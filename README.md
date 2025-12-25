@@ -4,6 +4,8 @@
 
 Access your Mac's terminal from your phone, tablet, or any browser — secured with 2FA, tunneled through Cloudflare.
 
+> **🍎 macOS only** — Requires Homebrew for dependencies (ttyd, tmux, cloudflared)
+
 ```
            (\(\ 
            ( -.-)    "hop into your shell"

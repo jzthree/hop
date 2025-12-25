@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+ttyd*.log
+
+# Auth secrets (sensitive!)
+.auth_secret
+
+# State files
+.tunnel-state
+.exit-*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

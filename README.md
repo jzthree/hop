@@ -106,13 +106,6 @@ Node.js packages:
 - `qrcode-terminal` — QR code display
 - `cookie` — Session cookies
 
-## 🎨 Theme
-
-hop uses a light, modern theme inspired by OpenCode:
-- Clean white terminal background
-- Violet accent (`#7c3aed`)
-- Shaded status bar for negative space
-
 ## 🛡️ Security
 
 - **TOTP 2FA** — Industry-standard time-based codes

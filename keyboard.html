@@ -2,10 +2,11 @@
 <!-- Uses window.__hopSocket from the head hook -->
 <style id="hop-keyboard-styles">
     /* Suppress native keyboard */
-    body {
+    html, body {
         touch-action: manipulation;
         -webkit-user-select: none;
         user-select: none;
+        background: #d1d3d9;
     }
 
     .xterm-helper-textarea {
@@ -13,77 +14,93 @@
         pointer-events: none !important;
     }
 
-    /* Keyboard container - Dark mode iOS keyboard background */
+    /* Keyboard container - Light mode iOS keyboard background */
     #hop-keyboard {
         position: fixed;
         bottom: 0;
         left: 0;
         right: 0;
         z-index: 99999;
-        background: #1c1c1e;
-        padding: 4px 2px 0;
-        padding-bottom: max(4px, env(safe-area-inset-bottom));
+        background: #d1d3d9;
+        padding: 4px max(2px, env(safe-area-inset-right)) 0 max(2px, env(safe-area-inset-left));
+        padding-bottom: max(10px, env(safe-area-inset-bottom));
         font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+        box-sizing: border-box;
+        overflow-x: hidden;
     }
 
     #hop-keyboard .acc-row {
         display: flex;
-        margin-bottom: 4px;
-        padding: 0 2px;
+        margin: 0 2px var(--hop-acc-margin-bottom);
+        padding: var(--hop-acc-pad) var(--hop-acc-pad) var(--hop-acc-pad-bottom);
+        background: #d1d3d9;
+        border-radius: 8px;
+    }
+
+    #hop-keys {
+        display: flex;
+        flex-direction: column;
+        gap: var(--hop-row-gap);
+        padding: 0 4px;
+        width: 100%;
+        box-sizing: border-box;
     }
 
     #hop-keyboard .key-row {
         display: flex;
         justify-content: center;
-        margin-bottom: 6px;
+        width: 100%;
+        box-sizing: border-box;
     }
 
     #hop-keyboard .key-row.r2 {
-        padding: 0 4%;
+        padding: 0 5%;
     }
 
-    /* Base key - iOS exact styling */
+    /* Base key - iOS exact styling (light mode) */
     #hop-keyboard .key {
         display: flex;
         align-items: center;
         justify-content: center;
-        height: 46px;
+        height: var(--hop-key-height);
         border-radius: 6px;
-        margin: 3px;
-        font-size: 25px;
+        margin: var(--hop-key-margin);
+        font-size: var(--hop-key-font);
         font-weight: 400;
         letter-spacing: -0.5px;
 
-        /* Dark mode character key - #6d6d6e */
-        background: #6d6d6e;
-        color: #fff;
+        /* Light mode character key */
+        background: #ffffff;
+        color: #000;
 
         cursor: pointer;
         flex-grow: 1;
         flex-basis: 0;
         -webkit-tap-highlight-color: transparent;
-        transition: background-color 75ms, transform 75ms;
+        transition: background-color 75ms, transform 75ms, box-shadow 75ms;
 
         /* iOS key shadow (the "chin") */
-        box-shadow: 0 1px 0 #000000;
+        box-shadow: 0 1px 0 #898c94;
     }
 
     /* Pressed state */
     #hop-keyboard .key.pressed {
-        background: #555557 !important;
+        background: #e5e5e5 !important;
         box-shadow: none !important;
-        transform: translateY(1px);
+        transform: translateY(2px) scale(0.97);
+        filter: brightness(0.92);
     }
 
     /* Function keys - darker background */
     #hop-keyboard .key.act {
-        background: #3a3a3c;
-        font-size: 16px;
+        background: #b2b6bf;
+        font-size: var(--hop-fn-font);
         font-weight: 400;
+        letter-spacing: -0.2px;
     }
 
     #hop-keyboard .key.act.pressed {
-        background: #2c2c2e !important;
+        background: #aeb3bc !important;
     }
 
     /* Primary key (return) - iOS blue */
@@ -95,66 +112,151 @@
         background: #0062cc !important;
     }
 
-    /* Active state (modifier on) - white/inverted */
+    /* Active state (modifier on) - dark */
     #hop-keyboard .key.on {
-        background: #fff;
-        color: #000;
+        background: #000;
+        color: #fff;
         box-shadow: none;
         transform: translateY(1px);
     }
 
     #hop-keyboard .key svg {
-        width: 22px;
-        height: 22px;
+        width: var(--hop-icon-size);
+        height: var(--hop-icon-size);
     }
 
-    #hop-keyboard .foot {
+    #hop-float-controls {
+        position: fixed;
+        top: calc(6px + env(safe-area-inset-top) + 20px);
+        right: max(6px, env(safe-area-inset-right));
         display: flex;
-        justify-content: space-between;
-        padding: 8px 20px;
-        color: #8e8e93;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 6px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.85);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+        backdrop-filter: blur(6px);
+        z-index: 1000000;
     }
 
-    #hop-keyboard .foot svg {
-        width: 26px;
-        height: 26px;
+    #hop-float-controls svg {
+        width: var(--hop-foot-icon);
+        height: var(--hop-foot-icon);
         cursor: pointer;
+    }
+
+    #hop-mode-toggle {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: var(--hop-foot-font);
+        color: #6b7280;
+        user-select: none;
+    }
+
+    #hop-mode-pill {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #b2b6bf;
+        color: #111;
+        font-size: var(--hop-pill-font);
+        letter-spacing: 0.3px;
+    }
+
+    #hop-mode-pill[data-mode="term"] { background: #0a84ff; color: #fff; }
+    #hop-mode-pill[data-mode="core"] { background: #16a34a; color: #fff; }
+    #hop-mode-pill[data-mode="input"] { background: #aeb3bc; color: #111; }
+
+    #hop-prime-pill {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #c7cbd4;
+        color: #111;
+        font-size: var(--hop-pill-font);
+        letter-spacing: 0.3px;
+    }
+    #hop-prime-pill[data-on="1"] { background: #f59e0b; color: #111; }
+
+    @media (orientation: landscape) {
+        #hop-keyboard {
+            padding-left: env(safe-area-inset-left);
+            padding-right: env(safe-area-inset-right);
+        }
+        #hop-keyboard .acc-row {
+            margin-left: 0;
+            margin-right: 0;
+            border-radius: 0;
+        }
+    }
+
+    :root {
+        --hop-kb-height: 280px;
+        --hop-vh: 100vh;
+        --hop-kb-scale: 1;
+        --hop-key-height: calc(46px * var(--hop-kb-scale));
+        --hop-key-margin: calc(3.36px * var(--hop-kb-scale));
+        --hop-row-gap: calc(6px * var(--hop-kb-scale));
+        --hop-acc-pad: calc(4px * var(--hop-kb-scale));
+        --hop-acc-pad-bottom: calc(6px * var(--hop-kb-scale));
+        --hop-acc-margin-bottom: calc(5.6px * var(--hop-kb-scale));
+        --hop-acc-key-height: calc(36px * var(--hop-kb-scale));
+        --hop-acc-font: calc(14px * var(--hop-kb-scale));
+        --hop-key-font: calc(25px * var(--hop-kb-scale));
+        --hop-fn-font: calc(16px * var(--hop-kb-scale));
+        --hop-foot-pad-y: calc(14px * var(--hop-kb-scale));
+        --hop-foot-pad-x: calc(24px * var(--hop-kb-scale));
+        --hop-icon-size: calc(24px * var(--hop-kb-scale));
+        --hop-foot-icon: calc(26px * var(--hop-kb-scale));
+        --hop-foot-font: calc(12px * var(--hop-kb-scale));
+        --hop-pill-font: calc(11px * var(--hop-kb-scale));
+        --hop-kb-buffer: calc(6px * var(--hop-kb-scale));
+        --hop-kb-extra: 0px;
     }
 
     /* Adjust terminal to leave room for keyboard */
     .terminal,
     .xterm {
-        height: calc(100vh - 280px) !important;
+        height: calc(var(--hop-vh) - var(--hop-kb-height)) !important;
     }
 
     /* Debug indicator */
     #hop-debug {
         position: fixed;
         top: 0;
-        left: 0;
+        right: 0;
         background: rgba(0, 0, 0, 0.8);
         color: #0f0;
         font-family: monospace;
         font-size: 10px;
         padding: 4px 8px;
+        border-bottom-left-radius: 6px;
         z-index: 999999;
         pointer-events: none;
     }
 </style>
 
 <div id="hop-debug">Waiting for socket...</div>
+<div id="hop-float-controls">
+    <div id="hop-toggle-kb" style="cursor:pointer;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="4" width="20" height="14" rx="2"></rect>
+            <line x1="6" y1="20" x2="18" y2="20"></line>
+        </svg>
+    </div>
+    <div id="hop-mode-toggle" style="cursor:pointer;">
+        <span>Mode</span>
+        <span id="hop-mode-pill" data-mode="auto">AUTO</span>
+    </div>
+    <div id="hop-prime-toggle" style="cursor:pointer;">
+        <span>Prime</span>
+        <span id="hop-prime-pill" data-on="1">ON</span>
+    </div>
+</div>
 
 <div id="hop-keyboard">
     <div class="acc-row" id="hop-acc"></div>
     <div id="hop-keys"></div>
-    <div class="foot">
-        <div id="hop-toggle-kb" style="cursor:pointer;">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                <rect x="2" y="4" width="20" height="14" rx="2"></rect>
-                <line x1="6" y1="20" x2="18" y2="20"></line>
-            </svg>
-        </div>
-    </div>
 </div>
 
 <script>
@@ -167,17 +269,229 @@
             return window.__hopSocket;
         }
 
-        // UTF-8 encode for ttyd input (fallback to basic bytes if TextEncoder missing)
-        var encoder = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
-        function stringToBytes(str) {
-            var bytes = new Uint8Array(str.length);
-            for (var i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i) & 0xff;
-            return bytes;
-        }
-
         function isSocketOpen() {
             var s = getSocket();
             return !!(s && s.readyState === 1);
+        }
+
+        var hopOnData = null;
+        var hopPrimed = false;
+        var hopPrimedAt = 0;
+
+        function hapticTap() {
+            try {
+                if (!navigator.vibrate) return;
+                var ua = navigator.userAgent || '';
+                if (/iPad|iPhone|iPod/.test(ua)) return;
+                navigator.vibrate(10);
+            } catch (e) { }
+        }
+        function getOnData() {
+            return (typeof window.__hopOnData === 'function') ? window.__hopOnData : hopOnData;
+        }
+        function hookTermInstance(term) {
+            if (!term || term.__hopPatched || typeof term.onData !== 'function') return;
+            var orig = term.onData;
+            term.onData = function (cb) {
+                hopOnData = cb;
+                window.__hopOnData = cb;
+                window.__hopTerm = term;
+                return orig.call(term, cb);
+            };
+            term.__hopPatched = true;
+        }
+        function findTerminalInstance() {
+            var candidates = [
+                window.__hopTerm,
+                window.term,
+                window.terminal,
+                window.xterm,
+                window.ttydTerm,
+                window.ttydTerminal
+            ];
+            for (var i = 0; i < candidates.length; i++) {
+                var t = candidates[i];
+                if (t && typeof t.onData === 'function') return t;
+            }
+            // Shallow scan window for a Terminal-like object
+            try {
+                for (var k in window) {
+                    var v = window[k];
+                    if (!v || typeof v.onData !== 'function') continue;
+                    if (v.element && v.element.classList && v.element.classList.contains('terminal')) return v;
+                    if (v._core || v._coreService) return v;
+                }
+            } catch (e) { }
+            return null;
+        }
+        function hookTerminalOnData() {
+            if (!window.Terminal || window.Terminal.__hopPatched) return;
+            var Terminal = window.Terminal;
+            var orig = Terminal.prototype.onData;
+            if (typeof orig !== 'function') return;
+            Terminal.prototype.onData = function (cb) {
+                hopOnData = cb;
+                window.__hopOnData = cb;
+                window.__hopTerm = this;
+                return orig.call(this, cb);
+            };
+            Terminal.__hopPatched = true;
+            log('Patched Terminal.onData');
+        }
+        function sendViaCore(term, data) {
+            if (!term) return false;
+            try {
+                if (term._core && term._core._onData && typeof term._core._onData.fire === 'function') {
+                    term._core._onData.fire(data);
+                    return true;
+                }
+                if (term._coreService && typeof term._coreService.triggerDataEvent === 'function') {
+                    term._coreService.triggerDataEvent(data, true);
+                    return true;
+                }
+                if (term.coreService && typeof term.coreService.triggerDataEvent === 'function') {
+                    term.coreService.triggerDataEvent(data, true);
+                    return true;
+                }
+            } catch (e) { }
+            return false;
+        }
+
+        function sendViaCoreFast(data) {
+            var term = findTerminalInstance();
+            if (!term) return false;
+            hookTermInstance(term);
+            return sendViaCore(term, data);
+        }
+
+        function sendViaInputRaw(data) {
+            var textarea = document.querySelector('.xterm-helper-textarea');
+            if (!textarea) return false;
+            try {
+                textarea.value = data;
+                var ev;
+                if (typeof InputEvent !== 'undefined') {
+                    ev = new InputEvent('input', { data: data, inputType: 'insertText', bubbles: true, cancelable: true });
+                } else {
+                    ev = document.createEvent('Event');
+                    ev.initEvent('input', true, true);
+                }
+                textarea.dispatchEvent(ev);
+                textarea.value = '';
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function primeInputPipeline(force) {
+            var now = Date.now();
+            if (!force && (now - hopPrimedAt) < 4500) return;
+            if (!isSocketOpen() && !getOnData() && !findTerminalInstance()) return;
+
+            var mode = window.__hopInputMode || 'auto'; // auto | core | term | input
+            var ok = false;
+
+            if (mode === 'core') ok = sendViaCoreFast('');
+            else if (mode === 'term') {
+                var cb = getOnData();
+                if (typeof cb === 'function') {
+                    try { cb(''); ok = true; } catch (e) { }
+                }
+            } else if (mode === 'input') ok = sendViaInputRaw('');
+
+            if (!ok && mode !== 'input') {
+                ok = sendViaCoreFast('') || (function () {
+                    var cb2 = getOnData();
+                    if (typeof cb2 === 'function') {
+                        try { cb2(''); return true; } catch (e) { }
+                    }
+                    return false;
+                })() || sendViaInputRaw('');
+            }
+
+            if (ok) {
+                hopPrimed = true;
+                hopPrimedAt = now;
+                log('Primed ' + (mode === 'auto' ? 'auto' : mode));
+            }
+        }
+
+        function updateModePill() {
+            var pill = document.getElementById('hop-mode-pill');
+            if (!pill) return;
+            var mode = window.__hopInputMode || 'auto';
+            pill.textContent = mode.toUpperCase();
+            pill.setAttribute('data-mode', mode);
+        }
+
+        function setMode(mode) {
+            window.__hopInputMode = mode;
+            updateModePill();
+        }
+
+        function updatePrimePill() {
+            var pill = document.getElementById('hop-prime-pill');
+            if (!pill) return;
+            var on = window.__hopPrimeEnabled !== false;
+            pill.textContent = on ? 'ON' : 'OFF';
+            pill.setAttribute('data-on', on ? '1' : '0');
+        }
+
+        function setPrime(on) {
+            window.__hopPrimeEnabled = !!on;
+            updatePrimePill();
+        }
+
+        function updateKbHeight() {
+            updateKbScale();
+            updateViewportHeight();
+            var kb = document.getElementById('hop-keyboard');
+            if (!kb) return;
+            if (kb.style.display === 'none') {
+                document.documentElement.style.setProperty('--hop-kb-height', '0px');
+                return;
+            }
+            var rect = kb.getBoundingClientRect();
+            var h = rect && rect.height ? rect.height : kb.offsetHeight;
+            if (h) {
+                var buffer = 0;
+                var extra = 0;
+                try {
+                    var bufStr = getComputedStyle(document.documentElement).getPropertyValue('--hop-kb-buffer');
+                    buffer = parseFloat(bufStr) || 0;
+                    var extraStr = getComputedStyle(document.documentElement).getPropertyValue('--hop-kb-extra');
+                    extra = parseFloat(extraStr) || 0;
+                } catch (e) { }
+                if (typeof window.__hopKbExtra === 'number') extra += window.__hopKbExtra;
+                document.documentElement.style.setProperty('--hop-kb-height', (h + buffer + extra) + 'px');
+            }
+        }
+
+        function clamp(num, min, max) {
+            return Math.max(min, Math.min(max, num));
+        }
+
+        function updateViewportHeight() {
+            var vv = window.visualViewport;
+            var h = vv && vv.height ? vv.height : (window.innerHeight || document.documentElement.clientHeight || 0);
+            if (h) document.documentElement.style.setProperty('--hop-vh', h + 'px');
+        }
+
+        function updateKbScale() {
+            var w = window.innerWidth || document.documentElement.clientWidth || 0;
+            var h = window.innerHeight || document.documentElement.clientHeight || 0;
+            if (!w || !h) return;
+            var aspect = h / w;
+            var scale;
+            if (aspect >= 1) {
+                // Portrait: taller keyboard
+                scale = 2;
+            } else {
+                // Landscape: shorter keyboard
+                scale = 0.6;
+            }
+            document.documentElement.style.setProperty('--hop-kb-scale', scale.toFixed(3));
         }
 
         function fireKey(target, type, key, code, keyCode) {
@@ -196,60 +510,80 @@
             try { target.dispatchEvent(ev); } catch (e) { }
         }
 
+        function isVisible(el) {
+            try {
+                if (!el) return false;
+                var style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                var rect = el.getBoundingClientRect();
+                return !!(rect && rect.width > 0 && rect.height > 0);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function isReconnectOverlayVisible() {
+            var overlay = document.getElementById('overlay') || document.querySelector('.overlay');
+            if (overlay) {
+                var txt = (overlay.textContent || '').toLowerCase();
+                if (/reconnect/.test(txt) && isVisible(overlay)) return true;
+            }
+            var bodyText = (document.body && document.body.textContent || '').toLowerCase();
+            return /press\s+enter\s+to\s+reconnect/.test(bodyText);
+        }
+
         function dispatchReconnectEnter() {
             var key = 'Enter';
             var code = 'Enter';
             var keyCode = 13;
+            var overlay = document.getElementById('overlay') || document.querySelector('.overlay');
+            if (overlay) {
+                try { overlay.click(); } catch (e) { }
+                try {
+                    var clickEv = new MouseEvent('click', { bubbles: true, cancelable: true });
+                    overlay.dispatchEvent(clickEv);
+                } catch (e) { }
+            }
             fireKey(document, 'keydown', key, code, keyCode);
             fireKey(document, 'keypress', key, code, keyCode);
             fireKey(document, 'keyup', key, code, keyCode);
+            if (document.activeElement && document.activeElement !== document) {
+                fireKey(document.activeElement, 'keydown', key, code, keyCode);
+                fireKey(document.activeElement, 'keypress', key, code, keyCode);
+                fireKey(document.activeElement, 'keyup', key, code, keyCode);
+            }
             fireKey(window, 'keydown', key, code, keyCode);
             fireKey(window, 'keypress', key, code, keyCode);
             fireKey(window, 'keyup', key, code, keyCode);
+
+            // If overlay is visible, force a reload as a reliable fallback
+            if (isReconnectOverlayVisible()) {
+                try { window.location.reload(); } catch (e) { }
+            }
         }
 
         var hopKb = window.hopKb = {
-            shift: false, caps: false, ctrl: false, alt: false, view: 'abc',
+            shift: false, caps: false, ctrl: false, alt: false, view: 'abc', shiftTapAt: 0,
 
             sendViaInput: function (data) {
-                var textarea = document.querySelector('.xterm-helper-textarea');
-                if (!textarea) return false;
-                try {
-                    textarea.value = data;
-                    var ev;
-                    if (typeof InputEvent !== 'undefined') {
-                        ev = new InputEvent('input', { data: data, inputType: 'insertText', bubbles: true, cancelable: true });
-                    } else {
-                        ev = document.createEvent('Event');
-                        ev.initEvent('input', true, true);
-                    }
-                    textarea.dispatchEvent(ev);
-                    textarea.value = '';
-                    return true;
-                } catch (e) {
-                    return false;
-                }
+                return sendViaInputRaw(data);
             },
 
-            sendViaSocket: function (data) {
-                var socket = getSocket();
-                if (!socket) {
-                    log('No socket captured!');
-                    return false;
+            sendViaTerm: function (data) {
+                var cb = getOnData();
+                if (typeof cb === 'function') {
+                    try {
+                        cb(data);
+                        return true;
+                    } catch (e) {
+                        return false;
+                    }
                 }
-                if (socket.readyState !== 1) {
-                    log('Socket not open: ' + socket.readyState);
-                    return false;
-                }
+                return false;
+            },
 
-                // ttyd protocol: 0 = input
-                var payload = encoder ? encoder.encode(data) : stringToBytes(data);
-                var buf = new Uint8Array(1 + payload.length);
-                buf[0] = 0;
-                buf.set(payload, 1);
-                // Safari-safe: send ArrayBuffer, not Uint8Array
-                socket.send(buf.buffer);
-                return true;
+            sendViaCore: function (data) {
+                return sendViaCoreFast(data);
             },
 
             send: function (key) {
@@ -269,21 +603,49 @@
                     return;
                 }
 
-                // Default to xterm input pipeline; fall back to socket
-                var mode = window.__hopInputMode || 'input'; // input | socket | auto
-                if (mode !== 'socket') {
-                    if (this.sendViaInput(data)) {
-                        log('Sent via input: ' + key);
+                // Default to auto (core -> term -> input)
+                var mode = window.__hopInputMode || 'auto'; // auto | core | term | input
+                if (mode === 'core') {
+                    if (this.sendViaCore(data)) {
+                        hopPrimedAt = Date.now();
+                        log('Sent via core: ' + key);
                         return;
                     }
-                    if (mode === 'input') {
-                        log('Input send failed');
+                    log('Core send failed');
+                }
+
+                if (mode === 'term') {
+                    if (this.sendViaTerm(data)) {
+                        hopPrimedAt = Date.now();
+                        log('Sent via term: ' + key);
+                        return;
+                    }
+                    log('Term send failed');
+                }
+
+                if (mode !== 'input') {
+                    if (this.sendViaCore(data)) {
+                        hopPrimedAt = Date.now();
+                        log('Sent via core: ' + key);
+                        return;
+                    }
+                    if (this.sendViaTerm(data)) {
+                        hopPrimedAt = Date.now();
+                        log('Sent via term: ' + key);
                         return;
                     }
                 }
 
-                if (this.sendViaSocket(data)) {
-                    log('Sent via socket: ' + key);
+                if (this.sendViaInput(data)) {
+                    hopPrimedAt = Date.now();
+                    log('Sent via input: ' + key);
+                } else {
+                    log('Input send failed');
+                }
+
+                // If shift was used for a character, clear double-tap timer
+                if (this.shift && !this.caps && data && data.length === 1) {
+                    this.shiftTapAt = 0;
                 }
             },
 
@@ -295,12 +657,13 @@
                 var k = document.createElement('div');
                 k.className = 'key' + (extraClass ? ' ' + extraClass : '');
 
-                // Handle label - could be text or HTML (for SVG icons)
-                if (label.indexOf('<') === 0) {
-                    k.innerHTML = label;
-                } else {
-                    k.textContent = label;
-                }
+            // Handle label - could be text or HTML (for SVG icons)
+            var labelStr = (label || '').toString();
+            if (labelStr.trim().indexOf('<svg') === 0) {
+                k.innerHTML = labelStr;
+            } else {
+                k.textContent = labelStr;
+            }
 
                 // Apply inline styles
                 for (var prop in extraStyle) {
@@ -308,12 +671,13 @@
                 }
 
                 // iOS-style press handling - prevent focus stealing
-                function handleStart(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    k.classList.add('pressed');
-                    action();
-                }
+            function handleStart(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                k.classList.add('pressed');
+                hapticTap();
+                action();
+            }
                 function handleEnd(e) {
                     e.preventDefault();
                     k.classList.remove('pressed');
@@ -343,25 +707,26 @@
                         ? function () { self[x.mod] = !self[x.mod]; self.renderAcc(); }
                         : function () { self.send(x.k); };
                     var isOn = x.mod && self[x.mod];
-                    var k = self.makeKey(x.l, action, 'act' + (isOn ? ' on' : ''), { height: '36px', fontSize: '14px' });
+                    var k = self.makeKey(x.l, action, 'act' + (isOn ? ' on' : ''), { height: 'var(--hop-acc-key-height)', fontSize: 'var(--hop-acc-font)' });
                     acc.appendChild(k);
                 });
             },
 
             renderKeys: function () {
                 var self = this;
+                var emojiSvg = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><path d="M8 14s1.5 2 4 2 4-2 4-2"></path><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg>';
                 var layouts = {
                     abc: [
                         'qwertyuiop'.split(''),
                         'asdfghjkl'.split(''),
                         ['SHIFT', 'z', 'x', 'c', 'v', 'b', 'n', 'm', 'BKSP'],
-                        ['123', 'SPACE', 'RET']
+                        ['123', 'EMOJI', 'SPACE', 'RET']
                     ],
                     num: [
                         '1234567890'.split(''),
                         '-/:;()$&@"'.split(''),
-                        ['ABC', '.', ',', '?', '!', '\'', 'BKSP'],
-                        ['ABC', 'SPACE', 'RET']
+                        ['SHIFT', '.', ',', '?', '!', '\'', 'BKSP'],
+                        ['ABC', 'EMOJI', 'SPACE', 'RET']
                     ]
                 };
                 var layout = layouts[this.view] || layouts.abc;
@@ -379,13 +744,36 @@
                             var isOn = self.shift || self.caps;
                             var svg = '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" fill="' + (isOn ? 'currentColor' : 'none') + '"><path d="M12 4L4 16h16L12 4z"/></svg>';
                             k = self.makeKey(svg, function () {
-                                if (self.shift) { self.caps = !self.caps; self.shift = false; }
-                                else self.shift = true;
+                                var now = Date.now();
+                                var doubleTap = self.shiftTapAt && (now - self.shiftTapAt) < 300;
+                                if (self.caps) {
+                                    // Tap to turn caps off
+                                    self.caps = false;
+                                    self.shift = false;
+                                    self.shiftTapAt = 0;
+                                } else if (self.shift) {
+                                    if (doubleTap) {
+                                        // Double tap enables caps
+                                        self.caps = true;
+                                        self.shift = false;
+                                        self.shiftTapAt = 0;
+                                    } else {
+                                        // Single tap turns shift off
+                                        self.shift = false;
+                                        self.shiftTapAt = now;
+                                    }
+                                } else {
+                                    // Turn shift on (first tap)
+                                    self.shift = true;
+                                    self.shiftTapAt = now;
+                                }
                                 self.renderKeys();
                             }, 'act' + (isOn ? ' on' : ''), { flexGrow: '1.35' });
                         } else if (c === 'BKSP') {
                             var svg = '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" fill="none"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/><line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/></svg>';
                             k = self.makeKey(svg, function () { self.send('\x7f'); }, 'act', { flexGrow: '1.35' });
+                        } else if (c === 'EMOJI') {
+                            k = self.makeKey(emojiSvg, function () { }, 'act', { flexGrow: '1.25' });
                         } else if (c === 'RET') {
                             k = self.makeKey('return', function () { self.send('\r'); }, 'pri', { fontSize: '16px', flexGrow: '2.5' });
                         } else if (c === 'SPACE') {
@@ -413,11 +801,24 @@
                 kb.style.display = kb.style.display === 'none' ? 'block' : 'none';
                 var term = document.querySelector('.terminal');
                 if (term) term.style.height = kb.style.display === 'none' ? '100vh' : '';
+                updateKbHeight();
             },
 
             init: function () {
                 var self = this;
                 log('Initializing...');
+                hookTerminalOnData();
+                var term = findTerminalInstance();
+                if (term) hookTermInstance(term);
+                if (!window.__hopInputMode) {
+                    var hasTerm = !!(getOnData() || term);
+                    window.__hopInputMode = hasTerm ? 'term' : 'input';
+                }
+                updateModePill();
+                if (window.__hopPrimeEnabled === undefined) window.__hopPrimeEnabled = true;
+                updatePrimePill();
+                updateKbHeight();
+                if (window.__hopPrimeEnabled) primeInputPipeline();
                 this.renderAcc();
                 this.renderKeys();
 
@@ -431,6 +832,22 @@
                     self.toggle();
                 });
 
+                // Mode toggle: TERM -> CORE -> INPUT
+                var modeToggle = document.getElementById('hop-mode-toggle');
+                if (modeToggle) {
+                    var toggle = function (e) {
+                        if (e) { e.preventDefault(); e.stopPropagation(); }
+                        var order = ['term', 'core', 'input'];
+                        var current = window.__hopInputMode || 'term';
+                        var idx = order.indexOf(current);
+                        var next = order[(idx + 1) % order.length];
+                        setMode(next);
+                        log('Mode: ' + window.__hopInputMode);
+                    };
+                    modeToggle.addEventListener('touchstart', toggle, { passive: false });
+                    modeToggle.addEventListener('mousedown', toggle);
+                }
+
                 // Prevent native keyboard on terminal touch
                 document.addEventListener('touchstart', function (e) {
                     var inp = document.querySelector('.xterm-helper-textarea');
@@ -442,11 +859,15 @@
 
                 // Wait for socket and update status
                 var checkSocket = setInterval(function () {
+                    hookTerminalOnData();
+                    var t = findTerminalInstance();
+                    if (t) hookTermInstance(t);
                     var socket = getSocket();
                     if (socket) {
                         if (socket.readyState === 1) {
                             log('Ready! Socket open.');
                             clearInterval(checkSocket);
+                            if (window.__hopPrimeEnabled) primeInputPipeline();
                         } else {
                             log('Socket state: ' + socket.readyState);
                         }
@@ -454,6 +875,28 @@
                         log('Waiting for socket...');
                     }
                 }, 500);
+
+                window.addEventListener('resize', function () { updateKbHeight(); });
+                if (window.visualViewport) {
+                    window.visualViewport.addEventListener('resize', function () { updateKbHeight(); });
+                }
+                window.addEventListener('orientationchange', function () { setTimeout(updateKbHeight, 50); });
+                if (!window.__hopPrimeInterval) {
+                    window.__hopPrimeInterval = setInterval(function () {
+                        if (window.__hopPrimeEnabled !== false) primeInputPipeline(true);
+                    }, 200);
+                }
+
+                // Prime toggle
+                var primeToggle = document.getElementById('hop-prime-toggle');
+                if (primeToggle) {
+                    var togglePrime = function (e) {
+                        if (e) { e.preventDefault(); e.stopPropagation(); }
+                        setPrime(!(window.__hopPrimeEnabled !== false));
+                    };
+                    primeToggle.addEventListener('touchstart', togglePrime, { passive: false });
+                    primeToggle.addEventListener('mousedown', togglePrime);
+                }
             }
         };
 

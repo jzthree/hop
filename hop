@@ -247,6 +247,34 @@ function getIOSKeyboardInjection() {
 (function() {
     // Capture ttyd's WebSocket when it's created
     window.__hopSocket = null;
+    window.__hopOnData = null;
+    function patchTerminal(Terminal) {
+        if (!Terminal || Terminal.__hopPatched) return;
+        var orig = Terminal.prototype.onData;
+        if (typeof orig !== 'function') return;
+        Terminal.prototype.onData = function(cb) {
+            window.__hopOnData = cb;
+            window.__hopTerm = this;
+            return orig.call(this, cb);
+        };
+        Terminal.__hopPatched = true;
+    }
+    try { patchTerminal(window.Terminal); } catch (e) { }
+    try {
+        var desc = Object.getOwnPropertyDescriptor(window, 'Terminal');
+        if (!desc || desc.configurable) {
+            var terminalValue = window.Terminal;
+            Object.defineProperty(window, 'Terminal', {
+                configurable: true,
+                get: function() { return terminalValue; },
+                set: function(v) { terminalValue = v; patchTerminal(v); }
+            });
+        } else {
+            setInterval(function() { patchTerminal(window.Terminal); }, 250);
+        }
+    } catch (e) {
+        setInterval(function() { patchTerminal(window.Terminal); }, 250);
+    }
     var OriginalWebSocket = window.WebSocket;
     window.WebSocket = function(url, protocols) {
         // Call original constructor properly (with or without protocols)

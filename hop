@@ -194,16 +194,97 @@ function getOrCreateSession(sessionName) {
     return activeSessions[sessionName];
 }
 
+// Apply tmux styling synchronously for reliable results
+function applyTmuxStyles(sessionName, publicUrl) {
+    const s = sessionName;
+    const run = (cmd) => {
+        try {
+            execSync(cmd, { stdio: 'ignore' });
+        } catch (e) { }
+    };
+
+    // Enable truecolor
+    run(`tmux set-option -g default-terminal tmux-256color`);
+    run(`tmux set-option -ga terminal-overrides ',xterm*:Tc,alacritty:Tc,*:Tc'`);
+
+    // Core settings
+    run(`tmux set-option -t ${s} mouse on`);
+    run(`tmux set-option -t ${s} escape-time 0`);
+    run(`tmux set-option -g window-size latest`);
+    run(`tmux set-window-option -t ${s} aggressive-resize on`);
+    run(`tmux set-option -g fill-character ' '`);
+
+    // Status bar styling
+    run(`tmux set-option -t ${s} status on`);
+    run(`tmux set-option -t ${s} status-position bottom`);
+    run(`tmux set-option -t ${s} status-style 'bg=#e4e4e7,fg=#52525b'`);
+    run(`tmux set-option -t ${s} status-left '#[fg=#7c3aed,bold]● #[fg=#18181b,bold]${sessionName} #[fg=#a1a1aa,nobold]│#[bg=#e4e4e7]  '`);
+    run(`tmux set-option -t ${s} status-left-length 40`);
+    run(`tmux set-option -t ${s} status-right '#[bg=#e4e4e7]    #[fg=#a1a1aa]│ #[fg=#71717a]${publicUrl} '`);
+    run(`tmux set-option -t ${s} status-right-length 200`);
+
+    // Window status
+    run(`tmux set-window-option -t ${s} window-status-current-style 'fg=#18181b,bold'`);
+    run(`tmux set-window-option -t ${s} window-status-style 'fg=#a1a1aa'`);
+    run(`tmux set-window-option -t ${s} window-status-separator '#[fg=#d4d4d8] │ '`);
+
+    // Pane borders
+    run(`tmux set-option -t ${s} pane-border-style 'fg=#e4e4e7'`);
+    run(`tmux set-option -t ${s} pane-active-border-style 'fg=#7c3aed'`);
+
+    // Message/mode styling
+    run(`tmux set-option -t ${s} message-style 'bg=#f0f0f0,fg=#18181b'`);
+    run(`tmux set-option -t ${s} mode-style 'bg=#ddd6fe,fg=#18181b'`);
+}
+
 function startAuthProxy(authEmitter) {
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
     const server = http.createServer((req, res) => {
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
-        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET;
+
+        // Check auth via cookie OR Authorization header (for mobile apps)
+        const authHeader = req.headers.authorization;
+        const tokenFromHeader = authHeader && authHeader.startsWith('Bearer ')
+            ? authHeader.substring(7)
+            : null;
+        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET
+            || tokenFromHeader === SESSION_SECRET;
 
         // --- LOGIN PAGE ---
         if (!isAuthenticated) {
+            // API Login for mobile apps - returns token in JSON
+            if (req.method === 'POST' && parsedUrl.pathname === '/api/login') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const { totp } = JSON.parse(body);
+                        if (authenticator.check(totp, AUTH_SECRET)) {
+                            res.setHeader('Set-Cookie', cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
+                                httpOnly: false, // Allow JS access for mobile
+                                maxAge: 60 * 60 * 24 * 7
+                            }));
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({
+                                success: true,
+                                token: SESSION_SECRET  // Return token for mobile to use in headers
+                            }));
+                            if (authEmitter) authEmitter.emit('authenticated');
+                        } else {
+                            res.writeHead(401, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, error: 'Invalid code' }));
+                        }
+                    } catch (e) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, error: 'Invalid request' }));
+                    }
+                });
+                return;
+            }
+
+            // Web form login
             if (req.method === 'POST' && parsedUrl.pathname === '/') {
                 let body = '';
                 req.on('data', chunk => body += chunk);
@@ -239,26 +320,88 @@ function startAuthProxy(authEmitter) {
                     <head>
                         <meta charset="UTF-8">
                         <meta name="viewport" content="width=device-width, initial-scale=1">
-                        <title>Tunnel Shell</title>
+                        <title>Verify Identity</title>
                         <style>
                             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fafafa; color: #18181b; display: flex; justify-content: center; align-items: center; height: 100vh; margin:0; }
-                            .box { text-align: center; }
-                            h2 { margin-bottom: 2rem; font-weight: 600; }
-                            input { font-size: 2rem; width: 240px; text-align: center; margin-bottom: 1.5rem; border: none; border-bottom: 2px solid #e4e4e7; background: transparent; color: #18181b; padding: 0.5rem; outline: none; }
-                            input:focus { border-bottom-color: #7c3aed; }
-                            button { font-size: 1rem; padding: 0.8rem 2.5rem; background: #18181b; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; }
-                            button:hover { opacity: 0.8; }
+                            .box { text-align: center; max-width: 400px; padding: 2rem; }
+                            h2 { margin-bottom: 2rem; font-weight: 600; font-size: 1.5rem; }
+                            .code-inputs { display: flex; gap: 8px; justify-content: center; margin-bottom: 2rem; }
+                            .code-inputs input { 
+                                width: 44px; height: 56px; 
+                                font-size: 24px; text-align: center; 
+                                border: 1px solid #e4e4e7; border-radius: 8px; 
+                                background: #fff; color: #18181b; 
+                                -moz-appearance: textfield;
+                            }
+                            .code-inputs input:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.1); }
+                            .code-inputs input::-webkit-outer-spin-button,
+                            .code-inputs input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+                            
+                            button { font-size: 1rem; padding: 0.8rem 2.5rem; background: #18181b; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; width: 100%; transition: opacity 0.2s; }
+                            button:hover { opacity: 0.9; }
+                            .hidden-submit { position: absolute; left: -9999px; }
                         </style>
                     </head>
                     <body>
                         <div class="box">
-                            <h2>Tunnel Shell</h2>
-                            <form method="POST">
-                                <input type="text" name="token" pattern="[0-9]*" inputmode="numeric" placeholder="000 000" autofocus autocomplete="one-time-code">
-                                <br>
-                                <button type="submit">Enter</button>
+                            <h2>Security Check</h2>
+                            <p style="color: #71717a; margin-bottom: 2rem; font-size: 0.9rem;">Please enter the verification code from your authenticator app to continue.</p>
+                            <form method="POST" id="authForm">
+                                <div class="code-inputs" id="inputs">
+                                    <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
+                                    <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
+                                    <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
+                                    <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
+                                    <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
+                                    <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
+                                </div>
+                                <input type="hidden" name="token" id="fullToken">
+                                <button type="submit">Verify</button>
                             </form>
                         </div>
+                        <script>
+                            const inputs = document.querySelectorAll('.code-inputs input');
+                            const form = document.getElementById('authForm');
+                            const hidden = document.getElementById('fullToken');
+                            
+                            inputs.forEach((input, i) => {
+                                input.addEventListener('input', e => {
+                                    if (e.target.value.length === 1) {
+                                        if (i < inputs.length - 1) inputs[i + 1].focus();
+                                        else submit();
+                                    }
+                                });
+                                input.addEventListener('keydown', e => {
+                                    if (e.key === 'Backspace' && !e.target.value && i > 0) {
+                                        inputs[i - 1].focus();
+                                    }
+                                });
+                                input.addEventListener('paste', e => {
+                                    e.preventDefault();
+                                    const text = (e.clipboardData || window.clipboardData).getData('text');
+                                    const digits = text.replace(/[^0-9]/g, '').slice(0, 6);
+                                    if (digits.length === 0) return;
+                                    digits.split('').forEach((char, index) => {
+                                        if (inputs[index]) inputs[index].value = char;
+                                    });
+                                    if (digits.length === 6) submit();
+                                    else inputs[Math.min(digits.length, 5)].focus();
+                                });
+                            });
+                            
+                            function submit() {
+                                const code = Array.from(inputs).map(i => i.value).join('');
+                                if (code.length === 6) {
+                                    hidden.value = code;
+                                    form.submit();
+                                }
+                            }
+                            
+                            form.addEventListener('submit', e => {
+                                const code = Array.from(inputs).map(i => i.value).join('');
+                                hidden.value = code;
+                            });
+                        </script>
                     </body>
                 </html>
             `);
@@ -267,6 +410,14 @@ function startAuthProxy(authEmitter) {
 
         // --- AUTHENTICATED ROUTES ---
         const sessionName = parsedUrl.query.session;
+
+        // API: Ping (triggers auth event for mobile login)
+        if (parsedUrl.pathname === '/api/ping' && req.method === 'POST') {
+            if (authEmitter) authEmitter.emit('authenticated');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, message: 'Mobile login' }));
+            return;
+        }
 
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
@@ -282,15 +433,54 @@ function startAuthProxy(authEmitter) {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
-                const { name } = JSON.parse(body);
-                if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+                try {
+                    const { name } = JSON.parse(body);
+                    if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid session name' }));
+                        return;
+                    }
+                    getOrCreateSession(name);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, name }));
+                } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Invalid session name' }));
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Rename session
+        if (parsedUrl.pathname === '/api/sessions/rename' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                const { oldName, newName } = JSON.parse(body);
+                if (!newName || !/^[a-zA-Z0-9_-]+$/.test(newName)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid name' }));
                     return;
                 }
-                getOrCreateSession(name);
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: true, name }));
+
+                // Rename in tmux
+                try {
+                    execSync(`tmux rename-session -t ${oldName} ${newName}`);
+
+                    // Update internal map if it's managed by us
+                    if (activeSessions[oldName]) {
+                        activeSessions[newName] = activeSessions[oldName];
+                        delete activeSessions[oldName];
+                    }
+
+                    // Rename log/exit files if they exist (optional cleanup)
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Rename failed' }));
+                }
             });
             return;
         }
@@ -314,7 +504,12 @@ function startAuthProxy(authEmitter) {
                             .session-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #e4e4e7; gap: 1rem; }
                             .session-item:last-child { border-bottom: none; }
                             .session-item:active { background: #f4f4f5; }
-                            .session-name { font-weight: 500; font-size: 1rem; }
+                            .session-info { flex: 1; min-width: 0; }
+                            .session-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+                            .session-name { font-weight: 500; font-size: 1rem; cursor: pointer; display: inline-flex; align-items: center; gap: 0.25rem; }
+                            .session-name:hover .edit-icon { opacity: 1; }
+                            .edit-icon { font-size: 0.8rem; opacity: 0; transition: opacity 0.2s; color: #a1a1aa; }
+                            .active-badge { background: #22c55e; color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
                             .session-meta { color: #71717a; font-size: 0.8rem; margin-top: 0.25rem; }
                             .btn { padding: 0.75rem 1.25rem; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 500; text-decoration: none; display: inline-block; min-width: 80px; text-align: center; transition: opacity 0.2s; }
                             .btn-primary { background: #18181b; color: #fff; }
@@ -348,7 +543,7 @@ function startAuthProxy(authEmitter) {
                         </div>
                         <div class="container">
                             <h1>Session Picker</h1>
-                            <p class="subtitle">Create a new session or join an existing one</p>
+                            <p class="subtitle">Create a new session, rename existing ones, or join one.</p>
                             <div class="new-session">
                                 <input type="text" id="newName" placeholder="Session name..." pattern="[a-zA-Z0-9_-]+">
                                 <button class="btn btn-primary" onclick="createSession()">Create</button>
@@ -368,7 +563,7 @@ function startAuthProxy(authEmitter) {
                                 const list = document.getElementById('sessionList');
                                 
                                 if (data.sessions.length === 0 && data.active.length === 0) {
-                                    list.innerHTML = '<div class="empty">No sessions yet. Create one above or use a quick-start button!</div>';
+                                    list.innerHTML = '<div class="empty">No sessions yet. Create one above!</div>';
                                     return;
                                 }
                                 
@@ -378,9 +573,14 @@ function startAuthProxy(authEmitter) {
                                     const isActive = data.active.includes(name);
                                     return \`
                                         <div class="session-item">
-                                            <div>
-                                                <span class="session-name">\${name}</span>
-                                                \${isActive ? '<span class="active-badge">LIVE</span>' : ''}
+                                            <div class="session-info">
+                                                <div class="session-header">
+                                                    <span class="session-name" onclick="renameSession('\${name}')" title="Click to rename">
+                                                        \${name}
+                                                        <span class="edit-icon">✎</span>
+                                                    </span>
+                                                    \${isActive ? '<span class="active-badge">LIVE</span>' : ''}
+                                                </div>
                                                 <div class="session-meta">\${tmuxSession ? tmuxSession.windows + ' window(s)' : 'Starting...'}</div>
                                             </div>
                                             <a href="/?session=\${encodeURIComponent(name)}" class="btn btn-primary" onclick="showLoading()">Join</a>
@@ -402,6 +602,19 @@ function startAuthProxy(authEmitter) {
                                     body: JSON.stringify({ name })
                                 });
                                 window.location.href = '/?session=' + encodeURIComponent(name);
+                            }
+                            
+                            async function renameSession(oldName) {
+                                const newName = prompt('Enter new session name:', oldName);
+                                if (!newName || newName === oldName) return;
+                                if (!/^[a-zA-Z0-9_-]+$/.test(newName)) return alert('Only letters, numbers, - and _ allowed');
+                                
+                                await fetch('/api/sessions/rename', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ oldName, newName })
+                                });
+                                loadSessions();
                             }
                             
                             document.getElementById('newName').addEventListener('keypress', e => {
@@ -431,7 +644,12 @@ function startAuthProxy(authEmitter) {
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
 
-        if (cookies[SESSION_COOKIE_NAME] !== SESSION_SECRET) {
+        // Check auth via cookie OR query param (for mobile apps)
+        const tokenFromQuery = parsedUrl.query.token;
+        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET
+            || tokenFromQuery === SESSION_SECRET;
+
+        if (!isAuthenticated) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
             socket.destroy();
             return;
@@ -479,25 +697,34 @@ function waitForStart(authEmitter, publicUrl) {
     return new Promise((resolve) => {
         console.clear();
         log(`\n==================================================`, MAGENTA);
-        log(`            >>>  TUNNEL SHELL  <<<`, BOLD + MAGENTA);
+        log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
         log(`==================================================\n`, MAGENTA);
 
-        log(`SETUP (First time only):`, BOLD + YELLOW);
-        log(`  Scan this QR with an authenticator app`, YELLOW);
-        log(`  (Google Authenticator, Authy, 1Password, etc.)`, YELLOW);
+        log(`TUNNEL URL:`, BOLD + GREEN);
+        log(`  ${publicUrl}`, GREEN);
+        log(`  Scan to open on mobile:`, RESET);
 
-        qrcode.generate(`otpauth://totp/TunnelShell?secret=${AUTH_SECRET}&issuer=TunnelShell`, { small: true });
+        // Simple URL QR code - scan with any camera app
+        qrcode.generate(publicUrl, { small: true });
+
+        log(`\n--------------------------------------------------`, RESET);
+
+        log(`\n2FA SETUP (First time only):`, BOLD + YELLOW);
+        log(`  Scan with authenticator app (1Password, Authy, etc.)`, YELLOW);
+
+        const cwdName = path.basename(process.cwd());
+        const issuerName = `Hop (${cwdName})`;
+
+        qrcode.generate(`otpauth://totp/${encodeURIComponent(issuerName)}?secret=${AUTH_SECRET}&issuer=${encodeURIComponent(issuerName)}`, { small: true });
 
         log(`  Secret saved to: .auth_secret`, RESET);
-        log(`\nACCESS:`, BOLD + CYAN);
-        log(`  ${publicUrl}`, CYAN);
         log(`\n--------------------------------------------------`, RESET);
 
         const readline = require('readline');
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
         log(`\n[READY]`, GREEN + BOLD);
-        log(`Press ENTER to launch local session, or login remotely to auto-launch...`, RESET);
+        log(`Press ENTER to launch local session, or login remotely...`, RESET);
 
         let resolved = false;
 
@@ -519,17 +746,100 @@ async function main() {
     const existingTunnel = isServerRunning();
 
     if (existingTunnel) {
-        // ATTACH MODE: Tunnel already running, just connect to a session
+        // ATTACH MODE: Tunnel already running
         log(`\n${BOLD}${GREEN}Tunnel already running!${RESET}`, GREEN);
         log(`URL: ${existingTunnel.url}`, CYAN);
-        log(`\nAttaching to session...`, RESET);
 
-        // Just attach to tmux - the tunnel and ttyd are already running
-        const tmux = spawn('tmux', ['new-session', '-A', '-s', 'default'], { stdio: 'inherit' });
+        // Generate smart session name: dir-N
+        const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+        let sessionName = `${cwdName}-1`;
+
+        log(`\nFinding next available session...`, RESET);
+
+        try {
+            // Get existing sessions first
+            const sessionsRes = await new Promise((resolve, reject) => {
+                const opts = {
+                    hostname: '127.0.0.1',
+                    port: existingTunnel.port,
+                    path: '/api/sessions',
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
+                };
+                http.get(opts, res => {
+                    let data = '';
+                    res.on('data', c => data += c);
+                    res.on('end', () => resolve(JSON.parse(data)));
+                }).on('error', reject);
+            });
+
+            // Find next available number
+            if (sessionsRes && sessionsRes.sessions && sessionsRes.active) {
+                const allNames = new Set([...sessionsRes.active, ...sessionsRes.sessions.map(s => s.name)]);
+                let counter = 1;
+                while (allNames.has(`${cwdName}-${counter}`)) {
+                    counter++;
+                }
+                sessionName = `${cwdName}-${counter}`;
+            }
+
+            log(`Creating new session: ${sessionName}...`, RESET);
+
+            // Register session with local server so ttyd starts
+            const res = await new Promise((resolve, reject) => {
+                const opts = {
+                    hostname: '127.0.0.1',
+                    port: existingTunnel.port,
+                    path: '/api/sessions',
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${existingTunnel.sessionSecret}`
+                    }
+                };
+
+                const req = http.request(opts, (response) => {
+                    let data = '';
+                    response.on('data', c => data += c);
+                    response.on('end', () => {
+                        try {
+                            resolve(JSON.parse(data));
+                        } catch (e) {
+                            // Server returned non-JSON (likely HTML login page)
+                            reject(new Error(`Server returned non-JSON (status ${response.statusCode})`));
+                        }
+                    });
+                });
+
+                req.on('error', reject);
+                req.write(JSON.stringify({ name: sessionName }));
+                req.end();
+            });
+
+            if (!res.ok && !res.success) throw new Error(res.error || 'Failed to create session');
+
+        } catch (e) {
+            log(`Note: Could not register session with server: ${e.message}`, YELLOW);
+            log(`Session will still work locally.`, RESET);
+        }
+
+        log(`Attaching...`, RESET);
+
+        // Attach to the specific session
+        const tmux = spawn('sh', ['-c', `
+            tmux new-session -A -s ${sessionName}
+        `], { stdio: 'inherit' });
+
+        // Apply styling immediately and continuously refresh (every 1 second)
+        applyTmuxStyles(sessionName, existingTunnel.url);
+
+        const styleInterval = setInterval(() => {
+            applyTmuxStyles(sessionName, existingTunnel.url);
+        }, 1000);
 
         tmux.on('close', () => {
-            log(`\nLocal session ended. (Tunnel still running in background)`, YELLOW);
-            log(`Run again to reattach, or kill processes to stop tunnel.`, RESET);
+            clearInterval(styleInterval);
+            log(`\nSession disconnected.`, YELLOW);
             process.exit(0);
         });
 
@@ -554,14 +864,33 @@ async function main() {
 
     await waitForStart(authEmitter, publicUrl);
 
-    log(`[4/4] Attaching to default session...`, BOLD);
+    log(`[4/4] Attaching to session...`, BOLD);
 
-    // Create and attach to default session locally
+    // Create and attach to session locally
+    // Find next available session name (in case another hop already created one)
+    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const existingSessions = listTmuxSessions().map(s => s.name);
+    let counter = 1;
+    while (existingSessions.includes(`${cwdName}-${counter}`)) {
+        counter++;
+    }
+    const defaultSessionName = `${cwdName}-${counter}`;
+
+    log(`Starting session: ${defaultSessionName}`, RESET);
+    const defaultSession = getOrCreateSession(defaultSessionName);
+
+    // Apply styling continuously to handle respawns (every 1 second)
+    const styleInterval = setInterval(() => {
+        applyTmuxStyles(defaultSessionName, publicUrl);
+    }, 1000);
+
+    // Apply immediately (no delay needed since execSync is synchronous)
+    applyTmuxStyles(defaultSessionName, publicUrl);
+
     // Use spawn with respawn loop - exit requires confirmation
-    const defaultSession = getOrCreateSession('default');
     const tmux = spawn('sh', ['-c', `
         while true; do
-            tmux new-session -A -s default
+            tmux new-session -A -s ${defaultSessionName}
             echo ""
             echo "[Session ended]"
             read -p "Type 'quit' to shutdown tunnel, or press Enter to restart: " answer
@@ -569,59 +898,9 @@ async function main() {
                 exit 0
             fi
             echo "Restarting..."
+            sleep 0.5
         done
     `], { stdio: 'inherit' });
-
-    // Modern tmux styling - OpenCode/Tokyo Night inspired with truecolor shading
-    setTimeout(() => {
-        const s = 'default';
-
-        // Enable truecolor (24-bit color) support - critical for shaded negative space
-        spawn('tmux', ['set-option', '-g', 'default-terminal', 'tmux-256color']);
-        spawn('tmux', ['set-option', '-ga', 'terminal-overrides', ',xterm*:Tc,alacritty:Tc,*:Tc']);
-
-        // Core settings
-        spawn('tmux', ['set-option', '-t', s, 'mouse', 'on']);
-        spawn('tmux', ['set-option', '-t', s, 'escape-time', '0']);
-        spawn('tmux', ['set-option', '-g', 'window-size', 'latest']);
-        spawn('tmux', ['set-window-option', '-t', s, 'aggressive-resize', 'on']);
-
-        // Fill character - pure space for shaded negative space
-        spawn('tmux', ['set-option', '-g', 'fill-character', ' ']);
-
-        // Color palette (Tokyo Night / OpenCode inspired - light theme)
-        // Primary bg: #f0f0f0, Negative space: #e4e4e7, Divider: #a1a1aa, Inactive: #71717a
-
-        // Status bar with shaded negative space
-        spawn('tmux', ['set-option', '-t', s, 'status', 'on']);
-        spawn('tmux', ['set-option', '-t', s, 'status-position', 'bottom']);
-
-        // Main status bar: slightly tinted background for negative space feel
-        spawn('tmux', ['set-option', '-t', s, 'status-style', 'bg=#e4e4e7,fg=#52525b']);
-
-        // Left: accent + label
-        spawn('tmux', ['set-option', '-t', s, 'status-left', '#[fg=#7c3aed,bold]●#[fg=#52525b,nobold] TUNNEL #[fg=#a1a1aa]│#[bg=#e4e4e7]  ']);
-        spawn('tmux', ['set-option', '-t', s, 'status-left-length', '25']);
-
-        // Right: URL with shaded padding (negative space)
-        spawn('tmux', ['set-option', '-t', s, 'status-right', `#[bg=#e4e4e7]    #[fg=#a1a1aa]│ #[fg=#71717a]${publicUrl} `]);
-        spawn('tmux', ['set-option', '-t', s, 'status-right-length', '200']);
-
-        // Window status - shaded inactive windows
-        spawn('tmux', ['set-window-option', '-t', s, 'window-status-current-style', 'fg=#18181b,bold']);
-        spawn('tmux', ['set-window-option', '-t', s, 'window-status-style', 'fg=#a1a1aa']);
-        spawn('tmux', ['set-window-option', '-t', s, 'window-status-separator', '#[fg=#d4d4d8] │ ']);
-
-        // Pane borders - subtle dividers
-        spawn('tmux', ['set-option', '-t', s, 'pane-border-style', 'fg=#e4e4e7']);
-        spawn('tmux', ['set-option', '-t', s, 'pane-active-border-style', 'fg=#7c3aed']);
-
-        // Message styling
-        spawn('tmux', ['set-option', '-t', s, 'message-style', 'bg=#f0f0f0,fg=#18181b']);
-
-        // Mode styling (copy mode, etc)
-        spawn('tmux', ['set-option', '-t', s, 'mode-style', 'bg=#ddd6fe,fg=#18181b']);
-    }, 1000);
 
     tmux.on('close', () => {
         log(`\nLocal session ended. Shutting down tunnel...`, YELLOW);

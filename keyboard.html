@@ -1,0 +1,467 @@
+<!-- iOS Virtual Keyboard for Hop Terminal - Matching termkey-ios styling -->
+<!-- Uses window.__hopSocket from the head hook -->
+<style id="hop-keyboard-styles">
+    /* Suppress native keyboard */
+    body {
+        touch-action: manipulation;
+        -webkit-user-select: none;
+        user-select: none;
+    }
+
+    .xterm-helper-textarea {
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+
+    /* Keyboard container - Dark mode iOS keyboard background */
+    #hop-keyboard {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        z-index: 99999;
+        background: #1c1c1e;
+        padding: 4px 2px 0;
+        padding-bottom: max(4px, env(safe-area-inset-bottom));
+        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+    }
+
+    #hop-keyboard .acc-row {
+        display: flex;
+        margin-bottom: 4px;
+        padding: 0 2px;
+    }
+
+    #hop-keyboard .key-row {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 6px;
+    }
+
+    #hop-keyboard .key-row.r2 {
+        padding: 0 4%;
+    }
+
+    /* Base key - iOS exact styling */
+    #hop-keyboard .key {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 46px;
+        border-radius: 6px;
+        margin: 3px;
+        font-size: 25px;
+        font-weight: 400;
+        letter-spacing: -0.5px;
+
+        /* Dark mode character key - #6d6d6e */
+        background: #6d6d6e;
+        color: #fff;
+
+        cursor: pointer;
+        flex-grow: 1;
+        flex-basis: 0;
+        -webkit-tap-highlight-color: transparent;
+        transition: background-color 75ms, transform 75ms;
+
+        /* iOS key shadow (the "chin") */
+        box-shadow: 0 1px 0 #000000;
+    }
+
+    /* Pressed state */
+    #hop-keyboard .key.pressed {
+        background: #555557 !important;
+        box-shadow: none !important;
+        transform: translateY(1px);
+    }
+
+    /* Function keys - darker background */
+    #hop-keyboard .key.act {
+        background: #3a3a3c;
+        font-size: 16px;
+        font-weight: 400;
+    }
+
+    #hop-keyboard .key.act.pressed {
+        background: #2c2c2e !important;
+    }
+
+    /* Primary key (return) - iOS blue */
+    #hop-keyboard .key.pri {
+        background: #007aff;
+    }
+
+    #hop-keyboard .key.pri.pressed {
+        background: #0062cc !important;
+    }
+
+    /* Active state (modifier on) - white/inverted */
+    #hop-keyboard .key.on {
+        background: #fff;
+        color: #000;
+        box-shadow: none;
+        transform: translateY(1px);
+    }
+
+    #hop-keyboard .key svg {
+        width: 22px;
+        height: 22px;
+    }
+
+    #hop-keyboard .foot {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 20px;
+        color: #8e8e93;
+    }
+
+    #hop-keyboard .foot svg {
+        width: 26px;
+        height: 26px;
+        cursor: pointer;
+    }
+
+    /* Adjust terminal to leave room for keyboard */
+    .terminal,
+    .xterm {
+        height: calc(100vh - 280px) !important;
+    }
+
+    /* Debug indicator */
+    #hop-debug {
+        position: fixed;
+        top: 0;
+        left: 0;
+        background: rgba(0, 0, 0, 0.8);
+        color: #0f0;
+        font-family: monospace;
+        font-size: 10px;
+        padding: 4px 8px;
+        z-index: 999999;
+        pointer-events: none;
+    }
+</style>
+
+<div id="hop-debug">Waiting for socket...</div>
+
+<div id="hop-keyboard">
+    <div class="acc-row" id="hop-acc"></div>
+    <div id="hop-keys"></div>
+    <div class="foot">
+        <div id="hop-toggle-kb" style="cursor:pointer;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="2" y="4" width="20" height="14" rx="2"></rect>
+                <line x1="6" y1="20" x2="18" y2="20"></line>
+            </svg>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        var debug = document.getElementById('hop-debug');
+        function log(msg) { debug.textContent = msg; console.log('[HopKb]', msg); }
+
+        // Get socket from head hook (window.__hopSocket)
+        function getSocket() {
+            return window.__hopSocket;
+        }
+
+        // UTF-8 encode for ttyd input (fallback to basic bytes if TextEncoder missing)
+        var encoder = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+        function stringToBytes(str) {
+            var bytes = new Uint8Array(str.length);
+            for (var i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i) & 0xff;
+            return bytes;
+        }
+
+        function isSocketOpen() {
+            var s = getSocket();
+            return !!(s && s.readyState === 1);
+        }
+
+        function fireKey(target, type, key, code, keyCode) {
+            if (!target) return;
+            var ev;
+            try {
+                ev = new KeyboardEvent(type, { key: key, code: code, bubbles: true, cancelable: true });
+            } catch (e) {
+                ev = document.createEvent('KeyboardEvent');
+                ev.initKeyboardEvent(type, true, true, window, key, 0, '', false, '');
+            }
+            try {
+                Object.defineProperty(ev, 'keyCode', { get: function () { return keyCode; } });
+                Object.defineProperty(ev, 'which', { get: function () { return keyCode; } });
+            } catch (e) { }
+            try { target.dispatchEvent(ev); } catch (e) { }
+        }
+
+        function dispatchReconnectEnter() {
+            var key = 'Enter';
+            var code = 'Enter';
+            var keyCode = 13;
+            fireKey(document, 'keydown', key, code, keyCode);
+            fireKey(document, 'keypress', key, code, keyCode);
+            fireKey(document, 'keyup', key, code, keyCode);
+            fireKey(window, 'keydown', key, code, keyCode);
+            fireKey(window, 'keypress', key, code, keyCode);
+            fireKey(window, 'keyup', key, code, keyCode);
+        }
+
+        var hopKb = window.hopKb = {
+            shift: false, caps: false, ctrl: false, alt: false, view: 'abc',
+
+            sendViaInput: function (data) {
+                var textarea = document.querySelector('.xterm-helper-textarea');
+                if (!textarea) return false;
+                try {
+                    textarea.value = data;
+                    var ev;
+                    if (typeof InputEvent !== 'undefined') {
+                        ev = new InputEvent('input', { data: data, inputType: 'insertText', bubbles: true, cancelable: true });
+                    } else {
+                        ev = document.createEvent('Event');
+                        ev.initEvent('input', true, true);
+                    }
+                    textarea.dispatchEvent(ev);
+                    textarea.value = '';
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            },
+
+            sendViaSocket: function (data) {
+                var socket = getSocket();
+                if (!socket) {
+                    log('No socket captured!');
+                    return false;
+                }
+                if (socket.readyState !== 1) {
+                    log('Socket not open: ' + socket.readyState);
+                    return false;
+                }
+
+                // ttyd protocol: 0 = input
+                var payload = encoder ? encoder.encode(data) : stringToBytes(data);
+                var buf = new Uint8Array(1 + payload.length);
+                buf[0] = 0;
+                buf.set(payload, 1);
+                // Safari-safe: send ArrayBuffer, not Uint8Array
+                socket.send(buf.buffer);
+                return true;
+            },
+
+            send: function (key) {
+                var data = key;
+
+                // Handle Ctrl modifier
+                if (this.ctrl && key.length === 1) {
+                    var c = key.toUpperCase().charCodeAt(0);
+                    if (c >= 65 && c <= 90) data = String.fromCharCode(c - 64);
+                    this.ctrl = false; this.renderAcc();
+                }
+
+                // If ttyd disconnected, Enter should trigger reconnect overlay
+                if (!isSocketOpen() && data === '\r') {
+                    dispatchReconnectEnter();
+                    log('Reconnect enter');
+                    return;
+                }
+
+                // Default to xterm input pipeline; fall back to socket
+                var mode = window.__hopInputMode || 'input'; // input | socket | auto
+                if (mode !== 'socket') {
+                    if (this.sendViaInput(data)) {
+                        log('Sent via input: ' + key);
+                        return;
+                    }
+                    if (mode === 'input') {
+                        log('Input send failed');
+                        return;
+                    }
+                }
+
+                if (this.sendViaSocket(data)) {
+                    log('Sent via socket: ' + key);
+                }
+            },
+
+            // Create a key element with iOS-style press handling
+            makeKey: function (label, action, extraClass, extraStyle) {
+                extraClass = extraClass || '';
+                extraStyle = extraStyle || {};
+
+                var k = document.createElement('div');
+                k.className = 'key' + (extraClass ? ' ' + extraClass : '');
+
+                // Handle label - could be text or HTML (for SVG icons)
+                if (label.indexOf('<') === 0) {
+                    k.innerHTML = label;
+                } else {
+                    k.textContent = label;
+                }
+
+                // Apply inline styles
+                for (var prop in extraStyle) {
+                    k.style[prop] = extraStyle[prop];
+                }
+
+                // iOS-style press handling - prevent focus stealing
+                function handleStart(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    k.classList.add('pressed');
+                    action();
+                }
+                function handleEnd(e) {
+                    e.preventDefault();
+                    k.classList.remove('pressed');
+                }
+
+                k.addEventListener('touchstart', handleStart, { passive: false });
+                k.addEventListener('touchend', handleEnd, { passive: false });
+                k.addEventListener('touchcancel', handleEnd, { passive: false });
+                k.addEventListener('mousedown', handleStart);
+                k.addEventListener('mouseup', handleEnd);
+                k.addEventListener('mouseleave', handleEnd);
+
+                return k;
+            },
+
+            renderAcc: function () {
+                var self = this;
+                var acc = document.getElementById('hop-acc');
+                acc.innerHTML = '';
+                var keys = [
+                    { l: 'Esc', k: '\x1b' }, { l: 'Tab', k: '\t' },
+                    { l: 'Ctrl', mod: 'ctrl' }, { l: 'Alt', mod: 'alt' },
+                    { l: '←', k: '\x1b[D' }, { l: '↓', k: '\x1b[B' }, { l: '↑', k: '\x1b[A' }, { l: '→', k: '\x1b[C' }
+                ];
+                keys.forEach(function (x) {
+                    var action = x.mod
+                        ? function () { self[x.mod] = !self[x.mod]; self.renderAcc(); }
+                        : function () { self.send(x.k); };
+                    var isOn = x.mod && self[x.mod];
+                    var k = self.makeKey(x.l, action, 'act' + (isOn ? ' on' : ''), { height: '36px', fontSize: '14px' });
+                    acc.appendChild(k);
+                });
+            },
+
+            renderKeys: function () {
+                var self = this;
+                var layouts = {
+                    abc: [
+                        'qwertyuiop'.split(''),
+                        'asdfghjkl'.split(''),
+                        ['SHIFT', 'z', 'x', 'c', 'v', 'b', 'n', 'm', 'BKSP'],
+                        ['123', 'SPACE', 'RET']
+                    ],
+                    num: [
+                        '1234567890'.split(''),
+                        '-/:;()$&@"'.split(''),
+                        ['ABC', '.', ',', '?', '!', '\'', 'BKSP'],
+                        ['ABC', 'SPACE', 'RET']
+                    ]
+                };
+                var layout = layouts[this.view] || layouts.abc;
+                var cont = document.getElementById('hop-keys');
+                cont.innerHTML = '';
+
+                layout.forEach(function (row, ri) {
+                    var r = document.createElement('div');
+                    r.className = 'key-row' + (ri === 1 ? ' r2' : '');
+
+                    row.forEach(function (c) {
+                        var k;
+
+                        if (c === 'SHIFT') {
+                            var isOn = self.shift || self.caps;
+                            var svg = '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" fill="' + (isOn ? 'currentColor' : 'none') + '"><path d="M12 4L4 16h16L12 4z"/></svg>';
+                            k = self.makeKey(svg, function () {
+                                if (self.shift) { self.caps = !self.caps; self.shift = false; }
+                                else self.shift = true;
+                                self.renderKeys();
+                            }, 'act' + (isOn ? ' on' : ''), { flexGrow: '1.35' });
+                        } else if (c === 'BKSP') {
+                            var svg = '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" fill="none"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/><line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/></svg>';
+                            k = self.makeKey(svg, function () { self.send('\x7f'); }, 'act', { flexGrow: '1.35' });
+                        } else if (c === 'RET') {
+                            k = self.makeKey('return', function () { self.send('\r'); }, 'pri', { fontSize: '16px', flexGrow: '2.5' });
+                        } else if (c === 'SPACE') {
+                            k = self.makeKey('space', function () { self.send(' '); }, '', { fontSize: '16px', flexGrow: '5' });
+                        } else if (c === '123') {
+                            k = self.makeKey('123', function () { self.view = 'num'; self.renderKeys(); }, 'act', { fontSize: '16px', flexGrow: '1.25' });
+                        } else if (c === 'ABC') {
+                            k = self.makeKey('ABC', function () { self.view = 'abc'; self.renderKeys(); }, 'act', { fontSize: '16px', flexGrow: '1.25' });
+                        } else {
+                            // Character keys - large 25px font
+                            var ch = (self.shift || self.caps) ? c.toUpperCase() : c;
+                            k = self.makeKey(ch, function () {
+                                self.send(ch);
+                                if (self.shift && !self.caps) { self.shift = false; self.renderKeys(); }
+                            }, '', {});
+                        }
+                        r.appendChild(k);
+                    });
+                    cont.appendChild(r);
+                });
+            },
+
+            toggle: function () {
+                var kb = document.getElementById('hop-keyboard');
+                kb.style.display = kb.style.display === 'none' ? 'block' : 'none';
+                var term = document.querySelector('.terminal');
+                if (term) term.style.height = kb.style.display === 'none' ? '100vh' : '';
+            },
+
+            init: function () {
+                var self = this;
+                log('Initializing...');
+                this.renderAcc();
+                this.renderKeys();
+
+                // Setup toggle button
+                document.getElementById('hop-toggle-kb').addEventListener('touchstart', function (e) {
+                    e.preventDefault();
+                    self.toggle();
+                }, { passive: false });
+                document.getElementById('hop-toggle-kb').addEventListener('mousedown', function (e) {
+                    e.preventDefault();
+                    self.toggle();
+                });
+
+                // Prevent native keyboard on terminal touch
+                document.addEventListener('touchstart', function (e) {
+                    var inp = document.querySelector('.xterm-helper-textarea');
+                    if (inp) {
+                        inp.setAttribute('inputmode', 'none');
+                        inp.setAttribute('readonly', 'readonly');
+                    }
+                }, { passive: true });
+
+                // Wait for socket and update status
+                var checkSocket = setInterval(function () {
+                    var socket = getSocket();
+                    if (socket) {
+                        if (socket.readyState === 1) {
+                            log('Ready! Socket open.');
+                            clearInterval(checkSocket);
+                        } else {
+                            log('Socket state: ' + socket.readyState);
+                        }
+                    } else {
+                        log('Waiting for socket...');
+                    }
+                }, 500);
+            }
+        };
+
+        // Initialize when ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', function () { hopKb.init(); });
+        } else {
+            hopKb.init();
+        }
+    })();
+</script>

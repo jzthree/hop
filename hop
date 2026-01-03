@@ -237,6 +237,55 @@ function applyTmuxStyles(sessionName, publicUrl) {
     run(`tmux set-option -t ${s} mode-style 'bg=#ddd6fe,fg=#18181b'`);
 }
 
+// iOS Virtual Keyboard - Returns {hook, ui} for proper injection timing
+// hook: WebSocket interceptor script (goes in <head> before ttyd scripts)
+// ui: keyboard HTML/CSS/JS (goes before </body>)
+function getIOSKeyboardInjection() {
+    // WebSocket interceptor - MUST run before ttyd creates its socket
+    const hook = `
+<script>
+(function() {
+    // Capture ttyd's WebSocket when it's created
+    window.__hopSocket = null;
+    var OriginalWebSocket = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+        // Call original constructor properly (with or without protocols)
+        var ws = protocols ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url);
+        
+        // Check if this is ttyd's socket by protocol OR URL pattern
+        var isTtyProtocol = protocols === 'tty' ||
+            (Array.isArray(protocols) && protocols.indexOf('tty') >= 0);
+        var wsUrl = '';
+        try { wsUrl = (typeof url === 'string') ? url : (url && url.toString ? url.toString() : ''); } catch (e) { wsUrl = ''; }
+        var isTtyUrl = wsUrl && /\\/ws(?:\\?|$|\\/)/.test(wsUrl);
+        
+        if (isTtyProtocol || isTtyUrl) {
+            console.log('[HopKb] Captured ttyd socket via ' + (isTtyProtocol ? 'protocol' : 'URL'));
+            ws.binaryType = 'arraybuffer';
+            window.__hopSocket = ws;
+        }
+        return ws;
+    };
+    window.WebSocket.CONNECTING = OriginalWebSocket.CONNECTING;
+    window.WebSocket.OPEN = OriginalWebSocket.OPEN;
+    window.WebSocket.CLOSING = OriginalWebSocket.CLOSING;
+    window.WebSocket.CLOSED = OriginalWebSocket.CLOSED;
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
+})();
+</script>`;
+
+    // Read keyboard UI from file
+    const keyboardFile = path.join(__dirname, 'keyboard.html');
+    let ui = '<!-- keyboard.html not found -->';
+    try {
+        ui = fs.readFileSync(keyboardFile, 'utf8');
+    } catch (e) {
+        log(`Warning: keyboard.html not found`, YELLOW);
+    }
+
+    return { hook, ui };
+}
+
 function startAuthProxy(authEmitter) {
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
@@ -630,8 +679,52 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        // --- PROXY TO SESSION ---
+        // --- CHECK FOR iOS - Intercept and inject virtual keyboard ---
+        const userAgent = req.headers['user-agent'] || '';
+        const isIOS = /iPad|iPhone|iPod/.test(userAgent);
         const session = getOrCreateSession(sessionName);
+
+        // Only inject keyboard for iOS on the root path (main HTML page)
+        const reqPath = parsedUrl.pathname || '/';
+        if (isIOS && (reqPath === '/' || reqPath === '')) {
+            // Intercept ttyd's HTML response and inject our keyboard
+            const ttydReq = http.request({
+                hostname: '127.0.0.1',
+                port: session.port,
+                path: '/',
+                method: 'GET',
+                headers: {
+                    'Accept': 'text/html',
+                    'User-Agent': userAgent
+                }
+            }, (ttydRes) => {
+                let chunks = [];
+                ttydRes.on('data', chunk => chunks.push(chunk));
+                ttydRes.on('end', () => {
+                    let html = Buffer.concat(chunks).toString('utf8');
+                    // Inject WebSocket hook in <head> BEFORE ttyd scripts run
+                    // Inject keyboard UI before </body>
+                    if (html.includes('<head>') && html.includes('</body>')) {
+                        const { hook, ui } = getIOSKeyboardInjection();
+                        html = html.replace('<head>', '<head>' + hook);
+                        html = html.replace('</body>', ui + '</body>');
+                    }
+                    res.writeHead(200, {
+                        'Content-Type': 'text/html; charset=utf-8',
+                        'Content-Length': Buffer.byteLength(html)
+                    });
+                    res.end(html);
+                });
+            });
+            ttydReq.on('error', () => {
+                res.writeHead(502);
+                res.end('Session not ready.');
+            });
+            ttydReq.end();
+            return;
+        }
+
+        // --- PROXY TO SESSION (non-iOS) ---
         const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${session.port}`, ws: false });
         proxy.web(req, res, {}, (err) => {
             res.writeHead(502);

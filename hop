@@ -12,14 +12,21 @@ const cookie = require('cookie');
 const EventEmitter = require('events');
 const url = require('url');
 
+const os = require('os');
+
 // Configure TOTP to accept codes ±1 time step (handles clock drift)
 authenticator.options = { window: 1 };
 
 // --- Configuration ---
-const STATE_FILE = path.join(__dirname, '.tunnel-state');
-const SECRET_FILE = path.join(__dirname, '.auth_secret');
+const HOME_DIR = path.join(os.homedir(), '.hop-shell');
+if (!fs.existsSync(HOME_DIR)) {
+    fs.mkdirSync(HOME_DIR, { recursive: true });
+}
+
+const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
+const SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const SESSION_COOKIE_NAME = 'tunnel_session';
-const HOP_TMUX_CONF = path.join(__dirname, '.hop-tmux.conf');
+const HOP_TMUX_CONF = path.join(HOME_DIR, '.hop-tmux.conf');
 
 // Check if tunnel is already running
 function isServerRunning() {
@@ -944,14 +951,34 @@ function waitForStart(authEmitter, publicUrl) {
     });
 }
 
-async function main() {
-    // Check if tunnel is already running
-    const existingTunnel = isServerRunning();
+// Generate QR code and prompt for verification
+function showQrCode() {
+    log(`[3/4] Setup Authenticator...`, BOLD);
 
+    const user = os.userInfo().username;
+    const host = os.hostname();
+    const service = 'Hop Shell'; // Consistent service name
+    const otpauth = authenticator.keyuri(`${user}@${host}`, service, AUTH_SECRET);
+
+    qrcode.generate(otpauth, { small: true });
+
+    log(`Scan this QR code with your Authenticator app (Google/Authy/etc).`, CYAN);
+    log(`Account: ${service} (${user}@${host})`, CYAN);
+    log(`Secret:  ${AUTH_SECRET}`, CYAN);
+    log(`\nIf you can't scan, manually enter the Secret above.\n`, RESET);
+}
+
+async function main() {
+    process.stdout.write('\x1Bc'); // Clear screen
+
+    // Only one instance allowed
+    const existingTunnel = isServerRunning();
     if (existingTunnel) {
-        // ATTACH MODE: Tunnel already running
-        log(`\n${BOLD}${GREEN}Tunnel already running!${RESET}`, GREEN);
-        log(`URL: ${existingTunnel.url}`, CYAN);
+        // CLIENT MODE: Connect to existing tunnel
+        // If args are provided, try to send them as a command? (TODO)
+
+        log(`Hop tunnel is already running!`, GREEN);
+        log(`URL: ${existingTunnel.url}`, BOLD);
 
         // Generate smart session name: dir-N
         const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');

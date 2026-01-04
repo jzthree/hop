@@ -251,6 +251,22 @@ function getOrCreateSession(sessionName) {
 
     activeSessions[sessionName] = { ttyd, port };
     log(`  Started session "${sessionName}" on port ${port}`, GREEN);
+
+    // Apply tmux styles with retries (give tmux time to start)
+    const applyStylesWithRetry = (retries = 0) => {
+        try {
+            const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+            if (state.url) {
+                applyTmuxStyles(sessionName, state.url);
+            }
+        } catch (e) { }
+        // Retry a few times to catch slow tmux starts
+        if (retries < 5) {
+            setTimeout(() => applyStylesWithRetry(retries + 1), 500);
+        }
+    };
+    setTimeout(() => applyStylesWithRetry(), 300);
+
     return activeSessions[sessionName];
 }
 

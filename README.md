@@ -16,9 +16,11 @@ Access your Mac's terminal from your phone, tablet, or any browser — secured w
 
 - 🔐 **2FA Authentication** — Scan QR with any authenticator app
 - 🌍 **Access Anywhere** — Cloudflare tunnel, no port forwarding
-- 📱 **Mobile Friendly** — Works on phone browsers
+- 📱 **Mobile Virtual Keyboard** — Custom keyboard with Esc, Ctrl, Alt, arrows, and more
+- ⌨️ **Native Keyboard Support** — Tap the blue button for dictation, spellcheck & autocomplete
 - 🪟 **Multi-Session** — Create and switch between named sessions
-- 🎨 **Modern UI** — Clean, minimal design
+- 🔄 **Quick Session Switching** — Floating menu to switch sessions without leaving the terminal
+- 🎨 **Modern UI** — Clean, minimal iOS-style design
 - ⚡ **Auto-Attach** — Multiple terminals share the same tunnel
 
 ## 🚀 Quick Install
@@ -73,10 +75,10 @@ hop
 3. Press Enter to start your local session
 
 **From your phone:**
-1. Open the URL in browser
+1. Open the URL in your browser
 2. Enter the 6-digit code from your authenticator
 3. Pick or create a session
-4. 🐰 You're in!
+4. 🐰 You're in! Use the virtual keyboard for terminal keys, or tap the blue button for native input
 
 ## 🪟 Sessions
 
@@ -85,6 +87,25 @@ Create multiple independent terminal sessions from the Session Picker:
 - **Create**: Type a name and click Create
 - **Join**: Click Join on any existing session
 - **Sessions are shared**: Multiple devices can view the same session
+
+## 📱 Mobile Keyboard
+
+On mobile devices, Hop provides a custom virtual keyboard designed for terminal use:
+
+**Accessory Row:**
+- `Esc` `Tab` `Ctrl` `Alt` — Essential terminal keys
+- `← ↓ ↑ →` — Arrow keys for navigation
+- 🔵 **Blue keyboard button** — Opens native iOS keyboard for dictation, spellcheck & autocomplete
+
+**Floating Menu (top-right button):**
+- **Toggle Keyboard** — Show/hide the virtual keyboard
+- **Session List** — Quick-switch between sessions
+- **All Sessions** — Return to session picker
+
+**Tips:**
+- The floating button is draggable — move it anywhere
+- First-time users will see a tooltip pointing to the native keyboard button
+- Use the native keyboard for longer text input with autocomplete
 
 ## 🔧 Commands
 

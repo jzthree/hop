@@ -178,7 +178,105 @@
         cursor: pointer;
     }
 
+    #hop-float-controls .menu-trigger {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2px;
+    }
 
+    #hop-menu {
+        display: none;
+        flex-direction: column;
+        gap: 2px;
+        padding: 4px 0;
+        border-top: 1px solid rgba(0, 0, 0, 0.1);
+        margin-top: 4px;
+    }
+
+    #hop-float-controls.menu-open {
+        flex-direction: column;
+        padding: 8px 10px;
+        max-width: calc(100vw - 24px);
+    }
+
+    #hop-float-controls.menu-open #hop-menu {
+        display: flex;
+    }
+
+    #hop-float-controls,
+    #hop-float-controls * {
+        touch-action: none;
+    }
+
+    #hop-menu .menu-item {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 18px 20px;
+        border-radius: 12px;
+        font-size: 19px;
+        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+        color: #333;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background-color 0.15s;
+        min-height: 56px;
+        box-sizing: border-box;
+    }
+
+    #hop-menu .menu-item:active {
+        background: rgba(0, 0, 0, 0.12);
+    }
+
+    #hop-menu .menu-item svg {
+        width: 28px;
+        height: 28px;
+        flex-shrink: 0;
+    }
+
+    #hop-menu .menu-divider {
+        height: 1px;
+        background: rgba(0, 0, 0, 0.1);
+        margin: 4px 0;
+    }
+
+    #hop-menu .sessions-list {
+        max-height: 250px;
+        overflow-y: auto;
+        margin: 0 -4px;
+        padding: 0 4px;
+    }
+
+    #hop-menu .session-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 16px 20px;
+        border-radius: 10px;
+        font-size: 18px;
+        color: #555;
+        cursor: pointer;
+        min-height: 52px;
+        box-sizing: border-box;
+    }
+
+    #hop-menu .session-item:active {
+        background: rgba(0, 0, 0, 0.1);
+    }
+
+    #hop-menu .session-item.current {
+        background: rgba(0, 122, 255, 0.12);
+        color: #007aff;
+    }
+
+    #hop-menu .session-item .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #34c759;
+        flex-shrink: 0;
+    }
 
     @media (orientation: landscape) {
         #hop-keyboard {
@@ -229,6 +327,7 @@
         padding: 0;
         overflow: hidden;
         background: #000;
+        overscroll-behavior: none;
     }
 
     body {
@@ -265,6 +364,104 @@
 
 
 
+    /* System keyboard hint overlay */
+    .sys-kb-hint-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 999998;
+        pointer-events: none;
+        opacity: 0;
+        animation: overlayFadeIn 0.4s ease-out forwards;
+    }
+
+    @keyframes overlayFadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+
+    @keyframes overlayFadeOut {
+        from { opacity: 1; }
+        to { opacity: 0; }
+    }
+
+    .sys-kb-hint-overlay.fade-out {
+        animation: overlayFadeOut 0.3s ease-out forwards;
+    }
+
+    /* System keyboard hint for first-time users */
+    .sys-kb-hint {
+        position: fixed;
+        bottom: auto;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0, 0, 0, 0.92);
+        color: #fff;
+        padding: 28px 36px;
+        border-radius: 20px;
+        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+        font-size: 22px;
+        text-align: center;
+        line-height: 1.5;
+        max-width: 340px;
+        pointer-events: none;
+        opacity: 0;
+        animation: hintFadeIn 0.4s ease-out forwards;
+        z-index: 999999;
+        box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+    }
+
+    @keyframes hintFadeIn {
+        from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+        to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
+
+    @keyframes hintFadeOut {
+        from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        to { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+    }
+
+    .sys-kb-hint.fade-out {
+        animation: hintFadeOut 0.3s ease-out forwards;
+    }
+
+    @keyframes pulseStrong {
+        0%, 100% {
+            box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.7);
+            transform: scale(1);
+            background: #007aff;
+        }
+        50% {
+            box-shadow: 0 0 0 12px rgba(0, 122, 255, 0);
+            transform: scale(1.1);
+            background: #0066dd;
+        }
+    }
+
+    .sys-kb-pulse {
+        animation: pulseStrong 1s ease-in-out 5;
+        border-radius: 8px;
+        color: #fff !important;
+    }
+
+    .sys-kb-pulse svg {
+        stroke: #fff !important;
+    }
+
+    /* System keyboard button - permanently highlighted */
+    .sys-kb-btn {
+        background: #3b82f6 !important;
+        color: #fff !important;
+    }
+
+    .sys-kb-btn svg {
+        stroke: #fff !important;
+    }
+
     #hop-sys-dialog {
         position: fixed;
         top: 0;
@@ -287,9 +484,7 @@
     }
 
     #hop-sys-dialog::backdrop {
-        background: rgba(0, 0, 0, 0.4);
-        backdrop-filter: blur(4px);
-        -webkit-backdrop-filter: blur(4px);
+        background: rgba(0, 0, 0, 0.5);
     }
 
     #hop-sys-dialog-content {
@@ -346,13 +541,39 @@
 
 
 <div id="hop-float-controls">
-    <div id="hop-toggle-kb" style="cursor:pointer;">
+    <div id="hop-menu-trigger" class="menu-trigger" style="cursor:pointer;">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <rect x="2" y="4" width="20" height="14" rx="2"></rect>
             <line x1="6" y1="20" x2="18" y2="20"></line>
         </svg>
     </div>
-
+    <div id="hop-menu">
+        <div class="menu-item" id="hop-menu-toggle-kb">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="2" y="6" width="20" height="12" rx="2"></rect>
+                <line x1="6" y1="10" x2="6.01" y2="10"></line>
+                <line x1="10" y1="10" x2="10.01" y2="10"></line>
+                <line x1="14" y1="10" x2="14.01" y2="10"></line>
+                <line x1="18" y1="10" x2="18.01" y2="10"></line>
+                <line x1="8" y1="14" x2="16" y2="14"></line>
+            </svg>
+            <span>Toggle Keyboard</span>
+        </div>
+        <div class="menu-divider"></div>
+        <div class="sessions-list" id="hop-sessions-list">
+            <!-- Sessions populated by JS -->
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" id="hop-menu-all-sessions">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="3" y="3" width="7" height="7" rx="1"></rect>
+                <rect x="14" y="3" width="7" height="7" rx="1"></rect>
+                <rect x="3" y="14" width="7" height="7" rx="1"></rect>
+                <rect x="14" y="14" width="7" height="7" rx="1"></rect>
+            </svg>
+            <span>All Sessions</span>
+        </div>
+    </div>
 </div>
 
 <div id="hop-keyboard">
@@ -851,20 +1072,62 @@
                     { l: '←', k: '\x1b[D' }, { l: '↓', k: '\x1b[B' }, { l: '↑', k: '\x1b[A' }, { l: '→', k: '\x1b[C' },
                     { l: kbIcon, fn: 'sysKb' }
                 ];
+                var sysKbKey = null;
                 keys.forEach(function (x) {
                     var action;
                     if (x.mod) {
                         action = function () { self[x.mod] = !self[x.mod]; self.renderAcc(); };
                     } else if (x.fn === 'sysKb') {
-                        action = function () { self.toggleSysKb(); };
+                        action = function () {
+                            // Mark as seen when clicked
+                            try { localStorage.setItem('hop-syskb-seen', '1'); } catch (e) { }
+                            self.toggleSysKb();
+                        };
                     } else {
                         action = function () { self.send(x.k); };
                     }
                     var isOn = x.mod && self[x.mod];
                     var opts = (x.fn === 'sysKb') ? { useClick: true } : {};
                     var k = self.makeKey(x.l, action, 'act' + (isOn ? ' on' : ''), { height: 'var(--hop-acc-key-height)', fontSize: 'var(--hop-acc-font)' }, opts);
+                    if (x.fn === 'sysKb') {
+                        k.style.position = 'relative';
+                        k.classList.add('sys-kb-btn');
+                        sysKbKey = k;
+                    }
                     acc.appendChild(k);
                 });
+
+                // Show hint for first-time users
+                if (sysKbKey && !self._sysKbHintShown) {
+                    try {
+                        if (!localStorage.getItem('hop-syskb-seen')) {
+                            self._sysKbHintShown = true;
+                            sysKbKey.classList.add('sys-kb-pulse');
+
+                            // Show tooltip after a short delay
+                            setTimeout(function () {
+                                var overlay = document.createElement('div');
+                                overlay.className = 'sys-kb-hint-overlay';
+                                document.body.appendChild(overlay);
+
+                                var hint = document.createElement('div');
+                                hint.className = 'sys-kb-hint';
+                                hint.innerHTML = '💡 Tap the <strong>pulsing button</strong> for smooth typing with native keyboard, spellcheck, autocomplete and dictation';
+                                document.body.appendChild(hint);
+
+                                // Fade out and remove after 4 seconds
+                                setTimeout(function () {
+                                    overlay.classList.add('fade-out');
+                                    hint.classList.add('fade-out');
+                                    setTimeout(function () {
+                                        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                                        if (hint.parentNode) hint.parentNode.removeChild(hint);
+                                    }, 300);
+                                }, 4000);
+                            }, 1000);
+                        }
+                    } catch (e) { }
+                }
             },
 
             renderKeys: function () {
@@ -1160,51 +1423,196 @@
                     }, { passive: true });
                 })();
 
-                // Draggable floating toggle
+                // Multi-tool menu functionality
                 (function () {
                     var fab = document.getElementById('hop-float-controls');
-                    var toggleBtn = document.getElementById('hop-toggle-kb');
-                    if (!fab || !toggleBtn) return;
+                    var menuTrigger = document.getElementById('hop-menu-trigger');
+                    var menu = document.getElementById('hop-menu');
+                    var toggleKbBtn = document.getElementById('hop-menu-toggle-kb');
+                    var allSessionsBtn = document.getElementById('hop-menu-all-sessions');
+                    var sessionsList = document.getElementById('hop-sessions-list');
+                    if (!fab || !menuTrigger) return;
 
                     var isDragging = false;
                     var startX, startY, initialLeft, initialTop;
                     var hasMoved = false;
+                    var menuOpen = false;
 
-                    // Initialize position if not set
-                    if (!fab.style.left && !fab.style.right) {
-                        // Default to right side
+                    // Get current session from URL
+                    function getCurrentSession() {
+                        var params = new URLSearchParams(window.location.search);
+                        return params.get('session') || '';
                     }
 
-                    function onStart(e) {
-                        // e.preventDefault(); // Don't prevent default immediately, might be a click
+                    // Fetch sessions from API and populate the list
+                    function fetchSessions() {
+                        fetch('/api/sessions')
+                            .then(function (r) { return r.json(); })
+                            .then(function (data) {
+                                // API returns { sessions: [{name, ...}], active: [names] }
+                                var sessionObjs = data.sessions || [];
+                                var activeNames = data.active || [];
+                                var currentSession = getCurrentSession();
+
+                                // Merge session names from both sources
+                                var allNames = new Set();
+                                sessionObjs.forEach(function (s) { allNames.add(s.name); });
+                                activeNames.forEach(function (n) { allNames.add(n); });
+                                var allSessions = Array.from(allNames);
+
+                                sessionsList.innerHTML = '';
+
+                                if (allSessions.length === 0) {
+                                    var empty = document.createElement('div');
+                                    empty.className = 'session-item';
+                                    empty.style.color = '#999';
+                                    empty.textContent = 'No sessions';
+                                    sessionsList.appendChild(empty);
+                                    return;
+                                }
+
+                                allSessions.forEach(function (sessionName) {
+                                    var item = document.createElement('div');
+                                    item.className = 'session-item';
+                                    if (sessionName === currentSession) {
+                                        item.classList.add('current');
+                                    }
+
+                                    var isActive = activeNames.indexOf(sessionName) !== -1;
+                                    if (isActive) {
+                                        var dot = document.createElement('span');
+                                        dot.className = 'dot';
+                                        item.appendChild(dot);
+                                    }
+
+                                    var nameSpan = document.createElement('span');
+                                    nameSpan.textContent = sessionName;
+                                    item.appendChild(nameSpan);
+
+                                    item.addEventListener('click', function (e) {
+                                        e.stopPropagation();
+                                        if (sessionName !== currentSession) {
+                                            window.location.href = '/?session=' + encodeURIComponent(sessionName);
+                                        }
+                                        closeMenu();
+                                    });
+
+                                    sessionsList.appendChild(item);
+                                });
+                            })
+                            .catch(function (err) {
+                                sessionsList.innerHTML = '<div class="session-item" style="color:#999">Failed to load</div>';
+                            });
+                    }
+
+                    var savedPosition = null;
+
+                    function openMenu() {
+                        menuOpen = true;
+
+                        // Save current position before adjusting
+                        savedPosition = {
+                            left: fab.style.left,
+                            top: fab.style.top
+                        };
+
+                        fab.classList.add('menu-open');
+                        fetchSessions();
+
+                        // Adjust position to stay within viewport
+                        setTimeout(function() {
+                            var rect = fab.getBoundingClientRect();
+                            var winW = window.innerWidth;
+                            var winH = window.innerHeight;
+
+                            // Check right overflow
+                            if (rect.right > winW - 10) {
+                                fab.style.left = Math.max(10, winW - rect.width - 10) + 'px';
+                            }
+                            // Check bottom overflow
+                            if (rect.bottom > winH - 10) {
+                                fab.style.top = Math.max(10, winH - rect.height - 10) + 'px';
+                            }
+                        }, 10);
+                    }
+
+                    function closeMenu() {
+                        menuOpen = false;
+                        fab.classList.remove('menu-open');
+
+                        // Restore original position
+                        if (savedPosition) {
+                            fab.style.left = savedPosition.left;
+                            fab.style.top = savedPosition.top;
+                            savedPosition = null;
+                        }
+                    }
+
+                    function toggleMenu() {
+                        if (menuOpen) {
+                            closeMenu();
+                        } else {
+                            openMenu();
+                        }
+                    }
+
+                    // Toggle keyboard button
+                    if (toggleKbBtn) {
+                        toggleKbBtn.addEventListener('click', function (e) {
+                            e.stopPropagation();
+                            self.toggle();
+                            closeMenu();
+                        });
+                    }
+
+                    // All sessions button - go to session picker
+                    if (allSessionsBtn) {
+                        allSessionsBtn.addEventListener('click', function (e) {
+                            e.stopPropagation();
+                            window.location.href = '/';
+                        });
+                    }
+
+                    // Close menu when clicking outside
+                    document.addEventListener('click', function (e) {
+                        if (menuOpen && !fab.contains(e.target)) {
+                            closeMenu();
+                        }
+                    });
+
+                    // Draggable handling - only for the trigger icon, not the whole menu
+                    var triggerActive = false;
+
+                    function onTriggerStart(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+
                         var touch = e.touches ? e.touches[0] : e;
                         startX = touch.clientX;
                         startY = touch.clientY;
 
-                        // Get current computed position
                         var rect = fab.getBoundingClientRect();
                         initialLeft = rect.left;
                         initialTop = rect.top;
 
-                        // Clear right/bottom to allow free movement via left/top
                         fab.style.right = 'auto';
                         fab.style.bottom = 'auto';
                         fab.style.left = initialLeft + 'px';
                         fab.style.top = initialTop + 'px';
 
+                        triggerActive = true;
                         isDragging = true;
                         hasMoved = false;
-                        fab.style.transition = 'none'; // Disable transition during drag
+                        fab.style.transition = 'none';
                     }
 
                     function onMove(e) {
-                        if (!isDragging) return;
-                        e.preventDefault(); // Prevent scrolling while dragging fab
+                        if (!isDragging || !triggerActive) return;
+                        e.preventDefault();
                         var touch = e.touches ? e.touches[0] : e;
                         var dx = touch.clientX - startX;
                         var dy = touch.clientY - startY;
 
-                        // Threshold to consider it a drag vs tap
                         if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
                             hasMoved = true;
                         }
@@ -1214,38 +1622,37 @@
                     }
 
                     function onEnd(e) {
-                        if (!isDragging) return;
+                        if (!triggerActive) return;
+                        triggerActive = false;
                         isDragging = false;
                         fab.style.transition = 'all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1)';
 
-                        // Keep within screen bounds
                         var rect = fab.getBoundingClientRect();
                         var winW = window.innerWidth;
                         var winH = window.innerHeight;
                         var safeTop = 10;
                         var safeBottom = winH - 50;
                         var safeLeft = 10;
-                        var safeRight = winW - 50; // assuming width approx 40
+                        var safeRight = winW - 50;
 
                         var newTop = Math.max(safeTop, Math.min(safeBottom, rect.top));
                         var newLeft = Math.max(safeLeft, Math.min(safeRight, rect.left));
 
                         fab.style.top = newTop + 'px';
                         fab.style.left = newLeft + 'px';
-                        fab.style.right = 'auto'; // ensure right is unset to stick to left positioning
+                        fab.style.right = 'auto';
 
-                        // If it wasn't a drag (just a tap), trigger the toggle
+                        // If it wasn't a drag (just a tap), toggle the menu
                         if (!hasMoved) {
-                            self.toggle();
+                            toggleMenu();
                         }
                     }
 
-                    fab.addEventListener('touchstart', onStart, { passive: false });
-                    document.addEventListener('touchmove', onMove, { passive: false }); // doc listener to catch fast swipes
-                    document.addEventListener('touchend', onEnd, { passive: true });
+                    menuTrigger.addEventListener('touchstart', onTriggerStart, { passive: false });
+                    menuTrigger.addEventListener('touchmove', onMove, { passive: false });
+                    menuTrigger.addEventListener('touchend', onEnd, { passive: false });
 
-                    // Mouse fallback for testing
-                    fab.addEventListener('mousedown', onStart);
+                    menuTrigger.addEventListener('mousedown', onTriggerStart);
                     document.addEventListener('mousemove', onMove);
                     document.addEventListener('mouseup', onEnd);
                 })();

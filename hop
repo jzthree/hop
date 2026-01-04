@@ -919,15 +919,9 @@ function waitForStart(authEmitter, publicUrl) {
 
         log(`\n--------------------------------------------------`, RESET);
 
-        log(`\n2FA SETUP (First time only):`, BOLD + YELLOW);
-        log(`  Scan with authenticator app (1Password, Authy, etc.)`, YELLOW);
+        // Standardized TOTP QR Code using the helper function
+        showQrCode();
 
-        const cwdName = path.basename(process.cwd());
-        const issuerName = `Hop (${cwdName})`;
-
-        qrcode.generate(`otpauth://totp/${encodeURIComponent(issuerName)}?secret=${AUTH_SECRET}&issuer=${encodeURIComponent(issuerName)}`, { small: true });
-
-        log(`  Secret saved to: .auth_secret`, RESET);
         log(`\n--------------------------------------------------`, RESET);
 
         const readline = require('readline');

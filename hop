@@ -19,6 +19,7 @@ authenticator.options = { window: 1 };
 const STATE_FILE = path.join(__dirname, '.tunnel-state');
 const SECRET_FILE = path.join(__dirname, '.auth_secret');
 const SESSION_COOKIE_NAME = 'tunnel_session';
+const HOP_TMUX_CONF = path.join(__dirname, '.hop-tmux.conf');
 
 // Check if tunnel is already running
 function isServerRunning() {
@@ -61,9 +62,61 @@ if (fs.existsSync(SECRET_FILE)) {
 const BASE_PORT = existingState ? existingState.port : Math.floor(Math.random() * (50000 - 10000 + 1) + 10000);
 const PROXY_PORT = BASE_PORT;
 
+// Create hop's tmux config (isolated from user's config, 1-line scroll speed)
+const HOP_TMUX_CONFIG = `
+# Hop Terminal - Tmux Configuration
+# Do not use user's config - this is hop-managed
+
+# Enable mouse support
+set -g mouse on
+
+# 2-line scroll speed (compromise between smoothness and remote latency)
+bind -T copy-mode WheelUpPane send -N 2 -X scroll-up
+bind -T copy-mode WheelDownPane send -N 2 -X scroll-down
+bind -T copy-mode-vi WheelUpPane send -N 2 -X scroll-up
+bind -T copy-mode-vi WheelDownPane send -N 2 -X scroll-down
+
+# Increase scrollback buffer
+set -g history-limit 50000
+
+# Better terminal colors
+set -g default-terminal "screen-256color"
+`;
+fs.writeFileSync(HOP_TMUX_CONF, HOP_TMUX_CONFIG);
+
 // Session Management
 const activeSessions = {}; // { sessionName: { ttyd: Process, port: number } }
 let nextPort = BASE_PORT + 1;
+
+// --- Login Rate Limiting (Exponential Backoff) ---
+const failedAttempts = new Map(); // ip -> { count: number, lastAttempt: number }
+
+function checkRateLimit(ip) {
+    const record = failedAttempts.get(ip);
+    if (!record || record.count < 5) return { allowed: true };
+
+    const now = Date.now();
+    // 5 failures = 30s, 6 = 60s, 7 = 120s... (30 * 2^(n-5))
+    const waitSeconds = 30 * Math.pow(2, record.count - 5);
+    const lockedUntil = record.lastAttempt + (waitSeconds * 1000);
+
+    if (now < lockedUntil) {
+        return { allowed: false, remaining: Math.ceil((lockedUntil - now) / 1000) };
+    }
+    return { allowed: true };
+}
+
+function recordFailure(ip) {
+    const now = Date.now();
+    const record = failedAttempts.get(ip) || { count: 0, lastAttempt: 0 };
+    record.count++;
+    record.lastAttempt = now;
+    failedAttempts.set(ip, record);
+}
+
+function resetFailure(ip) {
+    failedAttempts.delete(ip);
+}
 
 // Colors
 const RESET = "\x1b[0m";
@@ -167,7 +220,7 @@ function getOrCreateSession(sessionName) {
         '-t', 'rendererType=canvas',
         'sh', '-c', `
             while true; do
-                tmux new-session -A -s ${sessionName} zsh
+                tmux -f ${HOP_TMUX_CONF} new-session -A -s ${sessionName} zsh
                 echo ""
                 echo "[Session ended. Restarting in 2s... Type 'tunnel-exit' to stop]"
                 if [ -f "${path.join(__dirname, '.exit-' + sessionName)}" ]; then
@@ -314,12 +367,21 @@ function getIOSKeyboardInjection() {
     return { hook, ui };
 }
 
+// Helper to get client IP (handles proxies)
+function getClientIp(req) {
+    return req.headers['cf-connecting-ip'] ||
+        req.headers['x-forwarded-for'] ||
+        req.socket.remoteAddress ||
+        'unknown';
+}
+
 function startAuthProxy(authEmitter) {
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
     const server = http.createServer((req, res) => {
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
+        const ip = getClientIp(req);
 
         // Check auth via cookie OR Authorization header (for mobile apps)
         const authHeader = req.headers.authorization;
@@ -333,12 +395,20 @@ function startAuthProxy(authEmitter) {
         if (!isAuthenticated) {
             // API Login for mobile apps - returns token in JSON
             if (req.method === 'POST' && parsedUrl.pathname === '/api/login') {
+                const limit = checkRateLimit(ip);
+                if (!limit.allowed) {
+                    res.writeHead(429, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: `Too many attempts. Try again in ${limit.remaining}s.` }));
+                    return;
+                }
+
                 let body = '';
                 req.on('data', chunk => body += chunk);
                 req.on('end', () => {
                     try {
                         const { totp } = JSON.parse(body);
                         if (authenticator.check(totp, AUTH_SECRET)) {
+                            resetFailure(ip);
                             res.setHeader('Set-Cookie', cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
                                 httpOnly: false, // Allow JS access for mobile
                                 maxAge: 60 * 60 * 24 * 7
@@ -350,6 +420,7 @@ function startAuthProxy(authEmitter) {
                             }));
                             if (authEmitter) authEmitter.emit('authenticated');
                         } else {
+                            recordFailure(ip);
                             res.writeHead(401, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ success: false, error: 'Invalid code' }));
                         }
@@ -363,6 +434,13 @@ function startAuthProxy(authEmitter) {
 
             // Web form login
             if (req.method === 'POST' && parsedUrl.pathname === '/') {
+                const limit = checkRateLimit(ip);
+                if (!limit.allowed) {
+                    res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8' });
+                    res.end(`Too many attempts. Try again in ${limit.remaining}s. <a href="/">Back</a>`);
+                    return;
+                }
+
                 let body = '';
                 req.on('data', chunk => body += chunk);
                 req.on('end', () => {
@@ -371,6 +449,7 @@ function startAuthProxy(authEmitter) {
 
                     try {
                         if (authenticator.check(token, AUTH_SECRET)) {
+                            resetFailure(ip);
                             res.setHeader('Set-Cookie', cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
                                 httpOnly: true,
                                 maxAge: 60 * 60 * 24 * 7
@@ -379,6 +458,7 @@ function startAuthProxy(authEmitter) {
                             res.end();
                             if (authEmitter) authEmitter.emit('authenticated');
                         } else {
+                            recordFailure(ip);
                             res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
                             res.end('Invalid Code. <a href="/">Try Again</a>');
                         }
@@ -640,7 +720,7 @@ function startAuthProxy(authEmitter) {
                                 const list = document.getElementById('sessionList');
                                 
                                 if (data.sessions.length === 0 && data.active.length === 0) {
-                                    list.innerHTML = '<div class="empty">No sessions yet. Create one above!</div>';
+                                    list.innerHTML = '<div class="empty">Waiting for first session to start...</div>';
                                     return;
                                 }
                                 
@@ -734,8 +814,10 @@ function startAuthProxy(authEmitter) {
                     // Inject keyboard UI before </body>
                     if (html.includes('<head>') && html.includes('</body>')) {
                         const { hook, ui } = getIOSKeyboardInjection();
-                        html = html.replace('<head>', '<head>' + hook);
-                        html = html.replace('</body>', ui + '</body>');
+                        // Use split/join instead of replace to avoid any $ interpretation
+                        html = html.split('<head>').join('<head>' + hook);
+                        html = html.split('</body>').join(ui + '</body>');
+                        // log(`[Hop] Injected keyboard UI (${ui.length} bytes)`, GREEN);
                     }
                     res.writeHead(200, {
                         'Content-Type': 'text/html; charset=utf-8',
@@ -948,7 +1030,7 @@ async function main() {
 
         // Attach to the specific session
         const tmux = spawn('sh', ['-c', `
-            tmux new-session -A -s ${sessionName}
+            tmux -f ${HOP_TMUX_CONF} new-session -A -s ${sessionName}
         `], { stdio: 'inherit' });
 
         // Apply styling immediately and continuously refresh (every 1 second)
@@ -1011,7 +1093,7 @@ async function main() {
     // Use spawn with respawn loop - exit requires confirmation
     const tmux = spawn('sh', ['-c', `
         while true; do
-            tmux new-session -A -s ${defaultSessionName}
+            tmux -f ${HOP_TMUX_CONF} new-session -A -s ${defaultSessionName}
             echo ""
             echo "[Session ended]"
             read -p "Type 'quit' to shutdown tunnel, or press Enter to restart: " answer

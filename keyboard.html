@@ -2,8 +2,8 @@
 <!-- Uses window.__hopSocket from the head hook -->
 <style id="hop-keyboard-styles">
     /* Suppress native keyboard */
-    html, body {
-        touch-action: manipulation;
+    html,
+    body {
         -webkit-user-select: none;
         user-select: none;
         background: #d1d3d9;
@@ -16,11 +16,7 @@
 
     /* Keyboard container - Light mode iOS keyboard background */
     #hop-keyboard {
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        z-index: 99999;
+        /* Positioning via flexbox - no fixed positioning */
         background: #d1d3d9;
         padding: 4px max(2px, env(safe-area-inset-right)) 0 max(2px, env(safe-area-inset-left));
         padding-bottom: max(10px, env(safe-area-inset-bottom));
@@ -57,17 +53,28 @@
         padding: 0 5%;
     }
 
+    /* Third row - align z-m with s-k (SHIFT/BKSP have larger gaps) */
+    #hop-keyboard .key-row.r3 {
+        padding: 0 1.5%;
+    }
+
+    #hop-keyboard .key-row.r3 .gap {
+        width: 1%;
+        flex-shrink: 0;
+    }
+
     /* Base key - iOS exact styling (light mode) */
     #hop-keyboard .key {
         display: flex;
         align-items: center;
         justify-content: center;
         height: var(--hop-key-height);
-        border-radius: 6px;
+        border-radius: 20px;
         margin: var(--hop-key-margin);
         font-size: var(--hop-key-font);
         font-weight: 400;
         letter-spacing: -0.5px;
+        position: relative;
 
         /* Light mode character key */
         background: #ffffff;
@@ -77,18 +84,30 @@
         flex-grow: 1;
         flex-basis: 0;
         -webkit-tap-highlight-color: transparent;
-        transition: background-color 75ms, transform 75ms, box-shadow 75ms;
+        transition: background-color 1s ease-out, transform 1s ease-out, box-shadow 1s ease-out;
 
         /* iOS key shadow (the "chin") */
         box-shadow: 0 1px 0 #898c94;
     }
 
-    /* Pressed state */
+    /* Extend touch target to cover gaps between keys */
+    #hop-keyboard .key::before {
+        content: '';
+        position: absolute;
+        top: calc(-1 * var(--hop-key-margin));
+        left: calc(-1 * var(--hop-key-margin));
+        right: calc(-1 * var(--hop-key-margin));
+        bottom: calc(-1 * var(--hop-key-margin) - var(--hop-row-gap) / 2);
+    }
+
+    /* Pressed state - more prominent for mobile */
     #hop-keyboard .key.pressed {
-        background: #e5e5e5 !important;
+        background: #d0d0d0 !important;
         box-shadow: none !important;
-        transform: translateY(2px) scale(0.97);
-        filter: brightness(0.92);
+        /* Don't scale! Shrinking the element shrinks the touch target (::before), causing dropped keys on rapid taps */
+        transform: translateY(3px);
+        filter: brightness(0.85);
+        transition: background-color 50ms, transform 50ms, box-shadow 50ms;
     }
 
     /* Function keys - darker background */
@@ -97,6 +116,18 @@
         font-size: var(--hop-fn-font);
         font-weight: 400;
         letter-spacing: -0.2px;
+    }
+
+    /* Bottom row keys need larger font */
+    #hop-keyboard .key.act[style*="fontSize"],
+    #hop-keyboard .key.pri[style*="fontSize"],
+    #hop-keyboard .key[style*="fontSize"] {
+        font-size: inherit !important;
+    }
+
+    /* Bottom row large buttons (match function keys size) */
+    #hop-keyboard .key.bottom {
+        font-size: calc(16px * var(--hop-kb-scale)) !important;
     }
 
     #hop-keyboard .key.act.pressed {
@@ -138,6 +169,7 @@
         box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
         backdrop-filter: blur(6px);
         z-index: 1000000;
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
     }
 
     #hop-float-controls svg {
@@ -146,43 +178,14 @@
         cursor: pointer;
     }
 
-    #hop-mode-toggle {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: var(--hop-foot-font);
-        color: #6b7280;
-        user-select: none;
-    }
 
-    #hop-mode-pill {
-        padding: 2px 8px;
-        border-radius: 999px;
-        background: #b2b6bf;
-        color: #111;
-        font-size: var(--hop-pill-font);
-        letter-spacing: 0.3px;
-    }
-
-    #hop-mode-pill[data-mode="term"] { background: #0a84ff; color: #fff; }
-    #hop-mode-pill[data-mode="core"] { background: #16a34a; color: #fff; }
-    #hop-mode-pill[data-mode="input"] { background: #aeb3bc; color: #111; }
-
-    #hop-prime-pill {
-        padding: 2px 8px;
-        border-radius: 999px;
-        background: #c7cbd4;
-        color: #111;
-        font-size: var(--hop-pill-font);
-        letter-spacing: 0.3px;
-    }
-    #hop-prime-pill[data-on="1"] { background: #f59e0b; color: #111; }
 
     @media (orientation: landscape) {
         #hop-keyboard {
             padding-left: env(safe-area-inset-left);
             padding-right: env(safe-area-inset-right);
         }
+
         #hop-keyboard .acc-row {
             margin-left: 0;
             margin-right: 0;
@@ -195,11 +198,11 @@
         --hop-vh: 100vh;
         --hop-kb-scale: 1;
         --hop-key-height: calc(46px * var(--hop-kb-scale));
-        --hop-key-margin: calc(3.36px * var(--hop-kb-scale));
-        --hop-row-gap: calc(6px * var(--hop-kb-scale));
-        --hop-acc-pad: calc(4px * var(--hop-kb-scale));
-        --hop-acc-pad-bottom: calc(6px * var(--hop-kb-scale));
-        --hop-acc-margin-bottom: calc(5.6px * var(--hop-kb-scale));
+        --hop-key-margin: calc(3.024px * var(--hop-kb-scale));
+        --hop-row-gap: calc(5.4px * var(--hop-kb-scale));
+        --hop-acc-pad: calc(3.6px * var(--hop-kb-scale));
+        --hop-acc-pad-bottom: calc(5.4px * var(--hop-kb-scale));
+        --hop-acc-margin-bottom: calc(5.04px * var(--hop-kb-scale));
         --hop-acc-key-height: calc(36px * var(--hop-kb-scale));
         --hop-acc-font: calc(14px * var(--hop-kb-scale));
         --hop-key-font: calc(25px * var(--hop-kb-scale));
@@ -210,33 +213,138 @@
         --hop-foot-icon: calc(26px * var(--hop-kb-scale));
         --hop-foot-font: calc(12px * var(--hop-kb-scale));
         --hop-pill-font: calc(11px * var(--hop-kb-scale));
-        --hop-kb-buffer: calc(6px * var(--hop-kb-scale));
+        --hop-kb-buffer: calc(5.4px * var(--hop-kb-scale));
         --hop-kb-extra: 0px;
     }
 
-    /* Adjust terminal to leave room for keyboard */
-    .terminal,
-    .xterm {
-        height: calc(var(--hop-vh) - var(--hop-kb-height)) !important;
+    /* ========================================
+       SIMPLE LAYOUT: Fixed keyboard at bottom
+       Body has padding-bottom to make space
+       ======================================== */
+
+    html,
+    body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #000;
     }
 
-    /* Debug indicator */
-    #hop-debug {
+    body {
+        /* Padding at bottom makes room for keyboard */
+        padding-bottom: var(--hop-kb-height, 280px) !important;
+        box-sizing: border-box;
+    }
+
+    /* Terminal takes full height minus keyboard */
+    #terminal,
+    .terminal {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: var(--hop-kb-height, 280px) !important;
+        height: auto !important;
+        overflow: hidden;
+    }
+
+    .xterm {
+        height: 100% !important;
+        width: 100% !important;
+    }
+
+    /* Keyboard fixed at bottom */
+    #hop-keyboard {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        z-index: 99999;
+    }
+
+
+
+    #hop-sys-dialog {
         position: fixed;
         top: 0;
-        right: 0;
-        background: rgba(0, 0, 0, 0.8);
-        color: #0f0;
-        font-family: monospace;
-        font-size: 10px;
-        padding: 4px 8px;
-        border-bottom-left-radius: 6px;
-        z-index: 999999;
-        pointer-events: none;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        /* Use safe area to avoid being covered by bars if needed, but fixed usually ignores safe area unless specified */
+        max-width: none;
+        max-height: none;
+        margin: 0;
+        padding: 0;
+        border: none;
+        background: transparent;
+        z-index: 1000000;
+        display: none;
+    }
+
+    #hop-sys-dialog[open] {
+        display: block;
+    }
+
+    #hop-sys-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.4);
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+    }
+
+    #hop-sys-dialog-content {
+        position: absolute;
+        top: calc(env(safe-area-inset-top) + 12px);
+        left: 12px;
+        right: 12px;
+        bottom: auto;
+        width: auto;
+
+        background: rgba(245, 245, 247, 0.9);
+        backdrop-filter: blur(25px);
+        -webkit-backdrop-filter: blur(25px);
+
+        padding: 10px;
+        border-radius: 24px;
+
+        display: flex;
+        gap: 8px;
+
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        box-shadow:
+            0 12px 40px rgba(0, 0, 0, 0.2),
+            0 2px 8px rgba(0, 0, 0, 0.05);
+
+        transition: transform 0.35s cubic-bezier(0.19, 1, 0.22, 1);
+        transform: translateY(calc(-100% - 60px));
+        z-index: 10000;
+    }
+
+    #hop-sys-dialog[open] #hop-sys-dialog-content {
+        transform: translateY(0);
+    }
+
+    #hop-sys-input {
+        flex: 1;
+        height: 64px;
+        border-radius: 16px;
+        border: none;
+        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.06);
+        padding: 0 16px;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+        font-size: 40px;
+        background: #ffffff;
+        -webkit-text-size-adjust: 100%;
+        color: #000;
+    }
+
+    #hop-sys-input:focus {
+        outline: none;
+        box-shadow: 0 0 0 2px #007aff, 0 4px 12px rgba(0, 122, 255, 0.25);
     }
 </style>
 
-<div id="hop-debug">Waiting for socket...</div>
+
 <div id="hop-float-controls">
     <div id="hop-toggle-kb" style="cursor:pointer;">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -244,14 +352,7 @@
             <line x1="6" y1="20" x2="18" y2="20"></line>
         </svg>
     </div>
-    <div id="hop-mode-toggle" style="cursor:pointer;">
-        <span>Mode</span>
-        <span id="hop-mode-pill" data-mode="auto">AUTO</span>
-    </div>
-    <div id="hop-prime-toggle" style="cursor:pointer;">
-        <span>Prime</span>
-        <span id="hop-prime-pill" data-on="1">ON</span>
-    </div>
+
 </div>
 
 <div id="hop-keyboard">
@@ -259,10 +360,15 @@
     <div id="hop-keys"></div>
 </div>
 
+<dialog id="hop-sys-dialog">
+    <div id="hop-sys-dialog-content">
+        <input type="text" id="hop-sys-input" placeholder="Type here..." autocapitalize="off">
+    </div>
+</dialog>
+
 <script>
     (function () {
-        var debug = document.getElementById('hop-debug');
-        function log(msg) { debug.textContent = msg; console.log('[HopKb]', msg); }
+
 
         // Get socket from head hook (window.__hopSocket)
         function getSocket() {
@@ -290,15 +396,37 @@
             return (typeof window.__hopOnData === 'function') ? window.__hopOnData : hopOnData;
         }
         function hookTermInstance(term) {
-            if (!term || term.__hopPatched || typeof term.onData !== 'function') return;
-            var orig = term.onData;
-            term.onData = function (cb) {
-                hopOnData = cb;
-                window.__hopOnData = cb;
-                window.__hopTerm = term;
-                return orig.call(term, cb);
-            };
-            term.__hopPatched = true;
+            if (!term) return;
+
+            // Try to find existing onData callback from xterm internals
+            if (!window.__hopOnData && !hopOnData) {
+                try {
+                    // xterm.js stores onData listeners in _core._onData
+                    if (term._core && term._core._onData && term._core._onData._listeners) {
+                        var listeners = term._core._onData._listeners;
+                        if (listeners.length > 0) {
+                            var cb = listeners[0];
+                            if (typeof cb === 'function') {
+                                hopOnData = cb;
+                                window.__hopOnData = cb;
+                                window.__hopTerm = term;
+                            }
+                        }
+                    }
+                } catch (e) { }
+            }
+
+            // Patch onData for future calls
+            if (!term.__hopPatched && typeof term.onData === 'function') {
+                var orig = term.onData;
+                term.onData = function (cb) {
+                    hopOnData = cb;
+                    window.__hopOnData = cb;
+                    window.__hopTerm = term;
+                    return orig.call(term, cb);
+                };
+                term.__hopPatched = true;
+            }
         }
         function findTerminalInstance() {
             var candidates = [
@@ -336,7 +464,7 @@
                 return orig.call(this, cb);
             };
             Terminal.__hopPatched = true;
-            log('Patched Terminal.onData');
+            Terminal.__hopPatched = true;
         }
         function sendViaCore(term, data) {
             if (!term) return false;
@@ -358,98 +486,32 @@
         }
 
         function sendViaCoreFast(data) {
-            var term = findTerminalInstance();
+            // Use cached terminal instance first for speed
+            var term = window.__hopTerm || findTerminalInstance();
             if (!term) return false;
-            hookTermInstance(term);
+            if (!window.__hopTerm) {
+                window.__hopTerm = term;
+                hookTermInstance(term);
+            }
             return sendViaCore(term, data);
         }
 
-        function sendViaInputRaw(data) {
-            var textarea = document.querySelector('.xterm-helper-textarea');
-            if (!textarea) return false;
-            try {
-                textarea.value = data;
-                var ev;
-                if (typeof InputEvent !== 'undefined') {
-                    ev = new InputEvent('input', { data: data, inputType: 'insertText', bubbles: true, cancelable: true });
-                } else {
-                    ev = document.createEvent('Event');
-                    ev.initEvent('input', true, true);
-                }
-                textarea.dispatchEvent(ev);
-                textarea.value = '';
-                return true;
-            } catch (e) {
-                return false;
-            }
-        }
 
-        function primeInputPipeline(force) {
-            var now = Date.now();
-            if (!force && (now - hopPrimedAt) < 4500) return;
-            if (!isSocketOpen() && !getOnData() && !findTerminalInstance()) return;
 
-            var mode = window.__hopInputMode || 'auto'; // auto | core | term | input
-            var ok = false;
 
-            if (mode === 'core') ok = sendViaCoreFast('');
-            else if (mode === 'term') {
-                var cb = getOnData();
-                if (typeof cb === 'function') {
-                    try { cb(''); ok = true; } catch (e) { }
-                }
-            } else if (mode === 'input') ok = sendViaInputRaw('');
-
-            if (!ok && mode !== 'input') {
-                ok = sendViaCoreFast('') || (function () {
-                    var cb2 = getOnData();
-                    if (typeof cb2 === 'function') {
-                        try { cb2(''); return true; } catch (e) { }
-                    }
-                    return false;
-                })() || sendViaInputRaw('');
-            }
-
-            if (ok) {
-                hopPrimed = true;
-                hopPrimedAt = now;
-                log('Primed ' + (mode === 'auto' ? 'auto' : mode));
-            }
-        }
-
-        function updateModePill() {
-            var pill = document.getElementById('hop-mode-pill');
-            if (!pill) return;
-            var mode = window.__hopInputMode || 'auto';
-            pill.textContent = mode.toUpperCase();
-            pill.setAttribute('data-mode', mode);
-        }
-
-        function setMode(mode) {
-            window.__hopInputMode = mode;
-            updateModePill();
-        }
-
-        function updatePrimePill() {
-            var pill = document.getElementById('hop-prime-pill');
-            if (!pill) return;
-            var on = window.__hopPrimeEnabled !== false;
-            pill.textContent = on ? 'ON' : 'OFF';
-            pill.setAttribute('data-on', on ? '1' : '0');
-        }
-
-        function setPrime(on) {
-            window.__hopPrimeEnabled = !!on;
-            updatePrimePill();
-        }
 
         function updateKbHeight() {
+            // If system keyboard dialog is open, FREEZE the layout.
+            // Do not update scale or resize terminal.
+            if (document.body.classList.contains('sys-kb-open')) return;
+
             updateKbScale();
             updateViewportHeight();
             var kb = document.getElementById('hop-keyboard');
             if (!kb) return;
             if (kb.style.display === 'none') {
                 document.documentElement.style.setProperty('--hop-kb-height', '0px');
+                fitTerminal();
                 return;
             }
             var rect = kb.getBoundingClientRect();
@@ -465,7 +527,43 @@
                 } catch (e) { }
                 if (typeof window.__hopKbExtra === 'number') extra += window.__hopKbExtra;
                 document.documentElement.style.setProperty('--hop-kb-height', (h + buffer + extra) + 'px');
+                fitTerminal();
             }
+        }
+
+        // Trigger xterm to recalculate its dimensions
+        function fitTerminal() {
+            // If system keyboard dialog is open, FREEZE the layout.
+            if (document.body.classList.contains('sys-kb-open')) return;
+
+            // Small delay to allow CSS to apply
+            setTimeout(function () {
+                // Try various ways to trigger xterm fit
+                var term = findTerminalInstance();
+                if (term) {
+                    // xterm.js fit addon
+                    if (term._addonManager && term._addonManager._addons) {
+                        for (var i = 0; i < term._addonManager._addons.length; i++) {
+                            var addon = term._addonManager._addons[i];
+                            if (addon.instance && typeof addon.instance.fit === 'function') {
+                                try { addon.instance.fit(); } catch (e) { }
+                            }
+                        }
+                    }
+                    // Direct fit method (if FitAddon is attached)
+                    if (typeof term.fit === 'function') {
+                        try { term.fit(); } catch (e) { }
+                    }
+                    // Force resize event
+                    if (term._core && term._core._renderService) {
+                        try { term._core._renderService.onResize(term.cols, term.rows); } catch (e) { }
+                    }
+                }
+                // Also trigger window resize to help other listeners
+                try {
+                    window.dispatchEvent(new Event('resize'));
+                } catch (e) { }
+            }, 50);
         }
 
         function clamp(num, min, max) {
@@ -486,7 +584,7 @@
             var scale;
             if (aspect >= 1) {
                 // Portrait: taller keyboard
-                scale = 2;
+                scale = 2.5;
             } else {
                 // Landscape: shorter keyboard
                 scale = 0.6;
@@ -565,22 +663,7 @@
         var hopKb = window.hopKb = {
             shift: false, caps: false, ctrl: false, alt: false, view: 'abc', shiftTapAt: 0,
 
-            sendViaInput: function (data) {
-                return sendViaInputRaw(data);
-            },
 
-            sendViaTerm: function (data) {
-                var cb = getOnData();
-                if (typeof cb === 'function') {
-                    try {
-                        cb(data);
-                        return true;
-                    } catch (e) {
-                        return false;
-                    }
-                }
-                return false;
-            },
 
             sendViaCore: function (data) {
                 return sendViaCoreFast(data);
@@ -599,49 +682,17 @@
                 // If ttyd disconnected, Enter should trigger reconnect overlay
                 if (!isSocketOpen() && data === '\r') {
                     dispatchReconnectEnter();
-                    log('Reconnect enter');
+                    dispatchReconnectEnter();
+
                     return;
                 }
 
-                // Default to auto (core -> term -> input)
-                var mode = window.__hopInputMode || 'auto'; // auto | core | term | input
-                if (mode === 'core') {
-                    if (this.sendViaCore(data)) {
-                        hopPrimedAt = Date.now();
-                        log('Sent via core: ' + key);
-                        return;
-                    }
-                    log('Core send failed');
+                // Core mode only
+                if (this.sendViaCore(data)) {
+                    // Success
+                    return;
                 }
 
-                if (mode === 'term') {
-                    if (this.sendViaTerm(data)) {
-                        hopPrimedAt = Date.now();
-                        log('Sent via term: ' + key);
-                        return;
-                    }
-                    log('Term send failed');
-                }
-
-                if (mode !== 'input') {
-                    if (this.sendViaCore(data)) {
-                        hopPrimedAt = Date.now();
-                        log('Sent via core: ' + key);
-                        return;
-                    }
-                    if (this.sendViaTerm(data)) {
-                        hopPrimedAt = Date.now();
-                        log('Sent via term: ' + key);
-                        return;
-                    }
-                }
-
-                if (this.sendViaInput(data)) {
-                    hopPrimedAt = Date.now();
-                    log('Sent via input: ' + key);
-                } else {
-                    log('Input send failed');
-                }
 
                 // If shift was used for a character, clear double-tap timer
                 if (this.shift && !this.caps && data && data.length === 1) {
@@ -649,46 +700,142 @@
                 }
             },
 
+            pasteFromClipboard: function () {
+                var self = this;
+                // Try Clipboard API first
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    navigator.clipboard.readText().then(function (text) {
+                        if (text) {
+                            self.send(text);
+
+                        }
+                    }).catch(function (err) {
+                        // Clipboard API denied - use hidden input fallback
+                        self.showPasteInput();
+                    });
+                } else {
+                    // No Clipboard API - use hidden input fallback
+                    self.showPasteInput();
+                }
+            },
+
+            toggleSysKb: function () {
+                var dialog = document.getElementById('hop-sys-dialog');
+                var sysInput = document.getElementById('hop-sys-input');
+                var body = document.body;
+
+                if (dialog.open) {
+                    // CLOSE
+                    sysInput.blur();
+                    dialog.close();
+                    body.classList.remove('sys-kb-open');
+                    // Force a re-layout to restore correct size
+                    setTimeout(updateKbHeight, 100);
+                } else {
+                    // OPEN
+                    // Add class BEFORE showing/focusing to ensure layout is frozen first
+                    body.classList.add('sys-kb-open');
+                    dialog.showModal();
+                    setTimeout(function () {
+                        sysInput.focus();
+                    }, 50);
+                }
+            },
+
+            showPasteInput: function () {
+                var self = this;
+                var pasteInput = document.getElementById('hop-paste-input');
+                if (!pasteInput) {
+                    pasteInput = document.createElement('input');
+                    pasteInput.type = 'text';
+                    pasteInput.id = 'hop-paste-input';
+                    pasteInput.style.cssText = 'position:fixed;top:-100px;left:0;opacity:0;width:1px;height:1px;';
+                    pasteInput.setAttribute('autocomplete', 'off');
+                    pasteInput.setAttribute('autocorrect', 'off');
+                    pasteInput.setAttribute('autocapitalize', 'off');
+                    pasteInput.setAttribute('inputmode', 'none');
+                    pasteInput.setAttribute('readonly', 'readonly');
+                    document.body.appendChild(pasteInput);
+
+                    pasteInput.addEventListener('paste', function (e) {
+                        e.preventDefault();
+                        var text = '';
+                        if (e.clipboardData && e.clipboardData.getData) {
+                            text = e.clipboardData.getData('text/plain');
+                        } else if (window.clipboardData && window.clipboardData.getData) {
+                            text = window.clipboardData.getData('Text');
+                        }
+                        if (text) {
+                            self.send(text);
+
+                        }
+                        pasteInput.value = '';
+                        pasteInput.blur();
+                    });
+                }
+                pasteInput.value = '';
+                pasteInput.focus();
+                pasteInput.select();
+                // Try to trigger paste menu
+                try { document.execCommand('paste'); } catch (e) { }
+            },
+
             // Create a key element with iOS-style press handling
-            makeKey: function (label, action, extraClass, extraStyle) {
+            makeKey: function (label, action, extraClass, extraStyle, options) {
                 extraClass = extraClass || '';
                 extraStyle = extraStyle || {};
+                options = options || {};
 
                 var k = document.createElement('div');
                 k.className = 'key' + (extraClass ? ' ' + extraClass : '');
 
-            // Handle label - could be text or HTML (for SVG icons)
-            var labelStr = (label || '').toString();
-            if (labelStr.trim().indexOf('<svg') === 0) {
-                k.innerHTML = labelStr;
-            } else {
-                k.textContent = labelStr;
-            }
+                // Handle label - could be text or HTML (for SVG icons)
+                var labelStr = (label || '').toString();
+                if (labelStr.trim().indexOf('<svg') === 0) {
+                    k.innerHTML = labelStr;
+                } else {
+                    k.textContent = labelStr;
+                }
 
                 // Apply inline styles
                 for (var prop in extraStyle) {
                     k.style[prop] = extraStyle[prop];
                 }
 
-                // iOS-style press handling - prevent focus stealing
-            function handleStart(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                k.classList.add('pressed');
-                hapticTap();
-                action();
-            }
-                function handleEnd(e) {
-                    e.preventDefault();
-                    k.classList.remove('pressed');
-                }
+                if (options.useClick) {
+                    // For buttons that need format valid user activation (focus, paste)
+                    k.addEventListener('click', function (e) {
+                        // Let default proceed for focus? No, button is a div.
+                        // But allow event to bubble/be 'trusted'.
+                        k.classList.add('pressed');
+                        setTimeout(function () { k.classList.remove('pressed'); }, 100);
+                        action();
+                    });
+                    // Add touchstart for visual feedback only
+                    k.addEventListener('touchstart', function () { k.classList.add('pressed'); }, { passive: true });
+                    k.addEventListener('touchend', function () { k.classList.remove('pressed'); }, { passive: true });
+                } else {
+                    // Standard fast touch handling
+                    function handleStart(e) {
+                        e.preventDefault();
+                        // Priority 1: Send input immediately
+                        action();
+                        // Priority 2: Visual feedback
+                        k.classList.add('pressed');
+                        // Priority 3: Haptic feedback (guarded)
+                        try { hapticTap(); } catch (e) { }
+                    }
+                    function handleEnd() {
+                        k.classList.remove('pressed');
+                    }
 
-                k.addEventListener('touchstart', handleStart, { passive: false });
-                k.addEventListener('touchend', handleEnd, { passive: false });
-                k.addEventListener('touchcancel', handleEnd, { passive: false });
-                k.addEventListener('mousedown', handleStart);
-                k.addEventListener('mouseup', handleEnd);
-                k.addEventListener('mouseleave', handleEnd);
+                    k.addEventListener('touchstart', handleStart, { passive: false });
+                    k.addEventListener('touchend', handleEnd, { passive: true });
+                    k.addEventListener('touchcancel', handleEnd, { passive: true });
+                    k.addEventListener('mousedown', handleStart);
+                    k.addEventListener('mouseup', handleEnd);
+                    k.addEventListener('mouseleave', handleEnd);
+                }
 
                 return k;
             },
@@ -697,36 +844,43 @@
                 var self = this;
                 var acc = document.getElementById('hop-acc');
                 acc.innerHTML = '';
+                var kbIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:var(--hop-acc-font);height:var(--hop-acc-font);"><rect x="2" y="6" width="20" height="12" rx="2"></rect><line x1="6" y1="10" x2="6.01" y2="10"></line><line x1="10" y1="10" x2="10.01" y2="10"></line><line x1="14" y1="10" x2="14.01" y2="10"></line><line x1="18" y1="10" x2="18.01" y2="10"></line><line x1="8" y1="14" x2="16" y2="14"></line></svg>';
                 var keys = [
                     { l: 'Esc', k: '\x1b' }, { l: 'Tab', k: '\t' },
                     { l: 'Ctrl', mod: 'ctrl' }, { l: 'Alt', mod: 'alt' },
-                    { l: '←', k: '\x1b[D' }, { l: '↓', k: '\x1b[B' }, { l: '↑', k: '\x1b[A' }, { l: '→', k: '\x1b[C' }
+                    { l: '←', k: '\x1b[D' }, { l: '↓', k: '\x1b[B' }, { l: '↑', k: '\x1b[A' }, { l: '→', k: '\x1b[C' },
+                    { l: kbIcon, fn: 'sysKb' }
                 ];
                 keys.forEach(function (x) {
-                    var action = x.mod
-                        ? function () { self[x.mod] = !self[x.mod]; self.renderAcc(); }
-                        : function () { self.send(x.k); };
+                    var action;
+                    if (x.mod) {
+                        action = function () { self[x.mod] = !self[x.mod]; self.renderAcc(); };
+                    } else if (x.fn === 'sysKb') {
+                        action = function () { self.toggleSysKb(); };
+                    } else {
+                        action = function () { self.send(x.k); };
+                    }
                     var isOn = x.mod && self[x.mod];
-                    var k = self.makeKey(x.l, action, 'act' + (isOn ? ' on' : ''), { height: 'var(--hop-acc-key-height)', fontSize: 'var(--hop-acc-font)' });
+                    var opts = (x.fn === 'sysKb') ? { useClick: true } : {};
+                    var k = self.makeKey(x.l, action, 'act' + (isOn ? ' on' : ''), { height: 'var(--hop-acc-key-height)', fontSize: 'var(--hop-acc-font)' }, opts);
                     acc.appendChild(k);
                 });
             },
 
             renderKeys: function () {
                 var self = this;
-                var emojiSvg = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><path d="M8 14s1.5 2 4 2 4-2 4-2"></path><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg>';
                 var layouts = {
                     abc: [
-                        'qwertyuiop'.split(''),
-                        'asdfghjkl'.split(''),
+                        ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+                        ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
                         ['SHIFT', 'z', 'x', 'c', 'v', 'b', 'n', 'm', 'BKSP'],
-                        ['123', 'EMOJI', 'SPACE', 'RET']
+                        ['123', 'PASTE', 'SPACE', 'RET']
                     ],
                     num: [
-                        '1234567890'.split(''),
-                        '-/:;()$&@"'.split(''),
+                        ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+                        ['-', '/', ':', ';', '(', ')', '\x24', '\x26', '@', '"'],
                         ['SHIFT', '.', ',', '?', '!', '\'', 'BKSP'],
-                        ['ABC', 'EMOJI', 'SPACE', 'RET']
+                        ['ABC', 'PASTE', 'SPACE', 'RET']
                     ]
                 };
                 var layout = layouts[this.view] || layouts.abc;
@@ -735,7 +889,11 @@
 
                 layout.forEach(function (row, ri) {
                     var r = document.createElement('div');
-                    r.className = 'key-row' + (ri === 1 ? ' r2' : '');
+                    var rowClass = 'key-row';
+                    if (ri === 1) rowClass += ' r2';
+                    if (ri === 2) rowClass += ' r3';
+                    r.className = rowClass;
+                    var isThirdRow = (ri === 2);
 
                     row.forEach(function (c) {
                         var k;
@@ -768,20 +926,88 @@
                                     self.shiftTapAt = now;
                                 }
                                 self.renderKeys();
-                            }, 'act' + (isOn ? ' on' : ''), { flexGrow: '1.35' });
+                            }, 'act' + (isOn ? ' on' : ''), { flexGrow: '1.25' });
+
+                            // Insert gap after SHIFT in 3rd row
+                            r.appendChild(k);
+                            if (isThirdRow) {
+                                var gap = document.createElement('div');
+                                gap.className = 'gap';
+                                r.appendChild(gap);
+                            }
+                            // Skip default append
+                            return;
                         } else if (c === 'BKSP') {
                             var svg = '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" fill="none"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/><line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/></svg>';
-                            k = self.makeKey(svg, function () { self.send('\x7f'); }, 'act', { flexGrow: '1.35' });
-                        } else if (c === 'EMOJI') {
-                            k = self.makeKey(emojiSvg, function () { }, 'act', { flexGrow: '1.25' });
+                            // Custom backspace with long-press repeat
+                            k = document.createElement('div');
+                            k.className = 'key act';
+                            k.innerHTML = svg;
+                            k.style.flexGrow = '1.25';
+
+                            var bkspTimeout = null;
+                            var bkspInterval = null;
+
+                            function startBksp(e) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                k.classList.add('pressed');
+                                hapticTap();
+                                self.send('\x7f');
+                                // Start repeat after 500ms hold
+                                bkspTimeout = setTimeout(function () {
+                                    bkspInterval = setInterval(function () {
+                                        self.send('\x7f');
+                                    }, 50);
+                                }, 500);
+                            }
+                            function stopBksp(e) {
+                                e.preventDefault();
+                                k.classList.remove('pressed');
+                                if (bkspTimeout) { clearTimeout(bkspTimeout); bkspTimeout = null; }
+                                if (bkspInterval) { clearInterval(bkspInterval); bkspInterval = null; }
+                            }
+
+                            k.addEventListener('touchstart', startBksp, { passive: false });
+                            k.addEventListener('touchend', stopBksp, { passive: false });
+                            k.addEventListener('touchcancel', stopBksp, { passive: false });
+                            k.addEventListener('mousedown', startBksp);
+                            k.addEventListener('mouseup', stopBksp);
+                            k.addEventListener('mouseleave', stopBksp);
+
+                            // Insert gap before BKSP in 3rd row
+                            if (isThirdRow) {
+                                var gap = document.createElement('div');
+                                gap.className = 'gap';
+                                r.appendChild(gap);
+                            }
+
+                        } else if (c === 'PASTE') {
+                            // Paste button - clipboard icon (uses touchend to avoid keyboard issues)
+                            var pasteSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>';
+                            k = document.createElement('div');
+                            k.className = 'key act';
+                            k.innerHTML = pasteSvg;
+                            k.style.flexGrow = '1.25';
+
+                            var handlePaste = function (e) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                k.classList.add('pressed');
+                                hapticTap();
+                                self.pasteFromClipboard();
+                                setTimeout(function () { k.classList.remove('pressed'); }, 100);
+                            };
+                            k.addEventListener('touchend', handlePaste, { passive: false });
+                            k.addEventListener('click', handlePaste);
                         } else if (c === 'RET') {
-                            k = self.makeKey('return', function () { self.send('\r'); }, 'pri', { fontSize: '16px', flexGrow: '2.5' });
+                            k = self.makeKey('return', function () { self.send('\r'); }, 'pri bottom', { flexGrow: '2.5' });
                         } else if (c === 'SPACE') {
-                            k = self.makeKey('space', function () { self.send(' '); }, '', { fontSize: '16px', flexGrow: '5' });
+                            k = self.makeKey('space', function () { self.send(' '); }, 'bottom', { flexGrow: '5' });
                         } else if (c === '123') {
-                            k = self.makeKey('123', function () { self.view = 'num'; self.renderKeys(); }, 'act', { fontSize: '16px', flexGrow: '1.25' });
+                            k = self.makeKey('123', function () { self.view = 'num'; self.renderKeys(); }, 'act bottom', { flexGrow: '1.25' });
                         } else if (c === 'ABC') {
-                            k = self.makeKey('ABC', function () { self.view = 'abc'; self.renderKeys(); }, 'act', { fontSize: '16px', flexGrow: '1.25' });
+                            k = self.makeKey('ABC', function () { self.view = 'abc'; self.renderKeys(); }, 'act bottom', { flexGrow: '1.25' });
                         } else {
                             // Character keys - large 25px font
                             var ch = (self.shift || self.caps) ? c.toUpperCase() : c;
@@ -806,47 +1032,53 @@
 
             init: function () {
                 var self = this;
-                log('Initializing...');
+
                 hookTerminalOnData();
                 var term = findTerminalInstance();
                 if (term) hookTermInstance(term);
-                if (!window.__hopInputMode) {
-                    var hasTerm = !!(getOnData() || term);
-                    window.__hopInputMode = hasTerm ? 'term' : 'input';
-                }
-                updateModePill();
-                if (window.__hopPrimeEnabled === undefined) window.__hopPrimeEnabled = true;
-                updatePrimePill();
-                updateKbHeight();
-                if (window.__hopPrimeEnabled) primeInputPipeline();
+
                 this.renderAcc();
                 this.renderKeys();
 
-                // Setup toggle button
-                document.getElementById('hop-toggle-kb').addEventListener('touchstart', function (e) {
-                    e.preventDefault();
-                    self.toggle();
-                }, { passive: false });
-                document.getElementById('hop-toggle-kb').addEventListener('mousedown', function (e) {
-                    e.preventDefault();
-                    self.toggle();
-                });
 
-                // Mode toggle: TERM -> CORE -> INPUT
-                var modeToggle = document.getElementById('hop-mode-toggle');
-                if (modeToggle) {
-                    var toggle = function (e) {
-                        if (e) { e.preventDefault(); e.stopPropagation(); }
-                        var order = ['term', 'core', 'input'];
-                        var current = window.__hopInputMode || 'term';
-                        var idx = order.indexOf(current);
-                        var next = order[(idx + 1) % order.length];
-                        setMode(next);
-                        log('Mode: ' + window.__hopInputMode);
-                    };
-                    modeToggle.addEventListener('touchstart', toggle, { passive: false });
-                    modeToggle.addEventListener('mousedown', toggle);
+
+                // System keyboard dialog handlers
+                var sysDialog = document.getElementById('hop-sys-dialog');
+                var sysInput = document.getElementById('hop-sys-input');
+
+                function sendSysInput() {
+                    var text = sysInput.value;
+                    if (text) {
+                        self.send(text);
+                    }
+                    sysInput.value = '';
+
+                    // Delay closing slightly to ensure send completes and focus isn't stolen
+                    setTimeout(function () {
+                        self.toggleSysKb();
+                    }, 10);
                 }
+
+                if (sysInput) {
+                    // Send on Enter key
+                    sysInput.addEventListener('keydown', function (e) {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            sendSysInput();
+                        }
+                    });
+                }
+
+                // Close dialog when clicking backdrop
+                if (sysDialog) {
+                    sysDialog.addEventListener('click', function (e) {
+                        if (e.target === sysDialog) {
+                            self.toggleSysKb();
+                        }
+                    });
+                }
+
+
 
                 // Prevent native keyboard on terminal touch
                 document.addEventListener('touchstart', function (e) {
@@ -857,6 +1089,167 @@
                     }
                 }, { passive: true });
 
+                // Touch-based scrolling for terminal (sends mouse wheel escape sequences)
+                (function () {
+                    var termArea = null;
+                    var touchStartY = 0;
+                    var scrollThreshold = 20; // minimum px to trigger scroll
+                    var scrollActive = false;
+
+                    function getTermArea() {
+                        if (!termArea) termArea = document.querySelector('.xterm-screen') || document.querySelector('.terminal');
+                        return termArea;
+                    }
+
+                    function sendMouseWheel(up, x, y) {
+                        // SGR extended mouse encoding: \x1b[<button;x;y M/m
+                        // Button 64 = wheel up, 65 = wheel down
+                        var button = up ? 64 : 65;
+                        // Coordinates are 1-based
+                        var cx = Math.max(1, Math.floor(x / 8) + 1); // rough char width estimate
+                        var cy = Math.max(1, Math.floor(y / 16) + 1); // rough char height estimate
+                        // SGR format: \x1b[<btn;x;yM
+                        self.send('\x1b[<' + button + ';' + cx + ';' + cy + 'M');
+                    }
+
+                    function sendScrollCmd(up, lines, x, y) {
+                        for (var i = 0; i < lines; i++) {
+                            sendMouseWheel(up, x, y);
+                        }
+                    }
+
+                    document.addEventListener('touchstart', function (e) {
+                        var area = getTermArea();
+                        if (!area || !area.contains(e.target)) return;
+                        touchStartY = e.touches[0].clientY;
+                        scrollActive = true;
+                    }, { passive: true });
+
+                    document.addEventListener('touchmove', function (e) {
+                        if (!scrollActive) return;
+                        var area = getTermArea();
+                        if (!area) return;
+
+                        var touch = e.touches[0];
+                        var deltaY = touchStartY - touch.clientY;
+                        var absDelta = Math.abs(deltaY);
+
+                        if (absDelta > scrollThreshold) {
+                            var lines = Math.floor(absDelta / 25); // ~25px per line
+                            if (lines < 1) lines = 1;
+
+                            // SAFETY: Only send mouse sequences if we are in the ALTERNATE buffer (apps like Vim/Tmux).
+                            // Sending these to a raw shell (Normal buffer) causes "random characters" garbage.
+                            var term = window.__hopTerm || findTerminalInstance();
+                            if (term && term.buffer && term.buffer.active && term.buffer.alternate) {
+                                if (term.buffer.active === term.buffer.alternate) {
+                                    // App mode: Send mouse sequences
+                                    var rect = area.getBoundingClientRect();
+                                    var x = touch.clientX - rect.left;
+                                    var y = touch.clientY - rect.top;
+                                    sendScrollCmd(deltaY < 0, lines, x, y);
+                                }
+                            }
+
+                            touchStartY = touch.clientY; // Reset for continuous scroll
+                        }
+                    }, { passive: true });
+
+                    document.addEventListener('touchend', function (e) {
+                        scrollActive = false;
+                    }, { passive: true });
+                })();
+
+                // Draggable floating toggle
+                (function () {
+                    var fab = document.getElementById('hop-float-controls');
+                    var toggleBtn = document.getElementById('hop-toggle-kb');
+                    if (!fab || !toggleBtn) return;
+
+                    var isDragging = false;
+                    var startX, startY, initialLeft, initialTop;
+                    var hasMoved = false;
+
+                    // Initialize position if not set
+                    if (!fab.style.left && !fab.style.right) {
+                        // Default to right side
+                    }
+
+                    function onStart(e) {
+                        // e.preventDefault(); // Don't prevent default immediately, might be a click
+                        var touch = e.touches ? e.touches[0] : e;
+                        startX = touch.clientX;
+                        startY = touch.clientY;
+
+                        // Get current computed position
+                        var rect = fab.getBoundingClientRect();
+                        initialLeft = rect.left;
+                        initialTop = rect.top;
+
+                        // Clear right/bottom to allow free movement via left/top
+                        fab.style.right = 'auto';
+                        fab.style.bottom = 'auto';
+                        fab.style.left = initialLeft + 'px';
+                        fab.style.top = initialTop + 'px';
+
+                        isDragging = true;
+                        hasMoved = false;
+                        fab.style.transition = 'none'; // Disable transition during drag
+                    }
+
+                    function onMove(e) {
+                        if (!isDragging) return;
+                        e.preventDefault(); // Prevent scrolling while dragging fab
+                        var touch = e.touches ? e.touches[0] : e;
+                        var dx = touch.clientX - startX;
+                        var dy = touch.clientY - startY;
+
+                        // Threshold to consider it a drag vs tap
+                        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                            hasMoved = true;
+                        }
+
+                        fab.style.left = (initialLeft + dx) + 'px';
+                        fab.style.top = (initialTop + dy) + 'px';
+                    }
+
+                    function onEnd(e) {
+                        if (!isDragging) return;
+                        isDragging = false;
+                        fab.style.transition = 'all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1)';
+
+                        // Keep within screen bounds
+                        var rect = fab.getBoundingClientRect();
+                        var winW = window.innerWidth;
+                        var winH = window.innerHeight;
+                        var safeTop = 10;
+                        var safeBottom = winH - 50;
+                        var safeLeft = 10;
+                        var safeRight = winW - 50; // assuming width approx 40
+
+                        var newTop = Math.max(safeTop, Math.min(safeBottom, rect.top));
+                        var newLeft = Math.max(safeLeft, Math.min(safeRight, rect.left));
+
+                        fab.style.top = newTop + 'px';
+                        fab.style.left = newLeft + 'px';
+                        fab.style.right = 'auto'; // ensure right is unset to stick to left positioning
+
+                        // If it wasn't a drag (just a tap), trigger the toggle
+                        if (!hasMoved) {
+                            self.toggle();
+                        }
+                    }
+
+                    fab.addEventListener('touchstart', onStart, { passive: false });
+                    document.addEventListener('touchmove', onMove, { passive: false }); // doc listener to catch fast swipes
+                    document.addEventListener('touchend', onEnd, { passive: true });
+
+                    // Mouse fallback for testing
+                    fab.addEventListener('mousedown', onStart);
+                    document.addEventListener('mousemove', onMove);
+                    document.addEventListener('mouseup', onEnd);
+                })();
+
                 // Wait for socket and update status
                 var checkSocket = setInterval(function () {
                     hookTerminalOnData();
@@ -865,14 +1258,10 @@
                     var socket = getSocket();
                     if (socket) {
                         if (socket.readyState === 1) {
-                            log('Ready! Socket open.');
                             clearInterval(checkSocket);
-                            if (window.__hopPrimeEnabled) primeInputPipeline();
-                        } else {
-                            log('Socket state: ' + socket.readyState);
                         }
                     } else {
-                        log('Waiting for socket...');
+
                     }
                 }, 500);
 
@@ -881,22 +1270,6 @@
                     window.visualViewport.addEventListener('resize', function () { updateKbHeight(); });
                 }
                 window.addEventListener('orientationchange', function () { setTimeout(updateKbHeight, 50); });
-                if (!window.__hopPrimeInterval) {
-                    window.__hopPrimeInterval = setInterval(function () {
-                        if (window.__hopPrimeEnabled !== false) primeInputPipeline(true);
-                    }, 200);
-                }
-
-                // Prime toggle
-                var primeToggle = document.getElementById('hop-prime-toggle');
-                if (primeToggle) {
-                    var togglePrime = function (e) {
-                        if (e) { e.preventDefault(); e.stopPropagation(); }
-                        setPrime(!(window.__hopPrimeEnabled !== false));
-                    };
-                    primeToggle.addEventListener('touchstart', togglePrime, { passive: false });
-                    primeToggle.addEventListener('mousedown', togglePrime);
-                }
             }
         };
 

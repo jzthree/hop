@@ -1,6 +1,6 @@
 {
   "name": "hop-shell",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "🐰 Hop into your terminal from anywhere. Secure remote shell access with 2FA via Cloudflare Tunnel.",
   "main": "hop",
   "bin": {

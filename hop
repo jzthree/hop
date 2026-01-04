@@ -949,14 +949,14 @@ function waitForStart(authEmitter, publicUrl) {
 function showQrCode() {
     log(`[3/4] Setup Authenticator...`, BOLD);
 
-    const user = os.userInfo().username;
-    const service = 'Hop'; // Simple service name
-    const otpauth = authenticator.keyuri(user, service, AUTH_SECRET);
+    // Manually construct URL for minimalist "Hop" label without username
+    const label = 'Hop';
+    const otpauth = `otpauth://totp/${encodeURIComponent(label)}?secret=${AUTH_SECRET}&issuer=${encodeURIComponent(label)}`;
 
     qrcode.generate(otpauth, { small: true });
 
     log(`Scan this QR code with your Authenticator app.`, CYAN);
-    log(`Account: ${service} (${user})`, CYAN);
+    log(`Account: ${label}`, CYAN);
     log(`\n(Secret hidden for security. View ~/.hop-shell/.auth_secret if needed)\n`, RESET);
 }
 

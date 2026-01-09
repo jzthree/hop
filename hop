@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -19,18 +19,618 @@ authenticator.options = { window: 1 };
 
 // --- Configuration ---
 const HOME_DIR = path.join(os.homedir(), '.hop-shell');
-if (!fs.existsSync(HOME_DIR)) {
-    fs.mkdirSync(HOME_DIR, { recursive: true });
+const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+
+function ensurePrivateDir(dirPath) {
+    try {
+        if (!fs.existsSync(dirPath)) {
+            fs.mkdirSync(dirPath, { recursive: true, mode: PRIVATE_DIR_MODE });
+        } else {
+            fs.chmodSync(dirPath, PRIVATE_DIR_MODE);
+        }
+    } catch (e) { }
 }
+
+function ensurePrivateFile(filePath, mode = PRIVATE_FILE_MODE) {
+    try {
+        if (fs.existsSync(filePath)) {
+            fs.chmodSync(filePath, mode);
+        }
+    } catch (e) { }
+}
+
+function writePrivateFile(filePath, data, mode = PRIVATE_FILE_MODE) {
+    fs.writeFileSync(filePath, data, { mode });
+    ensurePrivateFile(filePath, mode);
+}
+
+ensurePrivateDir(HOME_DIR);
 
 const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
 const SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
+const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
+const PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
+const LOG_DIR = path.join(HOME_DIR, 'logs');
+const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+
+// Password hashing using scrypt (built-in, no external deps)
+function hashPassword(password) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+    return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, stored) {
+    if (!stored) return false;
+    const [salt, hash] = stored.split(':');
+    if (!salt || !hash) return false;
+    const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(testHash, 'hex'));
+}
+
+function getStoredPassword() {
+    if (fs.existsSync(PASSWORD_FILE)) {
+        ensurePrivateFile(PASSWORD_FILE);
+        return fs.readFileSync(PASSWORD_FILE, 'utf8').trim();
+    }
+    return null;
+}
+
+function setPassword(password) {
+    const hashed = hashPassword(password);
+    fs.writeFileSync(PASSWORD_FILE, hashed);
+    fs.chmodSync(PASSWORD_FILE, 0o600);  // Only owner can read
+}
+
+function clearPassword() {
+    if (fs.existsSync(PASSWORD_FILE)) {
+        fs.unlinkSync(PASSWORD_FILE);
+    }
+}
+
+function isPasswordEnabled() {
+    return fs.existsSync(PASSWORD_FILE);
+}
 const HOP_TMUX_CONF = path.join(HOME_DIR, '.hop-tmux.conf');
+const HOP_TMUX_WRAPPER = path.join(HOME_DIR, '.hop-tmux-wrapper.sh');
+const HOP_SESSION_PREFIX = 'hop-';  // Prefix to distinguish hop sessions from regular tmux sessions
+
+ensurePrivateDir(LOG_DIR);
+
+function normalizeSessionName(rawName) {
+    if (!rawName || typeof rawName !== 'string') return null;
+    if (!SESSION_NAME_RE.test(rawName)) return null;
+    if (rawName.startsWith(HOP_SESSION_PREFIX)) return rawName;
+    return HOP_SESSION_PREFIX + rawName;
+}
+
+// Load domain config if exists
+function getDomainConfig() {
+    if (fs.existsSync(DOMAIN_CONFIG_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(DOMAIN_CONFIG_FILE, 'utf8'));
+        } catch (e) {
+            return null;
+        }
+    }
+    return null;
+}
+
+function saveDomainConfig(config) {
+    fs.writeFileSync(DOMAIN_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+// Check if cloudflared is logged in
+function isCloudflaredLoggedIn() {
+    const certPath = path.join(os.homedir(), '.cloudflared', 'cert.pem');
+    return fs.existsSync(certPath);
+}
+
+// Get existing tunnels
+function listCloudflaredTunnels() {
+    try {
+        const output = execSync('cloudflared tunnel list -o json', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+        return JSON.parse(output);
+    } catch (e) {
+        return [];
+    }
+}
+
+// Setup custom domain
+async function setupDomain(hostname) {
+    const tunnelName = 'hop';
+    let tunnelCreatedByUs = false;  // Track if we created it (for cleanup)
+
+    log(`\n${BOLD}Setting up custom domain: ${hostname}${RESET}\n`, CYAN);
+
+    // Step 1: Check cloudflared login
+    log(`[1/4] Checking Cloudflare authentication...`, BOLD);
+    if (!isCloudflaredLoggedIn()) {
+        log(`  Opening browser for Cloudflare login...`, YELLOW);
+        log(`  Please authorize in your browser.\n`, RESET);
+        try {
+            execSync('cloudflared tunnel login', { stdio: 'inherit' });
+        } catch (e) {
+            log(`Failed to authenticate with Cloudflare.`, RED);
+            process.exit(1);
+        }
+    }
+    log(`  Authenticated with Cloudflare.`, GREEN);
+
+    // Step 2: Check if tunnel exists, create if not
+    log(`[2/4] Setting up tunnel...`, BOLD);
+    const tunnels = listCloudflaredTunnels();
+    let tunnel = tunnels.find(t => t.name === tunnelName);
+
+    if (tunnel) {
+        log(`  Using existing tunnel: ${tunnelName} (${tunnel.id})`, GREEN);
+    } else {
+        log(`  Creating new tunnel: ${tunnelName}...`, YELLOW);
+        try {
+            execSync(`cloudflared tunnel create ${tunnelName}`, { encoding: 'utf8' });
+            log(`  Tunnel created.`, GREEN);
+            tunnelCreatedByUs = true;
+            // Re-fetch to get the ID
+            const newTunnels = listCloudflaredTunnels();
+            tunnel = newTunnels.find(t => t.name === tunnelName);
+        } catch (e) {
+            log(`Failed to create tunnel: ${e.message}`, RED);
+            process.exit(1);
+        }
+    }
+
+    // Step 3: Setup DNS route - this validates domain ownership
+    log(`[3/4] Configuring DNS...`, BOLD);
+    let dnsSuccess = false;
+    try {
+        // Capture both stdout and stderr to check for errors
+        const result = execSync(`cloudflared tunnel route dns ${tunnelName} ${hostname} 2>&1`, {
+            encoding: 'utf8'
+        });
+
+        // Check for failure FIRST (before checking for "already exists" which can appear in error messages)
+        if (result.includes('Failed to add route') || result.includes('Failed to create record')) {
+            // This is an error, even if it contains "already exists"
+            log(`\n${RED}ERROR: DNS configuration failed.${RESET}`, RED);
+            log(`Details: ${result.trim()}`, YELLOW);
+            dnsSuccess = false;
+        } else if (result.includes('Added CNAME')) {
+            dnsSuccess = true;
+            log(`  DNS configured: ${hostname} → tunnel`, GREEN);
+        } else if (result.includes('already exists') && !result.includes('Failed')) {
+            // Only treat as success if it's not part of a failure message
+            dnsSuccess = true;
+            log(`  DNS already configured.`, GREEN);
+        } else {
+            // Unexpected output - treat as potential failure
+            log(`  Unexpected response: ${result.trim()}`, YELLOW);
+            dnsSuccess = false;
+        }
+    } catch (e) {
+        const errorOutput = e.stdout || e.stderr || e.message || '';
+
+        // Check for failure indicators FIRST
+        if (errorOutput.includes('Failed to add route') || errorOutput.includes('Failed to create record')) {
+            log(`\n${RED}ERROR: DNS configuration failed.${RESET}`, RED);
+            log(`Details: ${errorOutput.trim()}`, YELLOW);
+            dnsSuccess = false;
+        } else if (errorOutput.includes('zone') || errorOutput.includes('not found') || errorOutput.includes('does not exist')) {
+            log(`\n${RED}ERROR: Domain "${hostname}" is not in your Cloudflare account.${RESET}`, RED);
+            log(`\nMake sure:`, YELLOW);
+            log(`  1. You own this domain`, RESET);
+            log(`  2. The domain is added to your Cloudflare account`, RESET);
+            log(`  3. You're using the correct Cloudflare account`, RESET);
+            dnsSuccess = false;
+        } else if (errorOutput.includes('authentication') || errorOutput.includes('unauthorized')) {
+            log(`\n${RED}ERROR: Authentication failed.${RESET}`, RED);
+            log(`Try: cloudflared tunnel login`, YELLOW);
+            dnsSuccess = false;
+        } else if (errorOutput.includes('already exists') && !errorOutput.includes('Failed')) {
+            // Only treat as success if it's a clean "already exists" not part of error
+            dnsSuccess = true;
+            log(`  DNS already configured.`, GREEN);
+        } else {
+            log(`\n${RED}ERROR: DNS configuration failed.${RESET}`, RED);
+            log(`Details: ${errorOutput.trim()}`, YELLOW);
+            dnsSuccess = false;
+        }
+    }
+
+    // If DNS failed, clean up the tunnel we created
+    if (!dnsSuccess) {
+        if (tunnelCreatedByUs) {
+            log(`\nCleaning up...`, YELLOW);
+            try {
+                execSync(`cloudflared tunnel delete ${tunnelName}`, { stdio: 'ignore' });
+                log(`  Deleted tunnel: ${tunnelName}`, RESET);
+            } catch (e) {
+                log(`  Note: You may need to manually delete tunnel: cloudflared tunnel delete ${tunnelName}`, YELLOW);
+            }
+        }
+        log(`\nSetup failed. Please fix the issue and try again.`, RED);
+        process.exit(1);
+    }
+
+    // Step 4: Save config
+    log(`[4/4] Saving configuration...`, BOLD);
+    saveDomainConfig({
+        tunnelName,
+        tunnelId: tunnel ? tunnel.id : null,
+        hostname,
+        createdAt: new Date().toISOString()
+    });
+    log(`  Configuration saved.`, GREEN);
+
+    log(`\n${BOLD}${GREEN}✓ Custom domain setup complete!${RESET}`, GREEN);
+    log(`\nYour hop URL: https://${hostname}`, BOLD);
+
+    // Require password for fixed domains
+    if (!isPasswordEnabled()) {
+        log(`\n${YELLOW}⚠ Password required for fixed domains.${RESET}`, YELLOW);
+        log(`A fixed URL is publicly known - password adds essential protection.\n`, RESET);
+
+        const readline = require('readline');
+        const stream = require('stream');
+
+        const askPassword = (prompt) => new Promise((resolve) => {
+            const rl = readline.createInterface({
+                input: process.stdin,
+                output: new stream.Writable({
+                    write: (chunk, encoding, callback) => callback()
+                }),
+                terminal: true
+            });
+
+            process.stdout.write(prompt);
+            rl.question('', (answer) => {
+                rl.close();
+                process.stdout.write('\n');
+                resolve(answer);
+            });
+        });
+
+        const password = await askPassword('Set a password: ');
+        if (password.length < 4) {
+            log(`Password too short. Run ${CYAN}hop password set${RESET} to set later.`, RED);
+        } else {
+            const confirm = await askPassword('Confirm password: ');
+            if (password !== confirm) {
+                log(`Passwords don't match. Run ${CYAN}hop password set${RESET} to set later.`, RED);
+            } else {
+                setPassword(password);
+                log(`${GREEN}✓ Password set.${RESET}`, GREEN);
+            }
+        }
+    }
+
+    log(`\nRun ${CYAN}hop${RESET} to start with your custom domain.`, RESET);
+}
+
+// --- Multi-user management ---
+const USERS_FILE = path.join(HOME_DIR, '.users.json');
+
+function getUsers() {
+    if (fs.existsSync(USERS_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+        } catch (e) {
+            return {};
+        }
+    }
+    return {};
+}
+
+function saveUsers(users) {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+// Get base domain from existing config (e.g., hop.example.com -> example.com)
+function getBaseDomain() {
+    const config = getDomainConfig();
+    if (!config || !config.hostname) return null;
+    // Extract base domain: hop.example.com -> example.com
+    const parts = config.hostname.split('.');
+    if (parts.length >= 2) {
+        return parts.slice(-2).join('.');
+    }
+    return config.hostname;
+}
+
+// Get subdomain prefix (e.g., hop.example.com -> hop)
+function getSubdomainPrefix() {
+    const config = getDomainConfig();
+    if (!config || !config.hostname) return 'hop';
+    const parts = config.hostname.split('.');
+    if (parts.length >= 3) {
+        return parts[0];
+    }
+    return 'hop';
+}
+
+async function addUser(username) {
+    // Validate username
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+        log(`Invalid username. Use only letters, numbers, underscore, hyphen.`, RED);
+        process.exit(1);
+    }
+
+    const baseDomain = getBaseDomain();
+    const prefix = getSubdomainPrefix();
+
+    if (!baseDomain) {
+        log(`You must set up your own domain first.`, RED);
+        log(`Run: hop domain <your-subdomain.yourdomain.com>`, RESET);
+        process.exit(1);
+    }
+
+    if (!isCloudflaredLoggedIn()) {
+        log(`You must be logged in to Cloudflare.`, RED);
+        log(`Run: hop domain <hostname> to set up.`, RESET);
+        process.exit(1);
+    }
+
+    const users = getUsers();
+    if (users[username]) {
+        log(`User "${username}" already exists.`, YELLOW);
+        log(`Hostname: ${users[username].hostname}`, RESET);
+        process.exit(0);
+    }
+
+    const tunnelName = `hop-${username}`;
+    const hostname = `${username}.${prefix}.${baseDomain}`;
+    let tunnelCreatedByUs = false;
+
+    log(`\n${BOLD}Adding user: ${username}${RESET}\n`, CYAN);
+
+    // Step 1: Create tunnel
+    log(`[1/3] Creating tunnel...`, BOLD);
+    const tunnels = listCloudflaredTunnels();
+    let tunnel = tunnels.find(t => t.name === tunnelName);
+
+    if (tunnel) {
+        log(`  Tunnel already exists: ${tunnelName}`, GREEN);
+    } else {
+        try {
+            execSync(`cloudflared tunnel create ${tunnelName}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+            log(`  Tunnel created: ${tunnelName}`, GREEN);
+            tunnelCreatedByUs = true;
+            // Re-fetch to get the ID
+            const newTunnels = listCloudflaredTunnels();
+            tunnel = newTunnels.find(t => t.name === tunnelName);
+        } catch (e) {
+            log(`Failed to create tunnel: ${e.message}`, RED);
+            process.exit(1);
+        }
+    }
+
+    // Step 2: Setup DNS
+    log(`[2/3] Configuring DNS...`, BOLD);
+    let dnsSuccess = false;
+    try {
+        const result = execSync(`cloudflared tunnel route dns ${tunnelName} ${hostname} 2>&1`, {
+            encoding: 'utf8'
+        });
+        // Check for failure FIRST
+        if (result.includes('Failed to add route') || result.includes('Failed to create record')) {
+            log(`\n${RED}ERROR: DNS failed: ${result.trim()}${RESET}`, RED);
+            dnsSuccess = false;
+        } else if (result.includes('Added CNAME')) {
+            dnsSuccess = true;
+            log(`  DNS configured: ${hostname}`, GREEN);
+        } else if (result.includes('already exists') && !result.includes('Failed')) {
+            dnsSuccess = true;
+            log(`  DNS already configured.`, GREEN);
+        } else {
+            log(`  Unexpected response: ${result.trim()}`, YELLOW);
+        }
+    } catch (e) {
+        const errorOutput = e.stdout || e.stderr || e.message || '';
+        // Check for failure FIRST
+        if (errorOutput.includes('Failed to add route') || errorOutput.includes('Failed to create record')) {
+            log(`\n${RED}ERROR: DNS failed: ${errorOutput.trim()}${RESET}`, RED);
+        } else if (errorOutput.includes('already exists') && !errorOutput.includes('Failed')) {
+            dnsSuccess = true;
+            log(`  DNS already configured.`, GREEN);
+        } else if (errorOutput.includes('zone') || errorOutput.includes('not found')) {
+            log(`\n${RED}ERROR: Domain not in your Cloudflare account.${RESET}`, RED);
+        } else {
+            log(`\n${RED}ERROR: DNS failed: ${errorOutput.trim()}${RESET}`, RED);
+        }
+    }
+
+    // If DNS failed, clean up
+    if (!dnsSuccess) {
+        if (tunnelCreatedByUs) {
+            log(`\nCleaning up...`, YELLOW);
+            try {
+                execSync(`cloudflared tunnel delete ${tunnelName}`, { stdio: 'ignore' });
+                log(`  Deleted tunnel: ${tunnelName}`, RESET);
+            } catch (e) { }
+        }
+        process.exit(1);
+    }
+
+    // Step 3: Save user info
+    log(`[3/3] Saving user...`, BOLD);
+
+    // Find the credentials file
+    const cloudflaredDir = path.join(os.homedir(), '.cloudflared');
+    let credentialsFile = null;
+    if (tunnel && tunnel.id) {
+        credentialsFile = path.join(cloudflaredDir, `${tunnel.id}.json`);
+    }
+
+    users[username] = {
+        tunnelName,
+        tunnelId: tunnel ? tunnel.id : null,
+        hostname,
+        credentialsFile,
+        createdAt: new Date().toISOString()
+    };
+    saveUsers(users);
+    log(`  User saved.`, GREEN);
+
+    log(`\n${BOLD}${GREEN}✓ User "${username}" added!${RESET}`, GREEN);
+    log(`\nTheir URL: https://${hostname}`, BOLD);
+    log(`\nTo export credentials for them:`, RESET);
+    log(`  ${CYAN}hop user export ${username}${RESET}`, RESET);
+}
+
+async function removeUser(username) {
+    const users = getUsers();
+
+    if (!users[username]) {
+        log(`User "${username}" not found.`, RED);
+        process.exit(1);
+    }
+
+    const user = users[username];
+
+    log(`\n${BOLD}Removing user: ${username}${RESET}\n`, YELLOW);
+
+    // Delete tunnel
+    log(`[1/2] Deleting tunnel...`, BOLD);
+    try {
+        execSync(`cloudflared tunnel delete ${user.tunnelName}`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+        log(`  Tunnel deleted: ${user.tunnelName}`, GREEN);
+    } catch (e) {
+        log(`  Warning: Could not delete tunnel (may already be gone).`, YELLOW);
+    }
+
+    // Note: DNS record may remain, Cloudflare doesn't auto-delete it
+    log(`[2/2] Removing user record...`, BOLD);
+    delete users[username];
+    saveUsers(users);
+    log(`  User removed.`, GREEN);
+
+    log(`\n${BOLD}${GREEN}✓ User "${username}" removed.${RESET}`, GREEN);
+    log(`\nNote: DNS record for ${user.hostname} may need manual removal in Cloudflare dashboard.`, YELLOW);
+}
+
+function listUsersCommand() {
+    const users = getUsers();
+    const userList = Object.entries(users);
+
+    if (userList.length === 0) {
+        log(`\nNo users configured.`, YELLOW);
+        log(`\nAdd a user: hop user add <username>`, RESET);
+        return;
+    }
+
+    log(`\n${BOLD}Configured users:${RESET}\n`, CYAN);
+
+    for (const [username, info] of userList) {
+        log(`  ${BOLD}${username}${RESET}`, GREEN);
+        log(`    URL:     https://${info.hostname}`, RESET);
+        log(`    Tunnel:  ${info.tunnelName}`, RESET);
+        log(`    Created: ${info.createdAt}`, RESET);
+        log('');
+    }
+}
+
+async function exportUserCredentials(username) {
+    const users = getUsers();
+
+    if (!users[username]) {
+        log(`User "${username}" not found.`, RED);
+        process.exit(1);
+    }
+
+    const user = users[username];
+    const cloudflaredDir = path.join(os.homedir(), '.cloudflared');
+    const certFile = path.join(cloudflaredDir, 'cert.pem');
+
+    // Find credentials file
+    let credentialsFile = user.credentialsFile;
+    if (!credentialsFile || !fs.existsSync(credentialsFile)) {
+        // Try to find by tunnel ID
+        if (user.tunnelId) {
+            credentialsFile = path.join(cloudflaredDir, `${user.tunnelId}.json`);
+        }
+    }
+
+    if (!credentialsFile || !fs.existsSync(credentialsFile)) {
+        log(`Credentials file not found for user "${username}".`, RED);
+        log(`The tunnel may need to be recreated.`, YELLOW);
+        process.exit(1);
+    }
+
+    // Create export directory
+    const exportDir = path.join(HOME_DIR, 'exports', username);
+    if (!fs.existsSync(exportDir)) {
+        fs.mkdirSync(exportDir, { recursive: true });
+    }
+
+    // Copy credentials
+    const exportCredentials = path.join(exportDir, 'credentials.json');
+    fs.copyFileSync(credentialsFile, exportCredentials);
+
+    // Create README with hop client instructions
+    const readme = `# Hop Tunnel for ${username}
+
+Your tunnel URL: https://${user.hostname}
+
+## Quick Start
+
+1. Install hop globally:
+   npm install -g hop-shell
+
+2. Start the tunnel:
+   hop client ./credentials.json
+
+3. On first run, you'll be prompted to:
+   - Set a password (required)
+   - Scan a QR code for 2FA (TOTP)
+
+4. Start your local service on port 8080
+
+5. Your service is now accessible at:
+   https://${user.hostname}
+
+## Changing the port
+
+Use the --port option:
+   hop client ./credentials.json --port 3000
+
+## Security
+
+- credentials.json contains your tunnel secret - keep it safe!
+- On first run, you MUST set up password + TOTP authentication
+- Anyone accessing your URL will need YOUR password and TOTP code
+- Your credentials are stored in ~/.hop-shell/clients/<tunnel-id>/
+
+## Troubleshooting
+
+If you need to reset your password/TOTP:
+   rm -rf ~/.hop-shell/clients/
+
+Then run hop client again to set up fresh credentials.
+`;
+    const exportReadme = path.join(exportDir, 'README.md');
+    fs.writeFileSync(exportReadme, readme);
+
+    log(`\n${BOLD}${GREEN}✓ Credentials exported for "${username}"${RESET}`, GREEN);
+    log(`\nExport location: ${exportDir}`, BOLD);
+    log(`\nFiles created:`, RESET);
+    log(`  - credentials.json  (tunnel credentials - keep secret!)`, RESET);
+    log(`  - README.md         (setup instructions)`, RESET);
+    log(`\n${YELLOW}Send this folder to ${username}.${RESET}`, YELLOW);
+    log(`\nThey should:`, RESET);
+    log(`  1. Install hop:  ${CYAN}npm install -g hop-shell${RESET}`, RESET);
+    log(`  2. Run:          ${CYAN}hop client ./credentials.json${RESET}`, RESET);
+    log(`  3. Set up their password + TOTP on first run`, RESET);
+    log(`\nTheir URL will be: https://${user.hostname}`, CYAN);
+}
 
 // Check if tunnel is already running
 function isServerRunning() {
     if (!fs.existsSync(STATE_FILE)) return null;
+    ensurePrivateFile(STATE_FILE);
     try {
         const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
         // Check if the process is still alive
@@ -60,9 +660,10 @@ if (existingState) {
 let AUTH_SECRET;
 if (fs.existsSync(SECRET_FILE)) {
     AUTH_SECRET = fs.readFileSync(SECRET_FILE, 'utf8').trim();
+    ensurePrivateFile(SECRET_FILE);
 } else {
     AUTH_SECRET = authenticator.generateSecret();
-    fs.writeFileSync(SECRET_FILE, AUTH_SECRET);
+    writePrivateFile(SECRET_FILE, AUTH_SECRET);
 }
 
 // Port configuration
@@ -91,14 +692,55 @@ set -g default-terminal "screen-256color"
 `;
 fs.writeFileSync(HOP_TMUX_CONF, HOP_TMUX_CONFIG);
 
+// Wrapper script for ttyd to run tmux with safe args (no shell interpolation)
+const HOP_TMUX_WRAPPER_CONTENT = `#!/bin/sh
+TMUX_CONF="$1"
+SESSION_NAME="$2"
+EXIT_FLAG="$3"
+
+while true; do
+  tmux -f "$TMUX_CONF" new-session -A -s "$SESSION_NAME" zsh
+  echo ""
+  echo "[Session ended. Restarting in 2s... Type 'tunnel-exit' to stop]"
+  if [ -f "$EXIT_FLAG" ]; then
+    rm -f "$EXIT_FLAG"
+    echo "[Clean exit requested]"
+    exit 0
+  fi
+  sleep 2
+done
+`;
+fs.writeFileSync(HOP_TMUX_WRAPPER, HOP_TMUX_WRAPPER_CONTENT, { mode: PRIVATE_DIR_MODE });
+try { fs.chmodSync(HOP_TMUX_WRAPPER, PRIVATE_DIR_MODE); } catch (e) { }
+
 // Session Management
 const activeSessions = {}; // { sessionName: { ttyd: Process, port: number } }
+const sessionRenames = {};  // { oldName: newName } - track renames for styling updates
 let nextPort = BASE_PORT + 1;
 
 // --- Login Rate Limiting (Exponential Backoff) ---
 const failedAttempts = new Map(); // ip -> { count: number, lastAttempt: number }
+const FAILED_ATTEMPT_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const FAILED_ATTEMPT_MAX = 1000;
+
+function pruneFailedAttempts(now = Date.now()) {
+    for (const [ip, record] of failedAttempts.entries()) {
+        if (now - record.lastAttempt > FAILED_ATTEMPT_TTL_MS) {
+            failedAttempts.delete(ip);
+        }
+    }
+    if (failedAttempts.size > FAILED_ATTEMPT_MAX) {
+        const entries = Array.from(failedAttempts.entries())
+            .sort((a, b) => a[1].lastAttempt - b[1].lastAttempt);
+        const overflow = failedAttempts.size - FAILED_ATTEMPT_MAX;
+        for (let i = 0; i < overflow; i++) {
+            failedAttempts.delete(entries[i][0]);
+        }
+    }
+}
 
 function checkRateLimit(ip) {
+    pruneFailedAttempts();
     const record = failedAttempts.get(ip);
     if (!record || record.count < 5) return { allowed: true };
 
@@ -115,6 +757,7 @@ function checkRateLimit(ip) {
 
 function recordFailure(ip) {
     const now = Date.now();
+    pruneFailedAttempts(now);
     const record = failedAttempts.get(ip) || { count: 0, lastAttempt: 0 };
     record.count++;
     record.lastAttempt = now;
@@ -151,8 +794,44 @@ async function runCommand(command, args, opts = {}) {
 
 async function checkAndInstallDependencies() {
     log(`[1/4] Checking dependencies...`, BOLD);
-    try { await runCommand('brew', ['--version'], { stdio: 'ignore' }); }
-    catch (e) { log(`Error: Homebrew missing.`, RED); process.exit(1); }
+    try {
+        await runCommand('brew', ['--version'], { stdio: 'ignore' });
+    } catch (e) {
+        log(`  - Homebrew not found.`, YELLOW);
+
+        const readline = require('readline');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+        const answer = await new Promise(resolve => {
+            rl.question(`  Install Homebrew now? (y/n) `, resolve);
+        });
+        rl.close();
+
+        if (answer.toLowerCase() !== 'y') {
+            log(`Error: Homebrew required. Install from https://brew.sh`, RED);
+            process.exit(1);
+        }
+
+        log(`  - Installing Homebrew...`, YELLOW);
+        try {
+            await runCommand('/bin/bash', ['-c',
+                'curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash'
+            ], { stdio: 'inherit' });
+
+            // Add brew to PATH for Apple Silicon
+            const brewPaths = ['/opt/homebrew/bin', '/usr/local/bin'];
+            for (const p of brewPaths) {
+                if (fs.existsSync(path.join(p, 'brew'))) {
+                    process.env.PATH = `${p}:${process.env.PATH}`;
+                    break;
+                }
+            }
+            log(`  - Homebrew installed.`, GREEN);
+        } catch (err) {
+            log(`Error: Failed to install Homebrew.`, RED);
+            process.exit(1);
+        }
+    }
 
     const deps = ['tmux', 'ttyd', 'cloudflared'];
     for (const dep of deps) {
@@ -185,6 +864,11 @@ function listTmuxSessions() {
     }
 }
 
+function hopSessionExists(name) {
+    if (!name || !name.startsWith(HOP_SESSION_PREFIX)) return false;
+    return listTmuxSessions().some(s => s.name === name && s.name.startsWith(HOP_SESSION_PREFIX));
+}
+
 // Light theme for ttyd - clean white background (tmux handles negative space)
 function getTheme() {
     return JSON.stringify({
@@ -205,13 +889,21 @@ function getTheme() {
 
 // Start or get existing ttyd for a session
 function getOrCreateSession(sessionName) {
+    const normalizedName = normalizeSessionName(sessionName);
+    if (!normalizedName) {
+        throw new Error('Invalid session name');
+    }
+    sessionName = normalizedName;
     if (activeSessions[sessionName]) {
         return activeSessions[sessionName];
     }
 
     const port = nextPort++;
-    const logFile = fs.openSync(path.join(__dirname, `ttyd-${sessionName}.log`), 'w');
+    const logFilePath = path.join(LOG_DIR, `ttyd-${sessionName}.log`);
+    const logFile = fs.openSync(logFilePath, 'w', PRIVATE_FILE_MODE);
+    ensurePrivateFile(logFilePath);
     const themeJson = getTheme();
+    const exitFlagPath = path.join(HOME_DIR, `.exit-${sessionName}`);
 
     // Shell wrapper with safety loop
     // Uses respawn-on-remain-exit in tmux for reliability
@@ -225,19 +917,10 @@ function getOrCreateSession(sessionName) {
         '-t', 'fontSize=15',
         '-t', 'disableLeaveAlert=true',
         '-t', 'rendererType=canvas',
-        'sh', '-c', `
-            while true; do
-                tmux -f ${HOP_TMUX_CONF} new-session -A -s ${sessionName} zsh
-                echo ""
-                echo "[Session ended. Restarting in 2s... Type 'tunnel-exit' to stop]"
-                if [ -f "${path.join(__dirname, '.exit-' + sessionName)}" ]; then
-                    rm -f "${path.join(__dirname, '.exit-' + sessionName)}"
-                    echo "[Clean exit requested]"
-                    exit 0
-                fi
-                sleep 2
-            done
-        `
+        HOP_TMUX_WRAPPER,
+        HOP_TMUX_CONF,
+        sessionName,
+        exitFlagPath
     ], {
         stdio: ['ignore', logFile, logFile],
         detached: false
@@ -270,9 +953,23 @@ function getOrCreateSession(sessionName) {
     return activeSessions[sessionName];
 }
 
+// Resolve current session name (follows rename chain)
+function resolveSessionName(name) {
+    let current = name;
+    while (sessionRenames[current]) {
+        current = sessionRenames[current];
+    }
+    return current;
+}
+
 // Apply tmux styling synchronously for reliable results
 function applyTmuxStyles(sessionName, publicUrl) {
-    const s = sessionName;
+    // Resolve to current name in case of renames
+    const s = resolveSessionName(sessionName);
+    // Strip hop- prefix for display
+    const displayName = s.startsWith(HOP_SESSION_PREFIX)
+        ? s.slice(HOP_SESSION_PREFIX.length)
+        : s;
     const run = (cmd) => {
         try {
             execSync(cmd, { stdio: 'ignore' });
@@ -294,7 +991,7 @@ function applyTmuxStyles(sessionName, publicUrl) {
     run(`tmux set-option -t ${s} status on`);
     run(`tmux set-option -t ${s} status-position bottom`);
     run(`tmux set-option -t ${s} status-style 'bg=#e4e4e7,fg=#52525b'`);
-    run(`tmux set-option -t ${s} status-left '#[fg=#7c3aed,bold]● #[fg=#18181b,bold]${sessionName} #[fg=#a1a1aa,nobold]│#[bg=#e4e4e7]  '`);
+    run(`tmux set-option -t ${s} status-left '#[fg=#7c3aed,bold]● #[fg=#18181b,bold]${displayName} #[fg=#a1a1aa,nobold]│#[bg=#e4e4e7]  '`);
     run(`tmux set-option -t ${s} status-left-length 40`);
     run(`tmux set-option -t ${s} status-right '#[bg=#e4e4e7]    #[fg=#a1a1aa]│ #[fg=#71717a]${publicUrl} '`);
     run(`tmux set-option -t ${s} status-right-length 200`);
@@ -398,6 +1095,44 @@ function getClientIp(req) {
         'unknown';
 }
 
+function setNoCache(res) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+}
+
+function appendSetCookie(res, cookies) {
+    const existing = res.getHeader('Set-Cookie');
+    if (!existing) {
+        res.setHeader('Set-Cookie', cookies);
+        return;
+    }
+    const merged = Array.isArray(existing) ? existing.concat(cookies) : [existing].concat(cookies);
+    res.setHeader('Set-Cookie', merged);
+}
+
+function clearAuthCookies(res) {
+    const expires = new Date(0);
+    appendSetCookie(res, [
+        cookie.serialize(SESSION_COOKIE_NAME, '', {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'lax',
+            path: '/',
+            expires,
+            maxAge: 0
+        }),
+        cookie.serialize(SESSION_COOKIE_NAME, '', {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'lax',
+            path: '/api',
+            expires,
+            maxAge: 0
+        })
+    ]);
+}
+
 function startAuthProxy(authEmitter) {
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
@@ -406,7 +1141,8 @@ function startAuthProxy(authEmitter) {
         const cookies = cookie.parse(req.headers.cookie || '');
         const ip = getClientIp(req);
 
-        // Check auth via cookie OR Authorization header (for mobile apps)
+        // Check auth via cookie OR Authorization header (internal hop-to-hop only)
+        // Bearer token is read from state file by other hop processes on same machine
         const authHeader = req.headers.authorization;
         const tokenFromHeader = authHeader && authHeader.startsWith('Bearer ')
             ? authHeader.substring(7)
@@ -416,7 +1152,10 @@ function startAuthProxy(authEmitter) {
 
         // --- LOGIN PAGE ---
         if (!isAuthenticated) {
-            // API Login for mobile apps - returns token in JSON
+            const passwordRequired = isPasswordEnabled();
+            const storedPasswordHash = getStoredPassword();
+
+            // API Login endpoint - authenticates via password (if enabled) + TOTP
             if (req.method === 'POST' && parsedUrl.pathname === '/api/login') {
                 const limit = checkRateLimit(ip);
                 if (!limit.allowed) {
@@ -429,18 +1168,28 @@ function startAuthProxy(authEmitter) {
                 req.on('data', chunk => body += chunk);
                 req.on('end', () => {
                     try {
-                        const { totp } = JSON.parse(body);
+                        const { totp, password } = JSON.parse(body);
+
+                        // Check password if enabled
+                        if (passwordRequired && !verifyPassword(password || '', storedPasswordHash)) {
+                            recordFailure(ip);
+                            res.writeHead(401, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, error: 'Invalid password' }));
+                            return;
+                        }
+
+                        // Check TOTP
                         if (authenticator.check(totp, AUTH_SECRET)) {
                             resetFailure(ip);
                             res.setHeader('Set-Cookie', cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
-                                httpOnly: false, // Allow JS access for mobile
+                                httpOnly: true,
+                                secure: true,
+                                sameSite: 'lax',
+                                path: '/',
                                 maxAge: 60 * 60 * 24 * 7
                             }));
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({
-                                success: true,
-                                token: SESSION_SECRET  // Return token for mobile to use in headers
-                            }));
+                            res.end(JSON.stringify({ success: true }));
                             if (authEmitter) authEmitter.emit('authenticated');
                         } else {
                             recordFailure(ip);
@@ -469,12 +1218,25 @@ function startAuthProxy(authEmitter) {
                 req.on('end', () => {
                     const params = new URLSearchParams(body);
                     const token = params.get('token');
+                    const password = params.get('password');
 
                     try {
+                        // Check password if enabled
+                        if (passwordRequired && !verifyPassword(password || '', storedPasswordHash)) {
+                            recordFailure(ip);
+                            res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+                            res.end('Invalid password. <a href="/">Try Again</a>');
+                            return;
+                        }
+
+                        // Check TOTP
                         if (authenticator.check(token, AUTH_SECRET)) {
                             resetFailure(ip);
                             res.setHeader('Set-Cookie', cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
                                 httpOnly: true,
+                                secure: true,
+                                sameSite: 'lax',
+                                path: '/',
                                 maxAge: 60 * 60 * 24 * 7
                             }));
                             res.writeHead(302, { 'Location': '/' });
@@ -493,7 +1255,26 @@ function startAuthProxy(authEmitter) {
                 return;
             }
 
-            // Show login page
+            // Show login page - with password field if enabled
+            const passwordFieldHtml = passwordRequired ? `
+                <div style="margin-bottom: 1.5rem;">
+                    <input type="password" name="password" id="passwordField" placeholder="Password"
+                        style="width: 100%; padding: 0.8rem 1rem; font-size: 1rem; border: 1px solid #e4e4e7; border-radius: 8px; background: #fff; color: #18181b; box-sizing: border-box;"
+                        required>
+                </div>
+                <p style="color: #71717a; margin-bottom: 1rem; font-size: 0.9rem;">Then enter your authenticator code:</p>
+            ` : '';
+
+            const passwordCheckJs = passwordRequired ? `
+                const passwordField = document.getElementById('passwordField');
+                if (!passwordField.value) {
+                    passwordField.focus();
+                    return;
+                }
+            ` : '';
+
+            clearAuthCookies(res);
+            setNoCache(res);
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(`
                 <html>
@@ -504,19 +1285,20 @@ function startAuthProxy(authEmitter) {
                         <style>
                             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fafafa; color: #18181b; display: flex; justify-content: center; align-items: center; height: 100vh; margin:0; }
                             .box { text-align: center; max-width: 400px; padding: 2rem; }
-                            h2 { margin-bottom: 2rem; font-weight: 600; font-size: 1.5rem; }
+                            h2 { margin-bottom: 1.5rem; font-weight: 600; font-size: 1.5rem; }
                             .code-inputs { display: flex; gap: 8px; justify-content: center; margin-bottom: 2rem; }
-                            .code-inputs input { 
-                                width: 44px; height: 56px; 
-                                font-size: 24px; text-align: center; 
-                                border: 1px solid #e4e4e7; border-radius: 8px; 
-                                background: #fff; color: #18181b; 
+                            .code-inputs input {
+                                width: 44px; height: 56px;
+                                font-size: 24px; text-align: center;
+                                border: 1px solid #e4e4e7; border-radius: 8px;
+                                background: #fff; color: #18181b;
                                 -moz-appearance: textfield;
                             }
                             .code-inputs input:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.1); }
                             .code-inputs input::-webkit-outer-spin-button,
                             .code-inputs input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-                            
+                            input[type="password"]:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.1); }
+
                             button { font-size: 1rem; padding: 0.8rem 2.5rem; background: #18181b; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; width: 100%; transition: opacity 0.2s; }
                             button:hover { opacity: 0.9; }
                             .hidden-submit { position: absolute; left: -9999px; }
@@ -525,8 +1307,9 @@ function startAuthProxy(authEmitter) {
                     <body>
                         <div class="box">
                             <h2>Security Check</h2>
-                            <p style="color: #71717a; margin-bottom: 2rem; font-size: 0.9rem;">Please enter the verification code from your authenticator app to continue.</p>
+                            ${passwordRequired ? '<p style="color: #71717a; margin-bottom: 1rem; font-size: 0.9rem;">Enter your password:</p>' : '<p style="color: #71717a; margin-bottom: 2rem; font-size: 0.9rem;">Please enter the verification code from your authenticator app to continue.</p>'}
                             <form method="POST" id="authForm">
+                                ${passwordFieldHtml}
                                 <div class="code-inputs" id="inputs">
                                     <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
                                     <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
@@ -543,7 +1326,7 @@ function startAuthProxy(authEmitter) {
                             const inputs = document.querySelectorAll('.code-inputs input');
                             const form = document.getElementById('authForm');
                             const hidden = document.getElementById('fullToken');
-                            
+
                             inputs.forEach((input, i) => {
                                 input.addEventListener('input', e => {
                                     if (e.target.value.length === 1) {
@@ -568,15 +1351,16 @@ function startAuthProxy(authEmitter) {
                                     else inputs[Math.min(digits.length, 5)].focus();
                                 });
                             });
-                            
+
                             function submit() {
+                                ${passwordCheckJs}
                                 const code = Array.from(inputs).map(i => i.value).join('');
                                 if (code.length === 6) {
                                     hidden.value = code;
                                     form.submit();
                                 }
                             }
-                            
+
                             form.addEventListener('submit', e => {
                                 const code = Array.from(inputs).map(i => i.value).join('');
                                 hidden.value = code;
@@ -589,7 +1373,8 @@ function startAuthProxy(authEmitter) {
         }
 
         // --- AUTHENTICATED ROUTES ---
-        const sessionName = parsedUrl.query.session;
+        const rawSessionName = parsedUrl.query.session;
+        const sessionName = normalizeSessionName(rawSessionName);
 
         // API: Ping (triggers auth event for mobile login)
         if (parsedUrl.pathname === '/api/ping' && req.method === 'POST') {
@@ -601,8 +1386,15 @@ function startAuthProxy(authEmitter) {
 
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
-            const sessions = listTmuxSessions();
-            const activeSessionNames = Object.keys(activeSessions);
+            // Only list hop sessions, add displayName without prefix
+            const sessions = listTmuxSessions()
+                .filter(s => s.name.startsWith(HOP_SESSION_PREFIX))
+                .map(s => ({
+                    ...s,
+                    displayName: s.name.slice(HOP_SESSION_PREFIX.length)
+                }));
+            const activeSessionNames = Object.keys(activeSessions)
+                .filter(n => n.startsWith(HOP_SESSION_PREFIX));
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ sessions, active: activeSessionNames }));
             return;
@@ -614,8 +1406,9 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
-                    const { name } = JSON.parse(body);
-                    if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+                    let { name } = JSON.parse(body);
+                    name = normalizeSessionName(name);
+                    if (!name) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
                         return;
@@ -636,22 +1429,38 @@ function startAuthProxy(authEmitter) {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
-                const { oldName, newName } = JSON.parse(body);
-                if (!newName || !/^[a-zA-Z0-9_-]+$/.test(newName)) {
+                let { oldName, newName } = JSON.parse(body);
+                oldName = normalizeSessionName(oldName);
+                newName = normalizeSessionName(newName);
+                // Validate BOTH names to prevent command injection
+                if (!oldName) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Invalid name' }));
+                    res.end(JSON.stringify({ error: 'Invalid old name' }));
+                    return;
+                }
+                if (!newName) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid new name' }));
+                    return;
+                }
+                if (!hopSessionExists(oldName)) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Session not found' }));
                     return;
                 }
 
                 // Rename in tmux
                 try {
-                    execSync(`tmux rename-session -t ${oldName} ${newName}`);
+                    execFileSync('tmux', ['rename-session', '-t', oldName, newName], { stdio: 'ignore' });
 
                     // Update internal map if it's managed by us
                     if (activeSessions[oldName]) {
                         activeSessions[newName] = activeSessions[oldName];
                         delete activeSessions[oldName];
                     }
+
+                    // Track rename so styling intervals can follow
+                    sessionRenames[oldName] = newName;
 
                     // Rename log/exit files if they exist (optional cleanup)
 
@@ -665,154 +1474,69 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        // If no session selected, show picker
-        if (!sessionName) {
+        // API: Delete session
+        if (parsedUrl.pathname === '/api/sessions/delete' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                let { name } = JSON.parse(body);
+                name = normalizeSessionName(name);
+                // Validate name to prevent command injection
+                if (!name) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid session name' }));
+                    return;
+                }
+                if (!hopSessionExists(name)) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Session not found' }));
+                    return;
+                }
+
+                try {
+                    // Kill the tmux session
+                    execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' });
+
+                    // Clean up internal tracking
+                    if (activeSessions[name]) {
+                        if (activeSessions[name].ttyd) {
+                            activeSessions[name].ttyd.kill();
+                        }
+                        delete activeSessions[name];
+                    }
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Delete failed' }));
+                }
+            });
+            return;
+        }
+
+        // If no session selected, show session picker
+        if (!rawSessionName) {
+            const sessionsFile = path.join(__dirname, 'sessions.html');
+            let sessionsHtml = '<!-- sessions.html not found -->';
+            try {
+                sessionsHtml = fs.readFileSync(sessionsFile, 'utf8');
+            } catch (e) {
+                log(`Warning: sessions.html not found`, YELLOW);
+            }
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(`
-                <html>
-                    <head>
-                        <meta charset="UTF-8">
-                        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-                        <title>Session Picker</title>
-                        <style>
-                            * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-                            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fafafa; color: #18181b; margin: 0; padding: 1.5rem; min-height: 100vh; }
-                            .container { max-width: 600px; margin: 0 auto; }
-                            h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
-                            .subtitle { color: #71717a; font-size: 0.875rem; margin-bottom: 1rem; }
-                            .session-list { background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; overflow: hidden; margin-bottom: 1.5rem; }
-                            .session-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #e4e4e7; gap: 1rem; }
-                            .session-item:last-child { border-bottom: none; }
-                            .session-item:active { background: #f4f4f5; }
-                            .session-info { flex: 1; min-width: 0; }
-                            .session-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-                            .session-name { font-weight: 500; font-size: 1rem; cursor: pointer; display: inline-flex; align-items: center; gap: 0.25rem; }
-                            .session-name:hover .edit-icon { opacity: 1; }
-                            .edit-icon { font-size: 0.8rem; opacity: 0; transition: opacity 0.2s; color: #a1a1aa; }
-                            .active-badge { background: #22c55e; color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
-                            .session-meta { color: #71717a; font-size: 0.8rem; margin-top: 0.25rem; }
-                            .btn { padding: 0.75rem 1.25rem; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 500; text-decoration: none; display: inline-block; min-width: 80px; text-align: center; transition: opacity 0.2s; }
-                            .btn-primary { background: #18181b; color: #fff; }
-                            .btn-primary:hover, .btn-primary:active { opacity: 0.85; }
-                            .btn-secondary { background: #e4e4e7; color: #18181b; }
-                            .btn-secondary:hover { background: #d4d4d8; }
-                            .btn:disabled { opacity: 0.5; cursor: wait; }
-                            .new-session { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
-                            .new-session input { flex: 1; min-width: 200px; padding: 0.875rem 1rem; border: 1px solid #e4e4e7; border-radius: 8px; font-size: 1rem; background: #fff; }
-                            .new-session input:focus { outline: none; border-color: #7c3aed; }
-                            .quick-names { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-                            .quick-names button { padding: 0.5rem 1rem; font-size: 0.875rem; border-radius: 6px; }
-                            .empty { padding: 2rem; text-align: center; color: #71717a; }
-                            .active-badge { background: #22c55e; color: #fff; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem; vertical-align: middle; }
-                            .loading { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.9); justify-content: center; align-items: center; flex-direction: column; z-index: 100; }
-                            .loading.show { display: flex; }
-                            .spinner { width: 40px; height: 40px; border: 3px solid #e4e4e7; border-top-color: #7c3aed; border-radius: 50%; animation: spin 1s linear infinite; }
-                            @keyframes spin { to { transform: rotate(360deg); } }
-                            @media (max-width: 480px) {
-                                body { padding: 1rem; }
-                                .new-session { flex-direction: column; }
-                                .new-session input { min-width: 100%; }
-                                .new-session .btn { width: 100%; }
-                            }
-                        </style>
-                    </head>
-                    <body>
-                        <div class="loading" id="loading">
-                            <div class="spinner"></div>
-                            <p style="margin-top: 1rem; color: #71717a;">Starting session...</p>
-                        </div>
-                        <div class="container">
-                            <h1>Session Picker</h1>
-                            <p class="subtitle">Create a new session, rename existing ones, or join one.</p>
-                            <div class="new-session">
-                                <input type="text" id="newName" placeholder="Session name..." pattern="[a-zA-Z0-9_-]+">
-                                <button class="btn btn-primary" onclick="createSession()">Create</button>
-                            </div>
-                            <div class="session-list" id="sessionList">
-                                <div class="empty">Loading sessions...</div>
-                            </div>
-                        </div>
-                        <script>
-                            function showLoading() {
-                                document.getElementById('loading').classList.add('show');
-                            }
-                            
-                            async function loadSessions() {
-                                const res = await fetch('/api/sessions');
-                                const data = await res.json();
-                                const list = document.getElementById('sessionList');
-                                
-                                if (data.sessions.length === 0 && data.active.length === 0) {
-                                    list.innerHTML = '<div class="empty">Waiting for first session to start...</div>';
-                                    return;
-                                }
-                                
-                                const allSessions = new Set([...data.sessions.map(s => s.name), ...data.active]);
-                                list.innerHTML = Array.from(allSessions).map(name => {
-                                    const tmuxSession = data.sessions.find(s => s.name === name);
-                                    const isActive = data.active.includes(name);
-                                    return \`
-                                        <div class="session-item">
-                                            <div class="session-info">
-                                                <div class="session-header">
-                                                    <span class="session-name" onclick="renameSession('\${name}')" title="Click to rename">
-                                                        \${name}
-                                                        <span class="edit-icon">✎</span>
-                                                    </span>
-                                                    \${isActive ? '<span class="active-badge">LIVE</span>' : ''}
-                                                </div>
-                                                <div class="session-meta">\${tmuxSession ? tmuxSession.windows + ' window(s)' : 'Starting...'}</div>
-                                            </div>
-                                            <a href="/?session=\${encodeURIComponent(name)}" class="btn btn-primary" onclick="showLoading()">Join</a>
-                                        </div>
-                                    \`;
-                                }).join('');
-                            }
-                            
-                            async function createSession() {
-                                const input = document.getElementById('newName');
-                                const name = input.value.trim();
-                                if (!name) { input.focus(); return; }
-                                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
-                                
-                                showLoading();
-                                await fetch('/api/sessions', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ name })
-                                });
-                                window.location.href = '/?session=' + encodeURIComponent(name);
-                            }
-                            
-                            async function renameSession(oldName) {
-                                const newName = prompt('Enter new session name:', oldName);
-                                if (!newName || newName === oldName) return;
-                                if (!/^[a-zA-Z0-9_-]+$/.test(newName)) return alert('Only letters, numbers, - and _ allowed');
-                                
-                                await fetch('/api/sessions/rename', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ oldName, newName })
-                                });
-                                loadSessions();
-                            }
-                            
-                            document.getElementById('newName').addEventListener('keypress', e => {
-                                if (e.key === 'Enter') createSession();
-                            });
-                            
-                            loadSessions();
-                            setInterval(loadSessions, 3000);
-                        </script>
-                    </body>
-                </html>
-            `);
+            res.end(sessionsHtml);
             return;
         }
 
         // --- CHECK FOR iOS - Intercept and inject virtual keyboard ---
         const userAgent = req.headers['user-agent'] || '';
         const isIOS = /iPad|iPhone|iPod/.test(userAgent);
+        if (!sessionName) {
+            res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('Invalid session name');
+            return;
+        }
         const session = getOrCreateSession(sessionName);
 
         // Only inject keyboard for iOS on the root path (main HTML page)
@@ -870,10 +1594,8 @@ function startAuthProxy(authEmitter) {
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
 
-        // Check auth via cookie OR query param (for mobile apps)
-        const tokenFromQuery = parsedUrl.query.token;
-        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET
-            || tokenFromQuery === SESSION_SECRET;
+        // Auth via cookie only (tokens in URLs get logged - security risk)
+        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET;
 
         if (!isAuthenticated) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -881,7 +1603,7 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        const sessionName = parsedUrl.query.session;
+        const sessionName = normalizeSessionName(parsedUrl.query.session);
         if (!sessionName || !activeSessions[sessionName]) {
             socket.write('HTTP/1.1 404 Session Not Found\r\n\r\n');
             socket.destroy();
@@ -897,11 +1619,108 @@ function startAuthProxy(authEmitter) {
     return server;
 }
 
-function startTunnel() {
-    log(`[3/4] Opening Cloudflare Tunnel...`, BOLD);
-    const tunnel = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${PROXY_PORT}`]);
-    let urlFound = false;
+// Tunnel manager - handles auto-restart and URL updates
+let currentTunnelProc = null;
+let currentPublicUrl = null;
+let shuttingDown = false;  // Prevent restart during cleanup
+const tunnelEmitter = new EventEmitter();
 
+function startTunnel(isRestart = false) {
+    const domainConfig = getDomainConfig();
+    const useNamedTunnel = domainConfig && domainConfig.tunnelName && domainConfig.hostname;
+
+    if (!isRestart) {
+        if (useNamedTunnel) {
+            log(`[3/4] Opening Cloudflare Tunnel (${domainConfig.hostname})...`, BOLD);
+        } else {
+            log(`[3/4] Opening Cloudflare Tunnel...`, BOLD);
+        }
+    } else {
+        log(`[Tunnel] Reconnecting...`, YELLOW);
+    }
+
+    // Use named tunnel if configured, otherwise quick tunnel
+    let tunnel;
+    let publicUrl;
+
+    if (useNamedTunnel) {
+        // Named tunnel with custom domain - URL is fixed
+        publicUrl = `https://${domainConfig.hostname}`;
+
+        // Create config file for the tunnel
+        const tunnelConfigPath = path.join(HOME_DIR, '.tunnel-config.yml');
+        const tunnelConfig = `
+url: http://localhost:${PROXY_PORT}
+tunnel: ${domainConfig.tunnelName}
+`;
+        fs.writeFileSync(tunnelConfigPath, tunnelConfig);
+
+        tunnel = spawn('cloudflared', [
+            'tunnel',
+            '--config', tunnelConfigPath,
+            'run', domainConfig.tunnelName
+        ]);
+    } else {
+        // Quick tunnel - URL is random
+        tunnel = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${PROXY_PORT}`]);
+    }
+
+    tunnel.on('close', (code) => {
+        if (shuttingDown) return;  // Don't restart during cleanup
+        if (code !== null) {
+            log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
+            setTimeout(() => {
+                if (!shuttingDown) startTunnelWithRestart();
+            }, 3000);
+        }
+    });
+
+    tunnel.on('error', (err) => {
+        if (shuttingDown) return;  // Don't restart during cleanup
+        log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
+        setTimeout(() => {
+            if (!shuttingDown) startTunnelWithRestart();
+        }, 3000);
+    });
+
+    // For named tunnels, resolve immediately with the known URL
+    if (useNamedTunnel) {
+        currentTunnelProc = tunnel;
+        currentPublicUrl = publicUrl;
+
+        // Wait a moment for tunnel to establish, then resolve
+        return new Promise((resolve) => {
+            let resolved = false;
+
+            // Listen for successful connection or error
+            tunnel.stderr.on('data', (data) => {
+                const output = data.toString();
+                // Look for connection established message
+                if (!resolved && (output.includes('Registered tunnel connection') || output.includes('Connection'))) {
+                    resolved = true;
+                    if (isRestart) {
+                        tunnelEmitter.emit('urlChanged', publicUrl);
+                        log(`[Tunnel] Reconnected: ${publicUrl}`, GREEN);
+                    }
+                    resolve({ tunnel, publicUrl });
+                }
+            });
+
+            // Timeout fallback - assume connected after 5 seconds
+            setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    if (isRestart) {
+                        tunnelEmitter.emit('urlChanged', publicUrl);
+                    }
+                    resolve({ tunnel, publicUrl });
+                }
+            }, 5000);
+        });
+    }
+
+    // For quick tunnels, parse URL from output
+    let urlFound = false;
     return new Promise((resolve) => {
         tunnel.stderr.on('data', (data) => {
             if (urlFound) return;
@@ -909,14 +1728,46 @@ function startTunnel() {
             const match = output.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
 
             if (match) {
-                const publicUrl = match[0];
-                if (publicUrl.includes('api.trycloudflare.com')) return;
+                const parsedUrl = match[0];
+                if (parsedUrl.includes('api.trycloudflare.com')) return;
 
                 urlFound = true;
-                resolve({ tunnel, publicUrl });
+                currentTunnelProc = tunnel;
+                currentPublicUrl = parsedUrl;
+
+                // Emit URL change event for restarts
+                if (isRestart) {
+                    tunnelEmitter.emit('urlChanged', parsedUrl);
+                    log(`[Tunnel] New URL: ${parsedUrl}`, GREEN);
+                }
+
+                resolve({ tunnel, publicUrl: parsedUrl });
             }
         });
     });
+}
+
+async function startTunnelWithRestart() {
+    try {
+        const { tunnel, publicUrl } = await startTunnel(true);
+
+        // Update state file
+        if (fs.existsSync(STATE_FILE)) {
+            try {
+                const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+                state.url = publicUrl;
+                writePrivateFile(STATE_FILE, JSON.stringify(state));
+            } catch (e) { }
+        }
+
+        // Update all active session tmux bars
+        Object.keys(activeSessions).forEach(sessionName => {
+            applyTmuxStyles(sessionName, publicUrl);
+        });
+    } catch (e) {
+        log(`[Tunnel] Failed to restart: ${e.message}. Retrying in 5s...`, RED);
+        setTimeout(startTunnelWithRestart, 5000);
+    }
 }
 
 function waitForStart(authEmitter, publicUrl) {
@@ -975,6 +1826,556 @@ function showQrCode() {
 }
 
 async function main() {
+    // Handle `hop client` - run as a user with exported credentials
+    if (process.argv[2] === 'client') {
+        const credentialsArg = process.argv[3];
+
+        if (!credentialsArg || credentialsArg === '--help') {
+            log(`\n${BOLD}Hop Client Mode${RESET}\n`, CYAN);
+            log(`Run a tunnel using credentials from your admin.\n`, RESET);
+            log(`${BOLD}Usage:${RESET}`, RESET);
+            log(`  hop client <credentials.json>              Start tunnel with credentials`, RESET);
+            log(`  hop client <folder>                        Start tunnel (folder contains credentials.json)`, RESET);
+            log(`  hop client <credentials.json> --port 3000  Use custom local port`, RESET);
+            log('');
+            log(`${BOLD}Options:${RESET}`, RESET);
+            log(`  --port <number>    Local port to proxy to (default: 8080)`, RESET);
+            log('');
+            log(`${BOLD}First run:${RESET}`, RESET);
+            log(`  You'll be prompted to set a password and scan a QR code`, RESET);
+            log(`  for your authenticator app.`, RESET);
+            log('');
+            log(`${BOLD}Example:${RESET}`, RESET);
+            log(`  hop client ./my-credentials.json`, RESET);
+            log(`  hop client ~/Downloads/alice/ --port 3000`, RESET);
+            log('');
+            process.exit(0);
+        }
+
+        // Find credentials file
+        let credentialsPath = credentialsArg;
+        if (fs.existsSync(credentialsArg) && fs.statSync(credentialsArg).isDirectory()) {
+            credentialsPath = path.join(credentialsArg, 'credentials.json');
+        }
+
+        if (!fs.existsSync(credentialsPath)) {
+            log(`Credentials file not found: ${credentialsPath}`, RED);
+            process.exit(1);
+        }
+
+        // Load credentials
+        let credentials;
+        try {
+            credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+        } catch (e) {
+            log(`Invalid credentials file: ${e.message}`, RED);
+            process.exit(1);
+        }
+
+        // Client config is stored per-tunnel (based on tunnel ID)
+        const tunnelId = credentials.TunnelID || credentials.tunnelId || path.basename(credentialsPath, '.json');
+        const clientConfigDir = path.join(HOME_DIR, 'clients', tunnelId);
+        if (!fs.existsSync(clientConfigDir)) {
+            fs.mkdirSync(clientConfigDir, { recursive: true });
+        }
+
+        const clientPasswordFile = path.join(clientConfigDir, '.password_hash');
+        const clientSecretFile = path.join(clientConfigDir, '.auth_secret');
+        const clientConfigFile = path.join(clientConfigDir, '.config.json');
+
+        // Load or create client config
+        let clientConfig = {};
+        if (fs.existsSync(clientConfigFile)) {
+            try {
+                clientConfig = JSON.parse(fs.readFileSync(clientConfigFile, 'utf8'));
+            } catch (e) { }
+        }
+
+        // First time setup - require password and TOTP
+        const clientPasswordExists = fs.existsSync(clientPasswordFile);
+        const clientSecretExists = fs.existsSync(clientSecretFile);
+
+        if (!clientPasswordExists || !clientSecretExists) {
+            log(`\n${BOLD}${YELLOW}⚠ First time setup required${RESET}\n`, YELLOW);
+            log(`Your tunnel URL will be publicly accessible.`, RESET);
+            log(`Password + authenticator code protects your service.\n`, RESET);
+
+            const readline = require('readline');
+            const stream = require('stream');
+
+            const askPassword = (prompt) => new Promise((resolve) => {
+                const rl = readline.createInterface({
+                    input: process.stdin,
+                    output: new stream.Writable({
+                        write: (chunk, encoding, callback) => callback()
+                    }),
+                    terminal: true
+                });
+                process.stdout.write(prompt);
+                rl.question('', (answer) => {
+                    rl.close();
+                    process.stdout.write('\n');
+                    resolve(answer);
+                });
+            });
+
+            // Set password
+            if (!clientPasswordExists) {
+                const password = await askPassword('Set a password: ');
+                if (password.length < 4) {
+                    log(`Password too short (min 4 characters).`, RED);
+                    process.exit(1);
+                }
+                const confirm = await askPassword('Confirm password: ');
+                if (password !== confirm) {
+                    log(`Passwords do not match.`, RED);
+                    process.exit(1);
+                }
+                const hashedPassword = hashPassword(password);
+                fs.writeFileSync(clientPasswordFile, hashedPassword);
+                fs.chmodSync(clientPasswordFile, 0o600);
+                log(`${GREEN}✓ Password set.${RESET}`, GREEN);
+            }
+
+            // Set up TOTP
+            if (!clientSecretExists) {
+                const secret = authenticator.generateSecret();
+                fs.writeFileSync(clientSecretFile, secret);
+                fs.chmodSync(clientSecretFile, 0o600);
+
+                log(`\n${BOLD}Scan this QR code with your authenticator app:${RESET}\n`, CYAN);
+                const label = `Hop-${tunnelId.slice(0, 8)}`;
+                const otpauth = `otpauth://totp/${encodeURIComponent(label)}?secret=${secret}&issuer=Hop`;
+                qrcode.generate(otpauth, { small: true });
+            }
+
+            log(`\n${GREEN}✓ Setup complete!${RESET}\n`, GREEN);
+        }
+
+        // Load client auth secrets
+        const clientPassword = fs.readFileSync(clientPasswordFile, 'utf8').trim();
+        const clientAuthSecret = fs.readFileSync(clientSecretFile, 'utf8').trim();
+
+        // Determine port from --port argument or default
+        let localPort = 8080;
+        let hostname = clientConfig.hostname || null;
+
+        // Check for --port argument
+        const portArgIndex = process.argv.indexOf('--port');
+        if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
+            const portArg = parseInt(process.argv[portArgIndex + 1]);
+            if (portArg > 0 && portArg < 65536) {
+                localPort = portArg;
+            }
+        }
+
+        // Try to find config.yml in same directory as credentials (for hostname only)
+        const configYmlPath = path.join(path.dirname(credentialsPath), 'config.yml');
+        if (fs.existsSync(configYmlPath)) {
+            const configYml = fs.readFileSync(configYmlPath, 'utf8');
+            // Only use port from config if not specified via --port
+            if (portArgIndex === -1) {
+                const portMatch = configYml.match(/localhost:(\d+)/);
+                if (portMatch) localPort = parseInt(portMatch[1]);
+            }
+            const hostnameMatch = configYml.match(/hostname:\s*(\S+)/);
+            if (hostnameMatch) hostname = hostnameMatch[1];
+        }
+
+        // Start auth proxy
+        const clientProxyPort = Math.floor(Math.random() * (50000 - 10000 + 1) + 10000);
+        const clientSessionSecret = crypto.randomBytes(32).toString('hex');
+
+        log(`${BOLD}Starting Hop Client...${RESET}`, CYAN);
+        if (hostname) {
+            log(`URL: https://${hostname}`, GREEN);
+        }
+        log(`Proxying to: localhost:${localPort}`, RESET);
+        log('');
+
+        // Simple auth proxy for client mode
+        const clientServer = http.createServer((req, res) => {
+            const parsedUrl = url.parse(req.url, true);
+            const cookies = cookie.parse(req.headers.cookie || '');
+            const isAuth = cookies['hop_client_session'] === clientSessionSecret;
+
+            if (!isAuth) {
+                // Login API
+                if (req.method === 'POST' && parsedUrl.pathname === '/api/login') {
+                    let body = '';
+                    req.on('data', chunk => body += chunk);
+                    req.on('end', () => {
+                        try {
+                            const { password, totp } = JSON.parse(body);
+                            if (!verifyPassword(password || '', clientPassword)) {
+                                res.writeHead(401, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'Invalid password' }));
+                                return;
+                            }
+                            if (!authenticator.check(totp, clientAuthSecret)) {
+                                res.writeHead(401, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'Invalid code' }));
+                                return;
+                            }
+                            res.setHeader('Set-Cookie', cookie.serialize('hop_client_session', clientSessionSecret, {
+                                httpOnly: true,
+                                secure: true,
+                                sameSite: 'lax',
+                                path: '/',
+                                maxAge: 60 * 60 * 24 * 7
+                            }));
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true }));
+                        } catch (e) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Invalid request' }));
+                        }
+                    });
+                    return;
+                }
+
+                // Login page
+                setNoCache(res);
+                appendSetCookie(res, [cookie.serialize('hop_client_session', '', {
+                    httpOnly: true,
+                    secure: true,
+                    sameSite: 'lax',
+                    path: '/',
+                    expires: new Date(0),
+                    maxAge: 0
+                })]);
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Login</title>
+                <style>body{font-family:-apple-system,sans-serif;background:#fafafa;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
+                .box{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);max-width:320px;width:100%}
+                h2{margin:0 0 1.5rem;font-size:1.25rem;text-align:center}
+                input{width:100%;padding:0.75rem;margin-bottom:1rem;border:1px solid #e4e4e7;border-radius:8px;font-size:1rem;box-sizing:border-box}
+                input:focus{outline:none;border-color:#7c3aed}
+                button{width:100%;padding:0.75rem;background:#18181b;color:#fff;border:none;border-radius:8px;font-size:1rem;cursor:pointer}
+                button:hover{opacity:0.9}.error{color:#dc2626;font-size:0.875rem;margin-bottom:1rem;display:none}</style></head>
+                <body><div class="box"><h2>🔐 Login</h2><div class="error" id="error"></div>
+                <input type="password" id="password" placeholder="Password" autofocus>
+                <input type="text" id="totp" placeholder="6-digit code" maxlength="6" inputmode="numeric">
+                <button onclick="login()">Login</button></div>
+                <script>
+                async function login(){
+                    const error=document.getElementById('error');
+                    error.style.display='none';
+                    const password=document.getElementById('password').value;
+                    const totp=document.getElementById('totp').value;
+                    try{
+                        const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password,totp})});
+                        const data=await res.json();
+                        if(data.success){location.reload();}
+                        else{error.textContent=data.error||'Login failed';error.style.display='block';}
+                    }catch(e){error.textContent='Connection error';error.style.display='block';}
+                }
+                document.getElementById('totp').addEventListener('keyup',e=>{if(e.key==='Enter')login();});
+                document.getElementById('password').addEventListener('keyup',e=>{if(e.key==='Enter')document.getElementById('totp').focus();});
+                </script></body></html>`);
+                return;
+            }
+
+            // Authenticated - proxy to local service
+            const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${localPort}` });
+            proxy.web(req, res, {}, (err) => {
+                res.writeHead(502);
+                res.end(`Cannot connect to localhost:${localPort}. Is your service running?`);
+            });
+        });
+
+        // Handle WebSocket upgrade
+        clientServer.on('upgrade', (req, socket, head) => {
+            const cookies = cookie.parse(req.headers.cookie || '');
+            if (cookies['hop_client_session'] !== clientSessionSecret) {
+                socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+                socket.destroy();
+                return;
+            }
+            const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${localPort}`, ws: true });
+            proxy.ws(req, socket, head);
+        });
+
+        clientServer.listen(clientProxyPort, '127.0.0.1');
+
+        // Start cloudflared tunnel
+        const tunnelConfigPath = path.join(clientConfigDir, 'tunnel-config.yml');
+        const tunnelConfigContent = `
+url: http://localhost:${clientProxyPort}
+tunnel: ${tunnelId}
+credentials-file: ${path.resolve(credentialsPath)}
+`;
+        fs.writeFileSync(tunnelConfigPath, tunnelConfigContent);
+
+        const cloudflared = spawn('cloudflared', ['tunnel', '--config', tunnelConfigPath, 'run'], {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        cloudflared.stderr.on('data', (data) => {
+            const output = data.toString();
+            if (output.includes('Registered tunnel connection')) {
+                log(`${GREEN}✓ Tunnel connected!${RESET}`, GREEN);
+            }
+        });
+
+        cloudflared.on('close', (code) => {
+            log(`Tunnel closed (code ${code})`, YELLOW);
+            clientServer.close();
+            process.exit(code || 0);
+        });
+
+        log(`Waiting for tunnel connection...`, RESET);
+
+        // Handle shutdown
+        process.on('SIGINT', () => {
+            log(`\nShutting down...`, YELLOW);
+            cloudflared.kill();
+            clientServer.close();
+            process.exit(0);
+        });
+
+        return; // Keep running
+    }
+
+    // Handle `hop --help` or `hop help`
+    if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
+        log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
+        log(`${BOLD}Usage:${RESET}`, RESET);
+        log(`  hop                       Start tunnel (or attach to existing)`, RESET);
+        log(`  hop --help                Show this help message`, RESET);
+        log('');
+        log(`${BOLD}URL & QR:${RESET}`, RESET);
+        log(`  hop url                   Print current tunnel URL`, RESET);
+        log(`  hop qr                    Show URL as QR code`, RESET);
+        log('');
+        log(`${BOLD}Custom Domain:${RESET}`, RESET);
+        log(`  hop domain                Show current domain config`, RESET);
+        log(`  hop domain <hostname>     Setup custom domain (e.g., hop.example.com)`, RESET);
+        log(`  hop domain-clear          Remove custom domain, use random URLs`, RESET);
+        log('');
+        log(`${BOLD}Security:${RESET}`, RESET);
+        log(`  hop password              Show password status`, RESET);
+        log(`  hop password set          Set or change password`, RESET);
+        log(`  hop password clear        Remove password protection`, RESET);
+        log('');
+        log(`${BOLD}Multi-user (admin):${RESET}`, RESET);
+        log(`  hop user list             List all users`, RESET);
+        log(`  hop user add <name>       Add a user (creates tunnel + DNS)`, RESET);
+        log(`  hop user remove <name>    Remove a user`, RESET);
+        log(`  hop user export <name>    Export credentials for a user`, RESET);
+        log('');
+        log(`${BOLD}Client mode (for users):${RESET}`, RESET);
+        log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
+        log('');
+        log(`${BOLD}Maintenance:${RESET}`, RESET);
+        log(`  hop wipe                  Kill all hop tmux sessions`, RESET);
+        log('');
+        process.exit(0);
+    }
+
+    // Handle `hop url` command - prints current tunnel URL (easy to copy)
+    if (process.argv[2] === 'url') {
+        const state = isServerRunning();
+        if (!state) {
+            log(`Hop is not running.`, RED);
+            process.exit(1);
+        }
+        // Print just the URL for easy copying/piping
+        console.log(state.url);
+        process.exit(0);
+    }
+
+    // Handle `hop qr` command - shows QR code for current URL
+    if (process.argv[2] === 'qr') {
+        const state = isServerRunning();
+        if (!state) {
+            log(`Hop is not running.`, RED);
+            process.exit(1);
+        }
+        log(`\nCurrent tunnel URL:`, BOLD);
+        log(`${state.url}\n`, GREEN);
+        qrcode.generate(state.url, { small: true });
+        process.exit(0);
+    }
+
+    // Handle `hop domain <hostname>` command - setup custom domain
+    if (process.argv[2] === 'domain') {
+        const hostname = process.argv[3];
+        if (!hostname) {
+            // Show current domain config
+            const config = getDomainConfig();
+            if (config) {
+                log(`\nCurrent custom domain configuration:`, BOLD);
+                log(`  Hostname: ${config.hostname}`, GREEN);
+                log(`  Tunnel:   ${config.tunnelName}`, RESET);
+                log(`\nTo change: hop domain <new-hostname>`, RESET);
+                log(`To remove: hop domain-clear`, RESET);
+            } else {
+                log(`\nNo custom domain configured.`, YELLOW);
+                log(`\nUsage: hop domain <hostname>`, RESET);
+                log(`Example: hop domain hop.yourdomain.com`, RESET);
+            }
+            process.exit(0);
+        }
+        // Validate hostname format
+        if (!/^[a-zA-Z0-9]([a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}$/.test(hostname)) {
+            log(`Invalid hostname format: ${hostname}`, RED);
+            log(`Example: hop.yourdomain.com`, RESET);
+            process.exit(1);
+        }
+        await setupDomain(hostname);
+        process.exit(0);
+    }
+
+    // Handle `hop domain-clear` command - remove custom domain config
+    if (process.argv[2] === 'domain-clear') {
+        if (fs.existsSync(DOMAIN_CONFIG_FILE)) {
+            fs.unlinkSync(DOMAIN_CONFIG_FILE);
+            log(`Custom domain configuration removed.`, GREEN);
+            log(`Hop will use random Cloudflare URLs again.`, RESET);
+        } else {
+            log(`No custom domain configured.`, YELLOW);
+        }
+        process.exit(0);
+    }
+
+    // Handle `hop password` commands
+    if (process.argv[2] === 'password') {
+        const subcommand = process.argv[3];
+        const readline = require('readline');
+
+        if (!subcommand || subcommand === 'status') {
+            if (isPasswordEnabled()) {
+                log(`Password protection: ${GREEN}ENABLED${RESET}`, BOLD);
+                log(`\nTo change: hop password set`, RESET);
+                log(`To remove: hop password clear`, RESET);
+            } else {
+                log(`Password protection: ${YELLOW}DISABLED${RESET}`, BOLD);
+                log(`\nTo enable: hop password set`, RESET);
+            }
+            process.exit(0);
+        }
+
+        if (subcommand === 'set') {
+            // Use muted readline for password input
+            const askPassword = (prompt) => new Promise((resolve) => {
+                const rl = readline.createInterface({
+                    input: process.stdin,
+                    output: new (require('stream').Writable)({
+                        write: (chunk, encoding, callback) => callback()
+                    }),
+                    terminal: true
+                });
+
+                process.stdout.write(prompt);
+                rl.question('', (answer) => {
+                    rl.close();
+                    process.stdout.write('\n');
+                    resolve(answer);
+                });
+            });
+
+            const password = await askPassword('Enter new password: ');
+            if (password.length < 4) {
+                log(`Password too short (min 4 characters).`, RED);
+                process.exit(1);
+            }
+
+            const confirm = await askPassword('Confirm password: ');
+            if (password !== confirm) {
+                log(`Passwords do not match.`, RED);
+                process.exit(1);
+            }
+
+            setPassword(password);
+            log(`\n${GREEN}✓ Password set successfully.${RESET}`, GREEN);
+            log(`\nLogin will now require password + TOTP code.`, RESET);
+            process.exit(0);
+        }
+
+        if (subcommand === 'clear') {
+            if (!isPasswordEnabled()) {
+                log(`Password is not set.`, YELLOW);
+                process.exit(0);
+            }
+            clearPassword();
+            log(`${GREEN}✓ Password protection removed.${RESET}`, GREEN);
+            log(`\nLogin will only require TOTP code.`, RESET);
+            process.exit(0);
+        }
+
+        // Unknown subcommand
+        log(`\n${BOLD}Password commands:${RESET}\n`, CYAN);
+        log(`  hop password           Show password status`, RESET);
+        log(`  hop password set       Set or change password`, RESET);
+        log(`  hop password clear     Remove password protection`, RESET);
+        process.exit(0);
+    }
+
+    // Handle `hop user` commands - multi-user management
+    if (process.argv[2] === 'user') {
+        const subcommand = process.argv[3];
+        const username = process.argv[4];
+
+        if (!subcommand || subcommand === 'list') {
+            listUsersCommand();
+            process.exit(0);
+        }
+
+        if (subcommand === 'add') {
+            if (!username) {
+                log(`Usage: hop user add <username>`, RED);
+                process.exit(1);
+            }
+            await addUser(username);
+            process.exit(0);
+        }
+
+        if (subcommand === 'remove' || subcommand === 'rm' || subcommand === 'delete') {
+            if (!username) {
+                log(`Usage: hop user remove <username>`, RED);
+                process.exit(1);
+            }
+            await removeUser(username);
+            process.exit(0);
+        }
+
+        if (subcommand === 'export') {
+            if (!username) {
+                log(`Usage: hop user export <username>`, RED);
+                process.exit(1);
+            }
+            await exportUserCredentials(username);
+            process.exit(0);
+        }
+
+        // Unknown subcommand - show help
+        log(`\n${BOLD}User management commands:${RESET}\n`, CYAN);
+        log(`  hop user list              List all users`, RESET);
+        log(`  hop user add <username>    Add a new user`, RESET);
+        log(`  hop user remove <username> Remove a user`, RESET);
+        log(`  hop user export <username> Export credentials for a user`, RESET);
+        process.exit(0);
+    }
+
+    // Handle `hop wipe` command - kills all hop sessions
+    if (process.argv[2] === 'wipe') {
+        const sessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
+        if (sessions.length === 0) {
+            log(`No hop sessions to clean up.`, GREEN);
+            process.exit(0);
+        }
+        log(`Killing ${sessions.length} hop session(s)...`, YELLOW);
+        for (const s of sessions) {
+            try {
+                execSync(`tmux kill-session -t ${s.name}`, { stdio: 'ignore' });
+                log(`  - ${s.name}`, RESET);
+            } catch (e) { }
+        }
+        log(`Done.`, GREEN);
+        process.exit(0);
+    }
+
     process.stdout.write('\x1Bc'); // Clear screen
 
     // Only one instance allowed
@@ -986,9 +2387,9 @@ async function main() {
         log(`Hop tunnel is already running!`, GREEN);
         log(`URL: ${existingTunnel.url}`, BOLD);
 
-        // Generate smart session name: dir-N
+        // Generate smart session name: hop-dir-N
         const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-        let sessionName = `${cwdName}-1`;
+        let sessionName = `${HOP_SESSION_PREFIX}${cwdName}-1`;
 
         log(`\nFinding next available session...`, RESET);
 
@@ -1013,10 +2414,10 @@ async function main() {
             if (sessionsRes && sessionsRes.sessions && sessionsRes.active) {
                 const allNames = new Set([...sessionsRes.active, ...sessionsRes.sessions.map(s => s.name)]);
                 let counter = 1;
-                while (allNames.has(`${cwdName}-${counter}`)) {
+                while (allNames.has(`${HOP_SESSION_PREFIX}${cwdName}-${counter}`)) {
                     counter++;
                 }
-                sessionName = `${cwdName}-${counter}`;
+                sessionName = `${HOP_SESSION_PREFIX}${cwdName}-${counter}`;
             }
 
             log(`Creating new session: ${sessionName}...`, RESET);
@@ -1062,15 +2463,20 @@ async function main() {
         log(`Attaching...`, RESET);
 
         // Attach to the specific session
-        const tmux = spawn('sh', ['-c', `
-            tmux -f ${HOP_TMUX_CONF} new-session -A -s ${sessionName}
-        `], { stdio: 'inherit' });
+        const tmux = spawn('tmux', ['-f', HOP_TMUX_CONF, 'new-session', '-A', '-s', sessionName], { stdio: 'inherit' });
 
         // Apply styling immediately and continuously refresh (every 1 second)
+        // Re-read state file each time to pick up URL changes after tunnel restarts
         applyTmuxStyles(sessionName, existingTunnel.url);
 
         const styleInterval = setInterval(() => {
-            applyTmuxStyles(sessionName, existingTunnel.url);
+            try {
+                const currentState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+                applyTmuxStyles(sessionName, currentState.url);
+            } catch (e) {
+                // State file missing = server died, keep old URL
+                applyTmuxStyles(sessionName, existingTunnel.url);
+            }
         }, 1000);
 
         tmux.on('close', () => {
@@ -1083,6 +2489,17 @@ async function main() {
     }
 
     // SERVER MODE: Start new tunnel
+
+    // Require password for custom domains
+    const domainConfig = getDomainConfig();
+    if (domainConfig && domainConfig.hostname && !isPasswordEnabled()) {
+        log(`\n${RED}ERROR: Password required for custom domain.${RESET}`, RED);
+        log(`\nYour fixed URL (${domainConfig.hostname}) is publicly known.`, YELLOW);
+        log(`Password protection is required for security.\n`, RESET);
+        log(`Run: ${CYAN}hop password set${RESET}`, RESET);
+        process.exit(1);
+    }
+
     await checkAndInstallDependencies();
     const authEmitter = new EventEmitter();
 
@@ -1090,7 +2507,7 @@ async function main() {
     const { tunnel: tunnelProc, publicUrl } = await startTunnel();
 
     // Save state for other terminals to find
-    fs.writeFileSync(STATE_FILE, JSON.stringify({
+    writePrivateFile(STATE_FILE, JSON.stringify({
         pid: process.pid,
         port: BASE_PORT,
         url: publicUrl,
@@ -1107,43 +2524,30 @@ async function main() {
     const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
     const existingSessions = listTmuxSessions().map(s => s.name);
     let counter = 1;
-    while (existingSessions.includes(`${cwdName}-${counter}`)) {
+    while (existingSessions.includes(`${HOP_SESSION_PREFIX}${cwdName}-${counter}`)) {
         counter++;
     }
-    const defaultSessionName = `${cwdName}-${counter}`;
+    const defaultSessionName = `${HOP_SESSION_PREFIX}${cwdName}-${counter}`;
 
     log(`Starting session: ${defaultSessionName}`, RESET);
     const defaultSession = getOrCreateSession(defaultSessionName);
 
-    // Apply styling continuously to handle respawns (every 1 second)
+    // Apply styling continuously to handle respawns and URL changes (every 1 second)
     const styleInterval = setInterval(() => {
-        applyTmuxStyles(defaultSessionName, publicUrl);
+        // Use currentPublicUrl to pick up URL changes after tunnel restarts
+        applyTmuxStyles(defaultSessionName, currentPublicUrl || publicUrl);
     }, 1000);
 
     // Apply immediately (no delay needed since execSync is synchronous)
     applyTmuxStyles(defaultSessionName, publicUrl);
 
-    // Use spawn with respawn loop - exit requires confirmation
-    const tmux = spawn('sh', ['-c', `
-        while true; do
-            tmux -f ${HOP_TMUX_CONF} new-session -A -s ${defaultSessionName}
-            echo ""
-            echo "[Session ended]"
-            read -p "Type 'quit' to shutdown tunnel, or press Enter to restart: " answer
-            if [ "$answer" = "quit" ] || [ "$answer" = "QUIT" ]; then
-                exit 0
-            fi
-            echo "Restarting..."
-            sleep 0.5
-        done
-    `], { stdio: 'inherit' });
-
-    tmux.on('close', () => {
-        log(`\nLocal session ended. Shutting down tunnel...`, YELLOW);
-        cleanup();
+    // Also update when tunnel URL changes
+    tunnelEmitter.on('urlChanged', (newUrl) => {
+        applyTmuxStyles(defaultSessionName, newUrl);
     });
 
     const cleanup = () => {
+        shuttingDown = true;  // Prevent tunnel auto-restart
         log(`Cleaning up...`, YELLOW);
 
         // Remove state file
@@ -1156,20 +2560,43 @@ async function main() {
             try { s.ttyd.kill('SIGTERM'); } catch (e) { }
         });
 
-        // Kill cloudflared tunnel
-        try { tunnelProc.kill('SIGTERM'); } catch (e) { }
+        // Kill cloudflared tunnel (use currentTunnelProc in case it was restarted)
+        try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }
 
         // Close proxy server
         try { proxyServer.close(); } catch (e) { }
 
-        // Kill tmux server to clean up all sessions
-        try {
-            require('child_process').execSync('tmux kill-server 2>/dev/null || true');
-        } catch (e) { }
-
         log(`Goodbye!`, GREEN);
         process.exit(0);
     };
+
+    const runLocalSessionLoop = async () => {
+        const readline = require('readline');
+        while (true) {
+            await new Promise(resolve => {
+                const tmux = spawn('tmux', ['-f', HOP_TMUX_CONF, 'new-session', '-A', '-s', defaultSessionName], { stdio: 'inherit' });
+                tmux.on('close', resolve);
+            });
+            log(`\n[Session ended]`, YELLOW);
+            const answer = await new Promise(resolve => {
+                const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                rl.question(`Type 'quit' to shutdown tunnel, or press Enter to restart: `, (resp) => {
+                    rl.close();
+                    resolve(resp || '');
+                });
+            });
+            if (String(answer).trim().toLowerCase() === 'quit') {
+                break;
+            }
+            log(`Restarting...`, RESET);
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    };
+
+    runLocalSessionLoop().then(() => {
+        log(`\nLocal session ended. Shutting down tunnel...`, YELLOW);
+        cleanup();
+    });
 
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);

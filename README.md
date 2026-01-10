@@ -20,6 +20,7 @@ Access your Mac's terminal from your phone, tablet, or any browser — secured w
 - 📱 **Mobile Virtual Keyboard** — Custom keyboard with Esc, Ctrl, Alt, arrows, and more
 - ⌨️ **Native Keyboard Support** — Tap the blue button for dictation, spellcheck & autocomplete
 - 🪟 **Multi-Session** — Create and switch between named sessions
+- 🔌 **Port Sessions** — Proxy a local HTTP/WS service via hop
 - 🔄 **Quick Session Switching** — Floating menu to switch sessions without leaving the terminal
 - 🎨 **Modern UI** — Clean, minimal iOS-style design
 - ⚡ **Auto-Attach** — Multiple terminals share the same tunnel
@@ -68,6 +69,9 @@ source ~/.zshrc
 ```bash
 # Start hopping!
 hop
+
+# Use iTerm control mode for local session
+hop --iterm
 ```
 
 **First time:**
@@ -84,11 +88,17 @@ hop
 
 ## 🪟 Sessions
 
-Create multiple independent terminal sessions from the Session Picker:
+Create multiple independent terminal sessions from the Session Picker (`/sessions`):
 
 - **Create**: Type a name and click Create
 - **Join**: Click Join on any existing session
 - **Sessions are shared**: Multiple devices can view the same session
+
+You can also create **Port Sessions** that proxy to a local HTTP/WS service on your machine.
+Use the Session Picker or:
+```bash
+hop session add myapp --port 3000
+```
 
 ## 🌐 Custom Domains & Multi‑User
 
@@ -140,6 +150,7 @@ On mobile devices, Hop provides a custom virtual keyboard designed for terminal 
 | Command | Description |
 |---------|-------------|
 | `hop` | Start hop (or attach to existing tunnel) |
+| `hop --iterm` | Use iTerm tmux control mode for local session |
 | `hop url` | Print current tunnel URL |
 | `hop qr` | Show QR code for current URL |
 | `hop domain <hostname>` | Set custom domain (named tunnel) |
@@ -150,6 +161,10 @@ On mobile devices, Hop provides a custom virtual keyboard designed for terminal 
 | `hop user add <name>` | Add user + subdomain |
 | `hop user remove <name>` | Remove user |
 | `hop user export <name>` | Export user credentials |
+| `hop session list` | List sessions |
+| `hop session add <name>` | Create a terminal session |
+| `hop session add <name> --port N` | Create a port session (proxy) |
+| `hop session remove <name>` | Remove a session |
 | `hop client <credentials>` | Run hop with exported credentials |
 | `hop wipe` | Kill all hop tmux sessions |
 | `quit` | Type at exit prompt to shutdown tunnel |

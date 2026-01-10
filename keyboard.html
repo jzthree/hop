@@ -1490,7 +1490,11 @@
                                     }
 
                                     var nameSpan = document.createElement('span');
-                                    nameSpan.textContent = displayName;
+                                    var typeSuffix = '';
+                                    if (s.type === 'port') {
+                                        typeSuffix = s.port ? ' (PORT ' + s.port + ')' : ' (PORT)';
+                                    }
+                                    nameSpan.textContent = displayName + typeSuffix;
                                     item.appendChild(nameSpan);
 
                                     item.addEventListener('click', function (e) {
@@ -1573,7 +1577,7 @@
                     if (allSessionsBtn) {
                         allSessionsBtn.addEventListener('click', function (e) {
                             e.stopPropagation();
-                            window.location.href = '/';
+                            window.location.href = '/sessions';
                         });
                     }
 

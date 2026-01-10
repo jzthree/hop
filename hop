@@ -53,10 +53,12 @@ const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
 const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
+const SESSION_ROUTE_COOKIE_NAME = 'hop_session';
 const LOG_DIR = path.join(HOME_DIR, 'logs');
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 let SECRET_FILE_PATH = DEFAULT_SECRET_FILE;
 let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
+const SESSIONS_FILE = path.join(HOME_DIR, '.sessions.json');
 
 // Password hashing using scrypt (built-in, no external deps)
 function hashPassword(password) {
@@ -106,6 +108,80 @@ function normalizeSessionName(rawName) {
     if (!SESSION_NAME_RE.test(rawName)) return null;
     if (rawName.startsWith(HOP_SESSION_PREFIX)) return rawName;
     return HOP_SESSION_PREFIX + rawName;
+}
+
+function isITerm() {
+    return process.env.TERM_PROGRAM === 'iTerm.app' || !!process.env.ITERM_SESSION_ID;
+}
+
+let useItermControl = false;
+
+function enableITermControlMode() {
+    useItermControl = true;
+    // Avoid contaminating tmux control-mode stream with Node warnings
+    process.noDeprecation = true;
+    process.env.NODE_NO_WARNINGS = '1';
+    process.emitWarning = () => { };
+}
+
+function getLocalTmuxArgs(sessionName) {
+    const args = ['-f', HOP_TMUX_CONF];
+    if (useItermControl) args.push('-CC');
+    return args.concat(['new-session', '-A', '-s', sessionName]);
+}
+
+function loadSessionConfigs() {
+    if (fs.existsSync(SESSIONS_FILE)) {
+        try {
+            ensurePrivateFile(SESSIONS_FILE);
+            const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+            return data && typeof data === 'object' ? data : {};
+        } catch (e) {
+            return {};
+        }
+    }
+    return {};
+}
+
+function saveSessionConfigs() {
+    writePrivateFile(SESSIONS_FILE, JSON.stringify(sessionConfigs, null, 2));
+}
+
+let sessionConfigs = loadSessionConfigs();
+
+function getSessionConfig(name) {
+    return sessionConfigs[name] || null;
+}
+
+function setSessionConfig(name, config) {
+    sessionConfigs[name] = config;
+    saveSessionConfigs();
+}
+
+function deleteSessionConfig(name) {
+    delete sessionConfigs[name];
+    saveSessionConfigs();
+}
+
+function ensureTerminalSessionConfig(name) {
+    const existing = getSessionConfig(name);
+    if (!existing) {
+        setSessionConfig(name, {
+            type: 'terminal',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        });
+    }
+}
+
+function setPortSessionConfig(name, port) {
+    const existing = getSessionConfig(name);
+    setSessionConfig(name, {
+        type: 'port',
+        port,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+    });
 }
 
 // Load domain config if exists
@@ -783,7 +859,31 @@ const RED = "\x1b[31m";
 const BOLD = "\x1b[1m";
 const MAGENTA = "\x1b[35m";
 
+const HOP_ITERM_LOG = path.join(HOME_DIR, 'hop-iterm.log');
+let controlModeActive = false;
+let logFileStream = null;
+
+function setControlModeActive(active) {
+    controlModeActive = active;
+    if (active) {
+        try {
+            if (!logFileStream) {
+                logFileStream = fs.createWriteStream(HOP_ITERM_LOG, { flags: 'a', mode: PRIVATE_FILE_MODE });
+                ensurePrivateFile(HOP_ITERM_LOG);
+            }
+        } catch (e) { }
+    } else if (logFileStream) {
+        try { logFileStream.end(); } catch (e) { }
+        logFileStream = null;
+    }
+}
+
 function log(msg, color = RESET) {
+    if (controlModeActive && logFileStream) {
+        const plain = String(msg).replace(/\x1b\[[0-9;]*m/g, '');
+        logFileStream.write(plain + '\n');
+        return;
+    }
     console.log(`${color}${msg}${RESET}`);
 }
 
@@ -875,6 +975,42 @@ function hopSessionExists(name) {
     return listTmuxSessions().some(s => s.name === name && s.name.startsWith(HOP_SESSION_PREFIX));
 }
 
+function listAllSessionEntries() {
+    const tmuxSessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
+    const sessionMap = new Map();
+
+    for (const s of tmuxSessions) {
+        const config = getSessionConfig(s.name);
+        const type = config?.type || 'terminal';
+        sessionMap.set(s.name, {
+            ...s,
+            type,
+            port: config?.port,
+            displayName: s.name.slice(HOP_SESSION_PREFIX.length)
+        });
+    }
+
+    for (const [name, config] of Object.entries(sessionConfigs)) {
+        if (!name.startsWith(HOP_SESSION_PREFIX)) continue;
+        if (!sessionMap.has(name)) {
+            sessionMap.set(name, {
+                name,
+                windows: null,
+                attached: false,
+                type: config.type || 'terminal',
+                port: config.port,
+                displayName: name.slice(HOP_SESSION_PREFIX.length)
+            });
+        } else if (config?.type === 'port') {
+            const entry = sessionMap.get(name);
+            entry.type = 'port';
+            entry.port = config.port;
+        }
+    }
+
+    return Array.from(sessionMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // Light theme for ttyd - clean white background (tmux handles negative space)
 function getTheme() {
     return JSON.stringify({
@@ -900,6 +1036,11 @@ function getOrCreateSession(sessionName) {
         throw new Error('Invalid session name');
     }
     sessionName = normalizedName;
+    const existingConfig = getSessionConfig(sessionName);
+    if (existingConfig && existingConfig.type === 'port') {
+        throw new Error('Session is configured as a port proxy');
+    }
+    ensureTerminalSessionConfig(sessionName);
     if (activeSessions[sessionName]) {
         return activeSessions[sessionName];
     }
@@ -1437,7 +1578,8 @@ function startAuthProxy(authEmitter) {
 
         // --- AUTHENTICATED ROUTES ---
         const rawSessionName = parsedUrl.query.session;
-        const sessionName = normalizeSessionName(rawSessionName);
+        const cookieSessionName = cookies[SESSION_ROUTE_COOKIE_NAME];
+        const sessionName = normalizeSessionName(rawSessionName || cookieSessionName);
 
         // API: Ping (triggers auth event for mobile login)
         if (parsedUrl.pathname === '/api/ping' && req.method === 'POST') {
@@ -1449,13 +1591,7 @@ function startAuthProxy(authEmitter) {
 
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
-            // Only list hop sessions, add displayName without prefix
-            const sessions = listTmuxSessions()
-                .filter(s => s.name.startsWith(HOP_SESSION_PREFIX))
-                .map(s => ({
-                    ...s,
-                    displayName: s.name.slice(HOP_SESSION_PREFIX.length)
-                }));
+            const sessions = listAllSessionEntries();
             const activeSessionNames = Object.keys(activeSessions)
                 .filter(n => n.startsWith(HOP_SESSION_PREFIX));
             const startingSessionNames = Array.from(startingSessions)
@@ -1471,16 +1607,49 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
-                    let { name } = JSON.parse(body);
+                    let { name, type, port } = JSON.parse(body);
                     name = normalizeSessionName(name);
                     if (!name) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
                         return;
                     }
-                    getOrCreateSession(name);
+                    type = (type || 'terminal').toLowerCase();
+                    if (type !== 'terminal' && type !== 'port') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid session type' }));
+                        return;
+                    }
+                    if (type === 'port') {
+                        const parsedPort = parseInt(port, 10);
+                        if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Invalid port' }));
+                            return;
+                        }
+                        if (hopSessionExists(name)) {
+                            res.writeHead(409, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
+                            return;
+                        }
+                        const existingConfig = getSessionConfig(name);
+                        if (existingConfig && existingConfig.type === 'terminal') {
+                            res.writeHead(409, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
+                            return;
+                        }
+                        setPortSessionConfig(name, parsedPort);
+                    } else {
+                        const existingConfig = getSessionConfig(name);
+                        if (existingConfig && existingConfig.type === 'port') {
+                            res.writeHead(409, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Port session already exists with this name' }));
+                            return;
+                        }
+                        getOrCreateSession(name);
+                    }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, name }));
+                    res.end(JSON.stringify({ ok: true, name, type }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -1508,15 +1677,33 @@ function startAuthProxy(authEmitter) {
                     res.end(JSON.stringify({ error: 'Invalid new name' }));
                     return;
                 }
-                if (!hopSessionExists(oldName)) {
-                    res.writeHead(404, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Session not found' }));
+                if (getSessionConfig(newName) || hopSessionExists(newName)) {
+                    res.writeHead(409, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Session name already in use' }));
                     return;
                 }
 
                 // Rename in tmux
                 try {
-                    execFileSync('tmux', ['rename-session', '-t', oldName, newName], { stdio: 'ignore' });
+                    const config = getSessionConfig(oldName);
+                    if (config && config.type === 'port') {
+                        deleteSessionConfig(oldName);
+                        setSessionConfig(newName, { ...config, updatedAt: new Date().toISOString() });
+                    } else {
+                        if (!hopSessionExists(oldName)) {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Session not found' }));
+                            return;
+                        }
+                        execFileSync('tmux', ['rename-session', '-t', oldName, newName], { stdio: 'ignore' });
+                        if (config) {
+                            deleteSessionConfig(oldName);
+                            setSessionConfig(newName, { ...config, type: 'terminal', updatedAt: new Date().toISOString() });
+                        } else {
+                            deleteSessionConfig(oldName);
+                            ensureTerminalSessionConfig(newName);
+                        }
+                    }
 
                     // Update internal map if it's managed by us
                     if (activeSessions[oldName]) {
@@ -1552,22 +1739,28 @@ function startAuthProxy(authEmitter) {
                     res.end(JSON.stringify({ error: 'Invalid session name' }));
                     return;
                 }
-                if (!hopSessionExists(name)) {
-                    res.writeHead(404, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Session not found' }));
-                    return;
-                }
 
                 try {
-                    // Kill the tmux session
-                    execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' });
-
-                    // Clean up internal tracking
-                    if (activeSessions[name]) {
-                        if (activeSessions[name].ttyd) {
-                            activeSessions[name].ttyd.kill();
+                    const config = getSessionConfig(name);
+                    if (config && config.type === 'port') {
+                        deleteSessionConfig(name);
+                    } else {
+                        if (!hopSessionExists(name)) {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Session not found' }));
+                            return;
                         }
-                        delete activeSessions[name];
+                        // Kill the tmux session
+                        execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' });
+
+                        // Clean up internal tracking
+                        if (activeSessions[name]) {
+                            if (activeSessions[name].ttyd) {
+                                activeSessions[name].ttyd.kill();
+                            }
+                            delete activeSessions[name];
+                        }
+                        deleteSessionConfig(name);
                     }
 
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1581,7 +1774,7 @@ function startAuthProxy(authEmitter) {
         }
 
         // If no session selected, show session picker
-        if (!rawSessionName) {
+        if (parsedUrl.pathname === '/sessions') {
             const sessionsFile = path.join(__dirname, 'sessions.html');
             let sessionsHtml = '<!-- sessions.html not found -->';
             try {
@@ -1593,15 +1786,53 @@ function startAuthProxy(authEmitter) {
             res.end(sessionsHtml);
             return;
         }
+        if (!sessionName) {
+            const sessionsFile = path.join(__dirname, 'sessions.html');
+            let sessionsHtml = '<!-- sessions.html not found -->';
+            try {
+                sessionsHtml = fs.readFileSync(sessionsFile, 'utf8');
+            } catch (e) {
+                log(`Warning: sessions.html not found`, YELLOW);
+            }
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(sessionsHtml);
+            return;
+        }
+        if (rawSessionName && sessionName) {
+            appendSetCookie(res, [cookie.serialize(SESSION_ROUTE_COOKIE_NAME, sessionName, {
+                httpOnly: true,
+                secure: true,
+                sameSite: 'lax',
+                path: '/',
+                maxAge: 60 * 60 * 24 * 7
+            })]);
+        }
 
         // --- CHECK FOR iOS - Intercept and inject virtual keyboard ---
         const userAgent = req.headers['user-agent'] || '';
         const isIOS = /iPad|iPhone|iPod/.test(userAgent);
-        if (!sessionName) {
-            res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-            res.end('Invalid session name');
+        const sessionConfig = getSessionConfig(sessionName);
+        if (sessionConfig && sessionConfig.type === 'port') {
+            const targetPort = sessionConfig.port;
+            if (!targetPort) {
+                res.writeHead(500);
+                res.end('Port session missing target port.');
+                return;
+            }
+
+            waitForPort(targetPort).then((ready) => {
+                if (!ready) {
+                    sendStartingPage(res, sessionName);
+                    return;
+                }
+                const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${targetPort}`, ws: false });
+                proxy.web(req, res, {}, () => {
+                    sendStartingPage(res, sessionName);
+                });
+            });
             return;
         }
+
         const session = getOrCreateSession(sessionName);
 
         // Only inject keyboard for iOS on the root path (main HTML page)
@@ -1678,8 +1909,27 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        const sessionName = normalizeSessionName(parsedUrl.query.session);
-        if (!sessionName || !activeSessions[sessionName]) {
+        const sessionName = normalizeSessionName(parsedUrl.query.session || cookies[SESSION_ROUTE_COOKIE_NAME]);
+        if (!sessionName) {
+            socket.write('HTTP/1.1 404 Session Not Found\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+
+        const sessionConfig = getSessionConfig(sessionName);
+        if (sessionConfig && sessionConfig.type === 'port') {
+            const targetPort = sessionConfig.port;
+            if (!targetPort) {
+                socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+                socket.destroy();
+                return;
+            }
+            const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${targetPort}`, ws: true });
+            proxy.ws(req, socket, head);
+            return;
+        }
+
+        if (!activeSessions[sessionName]) {
             socket.write('HTTP/1.1 404 Session Not Found\r\n\r\n');
             socket.destroy();
             return;
@@ -2037,12 +2287,20 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
         process.exit(0);
     };
 
+    if (useItermControl) {
+        log(`${CYAN}iTerm control mode enabled for local session.${RESET}`, RESET);
+    }
+
     const runLocalSessionLoop = async () => {
         const readline = require('readline');
         while (true) {
             await new Promise(resolve => {
-                const tmux = spawn('tmux', ['-f', HOP_TMUX_CONF, 'new-session', '-A', '-s', defaultSessionName], { stdio: 'inherit' });
-                tmux.on('close', resolve);
+                if (useItermControl) setControlModeActive(true);
+                const tmux = spawn('tmux', getLocalTmuxArgs(defaultSessionName), { stdio: 'inherit' });
+                tmux.on('close', () => {
+                    if (useItermControl) setControlModeActive(false);
+                    resolve();
+                });
             });
             log(`\n[Session ended]`, YELLOW);
             const answer = await new Promise(resolve => {
@@ -2071,6 +2329,13 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
 }
 
 async function main() {
+    if (process.argv.includes('--iterm')) {
+        if (isITerm()) {
+            enableITermControlMode();
+        } else {
+            log(`${YELLOW}--iterm requested, but iTerm was not detected. Ignoring.${RESET}`, YELLOW);
+        }
+    }
     // Handle `hop client` - run as a user with exported credentials
     if (process.argv[2] === 'client') {
         const credentialsArg = process.argv[3];
@@ -2247,6 +2512,7 @@ async function main() {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
         log(`  hop                       Start tunnel (or attach to existing)`, RESET);
+        log(`  hop --iterm               Use iTerm tmux control mode for local session`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');
         log(`${BOLD}URL & QR:${RESET}`, RESET);
@@ -2268,6 +2534,12 @@ async function main() {
         log(`  hop user add <name>       Add a user (creates tunnel + DNS)`, RESET);
         log(`  hop user remove <name>    Remove a user`, RESET);
         log(`  hop user export <name>    Export credentials for a user`, RESET);
+        log('');
+        log(`${BOLD}Sessions:${RESET}`, RESET);
+        log(`  hop session list                 List sessions`, RESET);
+        log(`  hop session add <name>           Add terminal session`, RESET);
+        log(`  hop session add <name> --port N  Add port session (proxy)`, RESET);
+        log(`  hop session remove <name>        Remove a session`, RESET);
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
@@ -2463,6 +2735,102 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop session` commands
+    if (process.argv[2] === 'session') {
+        const subcommand = process.argv[3];
+        const nameArg = process.argv[4];
+
+        if (!subcommand || subcommand === 'list') {
+            const sessions = listAllSessionEntries();
+            if (sessions.length === 0) {
+                log(`No sessions configured.`, YELLOW);
+                process.exit(0);
+            }
+            log(`\n${BOLD}Sessions:${RESET}\n`, CYAN);
+            sessions.forEach(s => {
+                if (s.type === 'port') {
+                    log(`  ${BOLD}${s.displayName}${RESET}  ${YELLOW}[PORT ${s.port}]${RESET}`, RESET);
+                } else {
+                    log(`  ${BOLD}${s.displayName}${RESET}  ${GREEN}[TERMINAL]${RESET}`, RESET);
+                }
+            });
+            process.exit(0);
+        }
+
+        if (subcommand === 'add') {
+            if (!nameArg) {
+                log(`Usage: hop session add <name> [--port <number>]`, RED);
+                process.exit(1);
+            }
+            const name = normalizeSessionName(nameArg);
+            if (!name) {
+                log(`Invalid session name.`, RED);
+                process.exit(1);
+            }
+            const portArgIndex = process.argv.indexOf('--port');
+            if (portArgIndex !== -1) {
+                const portArg = parseInt(process.argv[portArgIndex + 1], 10);
+                if (!Number.isInteger(portArg) || portArg < 1 || portArg > 65535) {
+                    log(`Invalid port. Use 1-65535.`, RED);
+                    process.exit(1);
+                }
+                if (hopSessionExists(name)) {
+                    log(`Terminal session already exists with this name.`, RED);
+                    process.exit(1);
+                }
+                setPortSessionConfig(name, portArg);
+                log(`Added port session "${name}" → localhost:${portArg}`, GREEN);
+                process.exit(0);
+            }
+
+            const existingConfig = getSessionConfig(name);
+            if (existingConfig && existingConfig.type === 'port') {
+                log(`Port session already exists with this name.`, RED);
+                process.exit(1);
+            }
+            ensureTerminalSessionConfig(name);
+            log(`Added terminal session "${name}".`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'remove' || subcommand === 'rm' || subcommand === 'delete') {
+            if (!nameArg) {
+                log(`Usage: hop session remove <name>`, RED);
+                process.exit(1);
+            }
+            const name = normalizeSessionName(nameArg);
+            if (!name) {
+                log(`Invalid session name.`, RED);
+                process.exit(1);
+            }
+            const config = getSessionConfig(name);
+            if (config && config.type === 'port') {
+                deleteSessionConfig(name);
+                log(`Removed port session "${name}".`, GREEN);
+                process.exit(0);
+            }
+            try {
+                if (hopSessionExists(name)) {
+                    execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' });
+                }
+            } catch (e) { }
+            if (activeSessions[name]) {
+                try { activeSessions[name].ttyd.kill(); } catch (e) { }
+                delete activeSessions[name];
+            }
+            deleteSessionConfig(name);
+            log(`Removed terminal session "${name}".`, GREEN);
+            process.exit(0);
+        }
+
+        log(`\n${BOLD}Session commands:${RESET}\n`, CYAN);
+        log(`  hop session list                 List sessions`, RESET);
+        log(`  hop session add <name>           Add terminal session`, RESET);
+        log(`  hop session add <name> --port N  Add port session`, RESET);
+        log(`  hop session remove <name>        Remove a session`, RESET);
+        process.exit(0);
+    }
+
     // Handle `hop wipe` command - kills all hop sessions
     if (process.argv[2] === 'wipe') {
         const sessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
@@ -2568,7 +2936,8 @@ async function main() {
         log(`Attaching...`, RESET);
 
         // Attach to the specific session
-        const tmux = spawn('tmux', ['-f', HOP_TMUX_CONF, 'new-session', '-A', '-s', sessionName], { stdio: 'inherit' });
+        if (useItermControl) setControlModeActive(true);
+        const tmux = spawn('tmux', getLocalTmuxArgs(sessionName), { stdio: 'inherit' });
 
         // Apply styling immediately and continuously refresh (every 1 second)
         // Re-read state file each time to pick up URL changes after tunnel restarts
@@ -2585,6 +2954,7 @@ async function main() {
         }, 1000);
 
         tmux.on('close', () => {
+            if (useItermControl) setControlModeActive(false);
             clearInterval(styleInterval);
             log(`\nSession disconnected.`, YELLOW);
             process.exit(0);

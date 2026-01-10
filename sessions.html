@@ -32,12 +32,15 @@
             .btn-secondary:hover { background: #d4d4d8; }
             .btn:disabled { opacity: 0.5; cursor: wait; }
             .new-session { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
-            .new-session input { flex: 1; min-width: 200px; padding: 0.875rem 1rem; border: 1px solid #e4e4e7; border-radius: 8px; font-size: 1rem; background: #fff; }
+            .new-session input,
+            .new-session select { flex: 1; min-width: 180px; padding: 0.875rem 1rem; border: 1px solid #e4e4e7; border-radius: 8px; font-size: 1rem; background: #fff; }
             .new-session input:focus { outline: none; border-color: #7c3aed; }
+            .new-session select:focus { outline: none; border-color: #7c3aed; }
             .quick-names { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
             .quick-names button { padding: 0.5rem 1rem; font-size: 0.875rem; border-radius: 6px; }
             .empty { padding: 2rem; text-align: center; color: #71717a; }
             .active-badge { background: #22c55e; color: #fff; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem; vertical-align: middle; }
+            .port-badge { background: #f59e0b; color: #111827; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem; vertical-align: middle; font-weight: 600; text-transform: uppercase; }
             .loading { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.9); justify-content: center; align-items: center; flex-direction: column; z-index: 100; }
             .loading.show { display: flex; }
             .spinner { width: 40px; height: 40px; border: 3px solid #e4e4e7; border-top-color: #7c3aed; border-radius: 50%; animation: spin 1s linear infinite; }
@@ -45,7 +48,8 @@
             @media (max-width: 480px) {
                 body { padding: 1rem; }
                 .new-session { flex-direction: column; }
-                .new-session input { min-width: 100%; }
+                .new-session input,
+                .new-session select { min-width: 100%; }
                 .new-session .btn { width: 100%; }
             }
         </style>
@@ -57,9 +61,14 @@
         </div>
         <div class="container">
             <h1>Session Picker</h1>
-            <p class="subtitle">Create a new session, rename existing ones, or join one. Swipe left to delete.</p>
+            <p class="subtitle">Create a terminal or port session, rename existing ones, or join one. Swipe left to delete.</p>
             <div class="new-session">
                 <input type="text" id="newName" placeholder="Session name..." pattern="[a-zA-Z0-9_-]+">
+                <select id="sessionType">
+                    <option value="terminal">Terminal</option>
+                    <option value="port">Port</option>
+                </select>
+                <input type="number" id="portInput" placeholder="Port (e.g. 3000)" min="1" max="65535" style="display:none;">
                 <button class="btn btn-primary" onclick="createSession()">Create</button>
             </div>
             <div class="session-list" id="sessionList">
@@ -91,6 +100,8 @@
                     const displayName = s.displayName || name;
                     const isActive = data.active.includes(name);
                     const isStarting = (data.starting || []).includes(name);
+                    const isPort = s.type === 'port';
+                    const portLabel = isPort ? `PORT ${s.port || ''}`.trim() : '';
                     return `
                         <div class="session-item-wrapper" data-session="${name}">
                             <div class="session-action rename" onclick="renameSession('${name}', '${displayName}')">Rename</div>
@@ -99,9 +110,9 @@
                                 <div class="session-info">
                                     <div class="session-header">
                                         <span class="session-name">${displayName}</span>
-                                        ${isActive ? '<span class="active-badge">LIVE</span>' : (isStarting ? '<span class="starting-badge">STARTING</span>' : '')}
+                                        ${isActive ? '<span class="active-badge">LIVE</span>' : (isStarting ? '<span class="starting-badge">STARTING</span>' : (isPort ? `<span class="port-badge">${portLabel}</span>` : ''))}
                                     </div>
-                                    <div class="session-meta">${s.windows ? s.windows + ' window(s)' : 'Starting...'}</div>
+                                    <div class="session-meta">${isPort ? `Proxy to localhost:${s.port || ''}` : (s.windows ? s.windows + ' window(s)' : (isStarting ? 'Starting...' : 'Not started'))}</div>
                                 </div>
                                 <a href="/?session=${encodeURIComponent(name)}" class="btn btn-primary" onclick="showLoading()">Join</a>
                             </div>
@@ -117,11 +128,22 @@
                 if (!name) { input.focus(); return; }
                 if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
 
+                const type = document.getElementById('sessionType').value;
+                const portInput = document.getElementById('portInput');
+                let port = null;
+                if (type === 'port') {
+                    port = parseInt(portInput.value, 10);
+                    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+                        portInput.focus();
+                        return alert('Enter a valid port (1-65535)');
+                    }
+                }
+
                 showLoading();
                 const res = await fetch('/api/sessions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name })
+                    body: JSON.stringify({ name, type, port })
                 });
                 const data = await res.json();
                 // Use full name returned by API (includes hop- prefix)
@@ -143,7 +165,7 @@
             }
 
             async function deleteSession(name) {
-                if (!confirm('Delete session "' + name + '"? This will kill the terminal session.')) return;
+                if (!confirm('Delete session "' + name + '"? This will remove the session.')) return;
 
                 await fetch('/api/sessions/delete', {
                     method: 'POST',
@@ -202,6 +224,18 @@
 
             document.getElementById('newName').addEventListener('keypress', e => {
                 if (e.key === 'Enter') createSession();
+            });
+
+            const typeSelect = document.getElementById('sessionType');
+            const portInput = document.getElementById('portInput');
+            typeSelect.addEventListener('change', () => {
+                if (typeSelect.value === 'port') {
+                    portInput.style.display = 'block';
+                    portInput.focus();
+                } else {
+                    portInput.style.display = 'none';
+                    portInput.value = '';
+                }
             });
 
             loadSessions();

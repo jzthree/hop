@@ -1500,7 +1500,7 @@
                                     item.addEventListener('click', function (e) {
                                         e.stopPropagation();
                                         if (sessionName !== currentSession) {
-                                            window.location.href = '/?session=' + encodeURIComponent(sessionName);
+                                            window.location.href = '/s/' + encodeURIComponent(sessionName) + '/';
                                         }
                                         closeMenu();
                                     });

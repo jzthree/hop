@@ -53,7 +53,6 @@ const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
 const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
-const SESSION_ROUTE_COOKIE_NAME = 'hop_session';
 const LOG_DIR = path.join(HOME_DIR, 'logs');
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 let SECRET_FILE_PATH = DEFAULT_SECRET_FILE;
@@ -103,11 +102,15 @@ const HOP_SESSION_PREFIX = 'hop-';  // Prefix to distinguish hop sessions from r
 
 ensurePrivateDir(LOG_DIR);
 
-function normalizeSessionName(rawName) {
-    if (!rawName || typeof rawName !== 'string') return null;
-    if (!SESSION_NAME_RE.test(rawName)) return null;
-    if (rawName.startsWith(HOP_SESSION_PREFIX)) return rawName;
-    return HOP_SESSION_PREFIX + rawName;
+function toInternalSessionName(displayName) {
+    if (!displayName || typeof displayName !== 'string') return null;
+    if (!SESSION_NAME_RE.test(displayName)) return null;
+    return HOP_SESSION_PREFIX + displayName;
+}
+
+function toDisplaySessionName(internalName) {
+    if (!internalName || typeof internalName !== 'string') return '';
+    return internalName.slice(HOP_SESSION_PREFIX.length);
 }
 
 function isITerm() {
@@ -971,8 +974,8 @@ function listTmuxSessions() {
 }
 
 function hopSessionExists(name) {
-    if (!name || !name.startsWith(HOP_SESSION_PREFIX)) return false;
-    return listTmuxSessions().some(s => s.name === name && s.name.startsWith(HOP_SESSION_PREFIX));
+    if (!name) return false;
+    return listTmuxSessions().some(s => s.name === name);
 }
 
 function listAllSessionEntries() {
@@ -986,7 +989,7 @@ function listAllSessionEntries() {
             ...s,
             type,
             port: config?.port,
-            displayName: s.name.slice(HOP_SESSION_PREFIX.length)
+            displayName: toDisplaySessionName(s.name)
         });
     }
 
@@ -999,7 +1002,7 @@ function listAllSessionEntries() {
                 attached: false,
                 type: config.type || 'terminal',
                 port: config.port,
-                displayName: name.slice(HOP_SESSION_PREFIX.length)
+                displayName: toDisplaySessionName(name)
             });
         } else if (config?.type === 'port') {
             const entry = sessionMap.get(name);
@@ -1008,7 +1011,7 @@ function listAllSessionEntries() {
         }
     }
 
-    return Array.from(sessionMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+    return Array.from(sessionMap.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
 // Light theme for ttyd - clean white background (tmux handles negative space)
@@ -1031,11 +1034,9 @@ function getTheme() {
 
 // Start or get existing ttyd for a session
 function getOrCreateSession(sessionName) {
-    const normalizedName = normalizeSessionName(sessionName);
-    if (!normalizedName) {
+    if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
         throw new Error('Invalid session name');
     }
-    sessionName = normalizedName;
     const existingConfig = getSessionConfig(sessionName);
     if (existingConfig && existingConfig.type === 'port') {
         throw new Error('Session is configured as a port proxy');
@@ -1074,15 +1075,15 @@ function getOrCreateSession(sessionName) {
         detached: false
     });
 
-    ttyd.on('error', (err) => log(`Failed TTYD for ${sessionName}: ${err.message}`, RED));
+    ttyd.on('error', (err) => log(`Failed TTYD for ${toDisplaySessionName(sessionName)}: ${err.message}`, RED));
     ttyd.on('close', () => {
         delete activeSessions[sessionName];
         startingSessions.delete(sessionName);
-        log(`Session ${sessionName} closed.`, YELLOW);
+        log(`Session ${toDisplaySessionName(sessionName)} closed.`, YELLOW);
     });
 
     activeSessions[sessionName] = { ttyd, port };
-    log(`  Started session "${sessionName}" on port ${port}`, GREEN);
+    log(`  Started session "${toDisplaySessionName(sessionName)}" on port ${port}`, GREEN);
 
     waitForPort(port, '127.0.0.1', 8000, 150).then(() => {
         startingSessions.delete(sessionName);
@@ -1119,10 +1120,7 @@ function resolveSessionName(name) {
 function applyTmuxStyles(sessionName, publicUrl) {
     // Resolve to current name in case of renames
     const s = resolveSessionName(sessionName);
-    // Strip hop- prefix for display
-    const displayName = s.startsWith(HOP_SESSION_PREFIX)
-        ? s.slice(HOP_SESSION_PREFIX.length)
-        : s;
+    const displayName = toDisplaySessionName(s);
     const run = (cmd) => {
         try {
             execSync(cmd, { stdio: 'ignore' });
@@ -1240,6 +1238,311 @@ function getIOSKeyboardInjection() {
     return { hook, ui };
 }
 
+function getSessionSwitcherOverlay() {
+    return `
+<style id="hop-session-switcher-style">
+#hop-session-fab {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 2147483647;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  user-select: none;
+}
+#hop-session-fab-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.9);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+  cursor: pointer;
+  padding: 0;
+}
+#hop-session-fab-btn:active { transform: scale(0.97); }
+#hop-session-fab-btn svg { width: 20px; height: 20px; }
+#hop-session-fab-menu {
+  position: absolute;
+  right: 0;
+  bottom: 52px;
+  min-width: 200px;
+  max-width: min(82vw, 320px);
+  background: #fff;
+  color: #18181b;
+  border: 1px solid #e4e4e7;
+  border-radius: 12px;
+  box-shadow: 0 12px 28px rgba(0,0,0,0.16);
+  padding: 8px;
+  display: none;
+}
+#hop-session-fab.open #hop-session-fab-menu { display: block; }
+#hop-session-fab-menu .hop-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #71717a;
+  padding: 6px 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+#hop-session-fab-menu .hop-item,
+#hop-session-fab-menu .hop-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #18181b;
+  text-decoration: none;
+  cursor: pointer;
+}
+#hop-session-fab-menu .hop-item:hover,
+#hop-session-fab-menu .hop-link:hover { background: #f4f4f5; }
+#hop-session-fab-menu .hop-item.current { font-weight: 600; }
+#hop-session-fab-menu .hop-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #22c55e;
+}
+#hop-session-fab-menu .hop-subtle { color: #71717a; font-size: 12px; }
+</style>
+<div id="hop-session-fab" role="button" aria-label="Sessions">
+  <button id="hop-session-fab-btn" aria-label="Sessions">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4" width="18" height="13" rx="2"></rect>
+      <path d="M8 21h8"></path>
+      <path d="M12 17v4"></path>
+    </svg>
+  </button>
+  <div id="hop-session-fab-menu" aria-hidden="true">
+    <div class="hop-title">Sessions</div>
+    <div id="hop-session-fab-list"></div>
+    <a class="hop-link" href="/sessions">Session Picker</a>
+  </div>
+</div>
+<script>
+(function() {
+  var fab = document.getElementById('hop-session-fab');
+  var btn = document.getElementById('hop-session-fab-btn');
+  var menu = document.getElementById('hop-session-fab-menu');
+  var list = document.getElementById('hop-session-fab-list');
+  if (!fab || !btn || !menu || !list) return;
+
+  function clamp(v, min, max) { return Math.min(Math.max(v, min), max); }
+  function getCurrentSession() {
+    var path = window.location.pathname || '';
+    if (path.indexOf('/s/') === 0) {
+      var rest = path.slice(3);
+      var parts = rest.split('/');
+      try { return decodeURIComponent(parts[0] || ''); } catch (e) { return ''; }
+    }
+    return '';
+  }
+
+  var stored = null;
+  try { stored = JSON.parse(localStorage.getItem('hop-fab-pos') || 'null'); } catch (e) { stored = null; }
+  function setPos(x, y) {
+    fab.style.left = x + 'px';
+    fab.style.top = y + 'px';
+  }
+  function initPos() {
+    var pad = 12;
+    var x = (stored && typeof stored.x === 'number') ? stored.x : (window.innerWidth - 56);
+    var y = (stored && typeof stored.y === 'number') ? stored.y : (window.innerHeight - 120);
+    x = clamp(x, pad, window.innerWidth - 56);
+    y = clamp(y, pad, window.innerHeight - 56);
+    setPos(x, y);
+  }
+  initPos();
+
+  var dragging = false;
+  var moved = false;
+  var startX = 0, startY = 0, origX = 0, origY = 0;
+
+  function onDown(e) {
+    dragging = true;
+    moved = false;
+    var touch = e.touches ? e.touches[0] : e;
+    startX = touch.clientX;
+    startY = touch.clientY;
+    var rect = fab.getBoundingClientRect();
+    origX = rect.left;
+    origY = rect.top;
+    e.preventDefault();
+  }
+  function onMove(e) {
+    if (!dragging) return;
+    var touch = e.touches ? e.touches[0] : e;
+    var dx = touch.clientX - startX;
+    var dy = touch.clientY - startY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+    var x = clamp(origX + dx, 8, window.innerWidth - 56);
+    var y = clamp(origY + dy, 8, window.innerHeight - 56);
+    setPos(x, y);
+  }
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    var rect = fab.getBoundingClientRect();
+    try { localStorage.setItem('hop-fab-pos', JSON.stringify({ x: rect.left, y: rect.top })); } catch (e) { }
+  }
+
+  btn.addEventListener('touchstart', onDown, { passive: false });
+  btn.addEventListener('touchmove', onMove, { passive: false });
+  btn.addEventListener('touchend', onUp);
+  btn.addEventListener('mousedown', onDown);
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+
+  function closeMenu() {
+    fab.classList.remove('open');
+    menu.setAttribute('aria-hidden', 'true');
+  }
+  function toggleMenu() {
+    if (fab.classList.contains('open')) {
+      closeMenu();
+      return;
+    }
+    fab.classList.add('open');
+    menu.setAttribute('aria-hidden', 'false');
+    fetchSessions();
+  }
+
+  btn.addEventListener('click', function(e) {
+    if (moved) return;
+    e.preventDefault();
+    toggleMenu();
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!fab.contains(e.target)) closeMenu();
+  });
+
+  function fetchSessions() {
+    fetch('/api/sessions')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        list.innerHTML = '';
+        var sessions = data.sessions || [];
+        var active = data.active || [];
+        if (!sessions.length) {
+          var empty = document.createElement('div');
+          empty.className = 'hop-item';
+          empty.textContent = 'No sessions';
+          list.appendChild(empty);
+          return;
+        }
+        var current = getCurrentSession();
+        sessions.forEach(function(s) {
+          var item = document.createElement('button');
+          item.className = 'hop-item';
+          if (s.name === current) item.classList.add('current');
+          if (active.indexOf(s.name) !== -1) {
+            var dot = document.createElement('span');
+            dot.className = 'hop-dot';
+            item.appendChild(dot);
+          }
+          var label = document.createElement('span');
+          var suffix = s.type === 'port' ? (s.port ? ' (PORT ' + s.port + ')' : ' (PORT)') : '';
+          label.textContent = (s.displayName || s.name) + suffix;
+          item.appendChild(label);
+          item.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            window.location.href = '/s/' + encodeURIComponent(s.name) + '/';
+          });
+          list.appendChild(item);
+        });
+      })
+      .catch(function() {
+        list.innerHTML = '<div class="hop-item hop-subtle">Failed to load</div>';
+      });
+  }
+})();
+</script>
+`;
+}
+
+function shouldInjectSessionSwitcher(req) {
+    if (!req || req.method !== 'GET') return false;
+    const accept = String(req.headers?.accept || '').toLowerCase();
+    if (!accept.includes('text/html')) return false;
+    const dest = String(req.headers?.['sec-fetch-dest'] || '');
+    if (dest && dest !== 'document') return false;
+    return true;
+}
+
+function buildSessionPath(displayName) {
+    return `/s/${encodeURIComponent(displayName)}/`;
+}
+
+function stripSessionParam(search) {
+    if (!search) return '';
+    const params = new URLSearchParams(search);
+    params.delete('session');
+    const qs = params.toString();
+    return qs ? `?${qs}` : '';
+}
+
+function parseSessionFromRequest(req, parsedUrl) {
+    const pathname = parsedUrl.pathname || '';
+    if (pathname.startsWith('/s/')) {
+        const rest = pathname.slice(3);
+        const parts = rest.split('/');
+        const rawName = parts.shift() || '';
+        let displayName = '';
+        try {
+            displayName = decodeURIComponent(rawName);
+        } catch (e) {
+            return null;
+        }
+        if (!SESSION_NAME_RE.test(displayName)) return null;
+        const internalName = toInternalSessionName(displayName);
+        const needsSlash = pathname === `/s/${rawName}`;
+        const strippedPathname = '/' + parts.join('/');
+        const normalizedPathname = strippedPathname === '/' ? '/' : strippedPathname;
+        const strippedUrl = normalizedPathname + (parsedUrl.search || '');
+        return {
+            displayName,
+            internalName,
+            strippedPathname: normalizedPathname,
+            strippedUrl,
+            source: 'path',
+            needsSlash
+        };
+    }
+
+    const sessionParam = parsedUrl.query.session;
+    if (sessionParam && SESSION_NAME_RE.test(sessionParam)) {
+        const displayName = sessionParam;
+        const internalName = toInternalSessionName(displayName);
+        const strippedPathname = parsedUrl.pathname || '/';
+        const strippedUrl = strippedPathname + stripSessionParam(parsedUrl.search || '');
+        return {
+            displayName,
+            internalName,
+            strippedPathname,
+            strippedUrl,
+            source: 'query'
+        };
+    }
+
+    return null;
+}
+
+function shouldRedirectToSessionPath(req) {
+    if (!req || req.method !== 'GET') return false;
+    const accept = String(req.headers?.accept || '').toLowerCase();
+    return accept.includes('text/html');
+}
+
 // Helper to get client IP (handles proxies)
 function getClientIp(req) {
     return req.headers['cf-connecting-ip'] ||
@@ -1270,7 +1573,7 @@ function waitForPort(port, host = '127.0.0.1', timeoutMs = 4000, intervalMs = 12
     });
 }
 
-function sendStartingPage(res, sessionName) {
+function sendStartingPage(res, displayName) {
     setNoCache(res);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<!DOCTYPE html>
@@ -1293,7 +1596,7 @@ function sendStartingPage(res, sessionName) {
       <div class="spinner"></div>
       <h2>Starting session…</h2>
       <p>This can take a few seconds. Refreshing automatically.</p>
-      <p><a href="/?session=${encodeURIComponent(sessionName)}">Click to retry</a></p>
+      <p><a href="${buildSessionPath(displayName)}">Click to retry</a></p>
     </div>
   </body>
 </html>`);
@@ -1337,6 +1640,15 @@ function clearAuthCookies(res) {
     ]);
 }
 
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function startAuthProxy(authEmitter) {
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
@@ -1344,6 +1656,7 @@ function startAuthProxy(authEmitter) {
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
         const ip = getClientIp(req);
+        const sessionInfo = parseSessionFromRequest(req, parsedUrl);
 
         // Check auth via cookie OR Authorization header (internal hop-to-hop only)
         // Bearer token is read from state file by other hop processes on same machine
@@ -1385,13 +1698,15 @@ function startAuthProxy(authEmitter) {
                         // Check TOTP
                         if (authenticator.check(totp, AUTH_SECRET)) {
                             resetFailure(ip);
-                            res.setHeader('Set-Cookie', cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
-                                httpOnly: true,
-                                secure: true,
-                                sameSite: 'lax',
-                                path: '/',
-                                maxAge: 60 * 60 * 24 * 7
-                            }));
+                            appendSetCookie(res, [
+                                cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
+                                    httpOnly: true,
+                                    secure: true,
+                                    sameSite: 'lax',
+                                    path: '/',
+                                    maxAge: 60 * 60 * 24 * 7
+                                })
+                            ]);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ success: true }));
                             if (authEmitter) authEmitter.emit('authenticated');
@@ -1408,8 +1723,8 @@ function startAuthProxy(authEmitter) {
                 return;
             }
 
-            // Web form login
-            if (req.method === 'POST' && parsedUrl.pathname === '/') {
+            // Web form login (support / and /s/<name>/)
+            if (req.method === 'POST' && (parsedUrl.pathname === '/' || parsedUrl.pathname.startsWith('/s/'))) {
                 const limit = checkRateLimit(ip);
                 if (!limit.allowed) {
                     res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -1423,6 +1738,10 @@ function startAuthProxy(authEmitter) {
                     const params = new URLSearchParams(body);
                     const token = params.get('token');
                     const password = params.get('password');
+                    const requestedDisplayName = params.get('session') || sessionInfo?.displayName;
+                    const requestedInternalName = requestedDisplayName
+                        ? toInternalSessionName(requestedDisplayName)
+                        : null;
 
                     try {
                         // Check password if enabled
@@ -1436,14 +1755,19 @@ function startAuthProxy(authEmitter) {
                         // Check TOTP
                         if (authenticator.check(token, AUTH_SECRET)) {
                             resetFailure(ip);
-                            res.setHeader('Set-Cookie', cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
-                                httpOnly: true,
-                                secure: true,
-                                sameSite: 'lax',
-                                path: '/',
-                                maxAge: 60 * 60 * 24 * 7
-                            }));
-                            res.writeHead(302, { 'Location': '/' });
+                            appendSetCookie(res, [
+                                cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
+                                    httpOnly: true,
+                                    secure: true,
+                                    sameSite: 'lax',
+                                    path: '/',
+                                    maxAge: 60 * 60 * 24 * 7
+                                })
+                            ]);
+                            const redirectTarget = requestedInternalName
+                                ? buildSessionPath(requestedDisplayName)
+                                : '/sessions';
+                            res.writeHead(302, { 'Location': redirectTarget });
                             res.end();
                             if (authEmitter) authEmitter.emit('authenticated');
                         } else {
@@ -1476,6 +1800,14 @@ function startAuthProxy(authEmitter) {
                     return;
                 }
             ` : '';
+
+            const requestedDisplayName = sessionInfo?.displayName;
+            const requestedInternalName = requestedDisplayName
+                ? toInternalSessionName(requestedDisplayName)
+                : null;
+            const sessionFieldHtml = requestedInternalName
+                ? `<input type="hidden" name="session" value="${escapeHtml(requestedDisplayName)}">`
+                : '';
 
             clearAuthCookies(res);
             setNoCache(res);
@@ -1514,6 +1846,7 @@ function startAuthProxy(authEmitter) {
                             ${passwordRequired ? '<p style="color: #71717a; margin-bottom: 1rem; font-size: 0.9rem;">Enter your password:</p>' : '<p style="color: #71717a; margin-bottom: 2rem; font-size: 0.9rem;">Please enter the verification code from your authenticator app to continue.</p>'}
                             <form method="POST" id="authForm">
                                 ${passwordFieldHtml}
+                                ${sessionFieldHtml}
                                 <div class="code-inputs" id="inputs">
                                     <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
                                     <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]*" required>
@@ -1577,9 +1910,23 @@ function startAuthProxy(authEmitter) {
         }
 
         // --- AUTHENTICATED ROUTES ---
-        const rawSessionName = parsedUrl.query.session;
-        const cookieSessionName = cookies[SESSION_ROUTE_COOKIE_NAME];
-        const sessionName = normalizeSessionName(rawSessionName || cookieSessionName);
+        const sessionInfoAuth = parseSessionFromRequest(req, parsedUrl);
+        const sessionName = sessionInfoAuth ? sessionInfoAuth.internalName : null;
+        const displayName = sessionInfoAuth ? sessionInfoAuth.displayName : null;
+        const strippedUrl = sessionInfoAuth ? sessionInfoAuth.strippedUrl : req.url;
+        const strippedPathname = sessionInfoAuth ? sessionInfoAuth.strippedPathname : (parsedUrl.pathname || '/');
+
+        if (sessionInfoAuth && sessionInfoAuth.source === 'query' && shouldRedirectToSessionPath(req)) {
+            res.writeHead(302, { 'Location': buildSessionPath(displayName) });
+            res.end();
+            return;
+        }
+        if (sessionInfoAuth && sessionInfoAuth.source === 'path' && sessionInfoAuth.needsSlash && shouldRedirectToSessionPath(req)) {
+            const target = buildSessionPath(displayName) + (parsedUrl.search || '');
+            res.writeHead(302, { 'Location': target });
+            res.end();
+            return;
+        }
 
         // API: Ping (triggers auth event for mobile login)
         if (parsedUrl.pathname === '/api/ping' && req.method === 'POST') {
@@ -1591,11 +1938,16 @@ function startAuthProxy(authEmitter) {
 
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
-            const sessions = listAllSessionEntries();
-            const activeSessionNames = Object.keys(activeSessions)
-                .filter(n => n.startsWith(HOP_SESSION_PREFIX));
-            const startingSessionNames = Array.from(startingSessions)
-                .filter(n => n.startsWith(HOP_SESSION_PREFIX));
+            const sessions = listAllSessionEntries().map(s => ({
+                name: s.displayName,
+                displayName: s.displayName,
+                windows: s.windows,
+                attached: s.attached,
+                type: s.type,
+                port: s.port
+            }));
+            const activeSessionNames = Object.keys(activeSessions).map(toDisplaySessionName);
+            const startingSessionNames = Array.from(startingSessions).map(toDisplaySessionName);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ sessions, active: activeSessionNames, starting: startingSessionNames }));
             return;
@@ -1608,8 +1960,9 @@ function startAuthProxy(authEmitter) {
             req.on('end', () => {
                 try {
                     let { name, type, port } = JSON.parse(body);
-                    name = normalizeSessionName(name);
-                    if (!name) {
+                    const displayName = name;
+                    const internalName = toInternalSessionName(displayName);
+                    if (!internalName) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
                         return;
@@ -1627,29 +1980,29 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Invalid port' }));
                             return;
                         }
-                        if (hopSessionExists(name)) {
+                        if (hopSessionExists(internalName)) {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
                             return;
                         }
-                        const existingConfig = getSessionConfig(name);
+                        const existingConfig = getSessionConfig(internalName);
                         if (existingConfig && existingConfig.type === 'terminal') {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
                             return;
                         }
-                        setPortSessionConfig(name, parsedPort);
+                        setPortSessionConfig(internalName, parsedPort);
                     } else {
-                        const existingConfig = getSessionConfig(name);
+                        const existingConfig = getSessionConfig(internalName);
                         if (existingConfig && existingConfig.type === 'port') {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Port session already exists with this name' }));
                             return;
                         }
-                        getOrCreateSession(name);
+                        getOrCreateSession(internalName);
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, name, type }));
+                    res.end(JSON.stringify({ ok: true, name: displayName, type }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -1664,8 +2017,10 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 let { oldName, newName } = JSON.parse(body);
-                oldName = normalizeSessionName(oldName);
-                newName = normalizeSessionName(newName);
+                const oldDisplayName = oldName;
+                const newDisplayName = newName;
+                oldName = toInternalSessionName(oldDisplayName);
+                newName = toInternalSessionName(newDisplayName);
                 // Validate BOTH names to prevent command injection
                 if (!oldName) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1732,7 +2087,7 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 let { name } = JSON.parse(body);
-                name = normalizeSessionName(name);
+                name = toInternalSessionName(name);
                 // Validate name to prevent command injection
                 if (!name) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1798,19 +2153,10 @@ function startAuthProxy(authEmitter) {
             res.end(sessionsHtml);
             return;
         }
-        if (rawSessionName && sessionName) {
-            appendSetCookie(res, [cookie.serialize(SESSION_ROUTE_COOKIE_NAME, sessionName, {
-                httpOnly: true,
-                secure: true,
-                sameSite: 'lax',
-                path: '/',
-                maxAge: 60 * 60 * 24 * 7
-            })]);
-        }
-
         // --- CHECK FOR iOS - Intercept and inject virtual keyboard ---
         const userAgent = req.headers['user-agent'] || '';
         const isIOS = /iPad|iPhone|iPod/.test(userAgent);
+        const isMobile = isIOS || /Android/i.test(userAgent);
         const sessionConfig = getSessionConfig(sessionName);
         if (sessionConfig && sessionConfig.type === 'port') {
             const targetPort = sessionConfig.port;
@@ -1819,16 +2165,75 @@ function startAuthProxy(authEmitter) {
                 res.end('Port session missing target port.');
                 return;
             }
+            const shouldInject = isMobile && shouldInjectSessionSwitcher(req);
+            if (shouldInject) {
+                waitForPort(targetPort).then((ready) => {
+                    if (!ready) {
+                        sendStartingPage(res, displayName);
+                        return;
+                    }
+                    const headers = { ...req.headers };
+                    delete headers['accept-encoding'];
+                    const proxyReq = http.request({
+                        hostname: '127.0.0.1',
+                        port: targetPort,
+                        method: req.method,
+                        path: strippedUrl,
+                        headers
+                    }, (proxyRes) => {
+                        const contentType = String(proxyRes.headers['content-type'] || '').toLowerCase();
+                        const contentEncoding = String(proxyRes.headers['content-encoding'] || '').toLowerCase();
+                        const isHtml = contentType.includes('text/html');
+                        const isPlain = contentType.includes('text/plain');
+                        const canModify = (isHtml || isPlain) && (!contentEncoding || contentEncoding === 'identity');
+                        if (!canModify) {
+                            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+                            proxyRes.pipe(res);
+                            return;
+                        }
+                        let chunks = [];
+                        proxyRes.on('data', chunk => chunks.push(chunk));
+                        proxyRes.on('end', () => {
+                            let html = Buffer.concat(chunks).toString('utf8');
+                            const overlay = getSessionSwitcherOverlay();
+                            if (isPlain && !html.includes('<html')) {
+                                const body = `<pre style="white-space:pre-wrap;font:14px/1.4 ui-monospace,Menlo,Monaco,Consolas,monospace;margin:24px;color:#18181b;">${escapeHtml(html)}</pre>`;
+                                html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>${body}${overlay}</body></html>`;
+                            } else if (html.includes('</body>')) {
+                                html = html.split('</body>').join(overlay + '</body>');
+                            } else {
+                                html += overlay;
+                            }
+                            const outHeaders = { ...proxyRes.headers };
+                            delete outHeaders['content-length'];
+                            delete outHeaders['content-encoding'];
+                            if (isPlain) {
+                                outHeaders['content-type'] = 'text/html; charset=utf-8';
+                            }
+                            res.writeHead(proxyRes.statusCode || 200, outHeaders);
+                            res.end(html);
+                        });
+                    });
+                    proxyReq.on('error', () => {
+                        sendStartingPage(res, displayName);
+                    });
+                    req.pipe(proxyReq);
+                });
+                return;
+            }
 
             waitForPort(targetPort).then((ready) => {
                 if (!ready) {
-                    sendStartingPage(res, sessionName);
+                    sendStartingPage(res, displayName);
                     return;
                 }
                 const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${targetPort}`, ws: false });
+                const originalUrl = req.url;
+                req.url = strippedUrl;
                 proxy.web(req, res, {}, () => {
-                    sendStartingPage(res, sessionName);
+                    sendStartingPage(res, displayName);
                 });
+                req.url = originalUrl;
             });
             return;
         }
@@ -1836,18 +2241,18 @@ function startAuthProxy(authEmitter) {
         const session = getOrCreateSession(sessionName);
 
         // Only inject keyboard for iOS on the root path (main HTML page)
-        const reqPath = parsedUrl.pathname || '/';
+        const reqPath = strippedPathname || '/';
         if (isIOS && (reqPath === '/' || reqPath === '')) {
             waitForPort(session.port).then((ready) => {
                 if (!ready) {
-                    sendStartingPage(res, sessionName);
+                    sendStartingPage(res, displayName);
                     return;
                 }
                 // Intercept ttyd's HTML response and inject our keyboard
                 const ttydReq = http.request({
                     hostname: '127.0.0.1',
                     port: session.port,
-                    path: '/',
+                    path: strippedUrl,
                     method: 'GET',
                     headers: {
                         'Accept': 'text/html',
@@ -1875,7 +2280,7 @@ function startAuthProxy(authEmitter) {
                     });
                 });
                 ttydReq.on('error', () => {
-                    sendStartingPage(res, sessionName);
+                    sendStartingPage(res, displayName);
                 });
                 ttydReq.end();
             });
@@ -1885,13 +2290,16 @@ function startAuthProxy(authEmitter) {
         // --- PROXY TO SESSION (non-iOS) ---
         waitForPort(session.port).then((ready) => {
             if (!ready) {
-                sendStartingPage(res, sessionName);
+                sendStartingPage(res, displayName);
                 return;
             }
             const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${session.port}`, ws: false });
+            const originalUrl = req.url;
+            req.url = strippedUrl;
             proxy.web(req, res, {}, () => {
-                sendStartingPage(res, sessionName);
+                sendStartingPage(res, displayName);
             });
+            req.url = originalUrl;
         });
     });
 
@@ -1909,7 +2317,8 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        const sessionName = normalizeSessionName(parsedUrl.query.session || cookies[SESSION_ROUTE_COOKIE_NAME]);
+        const sessionInfo = parseSessionFromRequest(req, parsedUrl);
+        const sessionName = sessionInfo ? sessionInfo.internalName : null;
         if (!sessionName) {
             socket.write('HTTP/1.1 404 Session Not Found\r\n\r\n');
             socket.destroy();
@@ -1925,7 +2334,10 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${targetPort}`, ws: true });
+            const originalUrl = req.url;
+            req.url = sessionInfo.strippedUrl;
             proxy.ws(req, socket, head);
+            req.url = originalUrl;
             return;
         }
 
@@ -1937,7 +2349,10 @@ function startAuthProxy(authEmitter) {
 
         const session = activeSessions[sessionName];
         const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${session.port}`, ws: true });
+        const originalUrl = req.url;
+        req.url = sessionInfo.strippedUrl;
         proxy.ws(req, socket, head);
+        req.url = originalUrl;
     });
 
     server.listen(PROXY_PORT, '127.0.0.1');
@@ -2237,14 +2652,17 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     // Create and attach to session locally
     // Find next available session name (in case another hop already created one)
     const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const existingSessions = listTmuxSessions().map(s => s.name);
+    const existingSessions = new Set(listTmuxSessions().map(s => s.name));
     let counter = 1;
-    while (existingSessions.includes(`${HOP_SESSION_PREFIX}${cwdName}-${counter}`)) {
+    let displayName = `${cwdName}-${counter}`;
+    let defaultSessionName = toInternalSessionName(displayName);
+    while (existingSessions.has(defaultSessionName)) {
         counter++;
+        displayName = `${cwdName}-${counter}`;
+        defaultSessionName = toInternalSessionName(displayName);
     }
-    const defaultSessionName = `${HOP_SESSION_PREFIX}${cwdName}-${counter}`;
 
-    log(`Starting session: ${defaultSessionName}`, RESET);
+    log(`Starting session: ${displayName}`, RESET);
     getOrCreateSession(defaultSessionName);
 
     // Apply styling continuously to handle respawns and URL changes (every 1 second)
@@ -2262,6 +2680,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     });
 
     const cleanup = () => {
+        if (shuttingDown) return;
         shuttingDown = true;  // Prevent tunnel auto-restart
         log(`Cleaning up...`, YELLOW);
 
@@ -2762,7 +3181,8 @@ async function main() {
                 log(`Usage: hop session add <name> [--port <number>]`, RED);
                 process.exit(1);
             }
-            const name = normalizeSessionName(nameArg);
+            const displayName = nameArg;
+            const name = toInternalSessionName(displayName);
             if (!name) {
                 log(`Invalid session name.`, RED);
                 process.exit(1);
@@ -2779,7 +3199,7 @@ async function main() {
                     process.exit(1);
                 }
                 setPortSessionConfig(name, portArg);
-                log(`Added port session "${name}" → localhost:${portArg}`, GREEN);
+                log(`Added port session "${displayName}" → localhost:${portArg}`, GREEN);
                 process.exit(0);
             }
 
@@ -2789,7 +3209,7 @@ async function main() {
                 process.exit(1);
             }
             ensureTerminalSessionConfig(name);
-            log(`Added terminal session "${name}".`, GREEN);
+            log(`Added terminal session "${displayName}".`, GREEN);
             process.exit(0);
         }
 
@@ -2798,7 +3218,8 @@ async function main() {
                 log(`Usage: hop session remove <name>`, RED);
                 process.exit(1);
             }
-            const name = normalizeSessionName(nameArg);
+            const displayName = nameArg;
+            const name = toInternalSessionName(displayName);
             if (!name) {
                 log(`Invalid session name.`, RED);
                 process.exit(1);
@@ -2806,7 +3227,7 @@ async function main() {
             const config = getSessionConfig(name);
             if (config && config.type === 'port') {
                 deleteSessionConfig(name);
-                log(`Removed port session "${name}".`, GREEN);
+                log(`Removed port session "${displayName}".`, GREEN);
                 process.exit(0);
             }
             try {
@@ -2819,7 +3240,7 @@ async function main() {
                 delete activeSessions[name];
             }
             deleteSessionConfig(name);
-            log(`Removed terminal session "${name}".`, GREEN);
+            log(`Removed terminal session "${displayName}".`, GREEN);
             process.exit(0);
         }
 
@@ -2842,7 +3263,7 @@ async function main() {
         for (const s of sessions) {
             try {
                 execSync(`tmux kill-session -t ${s.name}`, { stdio: 'ignore' });
-                log(`  - ${s.name}`, RESET);
+                log(`  - ${toDisplaySessionName(s.name)}`, RESET);
             } catch (e) { }
         }
         log(`Done.`, GREEN);
@@ -2860,9 +3281,10 @@ async function main() {
         log(`Hop tunnel is already running!`, GREEN);
         log(`URL: ${existingTunnel.url}`, BOLD);
 
-        // Generate smart session name: hop-dir-N
+        // Generate smart session name: dir-N
         const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-        let sessionName = `${HOP_SESSION_PREFIX}${cwdName}-1`;
+        let displayName = `${cwdName}-1`;
+        let sessionName = toInternalSessionName(displayName);
 
         log(`\nFinding next available session...`, RESET);
 
@@ -2887,13 +3309,14 @@ async function main() {
             if (sessionsRes && sessionsRes.sessions && sessionsRes.active) {
                 const allNames = new Set([...sessionsRes.active, ...sessionsRes.sessions.map(s => s.name)]);
                 let counter = 1;
-                while (allNames.has(`${HOP_SESSION_PREFIX}${cwdName}-${counter}`)) {
+                while (allNames.has(`${cwdName}-${counter}`)) {
                     counter++;
                 }
-                sessionName = `${HOP_SESSION_PREFIX}${cwdName}-${counter}`;
+                displayName = `${cwdName}-${counter}`;
+                sessionName = toInternalSessionName(displayName);
             }
 
-            log(`Creating new session: ${sessionName}...`, RESET);
+            log(`Creating new session: ${displayName}...`, RESET);
 
             // Register session with local server so ttyd starts
             const res = await new Promise((resolve, reject) => {
@@ -2922,7 +3345,7 @@ async function main() {
                 });
 
                 req.on('error', reject);
-                req.write(JSON.stringify({ name: sessionName }));
+                req.write(JSON.stringify({ name: displayName }));
                 req.end();
             });
 

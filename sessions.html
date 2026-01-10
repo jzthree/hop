@@ -114,7 +114,7 @@
                                     </div>
                                     <div class="session-meta">${isPort ? `Proxy to localhost:${s.port || ''}` : (s.windows ? s.windows + ' window(s)' : (isStarting ? 'Starting...' : 'Not started'))}</div>
                                 </div>
-                                <a href="/?session=${encodeURIComponent(name)}" class="btn btn-primary" onclick="showLoading()">Join</a>
+                                <a href="/s/${encodeURIComponent(name)}/" class="btn btn-primary" onclick="showLoading()">Join</a>
                             </div>
                         </div>
                     `;
@@ -146,8 +146,7 @@
                     body: JSON.stringify({ name, type, port })
                 });
                 const data = await res.json();
-                // Use full name returned by API (includes hop- prefix)
-                window.location.href = '/?session=' + encodeURIComponent(data.name);
+                window.location.href = '/s/' + encodeURIComponent(data.name) + '/';
             }
 
             async function renameSession(oldName, oldDisplayName) {
@@ -155,7 +154,6 @@
                 if (!newDisplayName || newDisplayName === oldDisplayName) return;
                 if (!/^[a-zA-Z0-9_-]+$/.test(newDisplayName)) return alert('Only letters, numbers, - and _ allowed');
 
-                // Backend will add hop- prefix automatically
                 await fetch('/api/sessions/rename', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },

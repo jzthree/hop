@@ -145,6 +145,25 @@ On mobile devices, Hop provides a custom virtual keyboard designed for terminal 
 - First-time users will see a tooltip pointing to the native keyboard button
 - Use the native keyboard for longer text input with autocomplete
 
+## 🖥️ iTerm Integration
+
+```bash
+hop --iterm
+```
+
+Uses tmux control mode (`-CC`) for native scrolling, copy/paste, splits, and search. Session remains accessible via web.
+
+## 🔌 Port Sessions
+
+Expose local HTTP/WebSocket services through your tunnel:
+
+```bash
+hop session add myapp --port 3000
+# Access at: https://your-tunnel-url/s/myapp/
+```
+
+Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSocket.
+
 ## 🔧 Commands
 
 | Command | Description |

@@ -773,6 +773,11 @@ set -g history-limit 50000
 
 # Better terminal colors
 set -g default-terminal "screen-256color"
+
+# Window titles for iTerm control mode
+set -g set-titles on
+set -g set-titles-string "#S:#W"
+set -g automatic-rename on
 `;
 fs.writeFileSync(HOP_TMUX_CONF, HOP_TMUX_CONFIG);
 
@@ -978,6 +983,30 @@ function hopSessionExists(name) {
     return listTmuxSessions().some(s => s.name === name);
 }
 
+// Wait for tmux session to exist and be ready for control mode attachment
+// Returns true if ready, false if timeout
+async function waitForTmuxSessionReady(sessionName, maxWaitMs = 5000) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < maxWaitMs) {
+        try {
+            // Check if session exists
+            execSync(`tmux has-session -t ${sessionName}`, { stdio: 'ignore' });
+            // Session exists - wait a bit more for shell prompt to settle
+            await new Promise(resolve => setTimeout(resolve, 300));
+            // Clear the pane to avoid stale output corrupting control mode
+            try {
+                execSync(`tmux send-keys -t ${sessionName} '' C-l`, { stdio: 'ignore' });
+            } catch (e) { }
+            await new Promise(resolve => setTimeout(resolve, 100));
+            return true;
+        } catch (e) {
+            // Session doesn't exist yet, wait and retry
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    }
+    return false;
+}
+
 function listAllSessionEntries() {
     const tmuxSessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
     const sessionMap = new Map();
@@ -1158,6 +1187,9 @@ function applyTmuxStyles(sessionName, publicUrl) {
 
     // Message/mode styling
     run(`tmux set-option -t ${s} message-style 'bg=#f0f0f0,fg=#18181b'`);
+
+    // Window title for iTerm control mode (display name without hop- prefix + URL)
+    run(`tmux set-option -t ${s} set-titles-string "${displayName} • ${publicUrl}"`);
     run(`tmux set-option -t ${s} mode-style 'bg=#ddd6fe,fg=#18181b'`);
 }
 
@@ -2713,6 +2745,10 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     const runLocalSessionLoop = async () => {
         const readline = require('readline');
         while (true) {
+            // For iTerm control mode, wait for session to be ready to avoid protocol corruption
+            if (useItermControl) {
+                await waitForTmuxSessionReady(defaultSessionName);
+            }
             await new Promise(resolve => {
                 if (useItermControl) setControlModeActive(true);
                 const tmux = spawn('tmux', getLocalTmuxArgs(defaultSessionName), { stdio: 'inherit' });
@@ -3357,6 +3393,11 @@ async function main() {
         }
 
         log(`Attaching...`, RESET);
+
+        // For iTerm control mode, wait for session to be ready to avoid protocol corruption
+        if (useItermControl) {
+            await waitForTmuxSessionReady(sessionName);
+        }
 
         // Attach to the specific session
         if (useItermControl) setControlModeActive(true);

@@ -1,0 +1,211 @@
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+        <title>Session Picker</title>
+        <style>
+            * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fafafa; color: #18181b; margin: 0; padding: 1.5rem; min-height: 100vh; }
+            .container { max-width: 600px; margin: 0 auto; }
+            h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
+            .subtitle { color: #71717a; font-size: 0.875rem; margin-bottom: 1rem; }
+            .session-list { background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; overflow: hidden; margin-bottom: 1.5rem; }
+            .session-item-wrapper { position: relative; overflow: hidden; border-bottom: 1px solid #e4e4e7; }
+            .session-item-wrapper:last-child { border-bottom: none; }
+            .session-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; gap: 1rem; background: #fff; position: relative; transition: transform 0.2s ease-out; }
+            .session-item:active { background: #f4f4f5; }
+            .session-action { position: absolute; top: 0; bottom: 0; width: 80px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 500; cursor: pointer; font-size: 0.85rem; }
+            .session-action.rename { left: 0; background: #3b82f6; }
+            .session-action.rename:active { background: #2563eb; }
+            .session-action.delete { right: 0; background: #dc2626; }
+            .session-action.delete:active { background: #b91c1c; }
+            .session-info { flex: 1; min-width: 0; }
+            .session-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+            .session-name { font-weight: 500; font-size: 1rem; }
+            .active-badge { background: #22c55e; color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
+            .starting-badge { background: #f59e0b; color: #111827; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
+            .session-meta { color: #71717a; font-size: 0.8rem; margin-top: 0.25rem; }
+            .btn { padding: 0.75rem 1.25rem; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 500; text-decoration: none; display: inline-block; min-width: 80px; text-align: center; transition: opacity 0.2s; }
+            .btn-primary { background: #18181b; color: #fff; }
+            .btn-primary:hover, .btn-primary:active { opacity: 0.85; }
+            .btn-secondary { background: #e4e4e7; color: #18181b; }
+            .btn-secondary:hover { background: #d4d4d8; }
+            .btn:disabled { opacity: 0.5; cursor: wait; }
+            .new-session { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+            .new-session input { flex: 1; min-width: 200px; padding: 0.875rem 1rem; border: 1px solid #e4e4e7; border-radius: 8px; font-size: 1rem; background: #fff; }
+            .new-session input:focus { outline: none; border-color: #7c3aed; }
+            .quick-names { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+            .quick-names button { padding: 0.5rem 1rem; font-size: 0.875rem; border-radius: 6px; }
+            .empty { padding: 2rem; text-align: center; color: #71717a; }
+            .active-badge { background: #22c55e; color: #fff; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem; vertical-align: middle; }
+            .loading { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.9); justify-content: center; align-items: center; flex-direction: column; z-index: 100; }
+            .loading.show { display: flex; }
+            .spinner { width: 40px; height: 40px; border: 3px solid #e4e4e7; border-top-color: #7c3aed; border-radius: 50%; animation: spin 1s linear infinite; }
+            @keyframes spin { to { transform: rotate(360deg); } }
+            @media (max-width: 480px) {
+                body { padding: 1rem; }
+                .new-session { flex-direction: column; }
+                .new-session input { min-width: 100%; }
+                .new-session .btn { width: 100%; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="margin-top: 1rem; color: #71717a;">Starting session...</p>
+        </div>
+        <div class="container">
+            <h1>Session Picker</h1>
+            <p class="subtitle">Create a new session, rename existing ones, or join one. Swipe left to delete.</p>
+            <div class="new-session">
+                <input type="text" id="newName" placeholder="Session name..." pattern="[a-zA-Z0-9_-]+">
+                <button class="btn btn-primary" onclick="createSession()">Create</button>
+            </div>
+            <div class="session-list" id="sessionList">
+                <div class="empty">Loading sessions...</div>
+            </div>
+        </div>
+        <script>
+            function showLoading() {
+                document.getElementById('loading').classList.add('show');
+            }
+
+            async function loadSessions() {
+                const res = await fetch('/api/sessions');
+                const data = await res.json();
+                const list = document.getElementById('sessionList');
+
+                if (data.sessions.length === 0 && data.active.length === 0) {
+                    list.innerHTML = '<div class="empty">Waiting for first session to start...</div>';
+                    return;
+                }
+
+                // Build session list using displayName for UI, name for API
+                const sessionMap = new Map();
+                data.sessions.forEach(s => sessionMap.set(s.name, s));
+                data.active.forEach(n => { if (!sessionMap.has(n)) sessionMap.set(n, { name: n }); });
+
+                list.innerHTML = Array.from(sessionMap.values()).map(s => {
+                    const name = s.name;
+                    const displayName = s.displayName || name;
+                    const isActive = data.active.includes(name);
+                    const isStarting = (data.starting || []).includes(name);
+                    return `
+                        <div class="session-item-wrapper" data-session="${name}">
+                            <div class="session-action rename" onclick="renameSession('${name}', '${displayName}')">Rename</div>
+                            <div class="session-action delete" onclick="deleteSession('${name}')">Delete</div>
+                            <div class="session-item">
+                                <div class="session-info">
+                                    <div class="session-header">
+                                        <span class="session-name">${displayName}</span>
+                                        ${isActive ? '<span class="active-badge">LIVE</span>' : (isStarting ? '<span class="starting-badge">STARTING</span>' : '')}
+                                    </div>
+                                    <div class="session-meta">${s.windows ? s.windows + ' window(s)' : 'Starting...'}</div>
+                                </div>
+                                <a href="/?session=${encodeURIComponent(name)}" class="btn btn-primary" onclick="showLoading()">Join</a>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+                initSwipe();
+            }
+
+            async function createSession() {
+                const input = document.getElementById('newName');
+                const name = input.value.trim();
+                if (!name) { input.focus(); return; }
+                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
+
+                showLoading();
+                const res = await fetch('/api/sessions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                const data = await res.json();
+                // Use full name returned by API (includes hop- prefix)
+                window.location.href = '/?session=' + encodeURIComponent(data.name);
+            }
+
+            async function renameSession(oldName, oldDisplayName) {
+                const newDisplayName = prompt('Enter new session name:', oldDisplayName);
+                if (!newDisplayName || newDisplayName === oldDisplayName) return;
+                if (!/^[a-zA-Z0-9_-]+$/.test(newDisplayName)) return alert('Only letters, numbers, - and _ allowed');
+
+                // Backend will add hop- prefix automatically
+                await fetch('/api/sessions/rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ oldName, newName: newDisplayName })
+                });
+                loadSessions();
+            }
+
+            async function deleteSession(name) {
+                if (!confirm('Delete session "' + name + '"? This will kill the terminal session.')) return;
+
+                await fetch('/api/sessions/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                loadSessions();
+            }
+
+            function initSwipe() {
+                document.querySelectorAll('.session-item-wrapper').forEach(wrapper => {
+                    const item = wrapper.querySelector('.session-item');
+                    let startX, currentX, isDragging = false;
+
+                    wrapper.addEventListener('touchstart', e => {
+                        startX = e.touches[0].clientX;
+                        currentX = startX;
+                        isDragging = true;
+                        item.style.transition = 'none';
+                    }, { passive: true });
+
+                    wrapper.addEventListener('touchmove', e => {
+                        if (!isDragging) return;
+                        currentX = e.touches[0].clientX;
+                        let dx = currentX - startX;
+                        // Clamp: -80 (left/delete) to +80 (right/rename)
+                        dx = Math.max(-80, Math.min(80, dx));
+                        item.style.transform = 'translateX(' + dx + 'px)';
+                    }, { passive: true });
+
+                    wrapper.addEventListener('touchend', () => {
+                        if (!isDragging) return;
+                        isDragging = false;
+                        item.style.transition = 'transform 0.2s ease-out';
+                        const dx = currentX - startX;
+                        if (dx < -40) {
+                            item.style.transform = 'translateX(-80px)'; // Show delete
+                        } else if (dx > 40) {
+                            item.style.transform = 'translateX(80px)'; // Show rename
+                        } else {
+                            item.style.transform = 'translateX(0)';
+                        }
+                    }, { passive: true });
+
+                    // Close on tap elsewhere
+                    item.addEventListener('click', e => {
+                        const transform = item.style.transform;
+                        if (transform && transform !== 'translateX(0px)' && transform !== 'translateX(0)') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            item.style.transform = 'translateX(0)';
+                        }
+                    });
+                });
+            }
+
+            document.getElementById('newName').addEventListener('keypress', e => {
+                if (e.key === 'Enter') createSession();
+            });
+
+            loadSessions();
+            setInterval(loadSessions, 3000);
+        </script>
+    </body>
+</html>

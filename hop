@@ -11,6 +11,7 @@ const qrcode = require('qrcode-terminal');
 const cookie = require('cookie');
 const EventEmitter = require('events');
 const url = require('url');
+const net = require('net');
 
 const os = require('os');
 
@@ -48,12 +49,14 @@ function writePrivateFile(filePath, data, mode = PRIVATE_FILE_MODE) {
 ensurePrivateDir(HOME_DIR);
 
 const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
-const SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
+const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
-const PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
+const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
 const LOG_DIR = path.join(HOME_DIR, 'logs');
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+let SECRET_FILE_PATH = DEFAULT_SECRET_FILE;
+let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
 
 // Password hashing using scrypt (built-in, no external deps)
 function hashPassword(password) {
@@ -71,27 +74,26 @@ function verifyPassword(password, stored) {
 }
 
 function getStoredPassword() {
-    if (fs.existsSync(PASSWORD_FILE)) {
-        ensurePrivateFile(PASSWORD_FILE);
-        return fs.readFileSync(PASSWORD_FILE, 'utf8').trim();
+    if (fs.existsSync(PASSWORD_FILE_PATH)) {
+        ensurePrivateFile(PASSWORD_FILE_PATH);
+        return fs.readFileSync(PASSWORD_FILE_PATH, 'utf8').trim();
     }
     return null;
 }
 
 function setPassword(password) {
     const hashed = hashPassword(password);
-    fs.writeFileSync(PASSWORD_FILE, hashed);
-    fs.chmodSync(PASSWORD_FILE, 0o600);  // Only owner can read
+    writePrivateFile(PASSWORD_FILE_PATH, hashed);
 }
 
 function clearPassword() {
-    if (fs.existsSync(PASSWORD_FILE)) {
-        fs.unlinkSync(PASSWORD_FILE);
+    if (fs.existsSync(PASSWORD_FILE_PATH)) {
+        fs.unlinkSync(PASSWORD_FILE_PATH);
     }
 }
 
 function isPasswordEnabled() {
-    return fs.existsSync(PASSWORD_FILE);
+    return fs.existsSync(PASSWORD_FILE_PATH);
 }
 const HOP_TMUX_CONF = path.join(HOME_DIR, '.hop-tmux.conf');
 const HOP_TMUX_WRAPPER = path.join(HOME_DIR, '.hop-tmux-wrapper.sh');
@@ -570,32 +572,32 @@ async function exportUserCredentials(username) {
     const exportCredentials = path.join(exportDir, 'credentials.json');
     fs.copyFileSync(credentialsFile, exportCredentials);
 
-    // Create README with hop client instructions
-    const readme = `# Hop Tunnel for ${username}
+    // Create config.yml with hostname for client convenience
+    const exportConfig = `hostname: ${user.hostname}
+tunnel: ${user.tunnelId || ''}
+`;
+    const exportConfigPath = path.join(exportDir, 'config.yml');
+    writePrivateFile(exportConfigPath, exportConfig);
 
-Your tunnel URL: https://${user.hostname}
+    // Create README with hop client instructions
+    const readme = `# Hop Terminal for ${username}
+
+Your hop URL: https://${user.hostname}
 
 ## Quick Start
 
 1. Install hop globally:
    npm install -g hop-shell
 
-2. Start the tunnel:
+2. Start hop with credentials:
    hop client ./credentials.json
 
 3. On first run, you'll be prompted to:
    - Set a password (required)
    - Scan a QR code for 2FA (TOTP)
 
-4. Start your local service on port 8080
-
-5. Your service is now accessible at:
+4. Open your URL and log in:
    https://${user.hostname}
-
-## Changing the port
-
-Use the --port option:
-   hop client ./credentials.json --port 3000
 
 ## Security
 
@@ -618,6 +620,7 @@ Then run hop client again to set up fresh credentials.
     log(`\nExport location: ${exportDir}`, BOLD);
     log(`\nFiles created:`, RESET);
     log(`  - credentials.json  (tunnel credentials - keep secret!)`, RESET);
+    log(`  - config.yml        (hostname config)`, RESET);
     log(`  - README.md         (setup instructions)`, RESET);
     log(`\n${YELLOW}Send this folder to ${username}.${RESET}`, YELLOW);
     log(`\nThey should:`, RESET);
@@ -658,12 +661,14 @@ if (existingState) {
 
 // Persistence for Stable QR Code
 let AUTH_SECRET;
-if (fs.existsSync(SECRET_FILE)) {
-    AUTH_SECRET = fs.readFileSync(SECRET_FILE, 'utf8').trim();
-    ensurePrivateFile(SECRET_FILE);
-} else {
-    AUTH_SECRET = authenticator.generateSecret();
-    writePrivateFile(SECRET_FILE, AUTH_SECRET);
+function loadAuthSecret() {
+    if (fs.existsSync(SECRET_FILE_PATH)) {
+        AUTH_SECRET = fs.readFileSync(SECRET_FILE_PATH, 'utf8').trim();
+        ensurePrivateFile(SECRET_FILE_PATH);
+    } else {
+        AUTH_SECRET = authenticator.generateSecret();
+        writePrivateFile(SECRET_FILE_PATH, AUTH_SECRET);
+    }
 }
 
 // Port configuration
@@ -715,6 +720,7 @@ try { fs.chmodSync(HOP_TMUX_WRAPPER, PRIVATE_DIR_MODE); } catch (e) { }
 
 // Session Management
 const activeSessions = {}; // { sessionName: { ttyd: Process, port: number } }
+const startingSessions = new Set(); // session names waiting for ttyd to be ready
 const sessionRenames = {};  // { oldName: newName } - track renames for styling updates
 let nextPort = BASE_PORT + 1;
 
@@ -899,6 +905,7 @@ function getOrCreateSession(sessionName) {
     }
 
     const port = nextPort++;
+    startingSessions.add(sessionName);
     const logFilePath = path.join(LOG_DIR, `ttyd-${sessionName}.log`);
     const logFile = fs.openSync(logFilePath, 'w', PRIVATE_FILE_MODE);
     ensurePrivateFile(logFilePath);
@@ -929,11 +936,16 @@ function getOrCreateSession(sessionName) {
     ttyd.on('error', (err) => log(`Failed TTYD for ${sessionName}: ${err.message}`, RED));
     ttyd.on('close', () => {
         delete activeSessions[sessionName];
+        startingSessions.delete(sessionName);
         log(`Session ${sessionName} closed.`, YELLOW);
     });
 
     activeSessions[sessionName] = { ttyd, port };
     log(`  Started session "${sessionName}" on port ${port}`, GREEN);
+
+    waitForPort(port, '127.0.0.1', 8000, 150).then(() => {
+        startingSessions.delete(sessionName);
+    });
 
     // Apply tmux styles with retries (give tmux time to start)
     const applyStylesWithRetry = (retries = 0) => {
@@ -1093,6 +1105,57 @@ function getClientIp(req) {
         req.headers['x-forwarded-for'] ||
         req.socket.remoteAddress ||
         'unknown';
+}
+
+function waitForPort(port, host = '127.0.0.1', timeoutMs = 4000, intervalMs = 120) {
+    const start = Date.now();
+    return new Promise((resolve) => {
+        const tryConnect = () => {
+            const socket = net.connect({ port, host });
+            socket.once('connect', () => {
+                socket.end();
+                resolve(true);
+            });
+            socket.once('error', () => {
+                socket.destroy();
+                if (Date.now() - start >= timeoutMs) {
+                    resolve(false);
+                    return;
+                }
+                setTimeout(tryConnect, intervalMs);
+            });
+        };
+        tryConnect();
+    });
+}
+
+function sendStartingPage(res, sessionName) {
+    setNoCache(res);
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="1">
+    <title>Starting Session</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fafafa; color: #18181b; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+      .box { text-align: center; padding: 2rem; max-width: 420px; }
+      .spinner { width: 28px; height: 28px; border: 3px solid #e4e4e7; border-top-color: #7c3aed; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      a { color: #7c3aed; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <div class="spinner"></div>
+      <h2>Starting session…</h2>
+      <p>This can take a few seconds. Refreshing automatically.</p>
+      <p><a href="/?session=${encodeURIComponent(sessionName)}">Click to retry</a></p>
+    </div>
+  </body>
+</html>`);
 }
 
 function setNoCache(res) {
@@ -1395,8 +1458,10 @@ function startAuthProxy(authEmitter) {
                 }));
             const activeSessionNames = Object.keys(activeSessions)
                 .filter(n => n.startsWith(HOP_SESSION_PREFIX));
+            const startingSessionNames = Array.from(startingSessions)
+                .filter(n => n.startsWith(HOP_SESSION_PREFIX));
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ sessions, active: activeSessionNames }));
+            res.end(JSON.stringify({ sessions, active: activeSessionNames, starting: startingSessionNames }));
             return;
         }
 
@@ -1542,50 +1607,60 @@ function startAuthProxy(authEmitter) {
         // Only inject keyboard for iOS on the root path (main HTML page)
         const reqPath = parsedUrl.pathname || '/';
         if (isIOS && (reqPath === '/' || reqPath === '')) {
-            // Intercept ttyd's HTML response and inject our keyboard
-            const ttydReq = http.request({
-                hostname: '127.0.0.1',
-                port: session.port,
-                path: '/',
-                method: 'GET',
-                headers: {
-                    'Accept': 'text/html',
-                    'User-Agent': userAgent
+            waitForPort(session.port).then((ready) => {
+                if (!ready) {
+                    sendStartingPage(res, sessionName);
+                    return;
                 }
-            }, (ttydRes) => {
-                let chunks = [];
-                ttydRes.on('data', chunk => chunks.push(chunk));
-                ttydRes.on('end', () => {
-                    let html = Buffer.concat(chunks).toString('utf8');
-                    // Inject WebSocket hook in <head> BEFORE ttyd scripts run
-                    // Inject keyboard UI before </body>
-                    if (html.includes('<head>') && html.includes('</body>')) {
-                        const { hook, ui } = getIOSKeyboardInjection();
-                        // Use split/join instead of replace to avoid any $ interpretation
-                        html = html.split('<head>').join('<head>' + hook);
-                        html = html.split('</body>').join(ui + '</body>');
-                        // log(`[Hop] Injected keyboard UI (${ui.length} bytes)`, GREEN);
+                // Intercept ttyd's HTML response and inject our keyboard
+                const ttydReq = http.request({
+                    hostname: '127.0.0.1',
+                    port: session.port,
+                    path: '/',
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'text/html',
+                        'User-Agent': userAgent
                     }
-                    res.writeHead(200, {
-                        'Content-Type': 'text/html; charset=utf-8',
-                        'Content-Length': Buffer.byteLength(html)
+                }, (ttydRes) => {
+                    let chunks = [];
+                    ttydRes.on('data', chunk => chunks.push(chunk));
+                    ttydRes.on('end', () => {
+                        let html = Buffer.concat(chunks).toString('utf8');
+                        // Inject WebSocket hook in <head> BEFORE ttyd scripts run
+                        // Inject keyboard UI before </body>
+                        if (html.includes('<head>') && html.includes('</body>')) {
+                            const { hook, ui } = getIOSKeyboardInjection();
+                            // Use split/join instead of replace to avoid any $ interpretation
+                            html = html.split('<head>').join('<head>' + hook);
+                            html = html.split('</body>').join(ui + '</body>');
+                            // log(`[Hop] Injected keyboard UI (${ui.length} bytes)`, GREEN);
+                        }
+                        res.writeHead(200, {
+                            'Content-Type': 'text/html; charset=utf-8',
+                            'Content-Length': Buffer.byteLength(html)
+                        });
+                        res.end(html);
                     });
-                    res.end(html);
                 });
+                ttydReq.on('error', () => {
+                    sendStartingPage(res, sessionName);
+                });
+                ttydReq.end();
             });
-            ttydReq.on('error', () => {
-                res.writeHead(502);
-                res.end('Session not ready.');
-            });
-            ttydReq.end();
             return;
         }
 
         // --- PROXY TO SESSION (non-iOS) ---
-        const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${session.port}`, ws: false });
-        proxy.web(req, res, {}, (err) => {
-            res.writeHead(502);
-            res.end('Session not ready. Try again.');
+        waitForPort(session.port).then((ready) => {
+            if (!ready) {
+                sendStartingPage(res, sessionName);
+                return;
+            }
+            const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${session.port}`, ws: false });
+            proxy.web(req, res, {}, () => {
+                sendStartingPage(res, sessionName);
+            });
         });
     });
 
@@ -1624,6 +1699,7 @@ let currentTunnelProc = null;
 let currentPublicUrl = null;
 let shuttingDown = false;  // Prevent restart during cleanup
 const tunnelEmitter = new EventEmitter();
+let CLIENT_TUNNEL_CONFIG = null; // { tunnelId, credentialsPath, hostname, configDir }
 
 function startTunnel(isRestart = false) {
     const domainConfig = getDomainConfig();
@@ -1747,9 +1823,90 @@ tunnel: ${domainConfig.tunnelName}
     });
 }
 
+function startClientTunnel(isRestart = false) {
+    if (!CLIENT_TUNNEL_CONFIG) {
+        throw new Error('Client tunnel config missing');
+    }
+
+    const { tunnelId, credentialsPath, hostname, configDir } = CLIENT_TUNNEL_CONFIG;
+    const publicUrl = hostname ? `https://${hostname}` : null;
+
+    if (!isRestart) {
+        log(`[3/4] Opening Cloudflare Tunnel${hostname ? ` (${hostname})` : ''}...`, BOLD);
+    } else {
+        log(`[Tunnel] Reconnecting...`, YELLOW);
+    }
+
+    const tunnelConfigPath = path.join(configDir, 'tunnel-config.yml');
+    const tunnelConfig = `
+url: http://localhost:${PROXY_PORT}
+tunnel: ${tunnelId}
+credentials-file: ${path.resolve(credentialsPath)}
+`;
+    writePrivateFile(tunnelConfigPath, tunnelConfig);
+
+    const tunnel = spawn('cloudflared', ['tunnel', '--config', tunnelConfigPath, 'run'], {
+        stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    tunnel.on('close', (code) => {
+        if (shuttingDown) return;  // Don't restart during cleanup
+        if (code !== null) {
+            log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
+            setTimeout(() => {
+                if (!shuttingDown) startTunnelWithRestart();
+            }, 3000);
+        }
+    });
+
+    tunnel.on('error', (err) => {
+        if (shuttingDown) return;  // Don't restart during cleanup
+        log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
+        setTimeout(() => {
+            if (!shuttingDown) startTunnelWithRestart();
+        }, 3000);
+    });
+
+    currentTunnelProc = tunnel;
+    currentPublicUrl = publicUrl;
+
+    return new Promise((resolve) => {
+        let resolved = false;
+
+        tunnel.stderr.on('data', (data) => {
+            const output = data.toString();
+            if (!resolved && (output.includes('Registered tunnel connection') || output.includes('Connection'))) {
+                resolved = true;
+                if (isRestart) {
+                    if (publicUrl) {
+                        tunnelEmitter.emit('urlChanged', publicUrl);
+                        log(`[Tunnel] Reconnected: ${publicUrl}`, GREEN);
+                    } else {
+                        log(`[Tunnel] Reconnected.`, GREEN);
+                    }
+                }
+                resolve({ tunnel, publicUrl });
+            }
+        });
+
+        // Timeout fallback - assume connected after 5 seconds
+        setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                if (isRestart && publicUrl) {
+                    tunnelEmitter.emit('urlChanged', publicUrl);
+                }
+                resolve({ tunnel, publicUrl });
+            }
+        }, 5000);
+    });
+}
+
 async function startTunnelWithRestart() {
     try {
-        const { tunnel, publicUrl } = await startTunnel(true);
+        const { tunnel, publicUrl } = CLIENT_TUNNEL_CONFIG
+            ? await startClientTunnel(true)
+            : await startTunnel(true);
 
         // Update state file
         if (fs.existsSync(STATE_FILE)) {
@@ -1770,7 +1927,7 @@ async function startTunnelWithRestart() {
     }
 }
 
-function waitForStart(authEmitter, publicUrl) {
+function waitForStart(authEmitter, publicUrl, label) {
     return new Promise((resolve) => {
         console.clear();
         log(`\n==================================================`, MAGENTA);
@@ -1787,7 +1944,7 @@ function waitForStart(authEmitter, publicUrl) {
         log(`\n--------------------------------------------------`, RESET);
 
         // Standardized TOTP QR Code using the helper function
-        showQrCode();
+        showQrCode(label || 'Hop');
 
         log(`\n--------------------------------------------------`, RESET);
 
@@ -1813,11 +1970,10 @@ function waitForStart(authEmitter, publicUrl) {
 }
 
 // Generate QR code and prompt for verification
-function showQrCode() {
+function showQrCode(label = 'Hop') {
     log(`[3/4] Setup Authenticator...`, BOLD);
 
     // Manually construct URL for minimalist "Hop" label without username
-    const label = 'Hop';
     const otpauth = `otpauth://totp/${encodeURIComponent(label)}?secret=${AUTH_SECRET}&issuer=${encodeURIComponent(label)}`;
 
     qrcode.generate(otpauth, { small: true });
@@ -1825,21 +1981,111 @@ function showQrCode() {
     log(`Scan this QR code with your Authenticator app.`, CYAN);
 }
 
+async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
+    log(`[4/4] Attaching to session...`, BOLD);
+
+    // Create and attach to session locally
+    // Find next available session name (in case another hop already created one)
+    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const existingSessions = listTmuxSessions().map(s => s.name);
+    let counter = 1;
+    while (existingSessions.includes(`${HOP_SESSION_PREFIX}${cwdName}-${counter}`)) {
+        counter++;
+    }
+    const defaultSessionName = `${HOP_SESSION_PREFIX}${cwdName}-${counter}`;
+
+    log(`Starting session: ${defaultSessionName}`, RESET);
+    getOrCreateSession(defaultSessionName);
+
+    // Apply styling continuously to handle respawns and URL changes (every 1 second)
+    const styleInterval = setInterval(() => {
+        // Use currentPublicUrl to pick up URL changes after tunnel restarts
+        applyTmuxStyles(defaultSessionName, currentPublicUrl || publicUrl);
+    }, 1000);
+
+    // Apply immediately (no delay needed since execSync is synchronous)
+    applyTmuxStyles(defaultSessionName, publicUrl);
+
+    // Also update when tunnel URL changes
+    tunnelEmitter.on('urlChanged', (newUrl) => {
+        applyTmuxStyles(defaultSessionName, newUrl);
+    });
+
+    const cleanup = () => {
+        shuttingDown = true;  // Prevent tunnel auto-restart
+        log(`Cleaning up...`, YELLOW);
+
+        clearInterval(styleInterval);
+
+        // Remove state file
+        if (fs.existsSync(STATE_FILE)) {
+            try { fs.unlinkSync(STATE_FILE); } catch (e) { }
+        }
+
+        // Kill all ttyd sessions
+        Object.values(activeSessions).forEach(s => {
+            try { s.ttyd.kill('SIGTERM'); } catch (e) { }
+        });
+
+        // Kill cloudflared tunnel (use currentTunnelProc in case it was restarted)
+        try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }
+
+        // Close proxy server
+        try { proxyServer.close(); } catch (e) { }
+
+        log(`Goodbye!`, GREEN);
+        process.exit(0);
+    };
+
+    const runLocalSessionLoop = async () => {
+        const readline = require('readline');
+        while (true) {
+            await new Promise(resolve => {
+                const tmux = spawn('tmux', ['-f', HOP_TMUX_CONF, 'new-session', '-A', '-s', defaultSessionName], { stdio: 'inherit' });
+                tmux.on('close', resolve);
+            });
+            log(`\n[Session ended]`, YELLOW);
+            const answer = await new Promise(resolve => {
+                const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                rl.question(`Type 'quit' to shutdown tunnel, or press Enter to restart: `, (resp) => {
+                    rl.close();
+                    resolve(resp || '');
+                });
+            });
+            if (String(answer).trim().toLowerCase() === 'quit') {
+                break;
+            }
+            log(`Restarting...`, RESET);
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    };
+
+    runLocalSessionLoop().then(() => {
+        log(`\nLocal session ended. Shutting down tunnel...`, YELLOW);
+        cleanup();
+    });
+
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
+    process.on('exit', cleanup);
+}
+
 async function main() {
     // Handle `hop client` - run as a user with exported credentials
     if (process.argv[2] === 'client') {
         const credentialsArg = process.argv[3];
+        const hostnameArgIndex = process.argv.indexOf('--hostname');
+        const hostnameOverride = hostnameArgIndex !== -1 ? process.argv[hostnameArgIndex + 1] : null;
 
-        if (!credentialsArg || credentialsArg === '--help') {
+        if (!credentialsArg || credentialsArg === '--help' || credentialsArg === '-h') {
             log(`\n${BOLD}Hop Client Mode${RESET}\n`, CYAN);
-            log(`Run a tunnel using credentials from your admin.\n`, RESET);
+            log(`Run hop with credentials from your admin.\n`, RESET);
             log(`${BOLD}Usage:${RESET}`, RESET);
             log(`  hop client <credentials.json>              Start tunnel with credentials`, RESET);
             log(`  hop client <folder>                        Start tunnel (folder contains credentials.json)`, RESET);
-            log(`  hop client <credentials.json> --port 3000  Use custom local port`, RESET);
             log('');
             log(`${BOLD}Options:${RESET}`, RESET);
-            log(`  --port <number>    Local port to proxy to (default: 8080)`, RESET);
+            log(`  --hostname <name>  Override hostname if config.yml is missing`, RESET);
             log('');
             log(`${BOLD}First run:${RESET}`, RESET);
             log(`  You'll be prompted to set a password and scan a QR code`, RESET);
@@ -1847,7 +2093,6 @@ async function main() {
             log('');
             log(`${BOLD}Example:${RESET}`, RESET);
             log(`  hop client ./my-credentials.json`, RESET);
-            log(`  hop client ~/Downloads/alice/ --port 3000`, RESET);
             log('');
             process.exit(0);
         }
@@ -1875,12 +2120,10 @@ async function main() {
         // Client config is stored per-tunnel (based on tunnel ID)
         const tunnelId = credentials.TunnelID || credentials.tunnelId || path.basename(credentialsPath, '.json');
         const clientConfigDir = path.join(HOME_DIR, 'clients', tunnelId);
-        if (!fs.existsSync(clientConfigDir)) {
-            fs.mkdirSync(clientConfigDir, { recursive: true });
-        }
+        ensurePrivateDir(clientConfigDir);
 
-        const clientPasswordFile = path.join(clientConfigDir, '.password_hash');
-        const clientSecretFile = path.join(clientConfigDir, '.auth_secret');
+        PASSWORD_FILE_PATH = path.join(clientConfigDir, '.password_hash');
+        SECRET_FILE_PATH = path.join(clientConfigDir, '.auth_secret');
         const clientConfigFile = path.join(clientConfigDir, '.config.json');
 
         // Load or create client config
@@ -1891,14 +2134,38 @@ async function main() {
             } catch (e) { }
         }
 
+        let hostname = clientConfig.hostname || null;
+        if (hostnameOverride) {
+            hostname = hostnameOverride;
+        }
+
+        // Try to find hostname in config.yml in the export folder
+        const configYmlPath = path.join(path.dirname(credentialsPath), 'config.yml');
+        if (!hostname && fs.existsSync(configYmlPath)) {
+            const configYml = fs.readFileSync(configYmlPath, 'utf8');
+            const hostnameMatch = configYml.match(/hostname:\s*(\S+)/);
+            if (hostnameMatch) hostname = hostnameMatch[1];
+        }
+
+        if (!hostname) {
+            log(`Hostname not found.`, RED);
+            log(`Ask your admin to export a fresh bundle or pass --hostname.`, YELLOW);
+            process.exit(1);
+        }
+
+        if (clientConfig.hostname !== hostname) {
+            clientConfig.hostname = hostname;
+            writePrivateFile(clientConfigFile, JSON.stringify(clientConfig, null, 2));
+        }
+
         // First time setup - require password and TOTP
-        const clientPasswordExists = fs.existsSync(clientPasswordFile);
-        const clientSecretExists = fs.existsSync(clientSecretFile);
+        const clientPasswordExists = isPasswordEnabled();
+        const clientSecretExists = fs.existsSync(SECRET_FILE_PATH);
 
         if (!clientPasswordExists || !clientSecretExists) {
             log(`\n${BOLD}${YELLOW}⚠ First time setup required${RESET}\n`, YELLOW);
             log(`Your tunnel URL will be publicly accessible.`, RESET);
-            log(`Password + authenticator code protects your service.\n`, RESET);
+            log(`Password + authenticator code protects your hop login.\n`, RESET);
 
             const readline = require('readline');
             const stream = require('stream');
@@ -1931,210 +2198,48 @@ async function main() {
                     log(`Passwords do not match.`, RED);
                     process.exit(1);
                 }
-                const hashedPassword = hashPassword(password);
-                fs.writeFileSync(clientPasswordFile, hashedPassword);
-                fs.chmodSync(clientPasswordFile, 0o600);
+                setPassword(password);
                 log(`${GREEN}✓ Password set.${RESET}`, GREEN);
             }
 
             // Set up TOTP
             if (!clientSecretExists) {
-                const secret = authenticator.generateSecret();
-                fs.writeFileSync(clientSecretFile, secret);
-                fs.chmodSync(clientSecretFile, 0o600);
-
+                loadAuthSecret();
                 log(`\n${BOLD}Scan this QR code with your authenticator app:${RESET}\n`, CYAN);
-                const label = `Hop-${tunnelId.slice(0, 8)}`;
-                const otpauth = `otpauth://totp/${encodeURIComponent(label)}?secret=${secret}&issuer=Hop`;
-                qrcode.generate(otpauth, { small: true });
+                const label = hostname ? `Hop-${hostname}` : `Hop-${tunnelId.slice(0, 8)}`;
+                showQrCode(label);
             }
 
             log(`\n${GREEN}✓ Setup complete!${RESET}\n`, GREEN);
         }
 
-        // Load client auth secrets
-        const clientPassword = fs.readFileSync(clientPasswordFile, 'utf8').trim();
-        const clientAuthSecret = fs.readFileSync(clientSecretFile, 'utf8').trim();
+        loadAuthSecret();
 
-        // Determine port from --port argument or default
-        let localPort = 8080;
-        let hostname = clientConfig.hostname || null;
+        await checkAndInstallDependencies();
+        const authEmitter = new EventEmitter();
 
-        // Check for --port argument
-        const portArgIndex = process.argv.indexOf('--port');
-        if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
-            const portArg = parseInt(process.argv[portArgIndex + 1]);
-            if (portArg > 0 && portArg < 65536) {
-                localPort = portArg;
-            }
-        }
+        const proxyServer = startAuthProxy(authEmitter);
+        CLIENT_TUNNEL_CONFIG = {
+            tunnelId,
+            credentialsPath,
+            hostname,
+            configDir: clientConfigDir
+        };
+        const { tunnel: tunnelProc, publicUrl } = await startClientTunnel();
 
-        // Try to find config.yml in same directory as credentials (for hostname only)
-        const configYmlPath = path.join(path.dirname(credentialsPath), 'config.yml');
-        if (fs.existsSync(configYmlPath)) {
-            const configYml = fs.readFileSync(configYmlPath, 'utf8');
-            // Only use port from config if not specified via --port
-            if (portArgIndex === -1) {
-                const portMatch = configYml.match(/localhost:(\d+)/);
-                if (portMatch) localPort = parseInt(portMatch[1]);
-            }
-            const hostnameMatch = configYml.match(/hostname:\s*(\S+)/);
-            if (hostnameMatch) hostname = hostnameMatch[1];
-        }
+        // Save state for other terminals to find
+        writePrivateFile(STATE_FILE, JSON.stringify({
+            pid: process.pid,
+            port: BASE_PORT,
+            url: publicUrl,
+            sessionSecret: SESSION_SECRET,
+            startTime: Date.now()
+        }));
 
-        // Start auth proxy
-        const clientProxyPort = Math.floor(Math.random() * (50000 - 10000 + 1) + 10000);
-        const clientSessionSecret = crypto.randomBytes(32).toString('hex');
+        await waitForStart(authEmitter, publicUrl, `Hop-${hostname}`);
 
-        log(`${BOLD}Starting Hop Client...${RESET}`, CYAN);
-        if (hostname) {
-            log(`URL: https://${hostname}`, GREEN);
-        }
-        log(`Proxying to: localhost:${localPort}`, RESET);
-        log('');
-
-        // Simple auth proxy for client mode
-        const clientServer = http.createServer((req, res) => {
-            const parsedUrl = url.parse(req.url, true);
-            const cookies = cookie.parse(req.headers.cookie || '');
-            const isAuth = cookies['hop_client_session'] === clientSessionSecret;
-
-            if (!isAuth) {
-                // Login API
-                if (req.method === 'POST' && parsedUrl.pathname === '/api/login') {
-                    let body = '';
-                    req.on('data', chunk => body += chunk);
-                    req.on('end', () => {
-                        try {
-                            const { password, totp } = JSON.parse(body);
-                            if (!verifyPassword(password || '', clientPassword)) {
-                                res.writeHead(401, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ error: 'Invalid password' }));
-                                return;
-                            }
-                            if (!authenticator.check(totp, clientAuthSecret)) {
-                                res.writeHead(401, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ error: 'Invalid code' }));
-                                return;
-                            }
-                            res.setHeader('Set-Cookie', cookie.serialize('hop_client_session', clientSessionSecret, {
-                                httpOnly: true,
-                                secure: true,
-                                sameSite: 'lax',
-                                path: '/',
-                                maxAge: 60 * 60 * 24 * 7
-                            }));
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true }));
-                        } catch (e) {
-                            res.writeHead(400, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ error: 'Invalid request' }));
-                        }
-                    });
-                    return;
-                }
-
-                // Login page
-                setNoCache(res);
-                appendSetCookie(res, [cookie.serialize('hop_client_session', '', {
-                    httpOnly: true,
-                    secure: true,
-                    sameSite: 'lax',
-                    path: '/',
-                    expires: new Date(0),
-                    maxAge: 0
-                })]);
-                res.writeHead(200, { 'Content-Type': 'text/html' });
-                res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Login</title>
-                <style>body{font-family:-apple-system,sans-serif;background:#fafafa;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
-                .box{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);max-width:320px;width:100%}
-                h2{margin:0 0 1.5rem;font-size:1.25rem;text-align:center}
-                input{width:100%;padding:0.75rem;margin-bottom:1rem;border:1px solid #e4e4e7;border-radius:8px;font-size:1rem;box-sizing:border-box}
-                input:focus{outline:none;border-color:#7c3aed}
-                button{width:100%;padding:0.75rem;background:#18181b;color:#fff;border:none;border-radius:8px;font-size:1rem;cursor:pointer}
-                button:hover{opacity:0.9}.error{color:#dc2626;font-size:0.875rem;margin-bottom:1rem;display:none}</style></head>
-                <body><div class="box"><h2>🔐 Login</h2><div class="error" id="error"></div>
-                <input type="password" id="password" placeholder="Password" autofocus>
-                <input type="text" id="totp" placeholder="6-digit code" maxlength="6" inputmode="numeric">
-                <button onclick="login()">Login</button></div>
-                <script>
-                async function login(){
-                    const error=document.getElementById('error');
-                    error.style.display='none';
-                    const password=document.getElementById('password').value;
-                    const totp=document.getElementById('totp').value;
-                    try{
-                        const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password,totp})});
-                        const data=await res.json();
-                        if(data.success){location.reload();}
-                        else{error.textContent=data.error||'Login failed';error.style.display='block';}
-                    }catch(e){error.textContent='Connection error';error.style.display='block';}
-                }
-                document.getElementById('totp').addEventListener('keyup',e=>{if(e.key==='Enter')login();});
-                document.getElementById('password').addEventListener('keyup',e=>{if(e.key==='Enter')document.getElementById('totp').focus();});
-                </script></body></html>`);
-                return;
-            }
-
-            // Authenticated - proxy to local service
-            const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${localPort}` });
-            proxy.web(req, res, {}, (err) => {
-                res.writeHead(502);
-                res.end(`Cannot connect to localhost:${localPort}. Is your service running?`);
-            });
-        });
-
-        // Handle WebSocket upgrade
-        clientServer.on('upgrade', (req, socket, head) => {
-            const cookies = cookie.parse(req.headers.cookie || '');
-            if (cookies['hop_client_session'] !== clientSessionSecret) {
-                socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-                socket.destroy();
-                return;
-            }
-            const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${localPort}`, ws: true });
-            proxy.ws(req, socket, head);
-        });
-
-        clientServer.listen(clientProxyPort, '127.0.0.1');
-
-        // Start cloudflared tunnel
-        const tunnelConfigPath = path.join(clientConfigDir, 'tunnel-config.yml');
-        const tunnelConfigContent = `
-url: http://localhost:${clientProxyPort}
-tunnel: ${tunnelId}
-credentials-file: ${path.resolve(credentialsPath)}
-`;
-        fs.writeFileSync(tunnelConfigPath, tunnelConfigContent);
-
-        const cloudflared = spawn('cloudflared', ['tunnel', '--config', tunnelConfigPath, 'run'], {
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-
-        cloudflared.stderr.on('data', (data) => {
-            const output = data.toString();
-            if (output.includes('Registered tunnel connection')) {
-                log(`${GREEN}✓ Tunnel connected!${RESET}`, GREEN);
-            }
-        });
-
-        cloudflared.on('close', (code) => {
-            log(`Tunnel closed (code ${code})`, YELLOW);
-            clientServer.close();
-            process.exit(code || 0);
-        });
-
-        log(`Waiting for tunnel connection...`, RESET);
-
-        // Handle shutdown
-        process.on('SIGINT', () => {
-            log(`\nShutting down...`, YELLOW);
-            cloudflared.kill();
-            clientServer.close();
-            process.exit(0);
-        });
-
-        return; // Keep running
+        await startLocalSession(proxyServer, tunnelProc, publicUrl);
+        return;
     }
 
     // Handle `hop --help` or `hop help`
@@ -2500,6 +2605,7 @@ credentials-file: ${path.resolve(credentialsPath)}
         process.exit(1);
     }
 
+    loadAuthSecret();
     await checkAndInstallDependencies();
     const authEmitter = new EventEmitter();
 
@@ -2517,90 +2623,7 @@ credentials-file: ${path.resolve(credentialsPath)}
 
     await waitForStart(authEmitter, publicUrl);
 
-    log(`[4/4] Attaching to session...`, BOLD);
-
-    // Create and attach to session locally
-    // Find next available session name (in case another hop already created one)
-    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const existingSessions = listTmuxSessions().map(s => s.name);
-    let counter = 1;
-    while (existingSessions.includes(`${HOP_SESSION_PREFIX}${cwdName}-${counter}`)) {
-        counter++;
-    }
-    const defaultSessionName = `${HOP_SESSION_PREFIX}${cwdName}-${counter}`;
-
-    log(`Starting session: ${defaultSessionName}`, RESET);
-    const defaultSession = getOrCreateSession(defaultSessionName);
-
-    // Apply styling continuously to handle respawns and URL changes (every 1 second)
-    const styleInterval = setInterval(() => {
-        // Use currentPublicUrl to pick up URL changes after tunnel restarts
-        applyTmuxStyles(defaultSessionName, currentPublicUrl || publicUrl);
-    }, 1000);
-
-    // Apply immediately (no delay needed since execSync is synchronous)
-    applyTmuxStyles(defaultSessionName, publicUrl);
-
-    // Also update when tunnel URL changes
-    tunnelEmitter.on('urlChanged', (newUrl) => {
-        applyTmuxStyles(defaultSessionName, newUrl);
-    });
-
-    const cleanup = () => {
-        shuttingDown = true;  // Prevent tunnel auto-restart
-        log(`Cleaning up...`, YELLOW);
-
-        // Remove state file
-        if (fs.existsSync(STATE_FILE)) {
-            try { fs.unlinkSync(STATE_FILE); } catch (e) { }
-        }
-
-        // Kill all ttyd sessions
-        Object.values(activeSessions).forEach(s => {
-            try { s.ttyd.kill('SIGTERM'); } catch (e) { }
-        });
-
-        // Kill cloudflared tunnel (use currentTunnelProc in case it was restarted)
-        try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }
-
-        // Close proxy server
-        try { proxyServer.close(); } catch (e) { }
-
-        log(`Goodbye!`, GREEN);
-        process.exit(0);
-    };
-
-    const runLocalSessionLoop = async () => {
-        const readline = require('readline');
-        while (true) {
-            await new Promise(resolve => {
-                const tmux = spawn('tmux', ['-f', HOP_TMUX_CONF, 'new-session', '-A', '-s', defaultSessionName], { stdio: 'inherit' });
-                tmux.on('close', resolve);
-            });
-            log(`\n[Session ended]`, YELLOW);
-            const answer = await new Promise(resolve => {
-                const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                rl.question(`Type 'quit' to shutdown tunnel, or press Enter to restart: `, (resp) => {
-                    rl.close();
-                    resolve(resp || '');
-                });
-            });
-            if (String(answer).trim().toLowerCase() === 'quit') {
-                break;
-            }
-            log(`Restarting...`, RESET);
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-    };
-
-    runLocalSessionLoop().then(() => {
-        log(`\nLocal session ended. Shutting down tunnel...`, YELLOW);
-        cleanup();
-    });
-
-    process.on('SIGINT', cleanup);
-    process.on('SIGTERM', cleanup);
-    process.on('exit', cleanup);
+    await startLocalSession(proxyServer, tunnelProc, publicUrl);
 }
 
 main().catch(err => {

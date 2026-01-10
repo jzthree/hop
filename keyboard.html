@@ -1449,16 +1449,18 @@
                         fetch('/api/sessions')
                             .then(function (r) { return r.json(); })
                             .then(function (data) {
-                                // API returns { sessions: [{name, ...}], active: [names] }
+                                // API returns { sessions: [{name, displayName, ...}], active: [names] }
                                 var sessionObjs = data.sessions || [];
                                 var activeNames = data.active || [];
                                 var currentSession = getCurrentSession();
 
-                                // Merge session names from both sources
-                                var allNames = new Set();
-                                sessionObjs.forEach(function (s) { allNames.add(s.name); });
-                                activeNames.forEach(function (n) { allNames.add(n); });
-                                var allSessions = Array.from(allNames);
+                                // Build session map from session objects
+                                var sessionMap = {};
+                                sessionObjs.forEach(function (s) { sessionMap[s.name] = s; });
+                                activeNames.forEach(function (n) {
+                                    if (!sessionMap[n]) sessionMap[n] = { name: n };
+                                });
+                                var allSessions = Object.values(sessionMap);
 
                                 sessionsList.innerHTML = '';
 
@@ -1471,7 +1473,9 @@
                                     return;
                                 }
 
-                                allSessions.forEach(function (sessionName) {
+                                allSessions.forEach(function (s) {
+                                    var sessionName = s.name;
+                                    var displayName = s.displayName || sessionName;
                                     var item = document.createElement('div');
                                     item.className = 'session-item';
                                     if (sessionName === currentSession) {
@@ -1486,7 +1490,7 @@
                                     }
 
                                     var nameSpan = document.createElement('span');
-                                    nameSpan.textContent = sessionName;
+                                    nameSpan.textContent = displayName;
                                     item.appendChild(nameSpan);
 
                                     item.addEventListener('click', function (e) {

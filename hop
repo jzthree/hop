@@ -2697,11 +2697,12 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     log(`Starting session: ${displayName}`, RESET);
     getOrCreateSession(defaultSessionName);
 
-    // Apply styling continuously to handle respawns and URL changes (every 1 second)
+    // Apply styling continuously to handle respawns and URL changes
+    // Use longer interval (5s) to reduce tmux command overhead
     const styleInterval = setInterval(() => {
         // Use currentPublicUrl to pick up URL changes after tunnel restarts
         applyTmuxStyles(defaultSessionName, currentPublicUrl || publicUrl);
-    }, 1000);
+    }, 5000);
 
     // Apply immediately (no delay needed since execSync is synchronous)
     applyTmuxStyles(defaultSessionName, publicUrl);
@@ -3414,7 +3415,8 @@ async function main() {
                 if (useItermControl) setControlModeActive(true);
                 const tmux = spawn('tmux', getLocalTmuxArgs(sessionName), { stdio: 'inherit' });
 
-                // Apply styling immediately and continuously refresh (every 1 second)
+                // Apply styling immediately and continuously refresh
+                // Use longer interval (5s) to reduce tmux command overhead
                 applyTmuxStyles(sessionName, existingTunnel.url);
 
                 const styleInterval = setInterval(() => {
@@ -3424,7 +3426,7 @@ async function main() {
                     } catch (e) {
                         applyTmuxStyles(sessionName, existingTunnel.url);
                     }
-                }, 1000);
+                }, 5000);
 
                 await new Promise(resolve => {
                     tmux.on('close', () => {

@@ -1061,31 +1061,14 @@ function getTheme() {
     });
 }
 
-// Start or get existing ttyd for a session
-function getOrCreateSession(sessionName) {
-    if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
-        throw new Error('Invalid session name');
-    }
-    const existingConfig = getSessionConfig(sessionName);
-    if (existingConfig && existingConfig.type === 'port') {
-        throw new Error('Session is configured as a port proxy');
-    }
-    ensureTerminalSessionConfig(sessionName);
-    if (activeSessions[sessionName]) {
-        return activeSessions[sessionName];
-    }
-
-    const port = nextPort++;
-    startingSessions.add(sessionName);
+// Spawn ttyd process for a session (internal helper)
+function spawnTtyd(sessionName, port, isRestart = false) {
     const logFilePath = path.join(LOG_DIR, `ttyd-${sessionName}.log`);
-    const logFile = fs.openSync(logFilePath, 'w', PRIVATE_FILE_MODE);
+    const logFile = fs.openSync(logFilePath, isRestart ? 'a' : 'w', PRIVATE_FILE_MODE);
     ensurePrivateFile(logFilePath);
     const themeJson = getTheme();
     const exitFlagPath = path.join(HOME_DIR, `.exit-${sessionName}`);
 
-    // Shell wrapper with safety loop
-    // Uses respawn-on-remain-exit in tmux for reliability
-    // To cleanly exit: type "tunnel-exit" or kill the tmux session
     const ttyd = spawn('ttyd', [
         '-p', port.toString(),
         '-i', '127.0.0.1',
@@ -1105,13 +1088,52 @@ function getOrCreateSession(sessionName) {
     });
 
     ttyd.on('error', (err) => log(`Failed TTYD for ${toDisplaySessionName(sessionName)}: ${err.message}`, RED));
-    ttyd.on('close', () => {
-        delete activeSessions[sessionName];
-        startingSessions.delete(sessionName);
-        log(`Session ${toDisplaySessionName(sessionName)} closed.`, YELLOW);
+    ttyd.on('close', (code) => {
+        // Auto-restart ttyd if it crashes unexpectedly (not during shutdown)
+        if (!shuttingDown && activeSessions[sessionName]) {
+            const lastRestart = activeSessions[sessionName].lastRestart || 0;
+            const now = Date.now();
+            // Rate limit: don't restart more than once per 5 seconds
+            if (now - lastRestart > 5000) {
+                log(`Session ${toDisplaySessionName(sessionName)} crashed (code ${code}). Restarting...`, YELLOW);
+                activeSessions[sessionName].lastRestart = now;
+                const newTtyd = spawnTtyd(sessionName, port, true);
+                activeSessions[sessionName].ttyd = newTtyd;
+            } else {
+                log(`Session ${toDisplaySessionName(sessionName)} crashed too quickly. Not restarting.`, RED);
+                delete activeSessions[sessionName];
+                startingSessions.delete(sessionName);
+            }
+        } else {
+            delete activeSessions[sessionName];
+            startingSessions.delete(sessionName);
+            log(`Session ${toDisplaySessionName(sessionName)} closed.`, YELLOW);
+        }
     });
 
-    activeSessions[sessionName] = { ttyd, port };
+    return ttyd;
+}
+
+// Start or get existing ttyd for a session
+function getOrCreateSession(sessionName) {
+    if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
+        throw new Error('Invalid session name');
+    }
+    const existingConfig = getSessionConfig(sessionName);
+    if (existingConfig && existingConfig.type === 'port') {
+        throw new Error('Session is configured as a port proxy');
+    }
+    ensureTerminalSessionConfig(sessionName);
+    if (activeSessions[sessionName]) {
+        return activeSessions[sessionName];
+    }
+
+    const port = nextPort++;
+    startingSessions.add(sessionName);
+
+    const ttyd = spawnTtyd(sessionName, port, false);
+
+    activeSessions[sessionName] = { ttyd, port, lastRestart: 0 };
     log(`  Started session "${toDisplaySessionName(sessionName)}" on port ${port}`, GREEN);
 
     waitForPort(port, '127.0.0.1', 8000, 150).then(() => {

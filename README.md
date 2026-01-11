@@ -171,6 +171,7 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | Command | Description |
 |---------|-------------|
 | `hop` | Start daemon + attach (or attach to existing) |
+| `hop attach [session]` | Attach to existing session (lists if no name) |
 | `hop --iterm` | Use iTerm tmux control mode for local session |
 | `hop --no-daemon` | Run in single-process mode (old behavior) |
 | `hop url` | Print current tunnel URL |

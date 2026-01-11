@@ -3041,6 +3041,7 @@ async function main() {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
         log(`  hop                       Start daemon + attach (or attach to existing)`, RESET);
+        log(`  hop attach [session]      Attach to existing session (lists if no name)`, RESET);
         log(`  hop --iterm               Use iTerm tmux control mode for local session`, RESET);
         log(`  hop --no-daemon           Run in single-process mode (old behavior)`, RESET);
         log(`  hop --help                Show this help message`, RESET);
@@ -3266,6 +3267,91 @@ async function main() {
         log(`  hop user remove <username> Remove a user`, RESET);
         log(`  hop user export <username> Export credentials for a user`, RESET);
         process.exit(0);
+    }
+
+    // Handle `hop attach <session>` command - attach to existing session
+    if (process.argv[2] === 'attach') {
+        const sessionArg = process.argv[3];
+        if (!sessionArg) {
+            // List available sessions
+            const tmuxSessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
+            if (tmuxSessions.length === 0) {
+                log(`No hop sessions available.`, YELLOW);
+                log(`Start hop first, or specify a session: hop attach <name>`, RESET);
+                process.exit(1);
+            }
+            log(`\n${BOLD}Available sessions:${RESET}\n`, CYAN);
+            tmuxSessions.forEach(s => {
+                log(`  ${toDisplaySessionName(s.name)}`, RESET);
+            });
+            log(`\nUsage: hop attach <session-name>`, RESET);
+            process.exit(0);
+        }
+
+        const displayName = sessionArg;
+        const sessionName = toInternalSessionName(displayName);
+
+        // Check if session exists
+        if (!hopSessionExists(sessionName)) {
+            log(`Session "${displayName}" not found.`, RED);
+            const tmuxSessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
+            if (tmuxSessions.length > 0) {
+                log(`\nAvailable sessions:`, RESET);
+                tmuxSessions.forEach(s => {
+                    log(`  ${toDisplaySessionName(s.name)}`, RESET);
+                });
+            }
+            process.exit(1);
+        }
+
+        log(`Attaching to session: ${displayName}`, GREEN);
+
+        // Get current URL from state file if available
+        let currentUrl = '';
+        const state = isServerRunning();
+        if (state) {
+            currentUrl = state.url;
+        }
+
+        // Attach with reconnect loop for iTerm
+        const runAttachSession = async () => {
+            while (true) {
+                if (useItermControl) {
+                    await waitForTmuxSessionReady(sessionName);
+                }
+                if (useItermControl) setControlModeActive(true);
+                const tmux = spawn('tmux', getLocalTmuxArgs(sessionName), { stdio: 'inherit' });
+
+                if (currentUrl) {
+                    applyTmuxStyles(sessionName, currentUrl);
+                }
+                const styleInterval = setInterval(() => {
+                    try {
+                        const currentState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+                        applyTmuxStyles(sessionName, currentState.url);
+                    } catch (e) { }
+                }, 5000);
+
+                await new Promise(resolve => {
+                    tmux.on('close', () => {
+                        if (useItermControl) setControlModeActive(false);
+                        clearInterval(styleInterval);
+                        resolve();
+                    });
+                });
+
+                if (useItermControl) {
+                    log(`\n[Session ended] Reconnecting in 1s... (Ctrl+C to quit)`, YELLOW);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+
+                break;
+            }
+        };
+
+        runAttachSession().then(() => process.exit(0));
+        return;
     }
 
     // Handle `hop session` commands

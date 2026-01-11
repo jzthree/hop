@@ -8,7 +8,7 @@ This branch integrates [termshare](https://github.com/jzthree/termshare) to repl
 - **Built-in presence** - See who's connected, typing indicators
 - **Control modes** - Collaborative or locked single-controller
 - **No injection hacks** - Direct control over web UI
-- **Mobile-ready** - Responsive design built-in
+- **Mobile-ready** - Responsive design with iOS-style keyboard built-in
 - **CLI client** - Connect from real terminals too
 
 ## Architecture Change
@@ -24,7 +24,7 @@ Browser → Hop Auth Proxy → ttyd (per session) → tmux → shell
 ```
 Browser → Hop Auth Proxy → Termshare WebSocket → node-pty → shell
                 ↓
-        Native termshare web UI (no injection needed)
+        Native termshare web UI (mobile keyboard built-in)
 ```
 
 ## Implementation Steps
@@ -32,32 +32,33 @@ Browser → Hop Auth Proxy → Termshare WebSocket → node-pty → shell
 ### 1. Add Dependencies
 - [x] `node-pty-prebuilt-multiarch` - PTY handling
 - [x] `ws` - WebSocket server
-- [ ] Copy termshare room/pty logic into hop
+- [x] Copy termshare room/pty logic into hop (`termshare.js`)
 
 ### 2. Remove ttyd/tmux Code
-- [ ] Remove `spawn('ttyd', [...])` in `getOrCreateSession()`
-- [ ] Remove `HOP_TMUX_CONF`, `HOP_TMUX_WRAPPER` generation
-- [ ] Remove `listTmuxSessions()`, `waitForTmuxSessionReady()`
-- [ ] Remove ttyd dependency check
-- [ ] Remove `keyboard.html` injection code
-- [ ] Remove `getIOSKeyboardInjection()` WebSocket patching
+- [x] Remove `spawn('ttyd', [...])` in `getOrCreateSession()`
+- [ ] Remove `HOP_TMUX_CONF`, `HOP_TMUX_WRAPPER` generation (still present but unused)
+- [ ] Remove `listTmuxSessions()`, `waitForTmuxSessionReady()` (still present but unused)
+- [ ] Remove ttyd dependency check (still present but unused)
+- [x] Remove keyboard HTML injection code (now using termshare's built-in)
+- [x] Remove `getIOSKeyboardInjection()` WebSocket patching (still present but unused)
 
 ### 3. Add Termshare Integration
-- [ ] Port `Room` and `RoomManager` classes from termshare
-- [ ] Port `createPty` function
-- [ ] Create termshare WebSocket handler at `/ws` endpoint
-- [ ] Map hop sessions to termshare rooms
+- [x] Port `Room` and `RoomManager` classes from termshare
+- [x] Port `createPty` function
+- [x] Create termshare WebSocket handler at `/ws` endpoint
+- [x] Map hop sessions to termshare rooms
 
 ### 4. Update Session Management
 ```javascript
 // Before: activeSessions[name] = { ttyd: Process, port: number }
 // After:  activeSessions[name] = { room: Room }
 ```
+✅ Completed
 
 ### 5. Serve Termshare Web UI
-- [ ] Build termshare web client
-- [ ] Serve static files from hop
-- [ ] Or embed built assets
+- [x] Build termshare web client (with mobile keyboard)
+- [x] Serve static files from hop (`termshare-web/` directory)
+- [x] Inject room parameter for session routing
 
 ### 6. Keep Hop Features
 - [x] Authentication (TOTP + cookies)
@@ -65,43 +66,11 @@ Browser → Hop Auth Proxy → Termshare WebSocket → node-pty → shell
 - [x] Session URL routing (`/s/<name>/`)
 - [x] Multi-user support
 
-## Key Code Changes
+## Key Files Changed
 
-### Replace ttyd spawn (lines ~1089-1114)
-
-```javascript
-// OLD: spawn ttyd process
-const ttyd = spawn('ttyd', [...]);
-activeSessions[sessionName] = { ttyd, port };
-
-// NEW: create termshare room
-const room = roomManager.getRoom(sessionName, { cols: 80, rows: 24 });
-activeSessions[sessionName] = { room };
-```
-
-### Replace WebSocket proxy (lines ~2383)
-
-```javascript
-// OLD: proxy to ttyd WebSocket
-proxy.ws(req, socket, head);
-
-// NEW: handle with termshare
-wss.handleUpgrade(req, socket, head, (ws) => {
-  const room = activeSessions[sessionName].room;
-  room.attachClient(clientInfo, socketAdapter(ws));
-});
-```
-
-### Remove HTML injection (lines ~2283-2319)
-
-```javascript
-// OLD: intercept ttyd HTML, inject keyboard
-const { hook, ui } = getIOSKeyboardInjection();
-html = html.split('<head>').join('<head>' + hook);
-
-// NEW: serve termshare web client directly (no injection)
-res.sendFile(path.join(__dirname, 'web/index.html'));
-```
+- `hop` - Main server, updated `getOrCreateSession()` and WebSocket handler
+- `termshare.js` - New module with Room, RoomManager, createPty
+- `termshare-web/` - Built termshare web client with mobile keyboard
 
 ## Testing
 
@@ -118,5 +87,6 @@ res.sendFile(path.join(__dirname, 'web/index.html'));
 ## Migration Notes
 
 - Sessions are not persistent (by design) - shell exits when all clients disconnect
-- tmux scrollback replaced by termshare's output buffer
-- iOS keyboard injection replaced by termshare's mobile UI
+- tmux scrollback replaced by termshare's output buffer (200KB)
+- iOS keyboard injection replaced by termshare's built-in mobile keyboard
+- The old ttyd/tmux code paths are still present but no longer used; can be removed in a cleanup pass

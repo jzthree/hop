@@ -12,8 +12,14 @@ const cookie = require('cookie');
 const EventEmitter = require('events');
 const url = require('url');
 const net = require('net');
+const WebSocket = require('ws');
 
 const os = require('os');
+
+// Termshare integration for terminal sharing
+const termshare = require('./termshare');
+const termshareRooms = new termshare.RoomManager();
+const TERMSHARE_WEB_DIR = path.join(__dirname, 'termshare-web');
 
 // Configure TOTP to accept codes ±1 time step (handles clock drift)
 authenticator.options = { window: 1 };
@@ -1061,7 +1067,7 @@ function getTheme() {
     });
 }
 
-// Start or get existing ttyd for a session
+// Start or get existing session (uses termshare for terminal sharing)
 function getOrCreateSession(sessionName) {
     if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
         throw new Error('Invalid session name');
@@ -1075,63 +1081,21 @@ function getOrCreateSession(sessionName) {
         return activeSessions[sessionName];
     }
 
-    const port = nextPort++;
-    startingSessions.add(sessionName);
-    const logFilePath = path.join(LOG_DIR, `ttyd-${sessionName}.log`);
-    const logFile = fs.openSync(logFilePath, 'w', PRIVATE_FILE_MODE);
-    ensurePrivateFile(logFilePath);
-    const themeJson = getTheme();
-    const exitFlagPath = path.join(HOME_DIR, `.exit-${sessionName}`);
+    // Create termshare room for this session
+    const room = termshareRooms.getRoom(sessionName, { cols: 80, rows: 24 });
 
-    // Shell wrapper with safety loop
-    // Uses respawn-on-remain-exit in tmux for reliability
-    // To cleanly exit: type "tunnel-exit" or kill the tmux session
-    const ttyd = spawn('ttyd', [
-        '-p', port.toString(),
-        '-i', '127.0.0.1',
-        '-W',
-        '-t', `theme=${themeJson}`,
-        '-t', 'fontFamily="Menlo, Monaco, Consolas, monospace"',
-        '-t', 'fontSize=15',
-        '-t', 'disableLeaveAlert=true',
-        '-t', 'rendererType=canvas',
-        HOP_TMUX_WRAPPER,
-        HOP_TMUX_CONF,
-        sessionName,
-        exitFlagPath
-    ], {
-        stdio: ['ignore', logFile, logFile],
-        detached: false
-    });
-
-    ttyd.on('error', (err) => log(`Failed TTYD for ${toDisplaySessionName(sessionName)}: ${err.message}`, RED));
-    ttyd.on('close', () => {
+    room.on('empty', () => {
         delete activeSessions[sessionName];
-        startingSessions.delete(sessionName);
         log(`Session ${toDisplaySessionName(sessionName)} closed.`, YELLOW);
     });
 
-    activeSessions[sessionName] = { ttyd, port };
-    log(`  Started session "${toDisplaySessionName(sessionName)}" on port ${port}`, GREEN);
-
-    waitForPort(port, '127.0.0.1', 8000, 150).then(() => {
-        startingSessions.delete(sessionName);
+    room.on('exit', () => {
+        delete activeSessions[sessionName];
+        log(`Session ${toDisplaySessionName(sessionName)} exited.`, YELLOW);
     });
 
-    // Apply tmux styles with retries (give tmux time to start)
-    const applyStylesWithRetry = (retries = 0) => {
-        try {
-            const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-            if (state.url) {
-                applyTmuxStyles(sessionName, state.url);
-            }
-        } catch (e) { }
-        // Retry a few times to catch slow tmux starts
-        if (retries < 5) {
-            setTimeout(() => applyStylesWithRetry(retries + 1), 500);
-        }
-    };
-    setTimeout(() => applyStylesWithRetry(), 300);
+    activeSessions[sessionName] = { room };
+    log(`  Started session "${toDisplaySessionName(sessionName)}" (termshare)`, GREEN);
 
     return activeSessions[sessionName];
 }
@@ -2270,69 +2234,80 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        const session = getOrCreateSession(sessionName);
-
-        // Only inject keyboard for iOS on the root path (main HTML page)
-        const reqPath = strippedPathname || '/';
-        if (isIOS && (reqPath === '/' || reqPath === '')) {
-            waitForPort(session.port).then((ready) => {
-                if (!ready) {
-                    sendStartingPage(res, displayName);
-                    return;
-                }
-                // Intercept ttyd's HTML response and inject our keyboard
-                const ttydReq = http.request({
-                    hostname: '127.0.0.1',
-                    port: session.port,
-                    path: strippedUrl,
-                    method: 'GET',
-                    headers: {
-                        'Accept': 'text/html',
-                        'User-Agent': userAgent
-                    }
-                }, (ttydRes) => {
-                    let chunks = [];
-                    ttydRes.on('data', chunk => chunks.push(chunk));
-                    ttydRes.on('end', () => {
-                        let html = Buffer.concat(chunks).toString('utf8');
-                        // Inject WebSocket hook in <head> BEFORE ttyd scripts run
-                        // Inject keyboard UI before </body>
-                        if (html.includes('<head>') && html.includes('</body>')) {
-                            const { hook, ui } = getIOSKeyboardInjection();
-                            // Use split/join instead of replace to avoid any $ interpretation
-                            html = html.split('<head>').join('<head>' + hook);
-                            html = html.split('</body>').join(ui + '</body>');
-                            // log(`[Hop] Injected keyboard UI (${ui.length} bytes)`, GREEN);
-                        }
-                        res.writeHead(200, {
-                            'Content-Type': 'text/html; charset=utf-8',
-                            'Content-Length': Buffer.byteLength(html)
-                        });
-                        res.end(html);
-                    });
-                });
-                ttydReq.on('error', () => {
-                    sendStartingPage(res, displayName);
-                });
-                ttydReq.end();
-            });
+        // Ensure session exists (creates termshare room if needed)
+        try {
+            getOrCreateSession(sessionName);
+        } catch (e) {
+            res.writeHead(500);
+            res.end('Failed to create session');
             return;
         }
 
-        // --- PROXY TO SESSION (non-iOS) ---
-        waitForPort(session.port).then((ready) => {
-            if (!ready) {
-                sendStartingPage(res, displayName);
-                return;
-            }
-            const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${session.port}`, ws: false });
-            const originalUrl = req.url;
-            req.url = strippedUrl;
-            proxy.web(req, res, {}, () => {
-                sendStartingPage(res, displayName);
-            });
-            req.url = originalUrl;
+        // Serve termshare web client (has built-in mobile keyboard)
+        const reqPath = strippedPathname || '/';
+
+        // Map request path to file
+        let filePath;
+        if (reqPath === '/' || reqPath === '') {
+            filePath = path.join(TERMSHARE_WEB_DIR, 'index.html');
+        } else if (reqPath.startsWith('/assets/')) {
+            filePath = path.join(TERMSHARE_WEB_DIR, reqPath);
+        } else {
+            // Fallback to index.html for SPA routing
+            filePath = path.join(TERMSHARE_WEB_DIR, 'index.html');
+        }
+
+        // Check if file exists
+        if (!fs.existsSync(filePath)) {
+            res.writeHead(404);
+            res.end('Not Found');
+            return;
+        }
+
+        // Determine content type
+        const ext = path.extname(filePath).toLowerCase();
+        const contentTypes = {
+            '.html': 'text/html; charset=utf-8',
+            '.js': 'application/javascript',
+            '.css': 'text/css',
+            '.json': 'application/json',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.svg': 'image/svg+xml',
+            '.ico': 'image/x-icon'
+        };
+        const contentType = contentTypes[ext] || 'application/octet-stream';
+
+        // Read and serve the file
+        let content = fs.readFileSync(filePath);
+
+        // For HTML files, inject room parameter and WebSocket URL
+        if (ext === '.html') {
+            let html = content.toString('utf8');
+            // Inject room parameter into URL so termshare web client connects to the right room
+            const injectScript = `<script>
+                // Hop session configuration
+                window.__HOP_SESSION__ = ${JSON.stringify({
+                    room: sessionName,
+                    name: 'Guest',
+                    wsUrl: '/ws'
+                })};
+                // Auto-set room in URL params if not present
+                if (!new URLSearchParams(location.search).get('room')) {
+                    const url = new URL(location.href);
+                    url.searchParams.set('room', ${JSON.stringify(sessionName)});
+                    history.replaceState(null, '', url.toString());
+                }
+            </script>`;
+            html = html.replace('<head>', '<head>' + injectScript);
+            content = Buffer.from(html, 'utf8');
+        }
+
+        res.writeHead(200, {
+            'Content-Type': contentType,
+            'Content-Length': content.length
         });
+        res.end(content);
     });
 
     // WebSocket upgrade for terminal
@@ -2373,18 +2348,36 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        if (!activeSessions[sessionName]) {
-            socket.write('HTTP/1.1 404 Session Not Found\r\n\r\n');
-            socket.destroy();
-            return;
+        // Get or create termshare session
+        let session = activeSessions[sessionName];
+        if (!session) {
+            try {
+                session = getOrCreateSession(sessionName);
+            } catch (e) {
+                socket.write('HTTP/1.1 500 Server Error\r\n\r\n');
+                socket.destroy();
+                return;
+            }
         }
 
-        const session = activeSessions[sessionName];
-        const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${session.port}`, ws: true });
-        const originalUrl = req.url;
-        req.url = sessionInfo.strippedUrl;
-        proxy.ws(req, socket, head);
-        req.url = originalUrl;
+        // Create WebSocket server for this upgrade
+        const wss = new WebSocket.Server({ noServer: true });
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            // Parse query params for client info
+            const wsUrl = new URL(req.url, 'http://localhost');
+            const clientName = termshare.sanitizeName(wsUrl.searchParams.get('name') || 'Anonymous');
+            const cols = parseInt(wsUrl.searchParams.get('cols') || '80', 10);
+            const rows = parseInt(wsUrl.searchParams.get('rows') || '24', 10);
+
+            const clientId = termshare.generateClientId();
+            const colorIndex = Math.floor(Math.random() * 1000);
+
+            // Attach client to termshare room
+            session.room.attachClient(
+                { id: clientId, name: clientName, colorIndex, cols, rows },
+                termshare.createSocketAdapter(ws)
+            );
+        });
     });
 
     server.listen(PROXY_PORT, '127.0.0.1');

@@ -2758,6 +2758,14 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
                 });
             });
             log(`\n[Session ended]`, YELLOW);
+
+            // For iTerm control mode, auto-reconnect since disconnects are usually protocol issues
+            if (useItermControl) {
+                log(`Reconnecting in 1s... (Ctrl+C to quit)`, CYAN);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                continue;
+            }
+
             const answer = await new Promise(resolve => {
                 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                 rl.question(`Type 'quit' to shutdown tunnel, or press Enter to restart: `, (resp) => {
@@ -3394,35 +3402,51 @@ async function main() {
 
         log(`Attaching...`, RESET);
 
-        // For iTerm control mode, wait for session to be ready to avoid protocol corruption
-        if (useItermControl) {
-            await waitForTmuxSessionReady(sessionName);
-        }
+        // For iTerm control mode, use a reconnect loop
+        const runClientSession = async () => {
+            while (true) {
+                // Wait for session to be ready to avoid protocol corruption
+                if (useItermControl) {
+                    await waitForTmuxSessionReady(sessionName);
+                }
 
-        // Attach to the specific session
-        if (useItermControl) setControlModeActive(true);
-        const tmux = spawn('tmux', getLocalTmuxArgs(sessionName), { stdio: 'inherit' });
+                // Attach to the specific session
+                if (useItermControl) setControlModeActive(true);
+                const tmux = spawn('tmux', getLocalTmuxArgs(sessionName), { stdio: 'inherit' });
 
-        // Apply styling immediately and continuously refresh (every 1 second)
-        // Re-read state file each time to pick up URL changes after tunnel restarts
-        applyTmuxStyles(sessionName, existingTunnel.url);
-
-        const styleInterval = setInterval(() => {
-            try {
-                const currentState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-                applyTmuxStyles(sessionName, currentState.url);
-            } catch (e) {
-                // State file missing = server died, keep old URL
+                // Apply styling immediately and continuously refresh (every 1 second)
                 applyTmuxStyles(sessionName, existingTunnel.url);
-            }
-        }, 1000);
 
-        tmux.on('close', () => {
-            if (useItermControl) setControlModeActive(false);
-            clearInterval(styleInterval);
-            log(`\nSession disconnected.`, YELLOW);
-            process.exit(0);
-        });
+                const styleInterval = setInterval(() => {
+                    try {
+                        const currentState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+                        applyTmuxStyles(sessionName, currentState.url);
+                    } catch (e) {
+                        applyTmuxStyles(sessionName, existingTunnel.url);
+                    }
+                }, 1000);
+
+                await new Promise(resolve => {
+                    tmux.on('close', () => {
+                        if (useItermControl) setControlModeActive(false);
+                        clearInterval(styleInterval);
+                        resolve();
+                    });
+                });
+
+                // For iTerm control mode, auto-reconnect
+                if (useItermControl) {
+                    log(`\n[Session ended] Reconnecting in 1s... (Ctrl+C to quit)`, YELLOW);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+
+                log(`\nSession disconnected.`, YELLOW);
+                process.exit(0);
+            }
+        };
+
+        runClientSession();
 
         return;
     }

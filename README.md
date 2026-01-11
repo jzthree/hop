@@ -170,10 +170,14 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 
 | Command | Description |
 |---------|-------------|
-| `hop` | Start hop (or attach to existing tunnel) |
+| `hop` | Start daemon + attach (or attach to existing) |
 | `hop --iterm` | Use iTerm tmux control mode for local session |
+| `hop --no-daemon` | Run in single-process mode (old behavior) |
 | `hop url` | Print current tunnel URL |
 | `hop qr` | Show QR code for current URL |
+| `hop status` | Show daemon status |
+| `hop stop` | Stop the hop daemon |
+| `hop logs` | Show daemon logs (use `-f` to follow) |
 | `hop domain <hostname>` | Set custom domain (named tunnel) |
 | `hop domain-clear` | Remove custom domain, use random URLs |
 | `hop password set` | Set/change password |
@@ -188,7 +192,6 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | `hop session remove <name>` | Remove a session |
 | `hop client <credentials>` | Run hop with exported credentials |
 | `hop wipe` | Kill all hop tmux sessions |
-| `quit` | Type at exit prompt to shutdown tunnel |
 
 ## 📦 Dependencies
 

@@ -153,6 +153,8 @@ hop --iterm
 
 Uses tmux control mode (`-CC`) for native scrolling, copy/paste, splits, and search. Session remains accessible via web.
 
+**Note:** High-volume terminal output (e.g., rapid animations) may occasionally disconnect control mode. Hop will auto-reconnect.
+
 ## 🔌 Port Sessions
 
 Expose local HTTP/WebSocket services through your tunnel:

@@ -2409,6 +2409,11 @@ function startAuthProxy(authEmitter) {
         req.url = originalUrl;
     });
 
+    // Handle server errors gracefully
+    server.on('error', (err) => {
+        log(`Server error: ${err.message}`, RED);
+    });
+
     server.listen(PROXY_PORT, '127.0.0.1');
     return server;
 }

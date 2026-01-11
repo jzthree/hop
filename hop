@@ -25,7 +25,8 @@ const TERMSHARE_WEB_DIR = path.join(__dirname, 'termshare-web');
 authenticator.options = { window: 1 };
 
 // --- Configuration ---
-const HOME_DIR = path.join(os.homedir(), '.hop-shell');
+// Use HOP_HOME env var or default to .hop-shell2 (separate from original hop)
+const HOME_DIR = process.env.HOP_HOME || path.join(os.homedir(), '.hop-shell2');
 const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 

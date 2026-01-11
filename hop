@@ -3306,6 +3306,10 @@ async function main() {
 
         log(`Attaching to session: ${displayName}`, GREEN);
 
+        // Reset terminal state (including cursor visibility)
+        process.stdout.write('\x1Bc');  // Full terminal reset
+        process.stdout.write('\x1B[?25h');  // Ensure cursor is visible
+
         // Get current URL from state file if available
         let currentUrl = '';
         const state = isServerRunning();
@@ -3343,6 +3347,7 @@ async function main() {
                 if (useItermControl) {
                     log(`\n[Session ended] Reconnecting in 1s... (Ctrl+C to quit)`, YELLOW);
                     await new Promise(resolve => setTimeout(resolve, 1000));
+                    process.stdout.write('\x1B[?25h');  // Ensure cursor visible on reconnect
                     continue;
                 }
 
@@ -3350,7 +3355,10 @@ async function main() {
             }
         };
 
-        runAttachSession().then(() => process.exit(0));
+        runAttachSession().then(() => {
+            process.stdout.write('\x1B[?25h');  // Ensure cursor visible on exit
+            process.exit(0);
+        });
         return;
     }
 

@@ -767,6 +767,80 @@ async function spawnDaemon() {
     return null;
 }
 
+// Show QR codes and wait for Enter or remote login after daemon starts
+function showDaemonStartupScreen(daemonState) {
+    return new Promise((resolve) => {
+        // Load auth secret for QR code
+        loadAuthSecret();
+
+        console.clear();
+        log(`\n==================================================`, MAGENTA);
+        log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
+        log(`==================================================\n`, MAGENTA);
+
+        log(`TUNNEL URL:`, BOLD + GREEN);
+        log(`  ${daemonState.url}`, GREEN);
+        log(`  Scan to open on mobile:`, RESET);
+
+        // URL QR code
+        qrcode.generate(daemonState.url, { small: true });
+
+        log(`\n--------------------------------------------------`, RESET);
+
+        // TOTP QR code
+        log(`AUTHENTICATOR SETUP:`, BOLD);
+        const label = 'Hop';
+        const otpauth = `otpauth://totp/${encodeURIComponent(label)}?secret=${AUTH_SECRET}&issuer=${encodeURIComponent(label)}`;
+        qrcode.generate(otpauth, { small: true });
+        log(`Scan this QR code with your Authenticator app.`, CYAN);
+
+        log(`\n--------------------------------------------------`, RESET);
+
+        const readline = require('readline');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+        log(`\n[READY]`, GREEN + BOLD);
+        log(`Press ENTER to launch local session, or login remotely...`, RESET);
+
+        let resolved = false;
+
+        const finish = (reason) => {
+            if (resolved) return;
+            resolved = true;
+            rl.close();
+            if (pollInterval) clearInterval(pollInterval);
+            log(`\n${reason}. Launching local session...`, GREEN);
+            setTimeout(resolve, 800);
+        };
+
+        // Handle Enter key
+        rl.question('', () => finish('Manual Start'));
+
+        // Poll daemon for remote login
+        const pollInterval = setInterval(() => {
+            const opts = {
+                hostname: '127.0.0.1',
+                port: daemonState.port,
+                path: '/api/auth-status',
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${daemonState.sessionSecret}` }
+            };
+            http.get(opts, res => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => {
+                    try {
+                        const status = JSON.parse(data);
+                        if (status.authenticated) {
+                            finish('Remote Login');
+                        }
+                    } catch (e) { }
+                });
+            }).on('error', () => { });
+        }, 1000);
+    });
+}
+
 // Generate or load session secret
 let SESSION_SECRET;
 const existingState = isServerRunning();
@@ -1045,6 +1119,27 @@ async function waitForTmuxSessionReady(sessionName, maxWaitMs = 5000) {
     return false;
 }
 
+// Clean up stale terminal session configs (e.g., after reboot)
+function cleanupStaleSessionConfigs() {
+    const tmuxSessions = new Set(listTmuxSessions().map(s => s.name));
+    let cleaned = 0;
+
+    for (const [name, config] of Object.entries(sessionConfigs)) {
+        if (!name.startsWith(HOP_SESSION_PREFIX)) continue;
+        // Keep port sessions (they don't need tmux)
+        if (config.type === 'port') continue;
+        // Remove terminal sessions that don't exist in tmux
+        if (!tmuxSessions.has(name)) {
+            deleteSessionConfig(name);
+            cleaned++;
+        }
+    }
+
+    if (cleaned > 0) {
+        log(`Cleaned up ${cleaned} stale session config(s)`, YELLOW);
+    }
+}
+
 function listAllSessionEntries() {
     const tmuxSessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
     const sessionMap = new Map();
@@ -1063,14 +1158,19 @@ function listAllSessionEntries() {
     for (const [name, config] of Object.entries(sessionConfigs)) {
         if (!name.startsWith(HOP_SESSION_PREFIX)) continue;
         if (!sessionMap.has(name)) {
-            sessionMap.set(name, {
-                name,
-                windows: null,
-                attached: false,
-                type: config.type || 'terminal',
-                port: config.port,
-                displayName: toDisplaySessionName(name)
-            });
+            // Only add config entries that don't exist in tmux if they're port sessions
+            // Terminal sessions without a tmux session are stale (e.g., after reboot)
+            if (config.type === 'port') {
+                sessionMap.set(name, {
+                    name,
+                    windows: null,
+                    attached: false,
+                    type: 'port',
+                    port: config.port,
+                    displayName: toDisplaySessionName(name)
+                });
+            }
+            // Skip stale terminal sessions - they'll be cleaned up
         } else if (config?.type === 'port') {
             const entry = sessionMap.get(name);
             entry.type = 'port';
@@ -1801,6 +1901,7 @@ function startAuthProxy(authEmitter) {
                             ]);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ success: true }));
+                            hasAuthenticated = true;
                             if (authEmitter) authEmitter.emit('authenticated');
                         } else {
                             recordFailure(ip);
@@ -1861,6 +1962,7 @@ function startAuthProxy(authEmitter) {
                                 : '/sessions';
                             res.writeHead(302, { 'Location': redirectTarget });
                             res.end();
+                            hasAuthenticated = true;
                             if (authEmitter) authEmitter.emit('authenticated');
                         } else {
                             recordFailure(ip);
@@ -2028,6 +2130,13 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: Check if authenticated (for daemon parent to poll)
+        if (parsedUrl.pathname === '/api/auth-status' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ authenticated: hasAuthenticated }));
+            return;
+        }
+
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
             const sessions = listAllSessionEntries().map(s => ({
@@ -2111,7 +2220,8 @@ function startAuthProxy(authEmitter) {
                 let { oldName, newName } = JSON.parse(body);
                 const oldDisplayName = oldName;
                 const newDisplayName = newName;
-                oldName = toInternalSessionName(oldDisplayName);
+                // oldName may already be internal (hop-foo) from sessions.html
+                oldName = oldName.startsWith(HOP_SESSION_PREFIX) ? oldName : toInternalSessionName(oldDisplayName);
                 newName = toInternalSessionName(newDisplayName);
                 // Validate BOTH names to prevent command injection
                 if (!oldName) {
@@ -2179,7 +2289,8 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 let { name } = JSON.parse(body);
-                name = toInternalSessionName(name);
+                // name may already be internal (hop-foo) from sessions.html
+                name = name.startsWith(HOP_SESSION_PREFIX) ? name : toInternalSessionName(name);
                 // Validate name to prevent command injection
                 if (!name) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -2460,6 +2571,7 @@ function startAuthProxy(authEmitter) {
 let currentTunnelProc = null;
 let currentPublicUrl = null;
 let shuttingDown = false;  // Prevent restart during cleanup
+let hasAuthenticated = false;  // Track if any successful login has occurred
 const tunnelEmitter = new EventEmitter();
 let CLIENT_TUNNEL_CONFIG = null; // { tunnelId, credentialsPath, hostname, configDir }
 
@@ -3271,7 +3383,8 @@ async function main() {
 
     // Handle `hop attach <session>` command - attach to existing session
     if (process.argv[2] === 'attach') {
-        const sessionArg = process.argv[3];
+        // Skip flags like --iterm when looking for session name
+        const sessionArg = process.argv.slice(3).find(arg => !arg.startsWith('-'));
         if (!sessionArg) {
             // List available sessions
             const tmuxSessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
@@ -3701,6 +3814,9 @@ async function main() {
             process.exit(1);
         }
 
+        // Show QR codes and wait for Enter before continuing
+        await showDaemonStartupScreen(daemonState);
+
         // Now connect as client (reuse existing tunnel logic)
         // The daemon is running, so we recursively call main() which will detect it
         // and enter client mode at line 3348
@@ -3826,6 +3942,7 @@ async function main() {
     }
 
     loadAuthSecret();
+    cleanupStaleSessionConfigs();
     await checkAndInstallDependencies();
     const authEmitter = new EventEmitter();
 

@@ -16,10 +16,54 @@ const WebSocket = require('ws');
 
 const os = require('os');
 
-// Termshare integration for terminal sharing
-const termshare = require('./termshare');
-const termshareRooms = new termshare.RoomManager();
-const TERMSHARE_WEB_DIR = path.join(__dirname, 'termshare-web');
+// Hay integration for terminal sharing
+const hay = require('./hay');
+// Pass current working directory so sessions start where hop was invoked
+const hayRooms = new hay.RoomManager(hay.createPty, process.cwd());
+
+// Hot reload: Use HAY_DEV_DIR env or look for hay nearby
+function resolveHayWebDir() {
+    // Environment variable override for development
+    if (process.env.HAY_DEV_DIR && fs.existsSync(process.env.HAY_DEV_DIR)) {
+        return process.env.HAY_DEV_DIR;
+    }
+    // Check for hay dev build nearby
+    const devPaths = [
+        path.join(__dirname, '../hay/apps/web/dist'),
+        path.join(__dirname, '../../hay/apps/web/dist'),
+        path.resolve(__dirname, '../hay/apps/web/dist'),
+    ];
+    for (const p of devPaths) {
+        if (fs.existsSync(p)) {
+            console.log(`[Dev] Serving Hay from: ${p}`);
+            return p;
+        }
+    }
+    // Fallback to bundled
+    return path.join(__dirname, 'hay-web');
+}
+const HAY_WEB_DIR = resolveHayWebDir();
+
+// Resolve hay CLI path for local terminal
+function resolveHayCliPath() {
+    // Check for hay CLI nearby
+    const cliPaths = [
+        path.join(__dirname, '../hay/apps/cli/dist/index.js'),
+        path.join(__dirname, '../../hay/apps/cli/dist/index.js'),
+        path.resolve(__dirname, '../hay/apps/cli/dist/index.js'),
+    ];
+    for (const p of cliPaths) {
+        if (fs.existsSync(p)) {
+            return p;
+        }
+    }
+    // Fallback to bundled (if we ever bundle it)
+    const bundled = path.join(__dirname, 'hay-cli.js');
+    if (fs.existsSync(bundled)) {
+        return bundled;
+    }
+    throw new Error('Hay CLI not found. Build hay/apps/cli first.');
+}
 
 // Configure TOTP to accept codes ±1 time step (handles clock drift)
 authenticator.options = { window: 1 };
@@ -103,9 +147,7 @@ function clearPassword() {
 function isPasswordEnabled() {
     return fs.existsSync(PASSWORD_FILE_PATH);
 }
-const HOP_TMUX_CONF = path.join(HOME_DIR, '.hop-tmux.conf');
-const HOP_TMUX_WRAPPER = path.join(HOME_DIR, '.hop-tmux-wrapper.sh');
-const HOP_SESSION_PREFIX = 'hop-';  // Prefix to distinguish hop sessions from regular tmux sessions
+const HOP_SESSION_PREFIX = 'hop2-';  // Prefix for hop2 sessions (separate from hop which uses 'hop-')
 
 ensurePrivateDir(LOG_DIR);
 
@@ -118,26 +160,6 @@ function toInternalSessionName(displayName) {
 function toDisplaySessionName(internalName) {
     if (!internalName || typeof internalName !== 'string') return '';
     return internalName.slice(HOP_SESSION_PREFIX.length);
-}
-
-function isITerm() {
-    return process.env.TERM_PROGRAM === 'iTerm.app' || !!process.env.ITERM_SESSION_ID;
-}
-
-let useItermControl = false;
-
-function enableITermControlMode() {
-    useItermControl = true;
-    // Avoid contaminating tmux control-mode stream with Node warnings
-    process.noDeprecation = true;
-    process.env.NODE_NO_WARNINGS = '1';
-    process.emitWarning = () => { };
-}
-
-function getLocalTmuxArgs(sessionName) {
-    const args = ['-f', HOP_TMUX_CONF];
-    if (useItermControl) args.push('-CC');
-    return args.concat(['new-session', '-A', '-s', sessionName]);
 }
 
 function loadSessionConfigs() {
@@ -761,57 +783,9 @@ function loadAuthSecret() {
 const BASE_PORT = existingState ? existingState.port : Math.floor(Math.random() * (50000 - 10000 + 1) + 10000);
 const PROXY_PORT = BASE_PORT;
 
-// Create hop's tmux config (isolated from user's config, 1-line scroll speed)
-const HOP_TMUX_CONFIG = `
-# Hop Terminal - Tmux Configuration
-# Do not use user's config - this is hop-managed
-
-# Enable mouse support
-set -g mouse on
-
-# 2-line scroll speed (compromise between smoothness and remote latency)
-bind -T copy-mode WheelUpPane send -N 2 -X scroll-up
-bind -T copy-mode WheelDownPane send -N 2 -X scroll-down
-bind -T copy-mode-vi WheelUpPane send -N 2 -X scroll-up
-bind -T copy-mode-vi WheelDownPane send -N 2 -X scroll-down
-
-# Increase scrollback buffer
-set -g history-limit 50000
-
-# Better terminal colors
-set -g default-terminal "screen-256color"
-
-# Window titles for iTerm control mode
-set -g set-titles on
-set -g set-titles-string "#S:#W"
-set -g automatic-rename on
-`;
-fs.writeFileSync(HOP_TMUX_CONF, HOP_TMUX_CONFIG);
-
-// Wrapper script for ttyd to run tmux with safe args (no shell interpolation)
-const HOP_TMUX_WRAPPER_CONTENT = `#!/bin/sh
-TMUX_CONF="$1"
-SESSION_NAME="$2"
-EXIT_FLAG="$3"
-
-while true; do
-  tmux -f "$TMUX_CONF" new-session -A -s "$SESSION_NAME" zsh
-  echo ""
-  echo "[Session ended. Restarting in 2s... Type 'tunnel-exit' to stop]"
-  if [ -f "$EXIT_FLAG" ]; then
-    rm -f "$EXIT_FLAG"
-    echo "[Clean exit requested]"
-    exit 0
-  fi
-  sleep 2
-done
-`;
-fs.writeFileSync(HOP_TMUX_WRAPPER, HOP_TMUX_WRAPPER_CONTENT, { mode: PRIVATE_DIR_MODE });
-try { fs.chmodSync(HOP_TMUX_WRAPPER, PRIVATE_DIR_MODE); } catch (e) { }
-
-// Session Management
-const activeSessions = {}; // { sessionName: { ttyd: Process, port: number } }
-const startingSessions = new Set(); // session names waiting for ttyd to be ready
+// Session Management (using hay.js - no tmux/ttyd)
+const activeSessions = {}; // { sessionName: { room: HayRoom } }
+const startingSessions = new Set(); // session names being initialized
 const sessionRenames = {};  // { oldName: newName } - track renames for styling updates
 let nextPort = BASE_PORT + 1;
 
@@ -874,31 +848,7 @@ const RED = "\x1b[31m";
 const BOLD = "\x1b[1m";
 const MAGENTA = "\x1b[35m";
 
-const HOP_ITERM_LOG = path.join(HOME_DIR, 'hop-iterm.log');
-let controlModeActive = false;
-let logFileStream = null;
-
-function setControlModeActive(active) {
-    controlModeActive = active;
-    if (active) {
-        try {
-            if (!logFileStream) {
-                logFileStream = fs.createWriteStream(HOP_ITERM_LOG, { flags: 'a', mode: PRIVATE_FILE_MODE });
-                ensurePrivateFile(HOP_ITERM_LOG);
-            }
-        } catch (e) { }
-    } else if (logFileStream) {
-        try { logFileStream.end(); } catch (e) { }
-        logFileStream = null;
-    }
-}
-
 function log(msg, color = RESET) {
-    if (controlModeActive && logFileStream) {
-        const plain = String(msg).replace(/\x1b\[[0-9;]*m/g, '');
-        logFileStream.write(plain + '\n');
-        return;
-    }
     console.log(`${color}${msg}${RESET}`);
 }
 
@@ -954,7 +904,7 @@ async function checkAndInstallDependencies() {
         }
     }
 
-    const deps = ['tmux', 'ttyd', 'cloudflared'];
+    const deps = ['cloudflared']; // tmux/ttyd not needed - using node-pty via hay.js
     for (const dep of deps) {
         try {
             await runCommand('which', [dep], { stdio: 'ignore' });
@@ -972,53 +922,29 @@ async function checkAndInstallDependencies() {
     }
 }
 
-// Get list of tmux sessions
-function listTmuxSessions() {
-    try {
-        const output = execSync('tmux list-sessions -F "#{session_name}|#{session_windows}|#{session_attached}"', { encoding: 'utf8' });
-        return output.trim().split('\n').filter(Boolean).map(line => {
-            const [name, windows, attached] = line.split('|');
-            return { name, windows: parseInt(windows), attached: attached === '1' };
+// List active hay rooms as sessions
+function listActiveSessions() {
+    const sessions = [];
+    for (const [name, room] of hayRooms.rooms) {
+        sessions.push({
+            name,
+            windows: 1,
+            attached: room.clients.size > 0
         });
-    } catch (e) {
-        return [];
     }
+    return sessions;
 }
 
 function hopSessionExists(name) {
     if (!name) return false;
-    return listTmuxSessions().some(s => s.name === name);
-}
-
-// Wait for tmux session to exist and be ready for control mode attachment
-// Returns true if ready, false if timeout
-async function waitForTmuxSessionReady(sessionName, maxWaitMs = 5000) {
-    const startTime = Date.now();
-    while (Date.now() - startTime < maxWaitMs) {
-        try {
-            // Check if session exists
-            execSync(`tmux has-session -t ${sessionName}`, { stdio: 'ignore' });
-            // Session exists - wait a bit more for shell prompt to settle
-            await new Promise(resolve => setTimeout(resolve, 300));
-            // Clear the pane to avoid stale output corrupting control mode
-            try {
-                execSync(`tmux send-keys -t ${sessionName} '' C-l`, { stdio: 'ignore' });
-            } catch (e) { }
-            await new Promise(resolve => setTimeout(resolve, 100));
-            return true;
-        } catch (e) {
-            // Session doesn't exist yet, wait and retry
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
-    }
-    return false;
+    return hayRooms.hasRoom(name) || activeSessions[name];
 }
 
 function listAllSessionEntries() {
-    const tmuxSessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
+    const haySessions = listActiveSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
     const sessionMap = new Map();
 
-    for (const s of tmuxSessions) {
+    for (const s of haySessions) {
         const config = getSessionConfig(s.name);
         const type = config?.type || 'terminal';
         sessionMap.set(s.name, {
@@ -1050,7 +976,7 @@ function listAllSessionEntries() {
     return Array.from(sessionMap.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
-// Light theme for ttyd - clean white background (tmux handles negative space)
+// Light theme for hay terminal
 function getTheme() {
     return JSON.stringify({
         'background': '#ffffff',
@@ -1068,8 +994,8 @@ function getTheme() {
     });
 }
 
-// Start or get existing session (uses termshare for terminal sharing)
-function getOrCreateSession(sessionName) {
+// Start or get existing session (uses hay for terminal sharing)
+function getOrCreateSession(sessionName, cwd) {
     if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
         throw new Error('Invalid session name');
     }
@@ -1082,8 +1008,8 @@ function getOrCreateSession(sessionName) {
         return activeSessions[sessionName];
     }
 
-    // Create termshare room for this session
-    const room = termshareRooms.getRoom(sessionName, { cols: 80, rows: 24 });
+    // Create hay room for this session (with optional cwd override)
+    const room = hayRooms.getRoom(sessionName, { cols: 80, rows: 24 }, cwd);
 
     room.on('empty', () => {
         delete activeSessions[sessionName];
@@ -1096,7 +1022,7 @@ function getOrCreateSession(sessionName) {
     });
 
     activeSessions[sessionName] = { room };
-    log(`  Started session "${toDisplaySessionName(sessionName)}" (termshare)`, GREEN);
+    log(`  Started session "${toDisplaySessionName(sessionName)}" (hay)`, GREEN);
 
     return activeSessions[sessionName];
 }
@@ -1108,131 +1034,6 @@ function resolveSessionName(name) {
         current = sessionRenames[current];
     }
     return current;
-}
-
-// Apply tmux styling synchronously for reliable results
-function applyTmuxStyles(sessionName, publicUrl) {
-    // Resolve to current name in case of renames
-    const s = resolveSessionName(sessionName);
-    const displayName = toDisplaySessionName(s);
-    const run = (cmd) => {
-        try {
-            execSync(cmd, { stdio: 'ignore' });
-        } catch (e) { }
-    };
-
-    // Enable truecolor
-    run(`tmux set-option -g default-terminal tmux-256color`);
-    run(`tmux set-option -ga terminal-overrides ',xterm*:Tc,alacritty:Tc,*:Tc'`);
-
-    // Core settings
-    run(`tmux set-option -t ${s} mouse on`);
-    run(`tmux set-option -t ${s} escape-time 0`);
-    run(`tmux set-option -g window-size latest`);
-    run(`tmux set-window-option -t ${s} aggressive-resize on`);
-    run(`tmux set-option -g fill-character ' '`);
-
-    // Status bar styling
-    run(`tmux set-option -t ${s} status on`);
-    run(`tmux set-option -t ${s} status-position bottom`);
-    run(`tmux set-option -t ${s} status-style 'bg=#e4e4e7,fg=#52525b'`);
-    run(`tmux set-option -t ${s} status-left '#[fg=#7c3aed,bold]● #[fg=#18181b,bold]${displayName} #[fg=#a1a1aa,nobold]│#[bg=#e4e4e7]  '`);
-    run(`tmux set-option -t ${s} status-left-length 40`);
-    run(`tmux set-option -t ${s} status-right '#[bg=#e4e4e7]    #[fg=#a1a1aa]│ #[fg=#71717a]${publicUrl} '`);
-    run(`tmux set-option -t ${s} status-right-length 200`);
-
-    // Window status
-    run(`tmux set-window-option -t ${s} window-status-current-style 'fg=#18181b,bold'`);
-    run(`tmux set-window-option -t ${s} window-status-style 'fg=#a1a1aa'`);
-    run(`tmux set-window-option -t ${s} window-status-separator '#[fg=#d4d4d8] │ '`);
-
-    // Pane borders
-    run(`tmux set-option -t ${s} pane-border-style 'fg=#e4e4e7'`);
-    run(`tmux set-option -t ${s} pane-active-border-style 'fg=#7c3aed'`);
-
-    // Message/mode styling
-    run(`tmux set-option -t ${s} message-style 'bg=#f0f0f0,fg=#18181b'`);
-
-    // Window title for iTerm control mode (display name without hop- prefix + URL)
-    run(`tmux set-option -t ${s} set-titles-string "${displayName} • ${publicUrl}"`);
-    run(`tmux set-option -t ${s} mode-style 'bg=#ddd6fe,fg=#18181b'`);
-}
-
-// iOS Virtual Keyboard - Returns {hook, ui} for proper injection timing
-// hook: WebSocket interceptor script (goes in <head> before ttyd scripts)
-// ui: keyboard HTML/CSS/JS (goes before </body>)
-function getIOSKeyboardInjection() {
-    // WebSocket interceptor - MUST run before ttyd creates its socket
-    const hook = `
-<script>
-(function() {
-    // Capture ttyd's WebSocket when it's created
-    window.__hopSocket = null;
-    window.__hopOnData = null;
-    function patchTerminal(Terminal) {
-        if (!Terminal || Terminal.__hopPatched) return;
-        var orig = Terminal.prototype.onData;
-        if (typeof orig !== 'function') return;
-        Terminal.prototype.onData = function(cb) {
-            window.__hopOnData = cb;
-            window.__hopTerm = this;
-            return orig.call(this, cb);
-        };
-        Terminal.__hopPatched = true;
-    }
-    try { patchTerminal(window.Terminal); } catch (e) { }
-    try {
-        var desc = Object.getOwnPropertyDescriptor(window, 'Terminal');
-        if (!desc || desc.configurable) {
-            var terminalValue = window.Terminal;
-            Object.defineProperty(window, 'Terminal', {
-                configurable: true,
-                get: function() { return terminalValue; },
-                set: function(v) { terminalValue = v; patchTerminal(v); }
-            });
-        } else {
-            setInterval(function() { patchTerminal(window.Terminal); }, 250);
-        }
-    } catch (e) {
-        setInterval(function() { patchTerminal(window.Terminal); }, 250);
-    }
-    var OriginalWebSocket = window.WebSocket;
-    window.WebSocket = function(url, protocols) {
-        // Call original constructor properly (with or without protocols)
-        var ws = protocols ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url);
-        
-        // Check if this is ttyd's socket by protocol OR URL pattern
-        var isTtyProtocol = protocols === 'tty' ||
-            (Array.isArray(protocols) && protocols.indexOf('tty') >= 0);
-        var wsUrl = '';
-        try { wsUrl = (typeof url === 'string') ? url : (url && url.toString ? url.toString() : ''); } catch (e) { wsUrl = ''; }
-        var isTtyUrl = wsUrl && /\\/ws(?:\\?|$|\\/)/.test(wsUrl);
-        
-        if (isTtyProtocol || isTtyUrl) {
-            console.log('[HopKb] Captured ttyd socket via ' + (isTtyProtocol ? 'protocol' : 'URL'));
-            ws.binaryType = 'arraybuffer';
-            window.__hopSocket = ws;
-        }
-        return ws;
-    };
-    window.WebSocket.CONNECTING = OriginalWebSocket.CONNECTING;
-    window.WebSocket.OPEN = OriginalWebSocket.OPEN;
-    window.WebSocket.CLOSING = OriginalWebSocket.CLOSING;
-    window.WebSocket.CLOSED = OriginalWebSocket.CLOSED;
-    window.WebSocket.prototype = OriginalWebSocket.prototype;
-})();
-</script>`;
-
-    // Read keyboard UI from file
-    const keyboardFile = path.join(__dirname, 'keyboard.html');
-    let ui = '<!-- keyboard.html not found -->';
-    try {
-        ui = fs.readFileSync(keyboardFile, 'utf8');
-    } catch (e) {
-        log(`Warning: keyboard.html not found`, YELLOW);
-    }
-
-    return { hook, ui };
 }
 
 function getSessionSwitcherOverlay() {
@@ -1956,7 +1757,7 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
-                    let { name, type, port } = JSON.parse(body);
+                    let { name, type, port, cwd } = JSON.parse(body);
                     const displayName = name;
                     const internalName = toInternalSessionName(displayName);
                     if (!internalName) {
@@ -1996,7 +1797,7 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Port session already exists with this name' }));
                             return;
                         }
-                        getOrCreateSession(internalName);
+                        getOrCreateSession(internalName, cwd);
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, name: displayName, type }));
@@ -2035,7 +1836,7 @@ function startAuthProxy(authEmitter) {
                     return;
                 }
 
-                // Rename in tmux
+                // Update config for rename
                 try {
                     const config = getSessionConfig(oldName);
                     if (config && config.type === 'port') {
@@ -2047,7 +1848,7 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Session not found' }));
                             return;
                         }
-                        execFileSync('tmux', ['rename-session', '-t', oldName, newName], { stdio: 'ignore' });
+                        // Note: hay rooms can't be renamed - just update config tracking
                         if (config) {
                             deleteSessionConfig(oldName);
                             setSessionConfig(newName, { ...config, type: 'terminal', updatedAt: new Date().toISOString() });
@@ -2102,14 +1903,11 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Session not found' }));
                             return;
                         }
-                        // Kill the tmux session
-                        execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' });
+                        // Close the hay room
+                        hayRooms.closeRoom(name);
 
                         // Clean up internal tracking
                         if (activeSessions[name]) {
-                            if (activeSessions[name].ttyd) {
-                                activeSessions[name].ttyd.kill();
-                            }
                             delete activeSessions[name];
                         }
                         deleteSessionConfig(name);
@@ -2235,7 +2033,7 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        // Ensure session exists (creates termshare room if needed)
+        // Ensure session exists (creates hay room if needed)
         try {
             getOrCreateSession(sessionName);
         } catch (e) {
@@ -2244,18 +2042,18 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        // Serve termshare web client (has built-in mobile keyboard)
+        // Serve hay web client (has built-in mobile keyboard)
         const reqPath = strippedPathname || '/';
 
         // Map request path to file
         let filePath;
         if (reqPath === '/' || reqPath === '') {
-            filePath = path.join(TERMSHARE_WEB_DIR, 'index.html');
+            filePath = path.join(HAY_WEB_DIR, 'index.html');
         } else if (reqPath.startsWith('/assets/')) {
-            filePath = path.join(TERMSHARE_WEB_DIR, reqPath);
+            filePath = path.join(HAY_WEB_DIR, reqPath);
         } else {
             // Fallback to index.html for SPA routing
-            filePath = path.join(TERMSHARE_WEB_DIR, 'index.html');
+            filePath = path.join(HAY_WEB_DIR, 'index.html');
         }
 
         // Check if file exists
@@ -2282,32 +2080,47 @@ function startAuthProxy(authEmitter) {
         // Read and serve the file
         let content = fs.readFileSync(filePath);
 
-        // For HTML files, inject room parameter and WebSocket URL
+        // For HTML files, inject config and fix asset paths
         if (ext === '.html') {
             let html = content.toString('utf8');
-            // Inject room parameter into URL so termshare web client connects to the right room
+            const sessionBasePath = `/s/${displayName}/`;
+
+            // Inject hop session configuration
             const injectScript = `<script>
-                // Hop session configuration
+                // Hop session configuration - use /ws endpoint with room as query param
                 window.__HOP_SESSION__ = ${JSON.stringify({
-                    room: sessionName,
+                    room: displayName,
                     name: 'Guest',
                     wsUrl: '/ws'
                 })};
                 // Auto-set room in URL params if not present
                 if (!new URLSearchParams(location.search).get('room')) {
                     const url = new URL(location.href);
-                    url.searchParams.set('room', ${JSON.stringify(sessionName)});
+                    url.searchParams.set('room', ${JSON.stringify(displayName)});
                     history.replaceState(null, '', url.toString());
                 }
             </script>`;
             html = html.replace('<head>', '<head>' + injectScript);
+
+            // Convert absolute asset paths to relative (remove leading /)
+            html = html.replace(/src="\/assets\//g, 'src="assets/');
+            html = html.replace(/href="\/assets\//g, 'href="assets/');
+
             content = Buffer.from(html, 'utf8');
         }
 
-        res.writeHead(200, {
+        // No caching in dev mode (when serving from hay)
+        const isDevMode = !HAY_WEB_DIR.includes('hay-web');
+        const headers = {
             'Content-Type': contentType,
             'Content-Length': content.length
-        });
+        };
+        if (isDevMode) {
+            headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+            headers['Pragma'] = 'no-cache';
+            headers['Expires'] = '0';
+        }
+        res.writeHead(200, headers);
         res.end(content);
     });
 
@@ -2316,8 +2129,13 @@ function startAuthProxy(authEmitter) {
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
 
-        // Auth via cookie only (tokens in URLs get logged - security risk)
-        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET;
+        // Auth via cookie, Bearer token, or query param (for local CLI connections)
+        const authHeader = req.headers.authorization || '';
+        const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+        const tokenFromQuery = parsedUrl.query.token;
+        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET ||
+                               bearerToken === SESSION_SECRET ||
+                               tokenFromQuery === SESSION_SECRET;
 
         if (!isAuthenticated) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -2325,8 +2143,22 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        const sessionInfo = parseSessionFromRequest(req, parsedUrl);
-        const sessionName = sessionInfo ? sessionInfo.internalName : null;
+        // Support both /ws?room=X (hay CLI format) and /s/{session}/ws (legacy)
+        let sessionName = null;
+        let sessionInfo = null;
+
+        if (parsedUrl.pathname === '/ws') {
+            // Hay CLI format: /ws?room=X
+            const roomParam = parsedUrl.query.room;
+            if (roomParam && typeof roomParam === 'string') {
+                sessionName = toInternalSessionName(roomParam);
+            }
+        } else {
+            // Legacy format: /s/{session}/ws
+            sessionInfo = parseSessionFromRequest(req, parsedUrl);
+            sessionName = sessionInfo ? sessionInfo.internalName : null;
+        }
+
         if (!sessionName) {
             socket.write('HTTP/1.1 404 Session Not Found\r\n\r\n');
             socket.destroy();
@@ -2343,13 +2175,13 @@ function startAuthProxy(authEmitter) {
             }
             const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${targetPort}`, ws: true });
             const originalUrl = req.url;
-            req.url = sessionInfo.strippedUrl;
+            req.url = sessionInfo ? sessionInfo.strippedUrl : req.url;
             proxy.ws(req, socket, head);
             req.url = originalUrl;
             return;
         }
 
-        // Get or create termshare session
+        // Get or create hay session
         let session = activeSessions[sessionName];
         if (!session) {
             try {
@@ -2366,17 +2198,17 @@ function startAuthProxy(authEmitter) {
         wss.handleUpgrade(req, socket, head, (ws) => {
             // Parse query params for client info
             const wsUrl = new URL(req.url, 'http://localhost');
-            const clientName = termshare.sanitizeName(wsUrl.searchParams.get('name') || 'Anonymous');
+            const clientName = hay.sanitizeName(wsUrl.searchParams.get('name') || 'Anonymous');
             const cols = parseInt(wsUrl.searchParams.get('cols') || '80', 10);
             const rows = parseInt(wsUrl.searchParams.get('rows') || '24', 10);
 
-            const clientId = termshare.generateClientId();
+            const clientId = hay.generateClientId();
             const colorIndex = Math.floor(Math.random() * 1000);
 
-            // Attach client to termshare room
+            // Attach client to hay room
             session.room.attachClient(
                 { id: clientId, name: clientName, colorIndex, cols, rows },
-                termshare.createSocketAdapter(ws)
+                hay.createSocketAdapter(ws)
             );
         });
     });
@@ -2608,10 +2440,7 @@ async function startTunnelWithRestart() {
             } catch (e) { }
         }
 
-        // Update all active session tmux bars
-        Object.keys(activeSessions).forEach(sessionName => {
-            applyTmuxStyles(sessionName, publicUrl);
-        });
+        // Sessions are managed by hay.js, no tmux styling needed
     } catch (e) {
         log(`[Tunnel] Failed to restart: ${e.message}. Retrying in 5s...`, RED);
         setTimeout(startTunnelWithRestart, 5000);
@@ -2675,52 +2504,44 @@ function showQrCode(label = 'Hop') {
 async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     log(`[4/4] Attaching to session...`, BOLD);
 
-    // Create and attach to session locally
-    // Find next available session name (in case another hop already created one)
-    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const existingSessions = new Set(listTmuxSessions().map(s => s.name));
-    let counter = 1;
-    let displayName = `${cwdName}-${counter}`;
-    let defaultSessionName = toInternalSessionName(displayName);
-    while (existingSessions.has(defaultSessionName)) {
-        counter++;
+    // Check if there's already an active session (from remote login)
+    const existingSessions = listActiveSessions();
+    let displayName;
+    let defaultSessionName;
+
+    if (existingSessions.length > 0) {
+        // Connect to the first existing session (remote user already created it)
+        defaultSessionName = existingSessions[0].name;
+        displayName = toDisplaySessionName(defaultSessionName);
+        log(`Connecting to existing session: ${displayName}`, RESET);
+    } else {
+        // Create new session - find next available name
+        const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+        const existingNames = new Set(existingSessions.map(s => s.name));
+        let counter = 1;
         displayName = `${cwdName}-${counter}`;
         defaultSessionName = toInternalSessionName(displayName);
+        while (existingNames.has(defaultSessionName)) {
+            counter++;
+            displayName = `${cwdName}-${counter}`;
+            defaultSessionName = toInternalSessionName(displayName);
+        }
+        log(`Starting session: ${displayName}`, RESET);
+        getOrCreateSession(defaultSessionName);
     }
-
-    log(`Starting session: ${displayName}`, RESET);
-    getOrCreateSession(defaultSessionName);
-
-    // Apply styling continuously to handle respawns and URL changes (every 1 second)
-    const styleInterval = setInterval(() => {
-        // Use currentPublicUrl to pick up URL changes after tunnel restarts
-        applyTmuxStyles(defaultSessionName, currentPublicUrl || publicUrl);
-    }, 1000);
-
-    // Apply immediately (no delay needed since execSync is synchronous)
-    applyTmuxStyles(defaultSessionName, publicUrl);
-
-    // Also update when tunnel URL changes
-    tunnelEmitter.on('urlChanged', (newUrl) => {
-        applyTmuxStyles(defaultSessionName, newUrl);
-    });
 
     const cleanup = () => {
         if (shuttingDown) return;
         shuttingDown = true;  // Prevent tunnel auto-restart
         log(`Cleaning up...`, YELLOW);
 
-        clearInterval(styleInterval);
-
         // Remove state file
         if (fs.existsSync(STATE_FILE)) {
             try { fs.unlinkSync(STATE_FILE); } catch (e) { }
         }
 
-        // Kill all ttyd sessions
-        Object.values(activeSessions).forEach(s => {
-            try { s.ttyd.kill('SIGTERM'); } catch (e) { }
-        });
+        // Close all hay rooms
+        hayRooms.closeAll();
 
         // Kill cloudflared tunnel (use currentTunnelProc in case it was restarted)
         try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }
@@ -2732,39 +2553,29 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
         process.exit(0);
     };
 
-    if (useItermControl) {
-        log(`${CYAN}iTerm control mode enabled for local session.${RESET}`, RESET);
-    }
+    const runLocalSessionLoop = () => {
+        return new Promise((resolve) => {
+            // Ensure session exists on server
+            getOrCreateSession(defaultSessionName);
 
-    const runLocalSessionLoop = async () => {
-        const readline = require('readline');
-        while (true) {
-            // For iTerm control mode, wait for session to be ready to avoid protocol corruption
-            if (useItermControl) {
-                await waitForTmuxSessionReady(defaultSessionName);
-            }
-            await new Promise(resolve => {
-                if (useItermControl) setControlModeActive(true);
-                const tmux = spawn('tmux', getLocalTmuxArgs(defaultSessionName), { stdio: 'inherit' });
-                tmux.on('close', () => {
-                    if (useItermControl) setControlModeActive(false);
-                    resolve();
-                });
+            // Spawn hay CLI to connect to the session
+            const hayCli = resolveHayCliPath();
+            const wsUrl = `ws://127.0.0.1:${BASE_PORT}/ws?token=${SESSION_SECRET}`;
+
+            const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
+                stdio: 'inherit',
+                env: { ...process.env, FORCE_COLOR: '1' }
             });
-            log(`\n[Session ended]`, YELLOW);
-            const answer = await new Promise(resolve => {
-                const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                rl.question(`Type 'quit' to shutdown tunnel, or press Enter to restart: `, (resp) => {
-                    rl.close();
-                    resolve(resp || '');
-                });
+
+            cliProc.on('close', (code) => {
+                resolve(code);
             });
-            if (String(answer).trim().toLowerCase() === 'quit') {
-                break;
-            }
-            log(`Restarting...`, RESET);
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
+
+            cliProc.on('error', (err) => {
+                log(`Failed to start hay CLI: ${err.message}`, RED);
+                resolve(1);
+            });
+        });
     };
 
     runLocalSessionLoop().then(() => {
@@ -2778,13 +2589,6 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
 }
 
 async function main() {
-    if (process.argv.includes('--iterm')) {
-        if (isITerm()) {
-            enableITermControlMode();
-        } else {
-            log(`${YELLOW}--iterm requested, but iTerm was not detected. Ignoring.${RESET}`, YELLOW);
-        }
-    }
     // Handle `hop client` - run as a user with exported credentials
     if (process.argv[2] === 'client') {
         const credentialsArg = process.argv[3];
@@ -2961,7 +2765,6 @@ async function main() {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
         log(`  hop                       Start tunnel (or attach to existing)`, RESET);
-        log(`  hop --iterm               Use iTerm tmux control mode for local session`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');
         log(`${BOLD}URL & QR:${RESET}`, RESET);
@@ -2994,7 +2797,7 @@ async function main() {
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
         log('');
         log(`${BOLD}Maintenance:${RESET}`, RESET);
-        log(`  hop wipe                  Kill all hop tmux sessions`, RESET);
+        log(`  hop wipe                  Kill all hop sessions`, RESET);
         log('');
         process.exit(0);
     }
@@ -3260,13 +3063,11 @@ async function main() {
                 log(`Removed port session "${displayName}".`, GREEN);
                 process.exit(0);
             }
-            try {
-                if (hopSessionExists(name)) {
-                    execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' });
-                }
-            } catch (e) { }
+            // Close hay room if it exists
+            if (hayRooms.hasRoom(name)) {
+                hayRooms.closeRoom(name);
+            }
             if (activeSessions[name]) {
-                try { activeSessions[name].ttyd.kill(); } catch (e) { }
                 delete activeSessions[name];
             }
             deleteSessionConfig(name);
@@ -3284,19 +3085,82 @@ async function main() {
 
     // Handle `hop wipe` command - kills all hop sessions
     if (process.argv[2] === 'wipe') {
-        const sessions = listTmuxSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
-        if (sessions.length === 0) {
-            log(`No hop sessions to clean up.`, GREEN);
-            process.exit(0);
+        const existingTunnel = isServerRunning();
+
+        if (existingTunnel) {
+            // Server is running - call API to delete sessions
+            const http = require('http');
+
+            // First get list of sessions
+            const sessionsRes = await new Promise((resolve, reject) => {
+                const opts = {
+                    hostname: '127.0.0.1',
+                    port: existingTunnel.port,
+                    path: '/api/sessions',
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
+                };
+                const req = http.request(opts, res => {
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => resolve({ status: res.statusCode, data }));
+                });
+                req.on('error', reject);
+                req.end();
+            });
+
+            const sessionsData = JSON.parse(sessionsRes.data);
+            const sessions = sessionsData.sessions || [];
+
+            if (sessions.length === 0) {
+                log(`No hop sessions to clean up.`, GREEN);
+                process.exit(0);
+            }
+
+            log(`Killing ${sessions.length} hop session(s)...`, YELLOW);
+
+            for (const s of sessions) {
+                try {
+                    await new Promise((resolve, reject) => {
+                        const opts = {
+                            hostname: '127.0.0.1',
+                            port: existingTunnel.port,
+                            path: '/api/sessions/delete',
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${existingTunnel.sessionSecret}`
+                            }
+                        };
+                        const req = http.request(opts, res => {
+                            let data = '';
+                            res.on('data', chunk => data += chunk);
+                            res.on('end', () => resolve({ status: res.statusCode, data }));
+                        });
+                        req.on('error', reject);
+                        req.write(JSON.stringify({ name: s.name }));
+                        req.end();
+                    });
+                    log(`  - ${s.displayName || s.name}`, RESET);
+                } catch (e) {
+                    log(`  - ${s.displayName || s.name} (failed)`, YELLOW);
+                }
+            }
+            log(`Done.`, GREEN);
+        } else {
+            // Server not running - just clean up config files
+            const sessions = Object.keys(sessionConfigs).filter(s => s.startsWith(HOP_SESSION_PREFIX));
+            if (sessions.length === 0) {
+                log(`No hop sessions to clean up.`, GREEN);
+                process.exit(0);
+            }
+            log(`Cleaning up ${sessions.length} session config(s)...`, YELLOW);
+            for (const name of sessions) {
+                deleteSessionConfig(name);
+                log(`  - ${toDisplaySessionName(name)}`, RESET);
+            }
+            log(`Done.`, GREEN);
         }
-        log(`Killing ${sessions.length} hop session(s)...`, YELLOW);
-        for (const s of sessions) {
-            try {
-                execSync(`tmux kill-session -t ${s.name}`, { stdio: 'ignore' });
-                log(`  - ${toDisplaySessionName(s.name)}`, RESET);
-            } catch (e) { }
-        }
-        log(`Done.`, GREEN);
         process.exit(0);
     }
 
@@ -3348,7 +3212,7 @@ async function main() {
 
             log(`Creating new session: ${displayName}...`, RESET);
 
-            // Register session with local server so ttyd starts
+            // Register session with local server
             const res = await new Promise((resolve, reject) => {
                 const opts = {
                     hostname: '127.0.0.1',
@@ -3375,7 +3239,7 @@ async function main() {
                 });
 
                 req.on('error', reject);
-                req.write(JSON.stringify({ name: displayName }));
+                req.write(JSON.stringify({ name: displayName, cwd: process.cwd() }));
                 req.end();
             });
 
@@ -3386,39 +3250,29 @@ async function main() {
             log(`Session will still work locally.`, RESET);
         }
 
-        log(`Attaching...`, RESET);
+        log(`Attaching to ${displayName}...`, RESET);
 
-        // For iTerm control mode, wait for session to be ready to avoid protocol corruption
-        if (useItermControl) {
-            await waitForTmuxSessionReady(sessionName);
-        }
+        // Spawn hay CLI to connect to session
+        const hayCli = resolveHayCliPath();
+        const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}`;
 
-        // Attach to the specific session
-        if (useItermControl) setControlModeActive(true);
-        const tmux = spawn('tmux', getLocalTmuxArgs(sessionName), { stdio: 'inherit' });
-
-        // Apply styling immediately and continuously refresh (every 1 second)
-        // Re-read state file each time to pick up URL changes after tunnel restarts
-        applyTmuxStyles(sessionName, existingTunnel.url);
-
-        const styleInterval = setInterval(() => {
-            try {
-                const currentState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-                applyTmuxStyles(sessionName, currentState.url);
-            } catch (e) {
-                // State file missing = server died, keep old URL
-                applyTmuxStyles(sessionName, existingTunnel.url);
-            }
-        }, 1000);
-
-        tmux.on('close', () => {
-            if (useItermControl) setControlModeActive(false);
-            clearInterval(styleInterval);
-            log(`\nSession disconnected.`, YELLOW);
-            process.exit(0);
+        const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
+            stdio: 'inherit',
+            env: { ...process.env, FORCE_COLOR: '1' }
         });
 
-        return;
+        cliProc.on('close', (code) => {
+            log(`\nSession disconnected.`, YELLOW);
+            process.exit(code || 0);
+        });
+
+        cliProc.on('error', (err) => {
+            log(`\nConnection error: ${err.message}`, RED);
+            process.exit(1);
+        });
+
+        // Wait indefinitely (process will exit when CLI closes)
+        await new Promise(() => {});
     }
 
     // SERVER MODE: Start new tunnel

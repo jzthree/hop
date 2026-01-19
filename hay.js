@@ -1,4 +1,4 @@
-// Termshare integration for Hop
+// Hay - Terminal sharing for Hop
 // Provides terminal sharing with presence indicators and control modes
 
 const { spawn } = require('child_process');
@@ -15,7 +15,7 @@ try {
 }
 
 const MAX_OUTPUT_BUFFER = 200000; // 200KB buffer for reconnecting clients
-const ROOM_CLEANUP_DELAY = 5000; // 5 seconds before cleaning up empty rooms
+const ROOM_CLEANUP_DELAY = 300000; // 5 minutes before cleaning up empty rooms (allow reconnection)
 
 // Presence colors (same as termshare)
 const COLORS = [
@@ -67,7 +67,8 @@ function createPty(options = {}) {
     }
 
     const shell = options.shell || process.env.SHELL || (os.platform() === 'win32' ? 'powershell.exe' : '/bin/bash');
-    const cwd = options.cwd || process.env.HOME || os.homedir();
+    // Use provided cwd, or default to current working directory (not home)
+    const cwd = options.cwd || process.cwd();
     const env = options.env || { ...process.env, TERM: 'xterm-256color' };
     const cols = options.cols || 80;
     const rows = options.rows || 24;
@@ -83,7 +84,7 @@ function createPty(options = {}) {
 
 // Room class - manages a terminal session with multiple clients
 class Room extends EventEmitter {
-    constructor(id, ptyFactory, initialSize) {
+    constructor(id, ptyFactory, initialSize, cwd) {
         super();
         this.id = id;
         this.clients = new Map();
@@ -92,7 +93,7 @@ class Room extends EventEmitter {
         this.outputBuffer = '';
         this.cleanupTimer = null;
 
-        this.pty = ptyFactory({ cols: initialSize.cols, rows: initialSize.rows });
+        this.pty = ptyFactory({ cols: initialSize.cols, rows: initialSize.rows, cwd });
 
         this.pty.onData((data) => {
             this.outputBuffer = clampBuffer(this.outputBuffer + data);
@@ -116,6 +117,8 @@ class Room extends EventEmitter {
             color: pickPresenceColor(info.colorIndex),
             lastActive: now(),
             typing: false,
+            cols: info.cols || 80,
+            rows: info.rows || 24,
             socket
         };
 
@@ -183,6 +186,16 @@ class Room extends EventEmitter {
             case 'release_control':
                 this.handleReleaseControl(client);
                 break;
+            case 'kill_session':
+                // Notify clients before closing
+                for (const c of this.clients.values()) {
+                    try {
+                        c.socket.send(JSON.stringify({ type: 'error', message: 'Session terminated' }));
+                    } catch (e) {}
+                }
+                this.close();
+                this.emit('exit');
+                break;
         }
     }
 
@@ -206,8 +219,33 @@ class Room extends EventEmitter {
         if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
         if (cols < 1 || cols > 500 || rows < 1 || rows > 200) return;
 
-        this.pty.resize(cols, rows);
-        client.lastActive = now();
+        client.cols = cols;
+        client.rows = rows;
+        // Only resize PTY if this client is the most recently active (was typing)
+        // This prevents disrupting the active typer when others resize their windows
+        const isActive = [...this.clients.values()].every(c => c.lastActive <= client.lastActive);
+        if (isActive) {
+            this.pty.resize(cols, rows);
+        }
+    }
+
+    broadcastActiveSize(client) {
+        // Broadcast to OTHER clients (not the one typing)
+        const msg = JSON.stringify({
+            type: 'active_size',
+            clientId: client.id,
+            cols: client.cols,
+            rows: client.rows
+        });
+        for (const c of this.clients.values()) {
+            if (c.id !== client.id && c.socket.isOpen && c.socket.isOpen()) {
+                try {
+                    c.socket.send(msg);
+                } catch (e) {
+                    // Ignore send errors
+                }
+            }
+        }
     }
 
     handleTyping(client, active) {
@@ -305,14 +343,15 @@ class Room extends EventEmitter {
 
 // Room manager - manages multiple rooms
 class RoomManager {
-    constructor(ptyFactory = createPty) {
+    constructor(ptyFactory = createPty, cwd) {
         this.rooms = new Map();
         this.ptyFactory = ptyFactory;
+        this.cwd = cwd; // Default cwd for new rooms
     }
 
-    getRoom(id, initialSize = { cols: 80, rows: 24 }) {
+    getRoom(id, initialSize = { cols: 80, rows: 24 }, cwd) {
         if (!this.rooms.has(id)) {
-            const room = new Room(id, this.ptyFactory, initialSize);
+            const room = new Room(id, this.ptyFactory, initialSize, cwd || this.cwd);
             room.on('empty', () => {
                 room.close();
                 this.rooms.delete(id);
@@ -372,6 +411,9 @@ function createSocketAdapter(ws) {
 function generateClientId() {
     return require('crypto').randomUUID();
 }
+
+// Note: Local terminal attachment is now handled by the hay CLI
+// (apps/cli in hay/) to avoid duplicate implementations
 
 module.exports = {
     Room,

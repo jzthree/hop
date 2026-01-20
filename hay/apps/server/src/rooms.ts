@@ -67,6 +67,9 @@ export class Room extends EventEmitter {
   private clients = new Map<string, ClientState>();
   private collabMode = true;
   private controllerId: string | null = null;
+  private activeClientId: string | null = null;
+  private activeCols: number;
+  private activeRows: number;
   private outputBuffer = "";
   private cleanupTimer: NodeJS.Timeout | null = null;
 
@@ -74,6 +77,8 @@ export class Room extends EventEmitter {
     super();
     this.id = id;
     this.pty = ptyFactory({ cols: initialSize.cols, rows: initialSize.rows, cwd });
+    this.activeCols = initialSize.cols;
+    this.activeRows = initialSize.rows;
 
     this.pty.onData((data: string) => {
       this.outputBuffer = clampBuffer(this.outputBuffer + data);
@@ -98,6 +103,15 @@ export class Room extends EventEmitter {
         color: client.color,
         collabMode: this.collabMode,
         controllerId: this.controllerId
+      } satisfies ServerMessage)
+    );
+
+    socket.send(
+      JSON.stringify({
+        type: "active_size",
+        clientId: this.activeClientId ?? client.id,
+        cols: this.activeCols,
+        rows: this.activeRows
       } satisfies ServerMessage)
     );
 
@@ -214,6 +228,9 @@ export class Room extends EventEmitter {
     const isActive = [...this.clients.values()].every(c => c.lastActive <= client.lastActive);
     if (isActive) {
       this.pty.resize(cols, rows);
+      this.activeCols = cols;
+      this.activeRows = rows;
+      this.activeClientId = client.id;
       // Broadcast the new active size to other clients so they can adjust
       this.broadcastActiveSize(client);
     }

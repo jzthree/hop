@@ -22,11 +22,31 @@ const hay = require('./hay');
 const hayRooms = new hay.RoomManager(hay.createPty, process.cwd());
 
 // Hot reload: Use HAY_DEV_DIR env or look for hay nearby
+const HAY_ROOT = path.join(__dirname, 'hay');
+let didBuildHay = false;
+
+function ensureHayBuilt() {
+    if (didBuildHay) return;
+    if (!fs.existsSync(HAY_ROOT)) return;
+    const distDir = path.join(HAY_ROOT, 'apps/web/dist');
+    if (fs.existsSync(distDir)) return;
+    try {
+        console.log(`[Dev] Building Hay from: ${HAY_ROOT}`);
+        execFileSync('npm', ['--prefix', HAY_ROOT, 'install'], { stdio: 'inherit' });
+        execFileSync('npm', ['--prefix', HAY_ROOT, 'run', 'build'], { stdio: 'inherit' });
+        didBuildHay = true;
+    } catch (e) {
+        console.error(`[Dev] Failed to build Hay from: ${HAY_ROOT}`);
+    }
+}
+
 function resolveHayWebDir() {
     // Environment variable override for development
     if (process.env.HAY_DEV_DIR && fs.existsSync(process.env.HAY_DEV_DIR)) {
         return process.env.HAY_DEV_DIR;
     }
+    // If local hay source exists, ensure it is built
+    ensureHayBuilt();
     // Check for hay dev build nearby
     const devPaths = [
         path.join(__dirname, 'hay/apps/web/dist'),

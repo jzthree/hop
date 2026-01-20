@@ -224,6 +224,7 @@ npm run build
 ```
 
 This builds hay (web + cli) and syncs `hay/apps/web/dist` into `hay-web/` for Hop to serve.
+If `./hay` exists and the dist folder is missing, `hop` will auto-build hay on startup.
 
 ## 🐛 Troubleshooting
 

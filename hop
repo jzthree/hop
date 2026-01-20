@@ -15,6 +15,7 @@ const net = require('net');
 const WebSocket = require('ws');
 
 const os = require('os');
+const DAEMON_FLAG = process.argv.includes('--daemon');
 
 // Hay integration for terminal sharing
 const hay = require('./hay');
@@ -1477,6 +1478,12 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+let lastAuthAt = 0;
+function recordAuth(authEmitter) {
+    lastAuthAt = Date.now();
+    if (authEmitter) authEmitter.emit('authenticated');
+}
+
 function startAuthProxy(authEmitter) {
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
@@ -1494,6 +1501,18 @@ function startAuthProxy(authEmitter) {
             : null;
         const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET
             || tokenFromHeader === SESSION_SECRET;
+
+        // API: Auth status (used by local CLI to wait for remote login)
+        if (parsedUrl.pathname === '/api/auth' && req.method === 'GET') {
+            if (!isAuthenticated) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Unauthorized' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ lastAuthAt }));
+            return;
+        }
 
         // --- LOGIN PAGE ---
         if (!isAuthenticated) {
@@ -1537,7 +1556,7 @@ function startAuthProxy(authEmitter) {
                             ]);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ success: true }));
-                            if (authEmitter) authEmitter.emit('authenticated');
+                            recordAuth(authEmitter);
                         } else {
                             recordFailure(ip);
                             res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -1597,7 +1616,7 @@ function startAuthProxy(authEmitter) {
                                 : '/sessions';
                             res.writeHead(302, { 'Location': redirectTarget });
                             res.end();
-                            if (authEmitter) authEmitter.emit('authenticated');
+                            recordAuth(authEmitter);
                         } else {
                             recordFailure(ip);
                             res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -1758,7 +1777,7 @@ function startAuthProxy(authEmitter) {
 
         // API: Ping (triggers auth event for mobile login)
         if (parsedUrl.pathname === '/api/ping' && req.method === 'POST') {
-            if (authEmitter) authEmitter.emit('authenticated');
+            recordAuth(authEmitter);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, message: 'Mobile login' }));
             return;
@@ -2519,6 +2538,93 @@ function waitForStart(authEmitter, publicUrl, label) {
     });
 }
 
+function printStartupInfo(publicUrl, label) {
+    console.clear();
+    log(`\n==================================================`, MAGENTA);
+    log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
+    log(`==================================================\n`, MAGENTA);
+
+    log(`TUNNEL URL:`, BOLD + GREEN);
+    log(`  ${publicUrl}`, GREEN);
+    log(`  Scan to open on mobile:`, RESET);
+
+    qrcode.generate(publicUrl, { small: true });
+
+    log(`\n--------------------------------------------------`, RESET);
+    showQrCode(label || 'Hop');
+    log(`\n--------------------------------------------------`, RESET);
+    log(`\n[READY]`, GREEN + BOLD);
+    log(`Daemon started. Run ${CYAN}hop${RESET} to attach a local session.`, RESET);
+}
+
+function waitForStartPolling(state, label) {
+    return new Promise((resolve) => {
+        console.clear();
+        log(`\n==================================================`, MAGENTA);
+        log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
+        log(`==================================================\n`, MAGENTA);
+
+        log(`TUNNEL URL:`, BOLD + GREEN);
+        log(`  ${state.url}`, GREEN);
+        log(`  Scan to open on mobile:`, RESET);
+        qrcode.generate(state.url, { small: true });
+
+        log(`\n--------------------------------------------------`, RESET);
+        showQrCode(label || 'Hop');
+        log(`\n--------------------------------------------------`, RESET);
+
+        const readline = require('readline');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+        log(`\n[READY]`, GREEN + BOLD);
+        log(`Press ENTER to launch local session, or login remotely...`, RESET);
+
+        let resolved = false;
+        const startedAt = Date.now();
+        let pollTimer = null;
+
+        const finish = (reason) => {
+            if (resolved) return;
+            resolved = true;
+            if (pollTimer) clearInterval(pollTimer);
+            rl.close();
+            log(`\n${reason}. Launching local session...`, GREEN);
+            setTimeout(resolve, 800);
+        };
+
+        rl.question('', () => finish('Manual Start'));
+
+        const poll = () => {
+            if (resolved) return;
+            const opts = {
+                hostname: '127.0.0.1',
+                port: state.port,
+                path: '/api/auth',
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${state.sessionSecret}` }
+            };
+            const req = http.request(opts, res => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => {
+                    if (res.statusCode !== 200) return;
+                    try {
+                        const payload = JSON.parse(data);
+                        if (payload.lastAuthAt && payload.lastAuthAt >= startedAt) {
+                            finish('Remote Login');
+                        }
+                    } catch (e) { }
+                });
+            });
+            req.on('error', () => { });
+            req.end();
+        };
+
+        pollTimer = setInterval(poll, 1000);
+        poll();
+    });
+}
+
 // Generate QR code and prompt for verification
 function showQrCode(label = 'Hop') {
     log(`[3/4] Setup Authenticator...`, BOLD);
@@ -2529,6 +2635,32 @@ function showQrCode(label = 'Hop') {
     qrcode.generate(otpauth, { small: true });
 
     log(`Scan this QR code with your Authenticator app.`, CYAN);
+}
+
+function startDaemon() {
+    const node = process.execPath;
+    const script = __filename;
+    const child = spawn(node, [script, '--daemon'], {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env
+    });
+    child.unref();
+}
+
+function waitForDaemonReady(timeoutMs = 20000) {
+    return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const check = () => {
+            const state = isServerRunning();
+            if (state) return resolve(state);
+            if (Date.now() - start > timeoutMs) {
+                return reject(new Error('Timed out waiting for hop daemon'));
+            }
+            setTimeout(check, 250);
+        };
+        check();
+    });
 }
 
 async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
@@ -2630,6 +2762,114 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);
     process.on('exit', cleanup);
+}
+
+async function attachToExistingTunnel(existingTunnel) {
+    log(`Hop tunnel is already running!`, GREEN);
+    log(`URL: ${existingTunnel.url}`, BOLD);
+
+    // Generate smart session name: dir-N
+    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+    let displayName = `${cwdName}-1`;
+    let sessionName = toInternalSessionName(displayName);
+
+    log(`\nFinding next available session...`, RESET);
+
+    try {
+        // Get existing sessions first
+        const sessionsRes = await new Promise((resolve, reject) => {
+            const opts = {
+                hostname: '127.0.0.1',
+                port: existingTunnel.port,
+                path: '/api/sessions',
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
+            };
+            http.get(opts, res => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => resolve(JSON.parse(data)));
+            }).on('error', reject);
+        });
+
+        // Find next available number
+        if (sessionsRes && sessionsRes.sessions && sessionsRes.active) {
+            const allNames = new Set([...sessionsRes.active, ...sessionsRes.sessions.map(s => s.name)]);
+            let counter = 1;
+            while (allNames.has(`${cwdName}-${counter}`)) {
+                counter++;
+            }
+            displayName = `${cwdName}-${counter}`;
+            sessionName = toInternalSessionName(displayName);
+        }
+
+        log(`Creating new session: ${displayName}...`, RESET);
+
+        // Register session with local server
+        const res = await new Promise((resolve, reject) => {
+            const opts = {
+                hostname: '127.0.0.1',
+                port: existingTunnel.port,
+                path: '/api/sessions',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${existingTunnel.sessionSecret}`
+                }
+            };
+
+            const req = http.request(opts, (response) => {
+                let data = '';
+                response.on('data', c => data += c);
+                response.on('end', () => {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (e) {
+                        // Server returned non-JSON (likely HTML login page)
+                        reject(new Error(`Server returned non-JSON (status ${response.statusCode})`));
+                    }
+                });
+            });
+
+            req.on('error', reject);
+            req.write(JSON.stringify({ name: displayName, cwd: process.cwd() }));
+            req.end();
+        });
+
+        if (!res.ok && !res.success) throw new Error(res.error || 'Failed to create session');
+
+    } catch (e) {
+        log(`Note: Could not register session with server: ${e.message}`, YELLOW);
+        log(`Session will still work locally.`, RESET);
+    }
+
+    log(`Attaching to ${displayName}...`, RESET);
+
+    // Spawn hay CLI to connect to session
+    const hayCli = resolveHayCliPath();
+    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}`;
+
+    const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
+        stdio: 'inherit',
+        env: { ...process.env, FORCE_COLOR: '1' }
+    });
+
+    cliProc.on('close', (code) => {
+        if (code === 10) {
+            log(`\nDetached from local session.`, YELLOW);
+            process.exit(0);
+        }
+        log(`\nSession disconnected.`, YELLOW);
+        process.exit(code || 0);
+    });
+
+    cliProc.on('error', (err) => {
+        log(`\nConnection error: ${err.message}`, RED);
+        process.exit(1);
+    });
+
+    // Wait indefinitely (process will exit when CLI closes)
+    await new Promise(() => {});
 }
 
 async function main() {
@@ -2804,11 +3044,46 @@ async function main() {
         return;
     }
 
+    // Handle `hop start` command - start daemon and print QR codes
+    if (process.argv[2] === 'start') {
+        const existing = isServerRunning();
+        if (!existing) {
+            loadAuthSecret();
+            await checkAndInstallDependencies();
+            startDaemon();
+        }
+        const state = existing || await waitForDaemonReady();
+        const domainConfig = getDomainConfig();
+        const label = domainConfig?.hostname ? `Hop-${domainConfig.hostname}` : 'Hop';
+        loadAuthSecret();
+        printStartupInfo(state.url, label);
+        process.exit(0);
+    }
+
+    // Handle `hop stop` command - stop daemon
+    if (process.argv[2] === 'stop') {
+        const state = isServerRunning();
+        if (!state) {
+            log(`Hop is not running.`, RED);
+            process.exit(1);
+        }
+        try {
+            process.kill(state.pid, 'SIGTERM');
+            log(`Hop stopped.`, GREEN);
+        } catch (e) {
+            log(`Failed to stop hop: ${e.message}`, RED);
+            process.exit(1);
+        }
+        process.exit(0);
+    }
+
     // Handle `hop --help` or `hop help`
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
         log(`  hop                       Start tunnel (or attach to existing)`, RESET);
+        log(`  hop start                 Start hop daemon and print QR codes`, RESET);
+        log(`  hop stop                  Stop hop daemon`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');
         log(`${BOLD}URL & QR:${RESET}`, RESET);
@@ -3211,112 +3486,24 @@ async function main() {
     process.stdout.write('\x1Bc'); // Clear screen
 
     // Only one instance allowed
-    const existingTunnel = isServerRunning();
-    if (existingTunnel) {
-        // CLIENT MODE: Connect to existing tunnel
-        // If args are provided, try to send them as a command? (TODO)
-
-        log(`Hop tunnel is already running!`, GREEN);
-        log(`URL: ${existingTunnel.url}`, BOLD);
-
-        // Generate smart session name: dir-N
-        const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-        let displayName = `${cwdName}-1`;
-        let sessionName = toInternalSessionName(displayName);
-
-        log(`\nFinding next available session...`, RESET);
-
-        try {
-            // Get existing sessions first
-            const sessionsRes = await new Promise((resolve, reject) => {
-                const opts = {
-                    hostname: '127.0.0.1',
-                    port: existingTunnel.port,
-                    path: '/api/sessions',
-                    method: 'GET',
-                    headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
-                };
-                http.get(opts, res => {
-                    let data = '';
-                    res.on('data', c => data += c);
-                    res.on('end', () => resolve(JSON.parse(data)));
-                }).on('error', reject);
-            });
-
-            // Find next available number
-            if (sessionsRes && sessionsRes.sessions && sessionsRes.active) {
-                const allNames = new Set([...sessionsRes.active, ...sessionsRes.sessions.map(s => s.name)]);
-                let counter = 1;
-                while (allNames.has(`${cwdName}-${counter}`)) {
-                    counter++;
-                }
-                displayName = `${cwdName}-${counter}`;
-                sessionName = toInternalSessionName(displayName);
-            }
-
-            log(`Creating new session: ${displayName}...`, RESET);
-
-            // Register session with local server
-            const res = await new Promise((resolve, reject) => {
-                const opts = {
-                    hostname: '127.0.0.1',
-                    port: existingTunnel.port,
-                    path: '/api/sessions',
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${existingTunnel.sessionSecret}`
-                    }
-                };
-
-                const req = http.request(opts, (response) => {
-                    let data = '';
-                    response.on('data', c => data += c);
-                    response.on('end', () => {
-                        try {
-                            resolve(JSON.parse(data));
-                        } catch (e) {
-                            // Server returned non-JSON (likely HTML login page)
-                            reject(new Error(`Server returned non-JSON (status ${response.statusCode})`));
-                        }
-                    });
-                });
-
-                req.on('error', reject);
-                req.write(JSON.stringify({ name: displayName, cwd: process.cwd() }));
-                req.end();
-            });
-
-            if (!res.ok && !res.success) throw new Error(res.error || 'Failed to create session');
-
-        } catch (e) {
-            log(`Note: Could not register session with server: ${e.message}`, YELLOW);
-            log(`Session will still work locally.`, RESET);
+    if (!DAEMON_FLAG) {
+        const existingTunnel = isServerRunning();
+        if (existingTunnel) {
+            await attachToExistingTunnel(existingTunnel);
+            return;
         }
 
-        log(`Attaching to ${displayName}...`, RESET);
-
-        // Spawn hay CLI to connect to session
-        const hayCli = resolveHayCliPath();
-        const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}`;
-
-        const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
-            stdio: 'inherit',
-            env: { ...process.env, FORCE_COLOR: '1' }
-        });
-
-        cliProc.on('close', (code) => {
-            log(`\nSession disconnected.`, YELLOW);
-            process.exit(code || 0);
-        });
-
-        cliProc.on('error', (err) => {
-            log(`\nConnection error: ${err.message}`, RED);
-            process.exit(1);
-        });
-
-        // Wait indefinitely (process will exit when CLI closes)
-        await new Promise(() => {});
+        // No server yet: start daemon and wait for it to come up
+        loadAuthSecret();
+        await checkAndInstallDependencies();
+        startDaemon();
+        const state = await waitForDaemonReady();
+        const domainConfig = getDomainConfig();
+        const label = domainConfig?.hostname ? `Hop-${domainConfig.hostname}` : 'Hop';
+        loadAuthSecret();
+        await waitForStartPolling(state, label);
+        await attachToExistingTunnel(state);
+        return;
     }
 
     // SERVER MODE: Start new tunnel
@@ -3346,6 +3533,30 @@ async function main() {
         sessionSecret: SESSION_SECRET,
         startTime: Date.now()
     }));
+
+    if (DAEMON_FLAG) {
+        const cleanup = () => {
+            if (shuttingDown) return;
+            shuttingDown = true;
+            log(`Cleaning up...`, YELLOW);
+
+            if (fs.existsSync(STATE_FILE)) {
+                try { fs.unlinkSync(STATE_FILE); } catch (e) { }
+            }
+
+            hayRooms.closeAll();
+
+            try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }
+            try { proxyServer.close(); } catch (e) { }
+
+            process.exit(0);
+        };
+
+        process.on('SIGINT', cleanup);
+        process.on('SIGTERM', cleanup);
+        process.on('exit', cleanup);
+        await new Promise(() => {});
+    }
 
     await waitForStart(authEmitter, publicUrl);
 

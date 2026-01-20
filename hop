@@ -2540,6 +2540,14 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
             try { fs.unlinkSync(STATE_FILE); } catch (e) { }
         }
 
+        // Remove session config for this local session
+        try {
+            const config = getSessionConfig(defaultSessionName);
+            if (config && config.type !== 'port') {
+                deleteSessionConfig(defaultSessionName);
+            }
+        } catch (e) { }
+
         // Close all hay rooms
         hayRooms.closeAll();
 

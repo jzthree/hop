@@ -2616,7 +2616,13 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
         });
     };
 
-    runLocalSessionLoop().then(() => {
+    runLocalSessionLoop().then((code) => {
+        // Ctrl+D (detach) exits hay CLI with code 10; keep tunnel alive.
+        if (code === 10) {
+            log(`\nDetached from local session. Tunnel is still running.`, YELLOW);
+            log(`Press Ctrl+C to shut down.`, RESET);
+            return;
+        }
         log(`\nLocal session ended. Shutting down tunnel...`, YELLOW);
         cleanup();
     });

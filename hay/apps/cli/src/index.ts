@@ -61,6 +61,9 @@ let connected = false;
 let shouldReconnect = true;
 let reconnectAttempt = 0;
 let reconnectTimer: NodeJS.Timeout | null = null;
+const DETACH_EXIT_CODE = 10;
+const KILL_EXIT_CODE = 11;
+let exitCode = 0;
 
 function getUrl() {
   const cols = process.stdout.columns || 80;
@@ -162,7 +165,7 @@ function connect() {
         process.stdin.setRawMode(false);
       }
       process.stdout.write("\r\n\x1b[90m[hay] Disconnected\x1b[0m\r\n");
-      process.exit(0);
+      process.exit(exitCode);
     }
   });
 
@@ -214,6 +217,7 @@ process.stdin.on("data", (data) => {
   // Ctrl+D to detach (keep backend alive)
   if (input === "\x04") {
     shouldReconnect = false;
+    exitCode = DETACH_EXIT_CODE;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
@@ -225,6 +229,7 @@ process.stdin.on("data", (data) => {
   // Ctrl+Q to detach and kill the session
   if (input === "\x11") {
     shouldReconnect = false;
+    exitCode = KILL_EXIT_CODE;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
@@ -238,6 +243,7 @@ process.stdin.on("data", (data) => {
   // Ctrl+] to disconnect (standard telnet escape, same as Ctrl+D)
   if (input === "\x1d") {
     shouldReconnect = false;
+    exitCode = DETACH_EXIT_CODE;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }

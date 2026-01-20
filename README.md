@@ -220,11 +220,10 @@ Node.js packages:
 The hay source is vendored in `./hay`. Hop will serve `hay/apps/web/dist` when present.
 
 ```bash
-cd hay
-npm install
-npm -w apps/web run build
-npm -w apps/cli run build
+npm run build
 ```
+
+This builds hay (web + cli) and syncs `hay/apps/web/dist` into `hay-web/` for Hop to serve.
 
 ## 🐛 Troubleshooting
 

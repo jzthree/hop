@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node hop",
+    "build": "npm --prefix hay install && npm --prefix hay run build && rsync -a --delete hay/apps/web/dist/ hay-web/",
     "test": "node --check hop"
   },
   "keywords": [

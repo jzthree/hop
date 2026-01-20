@@ -23,6 +23,26 @@ import { RoomManager, type SocketAdapter } from "./rooms";
 import { createPty, type PtyFactory } from "./pty";
 import { sanitizeName, sanitizeRoom } from "./utils";
 
+export const generateClientId = () => randomUUID();
+
+export const createSocketAdapter = (ws: WebSocket): SocketAdapter => ({
+  send: (data: string) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(data);
+    }
+  },
+  onMessage: (handler: (data: string) => void) => {
+    ws.on("message", (data) => handler(data.toString()));
+  },
+  onClose: (handler: () => void) => {
+    ws.on("close", handler);
+  },
+  onError: (handler: (err: Error) => void) => {
+    ws.on("error", handler);
+  },
+  isOpen: () => ws.readyState === ws.OPEN
+});
+
 export type TermshareServerOptions = {
   /** HTTP server to attach WebSocket to */
   server: http.Server;

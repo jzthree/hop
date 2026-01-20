@@ -11,29 +11,28 @@ const qrcode = require('qrcode-terminal');
 const cookie = require('cookie');
 const EventEmitter = require('events');
 const url = require('url');
+const { pathToFileURL } = require('url');
 const net = require('net');
 const WebSocket = require('ws');
 
 const os = require('os');
 const DAEMON_FLAG = process.argv.includes('--daemon');
 
-// Hay integration for terminal sharing
-const hay = require('./hay');
-// Pass current working directory so sessions start where hop was invoked
-const hayRooms = new hay.RoomManager(hay.createPty, process.cwd());
-
-// Hot reload: Use HAY_DEV_DIR env or look for hay nearby
+// Hay integration for terminal sharing (built from ./hay)
 const HAY_ROOT = path.join(__dirname, 'hay');
 let didBuildHay = false;
+let hay = null;
+let hayRooms = null;
 
 function ensureHayBuilt() {
     if (didBuildHay) return;
     if (!fs.existsSync(HAY_ROOT)) return;
     const webDistDir = path.join(HAY_ROOT, 'apps/web/dist');
+    const serverDistFile = path.join(HAY_ROOT, 'apps/server/dist/lib.js');
     const cliDistFile = path.join(HAY_ROOT, 'apps/cli/dist/index.js');
     const sharedDep = path.join(HAY_ROOT, 'node_modules/hay-shared/package.json');
     const needsInstall = !fs.existsSync(sharedDep);
-    const needsBuild = !fs.existsSync(webDistDir) || !fs.existsSync(cliDistFile);
+    const needsBuild = !fs.existsSync(webDistDir) || !fs.existsSync(cliDistFile) || !fs.existsSync(serverDistFile);
     if (!needsInstall && !needsBuild) return;
     try {
         console.log(`[Dev] Building Hay from: ${HAY_ROOT}`);
@@ -47,6 +46,17 @@ function ensureHayBuilt() {
     } catch (e) {
         console.error(`[Dev] Failed to build Hay from: ${HAY_ROOT}`);
     }
+}
+
+async function ensureHayLoaded() {
+    if (hay && hayRooms) return;
+    ensureHayBuilt();
+    const libPath = path.join(HAY_ROOT, 'apps/server/dist/lib.js');
+    if (!fs.existsSync(libPath)) {
+        throw new Error('Hay server build missing. Run `npm --prefix hay run build`.');
+    }
+    hay = await import(pathToFileURL(libPath));
+    hayRooms = new hay.RoomManager(hay.createPty, process.cwd());
 }
 
 function resolveHayWebDir() {
@@ -814,7 +824,7 @@ function loadAuthSecret() {
 const BASE_PORT = existingState ? existingState.port : Math.floor(Math.random() * (50000 - 10000 + 1) + 10000);
 const PROXY_PORT = BASE_PORT;
 
-// Session Management (using hay.js - no tmux/ttyd)
+// Session Management (using hay server - no tmux/ttyd)
 const activeSessions = {}; // { sessionName: { room: HayRoom } }
 const startingSessions = new Set(); // session names being initialized
 const sessionRenames = {};  // { oldName: newName } - track renames for styling updates
@@ -935,7 +945,7 @@ async function checkAndInstallDependencies() {
         }
     }
 
-    const deps = ['cloudflared']; // tmux/ttyd not needed - using node-pty via hay.js
+    const deps = ['cloudflared']; // tmux/ttyd not needed - using node-pty via hay
     for (const dep of deps) {
         try {
             await runCommand('which', [dep], { stdio: 'ignore' });
@@ -2489,7 +2499,7 @@ async function startTunnelWithRestart() {
             } catch (e) { }
         }
 
-        // Sessions are managed by hay.js, no tmux styling needed
+        // Sessions are managed by hay, no tmux styling needed
     } catch (e) {
         log(`[Tunnel] Failed to restart: ${e.message}. Retrying in 5s...`, RED);
         setTimeout(startTunnelWithRestart, 5000);
@@ -3018,6 +3028,7 @@ async function main() {
         loadAuthSecret();
 
         await checkAndInstallDependencies();
+        await ensureHayLoaded();
         const authEmitter = new EventEmitter();
 
         const proxyServer = startAuthProxy(authEmitter);
@@ -3308,6 +3319,7 @@ async function main() {
 
     // Handle `hop session` commands
     if (process.argv[2] === 'session') {
+        await ensureHayLoaded();
         const subcommand = process.argv[3];
         const nameArg = process.argv[4];
 
@@ -3520,6 +3532,7 @@ async function main() {
 
     loadAuthSecret();
     await checkAndInstallDependencies();
+    await ensureHayLoaded();
     const authEmitter = new EventEmitter();
 
     const proxyServer = startAuthProxy(authEmitter);

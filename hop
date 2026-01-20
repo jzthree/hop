@@ -1960,19 +1960,30 @@ function startAuthProxy(authEmitter) {
                     const config = getSessionConfig(name);
                     if (config && config.type === 'port') {
                         deleteSessionConfig(name);
-                    } else {
-                        if (!hopSessionExists(name)) {
-                            res.writeHead(404, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ error: 'Session not found' }));
-                            return;
-                        }
-                        // Close the hay room
-                        hayRooms.closeRoom(name);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: true }));
+                        return;
+                    }
 
-                        // Clean up internal tracking
-                        if (activeSessions[name]) {
-                            delete activeSessions[name];
-                        }
+                    const exists = hopSessionExists(name);
+                    if (!exists && !config) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+
+                    // Close the hay room if it exists
+                    if (hayRooms.hasRoom(name)) {
+                        hayRooms.closeRoom(name);
+                    }
+
+                    // Clean up internal tracking
+                    if (activeSessions[name]) {
+                        delete activeSessions[name];
+                    }
+
+                    // Always remove session config if present
+                    if (config) {
                         deleteSessionConfig(name);
                     }
 

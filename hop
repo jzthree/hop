@@ -2156,12 +2156,6 @@ function startAuthProxy(authEmitter) {
                     name: 'Guest',
                     wsUrl: '/ws'
                 })};
-                // Auto-set room in URL params if not present
-                if (!new URLSearchParams(location.search).get('room')) {
-                    const url = new URL(location.href);
-                    url.searchParams.set('room', ${JSON.stringify(displayName)});
-                    history.replaceState(null, '', url.toString());
-                }
             </script>`;
             html = html.replace('<head>', '<head>' + injectScript);
 

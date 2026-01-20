@@ -11,7 +11,7 @@ import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 
-const createSessionId = () => `session-${Math.random().toString(36).slice(2, 7)}`;
+const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
 const resolveWsUrl = () => {
   // Check for hop session config (when embedded in hop)
@@ -43,13 +43,9 @@ const formatStatus = (client: PresenceClient) => {
   return "idle";
 };
 
-const createShareLink = (sessionName: string, embeddedInHop: boolean) => {
-  if (embeddedInHop) {
-    return `${window.location.origin}/s/${encodeURIComponent(sessionName)}/`;
-  }
+const createShareLink = (room: string) => {
   const url = new URL(window.location.href);
-  url.searchParams.set("session", sessionName);
-  url.searchParams.delete("room");
+  url.searchParams.set("room", room);
   url.searchParams.delete("name");
   return url.toString();
 };
@@ -99,7 +95,7 @@ const App = () => {
   });
   const [room, setRoom] = useState(() => {
     if (hopSession?.room) return hopSession.room;
-    return params.get("session") ?? params.get("room") ?? createSessionId();
+    return params.get("room") ?? createRoomId();
   });
   // Auto-start session when embedded in Hop (skip join page)
   const [session, setSession] = useState<{ name: string; room: string } | null>(() => {
@@ -152,9 +148,7 @@ const App = () => {
   const shouldReconnectRef = useRef(true);
 
   const shareUrl = useMemo(() => {
-    return session
-      ? createShareLink(session.room, isEmbeddedInHop())
-      : createShareLink(room, isEmbeddedInHop());
+    return session ? createShareLink(session.room) : createShareLink(room);
   }, [session, room]);
 
   const pushNotice = (message: string) => {
@@ -871,7 +865,7 @@ const App = () => {
   const handleJoin = (event: FormEvent) => {
     event.preventDefault();
     if (!name.trim() || !room.trim()) {
-      pushNotice("Enter a name and session to start.");
+      pushNotice("Enter a name and room to start.");
       return;
     }
     localStorage.setItem("hay_name", name.trim());

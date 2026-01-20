@@ -302,4 +302,21 @@ export class RoomManager {
     this.rooms.set(roomId, room);
     return room;
   }
+
+  hasRoom(roomId: string) {
+    return this.rooms.has(roomId);
+  }
+
+  closeRoom(roomId: string) {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+    room.kill();
+    this.rooms.delete(roomId);
+  }
+
+  closeAll() {
+    for (const roomId of this.rooms.keys()) {
+      this.closeRoom(roomId);
+    }
+  }
 }

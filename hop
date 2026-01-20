@@ -1054,6 +1054,10 @@ function getOrCreateSession(sessionName, cwd) {
 
     room.on('empty', () => {
         delete activeSessions[sessionName];
+        const config = getSessionConfig(sessionName);
+        if (config && config.type !== 'port') {
+            deleteSessionConfig(sessionName);
+        }
         log(`Session ${toDisplaySessionName(sessionName)} closed.`, YELLOW);
     });
 

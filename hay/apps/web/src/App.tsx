@@ -843,6 +843,12 @@ const App = () => {
     }
   }, [drawerOpen, fetchSessions]);
 
+  // Fetch sessions on desktop when embedded in Hop (no drawer)
+  useEffect(() => {
+    if (!isEmbeddedInHop() || isMobile) return;
+    fetchSessions();
+  }, [fetchSessions, isMobile]);
+
   // Update terminal font size when it changes
   useEffect(() => {
     if (termRef.current) {

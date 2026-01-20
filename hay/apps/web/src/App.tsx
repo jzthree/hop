@@ -797,7 +797,6 @@ const App = () => {
   }, [session]);
 
   const fetchSessions = useCallback(async () => {
-    if (!isEmbeddedInHop()) return;
     setLoadingSessions(true);
     try {
       const res = await fetch("/api/sessions");
@@ -843,9 +842,9 @@ const App = () => {
     }
   }, [drawerOpen, fetchSessions]);
 
-  // Fetch sessions on desktop when embedded in Hop (no drawer)
+  // Fetch sessions on desktop (no drawer)
   useEffect(() => {
-    if (!isEmbeddedInHop() || isMobile) return;
+    if (isMobile) return;
     fetchSessions();
   }, [fetchSessions, isMobile]);
 
@@ -1087,14 +1086,15 @@ const App = () => {
               </div>
             </div>
             {notice && <p className="notice">{notice}</p>}
-            {isEmbeddedInHop() && (() => {
+            {(() => {
               const otherSessions = sessions.filter((s) => s.name !== session?.room);
-              if (!loadingSessions && otherSessions.length === 0) return null;
               return (
                 <div className="session-switcher">
                   <p className="session-switcher-label">Switch session</p>
                   {loadingSessions ? (
                     <div className="session-list-loading">Loading...</div>
+                  ) : otherSessions.length === 0 ? (
+                    <div className="session-list-empty">No other sessions</div>
                   ) : (
                     <div className="session-list">
                       {otherSessions.map((s) => (

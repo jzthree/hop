@@ -215,6 +215,17 @@ Node.js packages:
 
 **Secrets:** Stored in `~/.hop-shell/` (treat like `~/.ssh/`)
 
+## 🛠 Development (Hay)
+
+The hay source is vendored in `./hay`. Hop will serve `hay/apps/web/dist` when present.
+
+```bash
+cd hay
+npm install
+npm -w apps/web run build
+npm -w apps/cli run build
+```
+
 ## 🐛 Troubleshooting
 
 **QR code not working?**

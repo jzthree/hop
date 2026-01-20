@@ -1,0 +1,37 @@
+{
+  "name": "hay-server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./dist/lib.js",
+  "types": "./dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/lib.js",
+      "types": "./dist/lib.d.ts"
+    },
+    "./standalone": {
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup src/lib.ts src/index.ts --format esm --dts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "hay-shared": "*",
+    "express": "^4.21.2",
+    "node-pty-prebuilt-multiarch": "^0.10.1-pre.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.5.12",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

@@ -29,6 +29,7 @@ function resolveHayWebDir() {
     }
     // Check for hay dev build nearby
     const devPaths = [
+        path.join(__dirname, 'hay/apps/web/dist'),
         path.join(__dirname, '../hay/apps/web/dist'),
         path.join(__dirname, '../../hay/apps/web/dist'),
         path.resolve(__dirname, '../hay/apps/web/dist'),
@@ -48,6 +49,7 @@ const HAY_WEB_DIR = resolveHayWebDir();
 function resolveHayCliPath() {
     // Check for hay CLI nearby
     const cliPaths = [
+        path.join(__dirname, 'hay/apps/cli/dist/index.js'),
         path.join(__dirname, '../hay/apps/cli/dist/index.js'),
         path.join(__dirname, '../../hay/apps/cli/dist/index.js'),
         path.resolve(__dirname, '../hay/apps/cli/dist/index.js'),

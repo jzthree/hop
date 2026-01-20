@@ -28,12 +28,20 @@ let didBuildHay = false;
 function ensureHayBuilt() {
     if (didBuildHay) return;
     if (!fs.existsSync(HAY_ROOT)) return;
-    const distDir = path.join(HAY_ROOT, 'apps/web/dist');
-    if (fs.existsSync(distDir)) return;
+    const webDistDir = path.join(HAY_ROOT, 'apps/web/dist');
+    const cliDistFile = path.join(HAY_ROOT, 'apps/cli/dist/index.js');
+    const sharedDep = path.join(HAY_ROOT, 'node_modules/hay-shared/package.json');
+    const needsInstall = !fs.existsSync(sharedDep);
+    const needsBuild = !fs.existsSync(webDistDir) || !fs.existsSync(cliDistFile);
+    if (!needsInstall && !needsBuild) return;
     try {
         console.log(`[Dev] Building Hay from: ${HAY_ROOT}`);
-        execFileSync('npm', ['--prefix', HAY_ROOT, 'install'], { stdio: 'inherit' });
-        execFileSync('npm', ['--prefix', HAY_ROOT, 'run', 'build'], { stdio: 'inherit' });
+        if (needsInstall) {
+            execFileSync('npm', ['--prefix', HAY_ROOT, 'install'], { stdio: 'inherit' });
+        }
+        if (needsBuild) {
+            execFileSync('npm', ['--prefix', HAY_ROOT, 'run', 'build'], { stdio: 'inherit' });
+        }
         didBuildHay = true;
     } catch (e) {
         console.error(`[Dev] Failed to build Hay from: ${HAY_ROOT}`);

@@ -2886,6 +2886,96 @@ async function attachToExistingTunnel(existingTunnel) {
     await new Promise(() => {});
 }
 
+async function fetchSessionList(existingTunnel) {
+    const sessionsRes = await new Promise((resolve, reject) => {
+        const opts = {
+            hostname: '127.0.0.1',
+            port: existingTunnel.port,
+            path: '/api/sessions',
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
+        };
+        http.get(opts, res => {
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch (e) {
+                    reject(new Error('Failed to parse sessions response'));
+                }
+            });
+        }).on('error', reject);
+    });
+    return sessionsRes || {};
+}
+
+function pickSessionForDir(sessions, cwdName) {
+    const prefix = `${cwdName}-`;
+    const matches = sessions
+        .filter(s => s.type !== 'port')
+        .filter(s => s.displayName === cwdName || s.displayName.startsWith(prefix));
+    if (matches.length === 0) return null;
+    const scored = matches.map(s => {
+        let score = Number.MAX_SAFE_INTEGER;
+        if (s.displayName === cwdName) {
+            score = 0;
+        } else if (s.displayName.startsWith(prefix)) {
+            const suffix = s.displayName.slice(prefix.length);
+            const num = parseInt(suffix, 10);
+            if (Number.isFinite(num)) score = num;
+        }
+        return { session: s, score };
+    });
+    scored.sort((a, b) => a.score - b.score || a.session.displayName.localeCompare(b.session.displayName));
+    return scored[0].session;
+}
+
+async function attachToNamedSession(existingTunnel, displayName) {
+    const sessionsRes = await fetchSessionList(existingTunnel);
+    const sessions = sessionsRes.sessions || [];
+    const target = sessions.find(s => s.type !== 'port' && s.displayName === displayName);
+    if (!target) {
+        throw new Error(`Session not found: ${displayName}`);
+    }
+    log(`Attaching to ${displayName}...`, RESET);
+
+    const hayCli = resolveHayCliPath();
+    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}`;
+
+    const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
+        stdio: 'inherit',
+        env: { ...process.env, FORCE_COLOR: '1' }
+    });
+
+    cliProc.on('close', (code) => {
+        if (code === 10) {
+            log(`\nDetached from local session.`, YELLOW);
+            process.exit(0);
+        }
+        log(`\nSession disconnected.`, YELLOW);
+        process.exit(code || 0);
+    });
+
+    cliProc.on('error', (err) => {
+        log(`\nConnection error: ${err.message}`, RED);
+        process.exit(1);
+    });
+
+    await new Promise(() => {});
+}
+
+async function attachToSessionForDir(existingTunnel) {
+    const sessionsRes = await fetchSessionList(existingTunnel);
+    const sessions = sessionsRes.sessions || [];
+    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const target = pickSessionForDir(sessions, cwdName);
+    if (!target) {
+        throw new Error(`No existing session for ${cwdName}`);
+    }
+    return attachToNamedSession(existingTunnel, target.displayName);
+}
+
 async function main() {
     // Handle `hop client` - run as a user with exported credentials
     if (process.argv[2] === 'client') {
@@ -3075,6 +3165,25 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop attach` command - attach to existing session
+    if (process.argv[2] === 'attach') {
+        const existing = isServerRunning();
+        if (!existing) {
+            log(`Hop is not running.`, RED);
+            process.exit(1);
+        }
+        const nameArg = process.argv[3];
+        const displayName = nameArg && nameArg.startsWith(HOP_SESSION_PREFIX)
+            ? toDisplaySessionName(nameArg)
+            : nameArg;
+        if (displayName) {
+            await attachToNamedSession(existing, displayName);
+        } else {
+            await attachToSessionForDir(existing);
+        }
+        return;
+    }
+
     // Handle `hop stop` command - stop daemon
     if (process.argv[2] === 'stop') {
         const state = isServerRunning();
@@ -3098,6 +3207,7 @@ async function main() {
         log(`${BOLD}Usage:${RESET}`, RESET);
         log(`  hop                       Start tunnel (or attach to existing)`, RESET);
         log(`  hop start                 Start hop daemon and print QR codes`, RESET);
+        log(`  hop attach [session]       Attach to an existing session`, RESET);
         log(`  hop stop                  Stop hop daemon`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');

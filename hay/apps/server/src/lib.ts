@@ -40,6 +40,9 @@ export const createSocketAdapter = (ws: WebSocket): SocketAdapter => ({
   onError: (handler: (err: Error) => void) => {
     ws.on("error", handler);
   },
+  close: () => {
+    ws.close();
+  },
   isOpen: () => ws.readyState === ws.OPEN
 });
 
@@ -95,6 +98,9 @@ export function attachTermshare(options: TermshareServerOptions) {
     },
     onError: (handler: (err: Error) => void) => {
       ws.on("error", handler);
+    },
+    close: () => {
+      ws.close();
     },
     isOpen: () => ws.readyState === ws.OPEN
   });

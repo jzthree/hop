@@ -53,6 +53,9 @@ const toSocketAdapter = (ws: WebSocket) => {
     onError: (handler: (err: Error) => void) => {
       ws.on("error", handler);
     },
+    close: () => {
+      ws.close();
+    },
     isOpen: () => ws.readyState === ws.OPEN
   };
 };

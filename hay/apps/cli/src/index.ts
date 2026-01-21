@@ -1,10 +1,37 @@
 #!/usr/bin/env node
 import process from "node:process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createRequire } from "node:module";
 import { WebSocket } from "ws";
 import { safeParseServerMessage, type ClientMessage, type PresenceClient } from "hay-shared";
 
 const args = process.argv.slice(2);
+const isMac = process.platform === "darwin";
+const keyLabelShort = isMac ? "Opt" : "Alt";
+const keyLabelLong = isMac ? "Option" : "Alt";
+
+const CONFIG_PATH = path.join(os.homedir(), ".hay-cli.json");
+type CliConfig = { showHints?: boolean };
+
+const loadConfig = (): CliConfig => {
+  try {
+    const raw = fs.readFileSync(CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw) as CliConfig;
+    return parsed ?? {};
+  } catch {
+    return {};
+  }
+};
+
+const saveConfig = (config: CliConfig) => {
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  } catch {
+    // Ignore config write errors
+  }
+};
 
 const globalWindow = globalThis as typeof globalThis & {
   window?: typeof globalThis;
@@ -58,10 +85,11 @@ Options:
   -h, --help           Show this help
 
 Keyboard shortcuts:
-  Ctrl+]               Detach (session continues in background)
+  Ctrl+G               Detach (session continues in background)
   Ctrl+Q               Kill session and exit
-  Option+←/→/↑/↓        Pan viewport (Shift = faster)
-  Option+A             Toggle autofit (resize remote to local)
+  Ctrl+T               Toggle hint bar (saved)
+  ${keyLabelLong}+←/→/↑/↓        Pan viewport (Shift = faster)
+  ${keyLabelLong}+A             Toggle autofit (resize remote to local)
 
 Examples:
   hay -r my-room
@@ -91,6 +119,13 @@ const NOTICE_MS = 3500;
 const PAN_STEP = 2;
 const PAN_FAST_STEP = 10;
 let cursorVisible = true;
+const SCROLL_STEP = 3;
+let pendingInput = "";
+type RgbColor = { r: number; g: number; b: number };
+let defaultFg: RgbColor | null = null;
+let defaultBg: RgbColor | null = null;
+let defaultCursor: RgbColor | null = null;
+let pendingOsc = "";
 
 let ws: WebSocket | null = null;
 let clientId: string | null = null;
@@ -102,6 +137,7 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 let typingTimeout: NodeJS.Timeout | null = null;
 let noticeTimer: NodeJS.Timeout | null = null;
 let exitCode = 0;
+let exitMessage: string | null = null;
 
 let collabMode = true;
 let controllerId: string | null = null;
@@ -109,8 +145,10 @@ let presence: PresenceClient[] = [];
 let notice: { message: string; expiresAt: number } | null = null;
 
 let syncSize = true;
+let mouseCapture = true;
 let viewX = 0;
 let viewY = 0;
+let showHints = true;
 
 let uiInitialized = false;
 let renderScheduled = false;
@@ -120,11 +158,15 @@ let lastRenderRows = 0;
 const getLocalMetrics = () => {
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  const barRows = rows >= 3 ? 2 : 0;
+  const showBottomBar = rows >= 2;
+  const showHintBar = showHints && rows >= 3;
+  const barRows = (showBottomBar ? 1 : 0) + (showHintBar ? 1 : 0);
   return {
     cols,
     rows,
     barRows,
+    showBottomBar,
+    showHintBar,
     viewportCols: Math.max(1, cols),
     viewportRows: Math.max(1, rows - barRows)
   };
@@ -142,22 +184,125 @@ const terminal = new Terminal({
   allowProposedApi: true
 });
 
+const configFile = loadConfig();
+showHints = configFile.showHints ?? true;
+
+// Forward terminal-generated responses (eg. DSR cursor reports) back to the PTY.
+terminal.onData((data) => {
+  if (!data) return;
+  sendMessage({ type: "input", data });
+});
+
 const filterFocusSequences = (data: string) => data.replace(/\x1b\[I/g, "").replace(/\x1b\[O/g, "");
+
+const stripMouseSequences = (data: string) => {
+  let didScroll = false;
+  const cleaned = data.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (_, buttonText, _x, _y, kind) => {
+    const button = Number(buttonText);
+    const isWheel = (button & 64) === 64;
+    if (isWheel && kind === "M") {
+      const direction = (button & 1) === 1 ? 1 : -1;
+      viewY += direction * SCROLL_STEP;
+      clampView();
+      scheduleRender();
+      didScroll = true;
+    }
+    return "";
+  });
+  return { cleaned, didScroll };
+};
+
+const parseOscColor = (value: string): RgbColor | null => {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed || trimmed === "default") {
+    return null;
+  }
+  if (trimmed.startsWith("#")) {
+    const hex = trimmed.slice(1);
+    if (hex.length === 6) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null;
+      return { r, g, b };
+    }
+    return null;
+  }
+  if (trimmed.startsWith("rgb:")) {
+    const parts = trimmed.slice(4).split("/");
+    if (parts.length < 3) return null;
+    const parsePart = (part: string) => {
+      if (!part) return null;
+      const valueNum = parseInt(part, 16);
+      if (Number.isNaN(valueNum)) return null;
+      const max = Math.pow(16, part.length) - 1;
+      return Math.round((valueNum / max) * 255);
+    };
+    const r = parsePart(parts[0]);
+    const g = parsePart(parts[1]);
+    const b = parsePart(parts[2]);
+    if (r === null || g === null || b === null) return null;
+    return { r, g, b };
+  }
+  return null;
+};
+
+const trackOscColors = (chunk: string) => {
+  const data = pendingOsc + chunk;
+  pendingOsc = "";
+  const oscPattern = /\x1b\](10|11|12);([\s\S]*?)(\x07|\x1b\\)/g;
+  let match: RegExpExecArray | null;
+  let lastMatchEnd = 0;
+  while ((match = oscPattern.exec(data))) {
+    lastMatchEnd = oscPattern.lastIndex;
+    const id = Number(match[1]);
+    const payload = match[2].trim();
+    if (payload === "?") {
+      continue;
+    }
+    const color = parseOscColor(payload);
+    if (id === 10) {
+      defaultFg = color;
+    } else if (id === 11) {
+      defaultBg = color;
+    } else if (id === 12) {
+      defaultCursor = color;
+    }
+  }
+  const tailIndex = data.lastIndexOf("\x1b]");
+  if (tailIndex !== -1 && tailIndex >= lastMatchEnd) {
+    const tail = data.slice(tailIndex);
+    if (!tail.includes("\x07") && !tail.includes("\x1b\\")) {
+      pendingOsc = tail;
+    }
+  }
+  if (lastMatchEnd > 0) {
+    scheduleRender();
+  }
+};
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
+const getMaxViewY = () => {
+  const buffer = terminal.buffer.active;
+  const max = buffer.length - localMetrics.viewportRows;
+  return Math.max(0, max);
+};
+
 const clampView = () => {
   const maxX = Math.max(0, remoteCols - localMetrics.viewportCols);
-  const maxY = Math.max(0, remoteRows - localMetrics.viewportRows);
+  const maxY = getMaxViewY();
   viewX = clamp(viewX, 0, maxX);
   viewY = clamp(viewY, 0, maxY);
 };
 
 const ensureCursorVisible = (_force: boolean) => {
-  const cursorX = terminal.buffer.active.cursorX;
-  const cursorY = terminal.buffer.active.cursorY;
+  const buffer = terminal.buffer.active;
+  const cursorX = buffer.cursorX;
+  const cursorRow = buffer.baseY + buffer.cursorY;
   let nextX = viewX;
   let nextY = viewY;
+  const maxY = getMaxViewY();
 
   if (cursorX < viewX) {
     nextX = cursorX;
@@ -165,15 +310,14 @@ const ensureCursorVisible = (_force: boolean) => {
     nextX = cursorX - localMetrics.viewportCols + 1;
   }
 
-  if (cursorY < viewY) {
-    nextY = cursorY;
-  } else if (cursorY >= viewY + localMetrics.viewportRows) {
-    nextY = cursorY - localMetrics.viewportRows + 1;
+  if (cursorRow < viewY) {
+    nextY = cursorRow;
+  } else if (cursorRow >= viewY + localMetrics.viewportRows) {
+    nextY = cursorRow - localMetrics.viewportRows + 1;
   }
 
   viewX = nextX;
-  viewY = nextY;
-  clampView();
+  viewY = clamp(nextY, 0, maxY);
 };
 
 const scheduleRender = () => {
@@ -222,6 +366,42 @@ const sendMessage = (message: ClientMessage) => {
   }
 };
 
+const sendOscResponse = (id: number, color: RgbColor | null) => {
+  if (!color) return;
+  const toHex4 = (value: number) => Math.round(value * 257).toString(16).padStart(4, "0");
+  const payload = `\x1b]${id};rgb:${toHex4(color.r)}/${toHex4(color.g)}/${toHex4(color.b)}\x1b\\`;
+  sendMessage({ type: "input", data: payload });
+};
+
+terminal.parser.registerOscHandler(10, (data) => {
+  if (data.trim() === "?") {
+    sendOscResponse(10, defaultFg);
+    return true;
+  }
+  defaultFg = parseOscColor(data);
+  scheduleRender();
+  return true;
+});
+
+terminal.parser.registerOscHandler(11, (data) => {
+  if (data.trim() === "?") {
+    sendOscResponse(11, defaultBg);
+    return true;
+  }
+  defaultBg = parseOscColor(data);
+  scheduleRender();
+  return true;
+});
+
+terminal.parser.registerOscHandler(12, (data) => {
+  if (data.trim() === "?") {
+    sendOscResponse(12, defaultCursor);
+    return true;
+  }
+  defaultCursor = parseOscColor(data);
+  return true;
+});
+
 const sendTyping = (active: boolean) => {
   sendMessage({ type: "typing", active });
 };
@@ -241,6 +421,31 @@ const getUrl = () => {
   return `${config.server}${separator}room=${encodeURIComponent(config.room)}&name=${encodeURIComponent(
     config.name
   )}&cols=${localMetrics.viewportCols}&rows=${localMetrics.viewportRows}`;
+};
+
+const buildShareUrl = () => {
+  const explicit = process.env.HAY_SHARE_URL || process.env.HOP_PUBLIC_URL || "";
+
+  const normalize = (raw: string) => {
+    try {
+      const url = new URL(raw);
+      return url.origin;
+    } catch {
+      return raw;
+    }
+  };
+
+  if (explicit) {
+    return normalize(explicit);
+  }
+
+  try {
+    const wsUrl = new URL(config.server);
+    const protocol = wsUrl.protocol === "wss:" ? "https:" : "http:";
+    return normalize(`${protocol}//${wsUrl.host}`);
+  } catch {
+    return "";
+  }
 };
 
 const setStatus = (nextStatus: typeof status) => {
@@ -271,23 +476,76 @@ const applySyncSize = () => {
   }
 };
 
+const enableMouseCapture = () => {
+  if (!process.stdout.isTTY) return;
+  process.stdout.write("\x1b[?1000h\x1b[?1006h");
+};
+
+const disableMouseCapture = () => {
+  if (!process.stdout.isTTY) return;
+  process.stdout.write("\x1b[?1006l\x1b[?1000l");
+};
+
+const setMouseCapture = (enabled: boolean) => {
+  mouseCapture = enabled;
+  if (uiInitialized) {
+    if (mouseCapture) {
+      enableMouseCapture();
+    } else {
+      disableMouseCapture();
+    }
+  }
+  scheduleRender();
+};
+
 const initUi = () => {
   if (uiInitialized || !process.stdout.isTTY) return;
   uiInitialized = true;
+  // Enable alternate screen (mouse capture is optional)
   process.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
+  if (mouseCapture) {
+    enableMouseCapture();
+  }
   lastRenderCols = 0;
   lastRenderRows = 0;
 };
 
 const restoreUi = () => {
   if (!uiInitialized || !process.stdout.isTTY) return;
+  disableMouseCapture();
   process.stdout.write("\x1b[?25h\x1b[?1049l\x1b[0m");
   uiInitialized = false;
 };
 
+const ANSI_REGEX = /\x1b\[[0-9;]*m/g;
+
+const visibleLength = (text: string) => text.replace(ANSI_REGEX, "").length;
+
+const truncateAnsi = (text: string, cols: number) => {
+  if (cols <= 0) return "";
+  let out = "";
+  let visible = 0;
+  for (let i = 0; i < text.length && visible < cols; i += 1) {
+    const char = text[i];
+    if (char === "\x1b" && text[i + 1] === "[") {
+      const end = text.indexOf("m", i + 2);
+      if (end === -1) {
+        break;
+      }
+      out += text.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    out += char;
+    visible += 1;
+  }
+  return out;
+};
+
 const padOrTrim = (text: string, cols: number) => {
-  if (text.length > cols) return text.slice(0, cols);
-  if (text.length < cols) return text + " ".repeat(cols - text.length);
+  const len = visibleLength(text);
+  if (len > cols) return truncateAnsi(text, cols);
+  if (len < cols) return text + " ".repeat(cols - len);
   return text;
 };
 
@@ -295,47 +553,49 @@ const composeBar = (left: string, right: string, cols: number) => {
   if (!right) {
     return padOrTrim(left, cols);
   }
-  if (right.length >= cols) {
+  const rightLen = visibleLength(right);
+  if (rightLen >= cols) {
     return padOrTrim(right.slice(0, cols), cols);
   }
-  const availableLeft = Math.max(0, cols - right.length - 1);
-  const trimmedLeft = left.length > availableLeft ? left.slice(0, availableLeft) : left;
-  const gap = Math.max(1, cols - trimmedLeft.length - right.length);
+  const availableLeft = Math.max(0, cols - rightLen - 1);
+  const trimmedLeft = visibleLength(left) > availableLeft ? truncateAnsi(left, availableLeft) : left;
+  const gap = Math.max(1, cols - visibleLength(trimmedLeft) - rightLen);
   return padOrTrim(trimmedLeft + " ".repeat(gap) + right, cols);
 };
 
-const BAR_TOP_BG = "\x1b[48;5;238m";
-const BAR_BOTTOM_BG = "\x1b[48;5;238m";
-const BAR_FG = "\x1b[38;5;250m";
-const BAR_ACCENT = "\x1b[38;5;110m\x1b[1m";
-const BAR_OK = "\x1b[38;5;151m\x1b[1m";
-const BAR_WARN = "\x1b[38;5;180m\x1b[1m";
-const BAR_ERR = "\x1b[38;5;174m\x1b[1m";
+const BAR_TOP_BG = "\x1b[48;5;254m";
+const BAR_BOTTOM_BG = "\x1b[48;5;254m";
+const BAR_FG = "\x1b[38;5;234m";
+const BAR_ACCENT = "\x1b[38;5;93m";
 const BAR_DIM = "\x1b[38;5;245m";
-const BAR_RESET_FG = "\x1b[22m\x1b[38;5;250m";
+const BAR_BOLD = "\x1b[1m";
+const BAR_RESET_FG = "\x1b[22m\x1b[38;5;234m";
 
 const renderBar = (text: string, variant: "top" | "bottom") =>
   `${variant === "top" ? BAR_TOP_BG : BAR_BOTTOM_BG}${BAR_FG}${text}\x1b[0m`;
 
-const decorateTop = (text: string) => {
+const decorateTop = (text: string, secondaryTokens: string[], boldTokens: string[]) => {
   let output = text;
-  output = output.replace(" HAY ", ` ${BAR_ACCENT}HAY${BAR_RESET_FG} `);
-  if (output.includes("connected")) {
-    output = output.replace("connected", `${BAR_OK}connected${BAR_RESET_FG}`);
-  } else if (output.includes("reconnecting")) {
-    output = output.replace("reconnecting", `${BAR_WARN}reconnecting${BAR_RESET_FG}`);
-  } else if (output.includes("connecting")) {
-    output = output.replace("connecting", `${BAR_WARN}connecting${BAR_RESET_FG}`);
-  } else if (output.includes("disconnected")) {
-    output = output.replace("disconnected", `${BAR_ERR}disconnected${BAR_RESET_FG}`);
+  output = output.replace("●", `${BAR_ACCENT}●${BAR_RESET_FG}`);
+  output = output.replace(/ \| /g, ` ${BAR_DIM}|${BAR_RESET_FG} `);
+  for (const token of boldTokens) {
+    if (!token) continue;
+    output = output.replace(token, `${BAR_BOLD}${token}${BAR_RESET_FG}`);
+  }
+  for (const token of secondaryTokens) {
+    if (!token) continue;
+    output = output.replace(token, `${BAR_DIM}${token}${BAR_RESET_FG}`);
   }
   return output;
 };
 
-const decorateBottom = (text: string) => {
+const decorateBottom = (text: string, secondaryTokens: string[]) => {
   let output = text;
-  output = output.replace("autofit on", `autofit ${BAR_OK}on${BAR_RESET_FG}`);
-  output = output.replace("autofit off", `autofit ${BAR_DIM}off${BAR_RESET_FG}`);
+  output = output.replace(/ \| /g, ` ${BAR_DIM}|${BAR_RESET_FG} `);
+  for (const token of secondaryTokens) {
+    if (!token) continue;
+    output = output.replace(token, `${BAR_DIM}${token}${BAR_RESET_FG}`);
+  }
   return output;
 };
 
@@ -358,10 +618,20 @@ const styleKeyForCell = (
   const strike = !!cell.isStrikethrough();
   const overline = !!cell.isOverline();
 
-  const fgMode = cell.isFgRGB() ? "rgb" : cell.isFgPalette() ? "palette" : "default";
-  const bgMode = cell.isBgRGB() ? "rgb" : cell.isBgPalette() ? "palette" : "default";
-  const fg = cell.getFgColor();
-  const bg = cell.getBgColor();
+  let fgMode = cell.isFgRGB() ? "rgb" : cell.isFgPalette() ? "palette" : "default";
+  let bgMode = cell.isBgRGB() ? "rgb" : cell.isBgPalette() ? "palette" : "default";
+  let fg = cell.getFgColor();
+  let bg = cell.getBgColor();
+  const inverseUsesDefault = inverse && fgMode === "default" && bgMode === "default";
+  if (inverseUsesDefault && (defaultFg || defaultBg)) {
+    fgMode = defaultBg ? "rgb" : "default";
+    bgMode = defaultFg ? "rgb" : "default";
+    fg = defaultBg ? (defaultBg.r << 16) + (defaultBg.g << 8) + defaultBg.b : -1;
+    bg = defaultFg ? (defaultFg.r << 16) + (defaultFg.g << 8) + defaultFg.b : -1;
+  } else if (inverse && !inverseUsesDefault) {
+    [fgMode, bgMode] = [bgMode, fgMode];
+    [fg, bg] = [bg, fg];
+  }
 
   const key = [
     bold ? 1 : 0,
@@ -385,10 +655,10 @@ const styleKeyForCell = (
   if (italic) codes.push(3);
   if (underline) codes.push(4);
   if (blink) codes.push(5);
-  if (inverse) codes.push(7);
   if (invisible) codes.push(8);
   if (strike) codes.push(9);
   if (overline) codes.push(53);
+  if (inverseUsesDefault) codes.push(7);
 
   const pushPalette = (value: number, base: number, brightBase: number, isFg: boolean) => {
     if (value < 8) {
@@ -403,7 +673,11 @@ const styleKeyForCell = (
   };
 
   if (fgMode === "default") {
-    codes.push(39);
+    if (defaultFg) {
+      codes.push(38, 2, defaultFg.r, defaultFg.g, defaultFg.b);
+    } else {
+      codes.push(39);
+    }
   } else if (fgMode === "palette") {
     pushPalette(fg, 30, 90, true);
   } else {
@@ -414,7 +688,11 @@ const styleKeyForCell = (
   }
 
   if (bgMode === "default") {
-    codes.push(49);
+    if (defaultBg) {
+      codes.push(48, 2, defaultBg.r, defaultBg.g, defaultBg.b);
+    } else {
+      codes.push(49);
+    }
   } else if (bgMode === "palette") {
     pushPalette(bg, 40, 100, false);
   } else {
@@ -432,7 +710,7 @@ const styleKeyForCell = (
 
 const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => {
   const buffer = terminal.buffer.active;
-  const base = buffer.viewportY + viewY;
+  const base = viewY;
   const isCursorLine = base + lineIndex === cursorRow;
   const line = buffer.getLine(base + lineIndex);
   const blankLine = " ".repeat(localMetrics.viewportCols);
@@ -529,24 +807,28 @@ const render = () => {
   }
 
   const presenceNames = presence.filter((client) => client.id !== clientId).map((client) => client.name);
-  const modeLabel = collabMode
-    ? "collab"
-    : controllerId
-      ? `locked:${presence.find((c) => c.id === controllerId)?.name ?? "?"}`
-      : "locked";
-  const statusLabel = status === "connected" ? "connected" : status === "reconnecting" ? "reconnecting" : status;
+  const statusLabel = status === "connected" ? "" : status;
+  const shareUrl = buildShareUrl();
 
-  const topLeft = ` HAY ${config.room} @${config.name}`;
-  const topRight = `${statusLabel}  ${modeLabel}`;
-  const topLine = renderBar(decorateTop(composeBar(topLeft, topRight, localMetrics.cols)), "top");
-
-  const noticeText = notice && notice.expiresAt > Date.now() ? ` ${notice.message} ` : "";
-  const controls = " Opt+Arrows pan  Opt+A fit  Ctrl+] detach  Ctrl+Q kill ";
-  const left = noticeText || controls;
+  const statusOrUrl = statusLabel || shareUrl;
+  const bottomLeft = `● ${config.room}`;
   const autofitLabel = syncSize ? "autofit on" : "autofit off";
   const peerLabel = `peers ${presenceNames.length}`;
-  const bottomRight = `${autofitLabel}  ${peerLabel}`;
-  const bottomLine = renderBar(decorateBottom(composeBar(left, bottomRight, localMetrics.cols)), "bottom");
+  const rightPrimary = decorateBottom(
+    [statusOrUrl, autofitLabel, peerLabel].filter(Boolean).join(" | "),
+    statusLabel ? [peerLabel] : [shareUrl, peerLabel]
+  );
+  const bottomPrimary = renderBar(
+    decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), statusLabel ? [] : [shareUrl], [config.room]),
+    "bottom"
+  );
+
+  const noticeText = notice && notice.expiresAt > Date.now() ? ` ${notice.message} ` : "";
+  const controls = `${keyLabelShort}+Arrows pan | ${keyLabelShort}+A fit | ${keyLabelShort}+M mouse | Ctrl+T hints | Ctrl+G detach | Ctrl+Q kill`;
+  const hintLine = renderBar(
+    composeBar(noticeText || `${BAR_DIM}${controls}${BAR_RESET_FG}`, "", localMetrics.cols),
+    "bottom"
+  );
 
   const buffer = terminal.buffer.active;
   const showCursor = connected && cursorVisible;
@@ -554,16 +836,15 @@ const render = () => {
   const cursorCol = showCursor ? buffer.cursorX : -1;
 
   const lines: string[] = [];
-  if (localMetrics.barRows > 0) {
-    lines.push(topLine);
-  }
-
   for (let row = 0; row < localMetrics.viewportRows; row++) {
     lines.push(renderLine(row, cursorRow, cursorCol));
   }
 
-  if (localMetrics.barRows > 0) {
-    lines.push(bottomLine);
+  if (localMetrics.showBottomBar) {
+    lines.push(bottomPrimary);
+  }
+  if (localMetrics.showHintBar) {
+    lines.push(hintLine);
   }
 
   const output = "\x1b[?25l\x1b[H" + lines.join("\n");
@@ -627,6 +908,7 @@ const connect = () => {
         break;
       case "output":
         {
+          trackOscColors(message.data);
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
@@ -637,6 +919,7 @@ const connect = () => {
         break;
       case "snapshot":
         {
+          trackOscColors(message.data);
           terminal.clear();
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
@@ -656,6 +939,16 @@ const connect = () => {
         break;
       case "active_size":
         applyRemoteSize(message.cols, message.rows);
+        break;
+      case "session_ended":
+        shouldReconnect = false;
+        exitMessage = message.message;
+        exitCode = 0;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.close();
+        } else {
+          cleanupAndExit();
+        }
         break;
       case "error":
         pushNotice(message.message);
@@ -697,7 +990,9 @@ const cleanupAndExit = () => {
   }
   process.stdin.pause();
   restoreUi();
-  if (exitCode === DETACH_EXIT_CODE) {
+  if (exitMessage) {
+    console.log(`[hay] ${exitMessage}`);
+  } else if (exitCode === DETACH_EXIT_CODE) {
     console.log("[hay] Detaching (session continues in background)...");
   } else if (exitCode === KILL_EXIT_CODE) {
     console.log("[hay] Session terminated.");
@@ -710,6 +1005,9 @@ const cleanupAndExit = () => {
 const handleLocalShortcut = (input: string) => {
   if (!input) return false;
 
+  const shouldExitImmediately =
+    !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+
   // Ctrl+Q to kill session
   if (input === "\x11") {
     shouldReconnect = false;
@@ -717,19 +1015,35 @@ const handleLocalShortcut = (input: string) => {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
-    sendMessage({ type: "kill_session" });
-    setTimeout(() => ws?.close(), 100);
+    if (ws?.readyState === WebSocket.OPEN) {
+      sendMessage({ type: "kill_session" });
+      setTimeout(() => ws?.close(), 100);
+    } else if (shouldExitImmediately) {
+      cleanupAndExit();
+    }
     return true;
   }
 
-  // Ctrl+] to detach (telnet convention)
-  if (input === "\x1d") {
+  // Ctrl+G to detach
+  if (input === "\x07") {
     shouldReconnect = false;
     exitCode = DETACH_EXIT_CODE;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
-    ws?.close();
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.close();
+    } else if (shouldExitImmediately) {
+      cleanupAndExit();
+    }
+    return true;
+  }
+
+  // Ctrl+T toggles hint bar
+  if (input === "\x14") {
+    showHints = !showHints;
+    saveConfig({ ...configFile, showHints });
+    pushNotice(`Hints ${showHints ? "on" : "off"}`);
     return true;
   }
 
@@ -773,6 +1087,11 @@ const handleLocalShortcut = (input: string) => {
     }
     return true;
   }
+  if (altKey("m") || altKey("M") || optionChar("µ")) {
+    setMouseCapture(!mouseCapture);
+    pushNotice(`Mouse capture ${mouseCapture ? "on" : "off"}`);
+    return true;
+  }
   if (altKey("0") || optionChar("º")) {
     ensureCursorVisible(true);
     pushNotice("Centered on cursor");
@@ -783,7 +1102,19 @@ const handleLocalShortcut = (input: string) => {
 };
 
 process.stdin.on("data", (data) => {
-  const input = data.toString();
+  let input = pendingInput + data.toString();
+  pendingInput = "";
+  const lastMouseStart = input.lastIndexOf("\x1b[<");
+  if (lastMouseStart !== -1) {
+    const tail = input.slice(lastMouseStart);
+    if (!/[Mm]/.test(tail)) {
+      pendingInput = tail;
+      input = input.slice(0, lastMouseStart);
+    }
+  }
+  if (!input) return;
+  const mouseResult = stripMouseSequences(input);
+  input = mouseResult.cleaned;
   if (!input) return;
   if (handleLocalShortcut(input)) return;
 
@@ -823,6 +1154,10 @@ process.on("SIGTERM", () => {
     clearTimeout(reconnectTimer);
   }
   ws?.close();
+});
+
+process.on("exit", () => {
+  restoreUi();
 });
 
 connect();

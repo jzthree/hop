@@ -431,6 +431,12 @@ const App = () => {
             }
           }
           break;
+        case "session_ended":
+          shouldReconnectRef.current = false;
+          pushNotice(message.message);
+          ws.close();
+          setStatus("disconnected");
+          break;
         default:
           break;
       }

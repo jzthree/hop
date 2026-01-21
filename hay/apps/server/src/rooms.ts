@@ -9,6 +9,7 @@ export type SocketAdapter = {
   onMessage: (handler: (data: string) => void) => void;
   onClose: (handler: () => void) => void;
   onError: (handler: (err: Error) => void) => void;
+  close: () => void;
   isOpen: () => boolean;
 };
 
@@ -72,6 +73,7 @@ export class Room extends EventEmitter {
   private activeRows: number;
   private outputBuffer = "";
   private cleanupTimer: NodeJS.Timeout | null = null;
+  private ended = false;
 
   constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, cwd?: string) {
     super();
@@ -84,6 +86,32 @@ export class Room extends EventEmitter {
       this.outputBuffer = clampBuffer(this.outputBuffer + data);
       this.broadcast({ type: "output", data });
     });
+
+    const handleExit = (exitCode?: number | null, signal?: number | string) => {
+      const normalizedExit = Number.isFinite(exitCode) ? Number(exitCode) : null;
+      const normalizedSignal = signal !== undefined && signal !== null ? String(signal) : null;
+      console.log(
+        `[hay] PTY exit room=${this.id} code=${normalizedExit ?? "null"} signal=${normalizedSignal ?? "null"}`
+      );
+      this.endSession({
+        exitCode: normalizedExit,
+        signal: normalizedSignal,
+        message: "Session ended"
+      });
+    };
+
+    if (typeof this.pty.onExit === "function") {
+      this.pty.onExit((event) => {
+        handleExit(event.exitCode, event.signal);
+      });
+    }
+
+    const legacyOn = (this.pty as unknown as { on?: (event: string, handler: (...args: any[]) => void) => void }).on;
+    if (typeof legacyOn === "function") {
+      legacyOn.call(this.pty, "exit", (exitCode: number, signal?: number) => {
+        handleExit(exitCode, signal);
+      });
+    }
   }
 
   attachClient(info: ClientInfo, socket: SocketAdapter) {
@@ -186,22 +214,12 @@ export class Room extends EventEmitter {
   }
 
   kill() {
-    // Cancel any pending cleanup
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
     }
-    // Kill the PTY
     this.pty.kill();
-    // Close all client connections
-    for (const client of this.clients.values()) {
-      if (client.socket.isOpen()) {
-        client.socket.send(JSON.stringify({ type: "error", message: "Session terminated" } satisfies ServerMessage));
-      }
-    }
-    this.clients.clear();
-    // Emit empty to trigger cleanup in RoomManager
-    this.emit("empty");
+    this.endSession({ exitCode: null, signal: null, message: "Session terminated" });
   }
 
   private handleInput(client: ClientState, data: string) {
@@ -294,6 +312,24 @@ export class Room extends EventEmitter {
         this.emit("empty");
       }
     }, CLEANUP_DELAY_MS);
+  }
+
+  private endSession(payload: { exitCode: number | null; signal: string | null; message: string }) {
+    if (this.ended) return;
+    this.ended = true;
+    if (this.cleanupTimer) {
+      clearTimeout(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    const message = JSON.stringify({ type: "session_ended", ...payload } satisfies ServerMessage);
+    for (const client of this.clients.values()) {
+      if (client.socket.isOpen()) {
+        client.socket.send(message);
+      }
+      client.socket.close();
+    }
+    this.clients.clear();
+    this.emit("empty");
   }
 }
 

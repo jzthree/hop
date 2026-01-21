@@ -2753,7 +2753,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
 
             const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
                 stdio: 'inherit',
-                env: { ...process.env, FORCE_COLOR: '1' }
+                env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: publicUrl || '' }
             });
 
             cliProc.on('close', (code) => {
@@ -2870,7 +2870,7 @@ async function attachToExistingTunnel(existingTunnel) {
 
     const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
         stdio: 'inherit',
-        env: { ...process.env, FORCE_COLOR: '1' }
+        env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: existingTunnel.url || '' }
     });
 
     cliProc.on('close', (code) => {
@@ -2950,7 +2950,7 @@ async function attachToNamedSession(existingTunnel, displayName) {
 
     const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
         stdio: 'inherit',
-        env: { ...process.env, FORCE_COLOR: '1' }
+        env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: existingTunnel.url || '' }
     });
 
     cliProc.on('close', (code) => {

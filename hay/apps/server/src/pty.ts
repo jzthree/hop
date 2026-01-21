@@ -24,14 +24,21 @@ export const createPty: PtyFactory = ({ cols, rows, cwd }) => {
     return createMockPty();
   }
   try {
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (typeof value === "string") {
+        env[key] = value;
+      }
+    }
+    env.TERM = "xterm-256color";
+    if (!env.COLORTERM) {
+      env.COLORTERM = "truecolor";
+    }
     return pty.spawn(resolveShell(), [], {
       cols,
       rows,
       cwd: cwd ?? process.cwd(),
-      env: {
-        ...process.env,
-        TERM: "xterm-256color"
-      }
+      env
     });
   } catch (error) {
     if (mode === "auto") {

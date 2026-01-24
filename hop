@@ -236,12 +236,21 @@ function deleteSessionConfig(name) {
     saveSessionConfigs();
 }
 
-function ensureTerminalSessionConfig(name) {
+function ensureTerminalSessionConfig(name, cwd) {
     const existing = getSessionConfig(name);
     if (!existing) {
         setSessionConfig(name, {
             type: 'terminal',
             createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            cwd: cwd || undefined
+        });
+        return;
+    }
+    if (cwd && existing.cwd !== cwd) {
+        setSessionConfig(name, {
+            ...existing,
+            cwd,
             updatedAt: new Date().toISOString()
         });
     }
@@ -1044,13 +1053,16 @@ function getOrCreateSession(sessionName, cwd) {
     if (existingConfig && existingConfig.type === 'port') {
         throw new Error('Session is configured as a port proxy');
     }
-    ensureTerminalSessionConfig(sessionName);
+    ensureTerminalSessionConfig(sessionName, cwd);
     if (activeSessions[sessionName]) {
         return activeSessions[sessionName];
     }
 
+    const config = getSessionConfig(sessionName);
+    const effectiveCwd = cwd || config?.cwd;
+
     // Create hay room for this session (with optional cwd override)
-    const room = hayRooms.getRoom(sessionName, { cols: 80, rows: 24 }, cwd);
+    const room = hayRooms.getRoom(sessionName, { cols: 80, rows: 24 }, effectiveCwd);
 
     room.on('empty', () => {
         delete activeSessions[sessionName];
@@ -2310,6 +2322,8 @@ function startTunnel(isRestart = false) {
     let tunnel;
     let publicUrl;
 
+    const localTunnelHost = '127.0.0.1';
+
     if (useNamedTunnel) {
         // Named tunnel with custom domain - URL is fixed
         publicUrl = `https://${domainConfig.hostname}`;
@@ -2317,7 +2331,7 @@ function startTunnel(isRestart = false) {
         // Create config file for the tunnel
         const tunnelConfigPath = path.join(HOME_DIR, '.tunnel-config.yml');
         const tunnelConfig = `
-url: http://localhost:${PROXY_PORT}
+url: http://${localTunnelHost}:${PROXY_PORT}
 tunnel: ${domainConfig.tunnelName}
 `;
         fs.writeFileSync(tunnelConfigPath, tunnelConfig);
@@ -2329,7 +2343,7 @@ tunnel: ${domainConfig.tunnelName}
         ]);
     } else {
         // Quick tunnel - URL is random
-        tunnel = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${PROXY_PORT}`]);
+        tunnel = spawn('cloudflared', ['tunnel', '--url', `http://${localTunnelHost}:${PROXY_PORT}`]);
     }
 
     tunnel.on('close', (code) => {
@@ -2430,7 +2444,7 @@ function startClientTunnel(isRestart = false) {
 
     const tunnelConfigPath = path.join(configDir, 'tunnel-config.yml');
     const tunnelConfig = `
-url: http://localhost:${PROXY_PORT}
+url: http://127.0.0.1:${PROXY_PORT}
 tunnel: ${tunnelId}
 credentials-file: ${path.resolve(credentialsPath)}
 `;
@@ -2690,6 +2704,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     let displayName;
     let defaultSessionName;
 
+    let sessionCwd;
     if (existingSessions.length > 0) {
         // Connect to the first existing session (remote user already created it)
         defaultSessionName = existingSessions[0].name;
@@ -2708,7 +2723,8 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
             defaultSessionName = toInternalSessionName(displayName);
         }
         log(`Starting session: ${displayName}`, RESET);
-        getOrCreateSession(defaultSessionName);
+        sessionCwd = process.cwd();
+        getOrCreateSession(defaultSessionName, sessionCwd);
     }
 
     const cleanup = () => {
@@ -2745,7 +2761,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     const runLocalSessionLoop = () => {
         return new Promise((resolve) => {
             // Ensure session exists on server
-            getOrCreateSession(defaultSessionName);
+            getOrCreateSession(defaultSessionName, sessionCwd);
 
             // Spawn hay CLI to connect to the session
             const hayCli = resolveHayCliPath();

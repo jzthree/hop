@@ -461,7 +461,6 @@ const applyRemoteSize = (cols: number, rows: number) => {
   remoteRows = nextRows;
   terminal.resize(remoteCols, remoteRows);
   clampView();
-  ensureCursorVisible(true);
   scheduleRender();
 };
 
@@ -912,7 +911,6 @@ const connect = () => {
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
-            ensureCursorVisible(false);
             scheduleRender();
           });
         }
@@ -924,7 +922,6 @@ const connect = () => {
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
-            ensureCursorVisible(true);
             scheduleRender();
           });
         }
@@ -1135,7 +1132,6 @@ process.stdout.on("resize", () => {
     applySyncSize();
   } else {
     clampView();
-    ensureCursorVisible(true);
   }
   scheduleRender();
 });

@@ -275,54 +275,6 @@ const App = () => {
     }
   };
 
-  const scrollToCursor = (force: boolean) => {
-    if (!termRef.current || !containerRef.current) return;
-
-    const terminal = termRef.current;
-    const scrollContainer = containerRef.current?.closest(".terminal-scroll");
-    if (!scrollContainer) return;
-
-    const core = (terminal as any)._core;
-    const cell = core?._renderService?.dimensions?.css?.cell;
-    if (!cell?.width || !cell?.height) return;
-
-    const cursorX = terminal.buffer.active.cursorX;
-    const cursorY = terminal.buffer.active.cursorY;
-    const cursorLeft = cursorX * cell.width;
-    const cursorTop = cursorY * cell.height;
-    const cursorRight = cursorLeft + cell.width;
-    const cursorBottom = cursorTop + cell.height;
-
-    const viewportLeft = scrollContainer.scrollLeft;
-    const viewportTop = scrollContainer.scrollTop;
-    const viewportRight = viewportLeft + scrollContainer.clientWidth;
-    const viewportBottom = viewportTop + scrollContainer.clientHeight;
-
-    const needsX = cursorLeft < viewportLeft || cursorRight > viewportRight;
-    const needsY = cursorTop < viewportTop || cursorBottom > viewportBottom;
-    if (!force && !needsX && !needsY) return;
-
-    let nextLeft = viewportLeft;
-    let nextTop = viewportTop;
-
-    if (cursorLeft < viewportLeft) {
-      nextLeft = cursorLeft;
-    } else if (cursorRight > viewportRight) {
-      nextLeft = cursorRight - scrollContainer.clientWidth;
-    }
-
-    if (cursorTop < viewportTop) {
-      nextTop = cursorTop;
-    } else if (cursorBottom > viewportBottom) {
-      nextTop = cursorBottom - scrollContainer.clientHeight;
-    }
-
-    const maxLeft = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
-    const maxTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
-    scrollContainer.scrollLeft = Math.max(0, Math.min(nextLeft, maxLeft));
-    scrollContainer.scrollTop = Math.max(0, Math.min(nextTop, maxTop));
-  };
-
   const writeToTerminal = (data: string) => {
     if (!termRef.current) {
       return;
@@ -332,7 +284,6 @@ const App = () => {
     termRef.current.write(filtered, () => {
       if (followOutput) {
         termRef.current?.scrollToBottom();
-        scrollToCursor(false);
       }
     });
   };
@@ -427,7 +378,6 @@ const App = () => {
             const currentRows = termRef.current.rows;
             if (message.cols !== currentCols || message.rows !== currentRows) {
               termRef.current.resize(message.cols, message.rows);
-              scrollToCursor(true);
             }
           }
           break;

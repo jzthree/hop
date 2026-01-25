@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+
+// iOS detection for haptic feedback
+const isIOS = () => {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /iPad|iPhone|iPod/.test(ua);
+};
 
 interface MobileKeyboardProps {
   onInput: (data: string) => void;
@@ -91,11 +99,14 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
   const [sysKbOpen, setSysKbOpen] = useState(false);
   const [sysKbHintShown, setSysKbHintShown] = useState(false);
   const [showHint, setShowHint] = useState(false);
+  const [sysKbDraft, setSysKbDraft] = useState("");
 
   const shiftTapAt = useRef(0);
   const bkspTimeout = useRef<number | null>(null);
   const bkspInterval = useRef<number | null>(null);
-  const sysInputRef = useRef<HTMLInputElement>(null);
+  const sysInputRef = useRef<HTMLTextAreaElement>(null);
+  const ignoreSysBlurRef = useRef(false);
+  const hapticLabelRef = useRef<HTMLLabelElement | null>(null);
 
   // Use refs to avoid stale closures in rapid key presses
   const onInputRef = useRef(onInput);
@@ -108,6 +119,41 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
   shiftRef.current = shift;
   capsRef.current = caps;
   ctrlRef.current = ctrl;
+
+  // Create hidden switch elements for iOS haptic feedback
+  // iOS doesn't support navigator.vibrate, so we use a hidden checkbox switch
+  // element trick - clicking its label triggers native haptic feedback
+  useEffect(() => {
+    if (!isIOS()) return;
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = "hay-haptic-switch";
+    input.setAttribute("switch", "");
+    // Hide off-screen instead of display:none (display:none prevents haptic)
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    input.style.top = "-9999px";
+    input.style.opacity = "0";
+    input.style.pointerEvents = "none";
+    document.body.appendChild(input);
+
+    const label = document.createElement("label");
+    label.htmlFor = "hay-haptic-switch";
+    label.style.position = "fixed";
+    label.style.left = "-9999px";
+    label.style.top = "-9999px";
+    label.style.opacity = "0";
+    label.style.pointerEvents = "none";
+    document.body.appendChild(label);
+    hapticLabelRef.current = label;
+
+    return () => {
+      document.body.removeChild(input);
+      document.body.removeChild(label);
+      hapticLabelRef.current = null;
+    };
+  }, []);
 
   // Helper to add pressed class (fast in, slow fade out via CSS)
   const addPressed = (e: React.TouchEvent | React.MouseEvent) => {
@@ -122,12 +168,16 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
 
   const hapticTap = useCallback(() => {
     try {
-      if (!navigator.vibrate) return;
-      const ua = navigator.userAgent || "";
-      if (/iPad|iPhone|iPod/.test(ua)) return;
-      navigator.vibrate(10);
+      if (isIOS()) {
+        // iOS: click hidden switch label to trigger native haptic
+        // Note: iOS 18+ requires this to be called from onClick handler
+        hapticLabelRef.current?.click();
+      } else if (navigator.vibrate) {
+        // Android/other: use Vibration API
+        navigator.vibrate(5);
+      }
     } catch {
-      // Ignore vibration errors
+      // Ignore haptic errors
     }
   }, []);
 
@@ -170,28 +220,88 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
     }
   }, [send]); // send is stable
 
+  const resizeSysTextarea = useCallback(() => {
+    const el = sysInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const maxHeight = Math.min(window.innerHeight * 0.4, 240);
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+  }, []);
+
+  const suppressNextSysBlur = useCallback(() => {
+    ignoreSysBlurRef.current = true;
+    window.setTimeout(() => {
+      ignoreSysBlurRef.current = false;
+    }, 250);
+  }, []);
+
+  const closeSysKb = useCallback(() => {
+    suppressNextSysBlur();
+    sysInputRef.current?.blur();
+    setSysKbOpen(false);
+  }, [suppressNextSysBlur]);
+
+  const focusSysKbInput = useCallback(() => {
+    const el = sysInputRef.current;
+    if (!el) return;
+    try {
+      el.focus({ preventScroll: true });
+    } catch {
+      el.focus();
+    }
+    const len = el.value.length;
+    if (typeof el.setSelectionRange === "function") {
+      el.setSelectionRange(len, len);
+    }
+    resizeSysTextarea();
+  }, [resizeSysTextarea]);
+
+  const openSysKb = useCallback(() => {
+    flushSync(() => {
+      setSysKbOpen(true);
+    });
+    focusSysKbInput();
+  }, [focusSysKbInput]);
+
   const toggleSysKb = useCallback(() => {
     if (sysKbOpen) {
-      sysInputRef.current?.blur();
-      setSysKbOpen(false);
+      closeSysKb();
     } else {
-      setSysKbOpen(true);
-      setTimeout(() => {
-        sysInputRef.current?.focus();
-      }, 50);
+      openSysKb();
     }
-  }, [sysKbOpen]);
+  }, [sysKbOpen, closeSysKb, openSysKb]);
 
   const handleSysKbSubmit = useCallback(() => {
-    const text = sysInputRef.current?.value || "";
+    const text = sysKbDraft;
     if (text) {
       send(text);
+      setSysKbDraft("");
     }
     if (sysInputRef.current) {
-      sysInputRef.current.value = "";
+      sysInputRef.current.style.height = "";
     }
-    toggleSysKb();
-  }, [send, toggleSysKb]);
+    closeSysKb();
+  }, [send, closeSysKb, sysKbDraft]);
+
+  useEffect(() => {
+    if (!sysKbOpen) return;
+    const el = sysInputRef.current;
+    if (!el) return;
+    const focusAndSize = () => {
+      focusSysKbInput();
+    };
+    const frame = requestAnimationFrame(focusAndSize);
+    const frame2 = requestAnimationFrame(focusAndSize);
+    return () => {
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(frame2);
+    };
+  }, [sysKbOpen, resizeSysTextarea]);
+
+  useEffect(() => {
+    if (!sysKbOpen) return;
+    resizeSysTextarea();
+  }, [sysKbDraft, sysKbOpen, resizeSysTextarea]);
 
   const handleShift = useCallback(() => {
     const now = Date.now();
@@ -217,14 +327,13 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
   }, [caps, shift]);
 
   const startBksp = useCallback(() => {
-    hapticTap();
     send("\x7f");
     bkspTimeout.current = window.setTimeout(() => {
       bkspInterval.current = window.setInterval(() => {
         send("\x7f");
       }, 50);
     }, 500);
-  }, [hapticTap, send]); // Both are stable
+  }, [send]);
 
   const stopBksp = useCallback(() => {
     if (bkspTimeout.current) {
@@ -286,10 +395,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
             e.preventDefault();
             addPressed(e);
             handleShift();
-            hapticTap();
           }}
           onTouchEnd={removePressed}
           onTouchCancel={removePressed}
+          onClick={hapticTap}
         >
           <ShiftIcon filled={isOn} />
         </button>
@@ -316,6 +425,7 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
             removePressed(e);
             stopBksp();
           }}
+          onClick={hapticTap}
         >
           <BackspaceIcon />
         </button>
@@ -333,10 +443,9 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
           onTouchEnd={(e) => {
             removePressed(e);
             handlePaste();
-            hapticTap();
           }}
           onTouchCancel={removePressed}
-          onClick={handlePaste}
+          onClick={hapticTap}
         >
           <PasteIcon />
         </button>
@@ -354,10 +463,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
             e.preventDefault();
             addPressed(e);
             send("\r");
-            hapticTap();
           }}
           onTouchEnd={removePressed}
           onTouchCancel={removePressed}
+          onClick={hapticTap}
         >
           return
         </button>
@@ -375,10 +484,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
             e.preventDefault();
             addPressed(e);
             send(" ");
-            hapticTap();
           }}
           onTouchEnd={removePressed}
           onTouchCancel={removePressed}
+          onClick={hapticTap}
         >
           space
         </button>
@@ -396,10 +505,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
             e.preventDefault();
             addPressed(e);
             setView("num");
-            hapticTap();
           }}
           onTouchEnd={removePressed}
           onTouchCancel={removePressed}
+          onClick={hapticTap}
         >
           123
         </button>
@@ -417,10 +526,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
             e.preventDefault();
             addPressed(e);
             setView("abc");
-            hapticTap();
           }}
           onTouchEnd={removePressed}
           onTouchCancel={removePressed}
+          onClick={hapticTap}
         >
           ABC
         </button>
@@ -438,10 +547,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
           e.preventDefault();
           addPressed(e);
           handleCharKey(keyStr);
-          hapticTap();
         }}
         onTouchEnd={removePressed}
         onTouchCancel={removePressed}
+        onClick={hapticTap}
       >
         {displayChar}
       </button>
@@ -465,20 +574,37 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
       {sysKbOpen && (
         <div className="kb-sys-overlay" onClick={toggleSysKb}>
           <div className="kb-sys-dialog" onClick={(e) => e.stopPropagation()}>
-            <input
+            <textarea
               ref={sysInputRef}
-              type="text"
               className="kb-sys-input"
               placeholder="Type here..."
               autoCapitalize="off"
               autoComplete="off"
               autoCorrect="off"
+              rows={1}
+              value={sysKbDraft}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
                   handleSysKbSubmit();
                 }
               }}
+              onBlur={() => {
+                if (!sysKbOpen) return;
+                if (ignoreSysBlurRef.current) {
+                  ignoreSysBlurRef.current = false;
+                  return;
+                }
+                if (sysKbDraft.trim()) {
+                  handleSysKbSubmit();
+                } else {
+                  closeSysKb();
+                }
+              }}
+              onChange={(e) => {
+                setSysKbDraft(e.currentTarget.value);
+              }}
+              onInput={resizeSysTextarea}
             />
           </div>
         </div>
@@ -500,10 +626,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
                     addPressed(e);
                     if (k.mod === "ctrl") setCtrl(prev => !prev);
                     else setAlt(prev => !prev);
-                    hapticTap();
                   }}
                   onTouchEnd={removePressed}
                   onTouchCancel={removePressed}
+                  onClick={hapticTap}
                 >
                   {k.label}
                 </button>
@@ -524,10 +650,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
                       // Ignore
                     }
                     toggleSysKb();
-                    hapticTap();
                   }}
                   onTouchEnd={removePressed}
                   onTouchCancel={removePressed}
+                  onClick={hapticTap}
                 >
                   <KeyboardIcon />
                 </button>
@@ -542,10 +668,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
                   e.preventDefault();
                   addPressed(e);
                   if (k.key) send(k.key);
-                  hapticTap();
                 }}
                 onTouchEnd={removePressed}
                 onTouchCancel={removePressed}
+                onClick={hapticTap}
               >
                 {k.label}
               </button>

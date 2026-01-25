@@ -824,7 +824,7 @@ const render = () => {
   );
 
   const noticeText = notice && notice.expiresAt > Date.now() ? ` ${notice.message} ` : "";
-  const controls = `${keyLabelShort}+Arrows pan | ${keyLabelShort}+A fit | ${keyLabelShort}+M mouse | Ctrl+T hints | Ctrl+G detach | Ctrl+Q kill`;
+  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, M mouse | Ctrl: T hints, G detach, Q kill`;
   const hintLine = renderBar(
     composeBar(noticeText || `${BAR_DIM}${controls}${BAR_RESET_FG}`, "", localMetrics.cols),
     "bottom"

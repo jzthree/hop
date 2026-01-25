@@ -24,6 +24,8 @@ export type ClientInfo = {
 const MAX_BUFFER_SIZE = 200_000;
 // Keep rooms alive indefinitely; only explicit kill/remove should end a session.
 const CLEANUP_DELAY_MS = 0;
+const CONTROL_SEQUENCE_TAIL = 32;
+const DEBUG_STATE = process.env.HAY_DEBUG === "1";
 
 const now = () => Date.now();
 
@@ -72,6 +74,9 @@ export class Room extends EventEmitter {
   private activeCols: number;
   private activeRows: number;
   private outputBuffer = "";
+  private alternateScreen = false;
+  private cursorHidden = false;
+  private controlSequenceTail = "";
   private cleanupTimer: NodeJS.Timeout | null = null;
   private ended = false;
 
@@ -84,6 +89,7 @@ export class Room extends EventEmitter {
 
     this.pty.onData((data: string) => {
       this.outputBuffer = clampBuffer(this.outputBuffer + data);
+      this.updateTerminalState(data);
       this.broadcast({ type: "output", data });
     });
 
@@ -144,7 +150,12 @@ export class Room extends EventEmitter {
     );
 
     if (this.outputBuffer) {
-      socket.send(JSON.stringify({ type: "snapshot", data: this.outputBuffer } satisfies ServerMessage));
+      socket.send(JSON.stringify({
+        type: "snapshot",
+        data: this.outputBuffer,
+        alternateScreen: this.alternateScreen,
+        cursorHidden: this.cursorHidden
+      } satisfies ServerMessage));
     }
 
     this.broadcastPresence();
@@ -211,6 +222,41 @@ export class Room extends EventEmitter {
       default:
         break;
     }
+  }
+
+  private updateTerminalState(data: string) {
+    const combined = this.controlSequenceTail + data;
+    const regex = /\x1b\[\?([0-9;]*)([hl])/g;
+    let match: RegExpExecArray | null;
+    let nextAlternate = this.alternateScreen;
+    let nextCursorHidden = this.cursorHidden;
+
+    while ((match = regex.exec(combined)) !== null) {
+      const params = match[1].split(";").filter(Boolean);
+      const mode = match[2];
+      for (const param of params) {
+        if (param === "25") {
+          nextCursorHidden = mode === "l";
+        } else if (param === "47" || param === "1047" || param === "1049") {
+          nextAlternate = mode === "h";
+        }
+      }
+    }
+
+    if (nextAlternate !== this.alternateScreen) {
+      if (DEBUG_STATE) {
+        console.log(`[hay] room=${this.id} alternateScreen=${nextAlternate}`);
+      }
+      this.alternateScreen = nextAlternate;
+    }
+    if (nextCursorHidden !== this.cursorHidden) {
+      if (DEBUG_STATE) {
+        console.log(`[hay] room=${this.id} cursorHidden=${nextCursorHidden}`);
+      }
+      this.cursorHidden = nextCursorHidden;
+    }
+
+    this.controlSequenceTail = combined.slice(-CONTROL_SEQUENCE_TAIL);
   }
 
   kill() {

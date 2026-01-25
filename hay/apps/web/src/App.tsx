@@ -366,10 +366,14 @@ const App = () => {
             termRef.current.clear();
           }
           writeToTerminal(message.data);
-          // On mobile, hide cursor after snapshot - apps like Claude Code manage their own
-          // cursor display, and snapshot restore doesn't preserve alternate screen mode state
-          if (isMobile && termRef.current) {
-            termRef.current.write('\x1b[?25l'); // Hide cursor
+          if (termRef.current) {
+            // Respect cursor visibility state after snapshot restore.
+            if (typeof message.cursorHidden === "boolean") {
+              termRef.current.write(message.cursorHidden ? '\x1b[?25l' : '\x1b[?25h');
+            } else if (message.alternateScreen) {
+              // Fallback for older servers: alternate screen apps generally hide the cursor.
+              termRef.current.write('\x1b[?25l');
+            }
           }
           break;
         case "collab":

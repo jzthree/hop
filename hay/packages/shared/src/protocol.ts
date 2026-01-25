@@ -35,7 +35,12 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     clients: z.array(presenceClientSchema)
   }),
   z.object({ type: z.literal("output"), data: z.string() }),
-  z.object({ type: z.literal("snapshot"), data: z.string() }),
+  z.object({
+    type: z.literal("snapshot"),
+    data: z.string(),
+    alternateScreen: z.boolean().optional(),
+    cursorHidden: z.boolean().optional()
+  }),
   z.object({ type: z.literal("collab"), enabled: z.boolean(), controllerId: z.string().nullable() }),
   z.object({ type: z.literal("input_rejected"), reason: z.string() }),
   z.object({ type: z.literal("error"), message: z.string() }),

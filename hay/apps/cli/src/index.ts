@@ -460,8 +460,10 @@ const applyRemoteSize = (cols: number, rows: number) => {
   remoteCols = nextCols;
   remoteRows = nextRows;
   terminal.resize(remoteCols, remoteRows);
-  // Scroll to bottom after resize to show latest content
-  viewY = getMaxViewY();
+  // Scroll to show cursor position after resize
+  const buffer = terminal.buffer.active;
+  const cursorRow = buffer.baseY + buffer.cursorY;
+  viewY = Math.max(0, cursorRow - localMetrics.viewportRows + 1);
   clampView();
   scheduleRender();
 };
@@ -912,11 +914,15 @@ const connect = () => {
           trackOscColors(message.data);
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
-          // Follow output if currently at bottom (standard terminal behavior)
-          const wasAtBottom = viewY >= getMaxViewY();
+          // Follow output if cursor was visible (standard terminal behavior)
+          const buffer = terminal.buffer.active;
+          const cursorRowBefore = buffer.baseY + buffer.cursorY;
+          const cursorWasVisible = cursorRowBefore >= viewY && cursorRowBefore < viewY + localMetrics.viewportRows;
           terminal.write(filtered, () => {
-            if (wasAtBottom) {
-              viewY = getMaxViewY();
+            if (cursorWasVisible) {
+              const cursorRowAfter = buffer.baseY + buffer.cursorY;
+              viewY = Math.max(0, cursorRowAfter - localMetrics.viewportRows + 1);
+              clampView();
             }
             scheduleRender();
           });
@@ -929,8 +935,12 @@ const connect = () => {
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
-            // Always scroll to bottom on snapshot restore
-            viewY = getMaxViewY();
+            // Scroll to show cursor position on snapshot restore
+            const buffer = terminal.buffer.active;
+            const cursorRow = buffer.baseY + buffer.cursorY;
+            // Position viewport so cursor is visible near the bottom
+            viewY = Math.max(0, cursorRow - localMetrics.viewportRows + 1);
+            clampView();
             scheduleRender();
           });
         }

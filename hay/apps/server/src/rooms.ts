@@ -389,12 +389,12 @@ export class RoomManager {
     this.cwd = cwd;
   }
 
-  getRoom(roomId: string, initialSize: { cols: number; rows: number }) {
+  getRoom(roomId: string, initialSize: { cols: number; rows: number }, cwd?: string) {
     const existing = this.rooms.get(roomId);
     if (existing) {
       return existing;
     }
-    const room = new Room(roomId, this.ptyFactory, initialSize, this.cwd);
+    const room = new Room(roomId, this.ptyFactory, initialSize, cwd ?? this.cwd);
     room.on("empty", () => {
       this.rooms.delete(roomId);
     });

@@ -361,6 +361,10 @@ const App = () => {
             termRef.current.clear();
           }
           writeToTerminal(message.data);
+          // Force a full refresh to ensure cursor state is properly updated
+          if (termRef.current) {
+            termRef.current.refresh(0, termRef.current.rows - 1);
+          }
           break;
         case "collab":
           setCollabMode(message.enabled);

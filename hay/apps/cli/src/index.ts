@@ -460,6 +460,8 @@ const applyRemoteSize = (cols: number, rows: number) => {
   remoteCols = nextCols;
   remoteRows = nextRows;
   terminal.resize(remoteCols, remoteRows);
+  // Scroll to bottom after resize to show latest content
+  viewY = getMaxViewY();
   clampView();
   scheduleRender();
 };
@@ -910,7 +912,12 @@ const connect = () => {
           trackOscColors(message.data);
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
+          // Follow output if currently at bottom (standard terminal behavior)
+          const wasAtBottom = viewY >= getMaxViewY();
           terminal.write(filtered, () => {
+            if (wasAtBottom) {
+              viewY = getMaxViewY();
+            }
             scheduleRender();
           });
         }
@@ -922,6 +929,8 @@ const connect = () => {
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
+            // Always scroll to bottom on snapshot restore
+            viewY = getMaxViewY();
             scheduleRender();
           });
         }

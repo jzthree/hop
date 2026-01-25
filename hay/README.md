@@ -15,7 +15,7 @@ A terminal sharing library designed as a **building block** for applications tha
 - **Web and CLI clients** - Connect via browser or real terminal
 - **Embeddable library** - `attachTermshare()` to add to any HTTP server
 - **Auto-fit** - Terminal resizes to active client's screen
-- **Mobile-ready** - Responsive web UI with slide-out drawer
+- **Mobile-ready** - Responsive web UI with slide-out drawer and haptic feedback
 
 **What it doesn't provide (by design):**
 - Authentication - bring your own (see hop for example)
@@ -58,6 +58,55 @@ npm -w @termshare/cli run dev -- -r my-room -n alice
 # Or after building
 npx termshare -r my-room -n alice
 ```
+
+#### Keyboard Shortcuts
+
+The CLI client provides keyboard shortcuts for navigation and control:
+
+| Key | Action |
+|-----|--------|
+| `←` `→` `↑` `↓` | Pan viewport |
+| `0` | Center on cursor |
+| `A` | Auto-fit viewport to content |
+| `M` | Toggle mouse mode |
+| `Ctrl+T` | Toggle hints bar |
+| `Ctrl+G` | Detach from session |
+| `Ctrl+Q` | Kill session |
+
+#### Configuration
+
+The CLI client reads configuration from these locations (first found wins):
+
+1. `.hay-cli.json` (local, legacy)
+2. `.hop.json` → `hay-cli` key (local)
+3. `~/.hay-cli.json` (global, legacy)
+4. `~/.hop.json` → `hay-cli` key (global)
+
+**Example `.hop.json`:**
+```json
+{
+  "hay-cli": {
+    "showHints": true,
+    "scrollOff": 3
+  }
+}
+```
+
+**Options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `showHints` | `true` | Show keyboard shortcut hints at bottom |
+| `scrollOff` | `3` | Lines of context to keep above/below cursor when scrolling (vim-like) |
+
+### Web Client
+
+The web client provides a browser-based terminal interface with:
+
+- **Touch-friendly keyboard** - Virtual keyboard with common terminal keys
+- **Haptic feedback** - Tactile feedback on iOS (via switch element trick) and Android (Vibration API)
+- **Slide-out drawer** - Access presence indicators and controls on mobile
+- **Responsive layout** - Adapts to screen size
 
 ### Embedding in Your App
 

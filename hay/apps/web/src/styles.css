@@ -589,6 +589,15 @@ button.primary {
     touch-action: none;
   }
 
+  /* Make xterm text elements pass-through for touch events
+     so touches hit our container directly instead of text spans
+     that iOS Safari wants to handle for text selection */
+  .session .terminal-frame .xterm-rows,
+  .session .terminal-frame .xterm-rows > div,
+  .session .terminal-frame .xterm-rows span {
+    pointer-events: none;
+  }
+
   .session .terminal-footer {
     display: none;
   }

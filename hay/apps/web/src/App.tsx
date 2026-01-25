@@ -111,7 +111,6 @@ const App = () => {
   const [controllerId, setControllerId] = useState<string | null>(null);
   const [clientId, setClientId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [followOutput, setFollowOutput] = useState(true);
   const [latencyComp, setLatencyComp] = useState(true);
   const [autoFitOnType, setAutoFitOnType] = useState(true);
   const [terminalReady, setTerminalReady] = useState(false);
@@ -279,10 +278,17 @@ const App = () => {
     if (!termRef.current) {
       return;
     }
+    // Check if currently at bottom before writing (standard terminal follow behavior)
+    const viewport = containerRef.current?.querySelector('.xterm-viewport');
+    const wasAtBottom = viewport
+      ? viewport.scrollTop >= viewport.scrollHeight - viewport.clientHeight - 5
+      : true;
+
     // Filter focus reporting sequences that can leak as visible text
     const filtered = data.replace(/\x1b\[I/g, '').replace(/\x1b\[O/g, '');
     termRef.current.write(filtered, () => {
-      if (followOutput) {
+      // Only scroll to bottom if we were already at bottom (follow output behavior)
+      if (wasAtBottom) {
         termRef.current?.scrollToBottom();
       }
     });
@@ -357,13 +363,13 @@ const App = () => {
         case "snapshot":
           optimisticEchoRef.current.reset();
           if (termRef.current) {
-            // Clear buffer without resetting modes to preserve existing terminal state on reconnect.
             termRef.current.clear();
           }
           writeToTerminal(message.data);
-          // Force a full refresh to ensure cursor state is properly updated
-          if (termRef.current) {
-            termRef.current.refresh(0, termRef.current.rows - 1);
+          // On mobile, hide cursor after snapshot - apps like Claude Code manage their own
+          // cursor display, and snapshot restore doesn't preserve alternate screen mode state
+          if (isMobile && termRef.current) {
+            termRef.current.write('\x1b[?25l'); // Hide cursor
           }
           break;
         case "collab":

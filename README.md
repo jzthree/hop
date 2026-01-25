@@ -4,7 +4,7 @@
 
 Access your Mac's terminal from your phone, tablet, or any browser — secured with password + 2FA, tunneled through Cloudflare.
 
-> **🍎 macOS only** — Requires Homebrew for dependencies (ttyd, tmux, cloudflared)
+> **🍎 macOS/Linux** — Requires cloudflared for tunneling
 
 ```
            (\(\ 
@@ -30,7 +30,7 @@ Access your Mac's terminal from your phone, tablet, or any browser — secured w
 ### From npm (easiest)
 
 ```bash
-npm install -g hop-shell
+npm install -g hop2
 ```
 
 Then just run:
@@ -120,7 +120,7 @@ hop session add myapp --port 3000
 
 ### User (their machine)
 ```bash
-npm install -g hop-shell
+npm install -g hop2
 hop client ./credentials.json
 ```
 First run prompts them to set a password + scan a TOTP QR code.  
@@ -208,12 +208,12 @@ Node.js packages:
 - **Secure Cookies** — `httpOnly`, `secure`, `sameSite=lax`
 - **Random URL** — Unguessable tunnel URL for quick tunnels
 - **Fixed URL** — Custom domains keep a stable URL
-- **Local Binding** — ttyd only listens on 127.0.0.1
+- **Local Binding** — Server only listens on 127.0.0.1
 - **End-to-End TLS** — Cloudflare Tunnel encryption
 
 **Passwords:** Recommended for any public URL; required for custom domains.
 
-**Secrets:** Stored in `~/.hop-shell/` (treat like `~/.ssh/`)
+**Secrets:** Stored in `~/.hop2/` (treat like `~/.ssh/`)
 
 ## 🛠 Development (Hay)
 
@@ -232,7 +232,7 @@ If `./hay` exists and the dist folder is missing, `hop` will auto-build hay on s
 Delete `.auth_secret` and restart hop to generate a new code.
 
 **Client reset (user mode)?**
-Delete `~/.hop-shell/clients/<tunnel-id>/` and run `hop client` again.
+Delete `~/.hop2/clients/<tunnel-id>/` and run `hop client` again.
 
 **Tunnel not starting?**
 Make sure `cloudflared` is installed: `brew install cloudflared`

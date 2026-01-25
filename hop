@@ -110,8 +110,8 @@ function resolveHayCliPath() {
 authenticator.options = { window: 1 };
 
 // --- Configuration ---
-// Use HOP_HOME env var or default to .hop-shell2 (separate from original hop)
-const HOME_DIR = process.env.HOP_HOME || path.join(os.homedir(), '.hop-shell2');
+// Use HOP_HOME env var or default to .hop2 (separate from original hop)
+const HOME_DIR = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
 const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 

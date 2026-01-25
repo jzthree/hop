@@ -589,13 +589,50 @@ button.primary {
     touch-action: none;
   }
 
-  /* Make xterm text elements pass-through for touch events
-     so touches hit our container directly instead of text spans
-     that iOS Safari wants to handle for text selection */
+  /* Mobile touch scrolling fix:
+     - We disable native touch handling on xterm text nodes so our custom
+       touch scrolling (App.tsx) receives events without iOS text selection.
+     - In selection mode we override these to re-enable native selection. */
   .session .terminal-frame .xterm-rows,
   .session .terminal-frame .xterm-rows > div,
   .session .terminal-frame .xterm-rows span {
     pointer-events: none;
+  }
+
+  /* Selection mode: re-enable native text selection and selection handles. */
+  .session.selection-mode .terminal .terminal-scroll {
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: auto;
+  }
+
+  .session.selection-mode .terminal-frame .xterm,
+  .session.selection-mode .terminal-frame .xterm-screen,
+  .session.selection-mode .terminal-frame .xterm-viewport {
+    touch-action: auto;
+  }
+
+  .session.selection-mode .terminal-frame .xterm {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
+
+  .session.selection-mode .terminal-frame .xterm-viewport {
+    overflow: hidden !important;
+  }
+
+  .session.selection-mode .terminal-frame .xterm-screen canvas {
+    pointer-events: none;
+  }
+
+  .session.selection-mode .terminal-frame .xterm-rows,
+  .session.selection-mode .terminal-frame .xterm-rows > div,
+  .session.selection-mode .terminal-frame .xterm-rows span {
+    pointer-events: auto;
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
   }
 
   .session .terminal-footer {
@@ -970,17 +1007,17 @@ button.primary {
 }
 
 .kb-sys-dialog {
-  background: rgba(245, 245, 247, 0.9);
+  background: transparent;
   backdrop-filter: blur(25px);
   -webkit-backdrop-filter: blur(25px);
-  padding: 10px;
-  border-radius: 24px;
+  padding: 4px;
+  border-radius: 14px;
   display: flex;
   gap: 8px;
   width: calc(100% - 24px);
   max-width: 500px;
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+  border: none;
+  box-shadow: none;
   animation: kbDialogIn 0.35s cubic-bezier(0.19, 1, 0.22, 1);
 }
 
@@ -991,21 +1028,26 @@ button.primary {
 
 .kb-sys-input {
   flex: 1;
-  height: 56px;
-  border-radius: 16px;
-  border: none;
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.06);
-  padding: 0 16px;
+  min-height: 34px;
+  max-height: 240px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: none;
+  padding: 6px 10px;
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
-  font-size: 24px;
-  background: #ffffff;
+  font-size: 16px;
+  line-height: 1.35;
+  resize: none;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.9);
   color: #000;
 }
 
 .kb-sys-input:focus {
   outline: none;
-  box-shadow: 0 0 0 2px #007aff, 0 4px 12px rgba(0, 122, 255, 0.25);
+  box-shadow: none;
 }
+
 
 /* Keyboard visibility state - when keyboard is shown, maximize terminal space */
 .session.has-keyboard {

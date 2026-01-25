@@ -120,6 +120,10 @@ const App = () => {
   const fabDragRef = useRef<{ dragging: boolean; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
   const [isMobile] = useState(() => isMobileDevice());
   const [keyboardVisible, setKeyboardVisible] = useState(() => isMobileDevice());
+  const [selectionMode, setSelectionMode] = useState(() => {
+    const saved = localStorage.getItem("hay_selection_mode");
+    return saved === "true";
+  });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [fontSize, setFontSize] = useState(() => {
@@ -138,6 +142,14 @@ const App = () => {
   const optimisticEchoRef = useRef(createOptimisticEcho());
   const optimisticPrevRef = useRef(false);
   const typingTimeout = useRef<number | null>(null);
+  const viewportTouchRef = useRef<{
+    start?: (ev: TouchEvent) => void;
+    move?: (ev: TouchEvent) => boolean;
+  } | null>(null);
+  useEffect(() => {
+    localStorage.setItem("hay_selection_mode", selectionMode ? "true" : "false");
+  }, [selectionMode]);
+
   const typingActive = useRef(false);
   const noticeTimeout = useRef<number | null>(null);
   const autoFitOnTypeRef = useRef(autoFitOnType);
@@ -145,10 +157,6 @@ const App = () => {
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(true);
-
-  const shareUrl = useMemo(() => {
-    return session ? createShareLink(session.room) : createShareLink(room);
-  }, [session, room]);
 
   const pushNotice = (message: string) => {
     setNotice(message);
@@ -159,6 +167,10 @@ const App = () => {
       setNotice(null);
     }, 3000);
   };
+
+  const shareUrl = useMemo(() => {
+    return session ? createShareLink(session.room) : createShareLink(room);
+  }, [session, room]);
 
   const sortedPresence = useMemo(() => sortPresence(presence, clientId), [presence, clientId]);
 
@@ -521,202 +533,6 @@ const App = () => {
       resizeObserver.observe(scrollContainer);
     }
 
-    // Mobile touch scrolling with momentum (native-feeling)
-    // xterm.js has the viewport underneath the rows, so native scroll doesn't work
-    // We implement our own with inertia/momentum for iOS-like feel
-    if (isMobile && containerRef.current) {
-      let lastY = 0;
-      let scrollDebt = 0; // Accumulated sub-line scroll distance
-      let velocitySamples: number[] = []; // Recent velocities for smoothing
-      let lastMoveTime = 0;
-      let momentumVelocity = 0;
-      let momentumId: number | null = null;
-      let isScrolling = false;
-      let isPanning = false;
-      let panStartScrollLeft = 0;
-      let panStartScrollTop = 0;
-      let panStartX = 0;
-      let panStartY = 0;
-
-      const getCellHeight = () => {
-        const core = (terminal as any)._core;
-        const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
-        return cellHeight && cellHeight > 0 ? cellHeight : 18;
-      };
-
-      const getTwoFingerCenter = (touches: TouchList) => {
-        const x = (touches[0].clientX + touches[1].clientX) / 2;
-        const y = (touches[0].clientY + touches[1].clientY) / 2;
-        return { x, y };
-      };
-
-      const friction = 0.94; // Momentum decay (higher = longer coast)
-      const minMomentumVelocity = 0.25; // Minimum px/frame to continue momentum
-
-      const stopMomentum = () => {
-        if (momentumId !== null) {
-          cancelAnimationFrame(momentumId);
-          momentumId = null;
-        }
-        momentumVelocity = 0;
-      };
-
-      const applyMomentum = () => {
-        if (Math.abs(momentumVelocity) < minMomentumVelocity) {
-          momentumId = null;
-          return;
-        }
-
-        // Apply momentum as fractional scroll
-        scrollDebt += momentumVelocity;
-        const lines = Math.trunc(scrollDebt / getCellHeight());
-        if (lines !== 0) {
-          terminal.scrollLines(lines);
-          scrollDebt -= lines * getCellHeight();
-        }
-
-        momentumVelocity *= friction;
-        momentumId = requestAnimationFrame(applyMomentum);
-      };
-
-      const handleTouchStart = (e: TouchEvent) => {
-        stopMomentum();
-        if (e.cancelable) {
-          e.preventDefault();
-        }
-
-        if (e.touches.length === 2) {
-          isPanning = true;
-          const center = getTwoFingerCenter(e.touches);
-          panStartX = center.x;
-          panStartY = center.y;
-          const panTarget = containerRef.current?.closest(".terminal-scroll");
-          if (panTarget) {
-            panStartScrollLeft = panTarget.scrollLeft;
-            panStartScrollTop = panTarget.scrollTop;
-          }
-          return;
-        }
-
-        if (e.touches.length !== 1) {
-          isPanning = false;
-          isScrolling = false;
-          return;
-        }
-
-        isPanning = false;
-        lastY = e.touches[0].clientY;
-        lastMoveTime = Date.now();
-        scrollDebt = 0;
-        velocitySamples = [];
-        isScrolling = true;
-      };
-
-      const handleTouchMove = (e: TouchEvent) => {
-        if (e.touches.length === 2) {
-          if (!isPanning) {
-            isPanning = true;
-            const center = getTwoFingerCenter(e.touches);
-            panStartX = center.x;
-            panStartY = center.y;
-            const panTarget = containerRef.current?.closest(".terminal-scroll");
-            if (panTarget) {
-              panStartScrollLeft = panTarget.scrollLeft;
-              panStartScrollTop = panTarget.scrollTop;
-            }
-          }
-
-          const center = getTwoFingerCenter(e.touches);
-          const deltaX = panStartX - center.x;
-          const deltaY = panStartY - center.y;
-          const panTarget = containerRef.current?.closest(".terminal-scroll");
-          if (panTarget) {
-            panTarget.scrollLeft = panStartScrollLeft + deltaX;
-            panTarget.scrollTop = panStartScrollTop + deltaY;
-          }
-          e.preventDefault();
-          return;
-        }
-
-        if (e.touches.length !== 1) return;
-
-        if (isPanning) {
-          isPanning = false;
-          isScrolling = true;
-        }
-
-        const touchY = e.touches[0].clientY;
-        const now = Date.now();
-        const deltaY = lastY - touchY; // positive = scroll down (finger up)
-        const deltaTime = Math.max(1, now - lastMoveTime);
-
-        // ALWAYS track velocity (even before direction is locked)
-        // This ensures quick flicks have velocity data
-        if (deltaTime > 0 && deltaTime < 100) { // Ignore stale samples
-          velocitySamples.push(deltaY / deltaTime);
-          if (velocitySamples.length > 5) velocitySamples.shift();
-        }
-
-        e.preventDefault();
-        // Accumulate scroll and apply whole lines
-        scrollDebt += deltaY;
-        const lines = Math.trunc(scrollDebt / getCellHeight());
-        if (lines !== 0) {
-          terminal.scrollLines(lines);
-          scrollDebt -= lines * getCellHeight();
-        }
-
-        lastY = touchY;
-        lastMoveTime = now;
-      };
-
-      const handleTouchEnd = () => {
-        if (isPanning) {
-          isPanning = false;
-          return;
-        }
-
-        // Only apply momentum if we were scrolling vertically
-        if (isScrolling && velocitySamples.length > 0) {
-          // Use peak velocity (max absolute value) - users often slow down at end of flick
-          // but we want to capture their flick intent, not their stopping motion
-          let peakVelocity = 0;
-          for (const v of velocitySamples) {
-            if (Math.abs(v) > Math.abs(peakVelocity)) {
-              peakVelocity = v;
-            }
-          }
-          // Convert to pixels per frame (~16ms)
-          momentumVelocity = peakVelocity * 16;
-
-          // Start momentum if significant (lowered threshold for responsiveness)
-          if (Math.abs(momentumVelocity) >= minMomentumVelocity) {
-            momentumId = requestAnimationFrame(applyMomentum);
-          }
-        }
-        isScrolling = false;
-      };
-
-      const container = containerRef.current.closest(".terminal-scroll");
-      if (!container) {
-        return;
-      }
-      // Use capture: true to intercept events before xterm's internal handlers
-      container.addEventListener('touchstart', handleTouchStart, { passive: false, capture: true });
-      container.addEventListener('touchmove', handleTouchMove, { passive: false, capture: true });
-      container.addEventListener('touchend', handleTouchEnd, { passive: true, capture: true });
-      container.addEventListener('touchcancel', handleTouchEnd, { passive: true, capture: true });
-
-      // Store cleanup handlers
-      (terminal as any).__touchCleanup = () => {
-        stopMomentum();
-        container.removeEventListener('touchstart', handleTouchStart, { capture: true });
-        container.removeEventListener('touchmove', handleTouchMove, { capture: true });
-        container.removeEventListener('touchend', handleTouchEnd, { capture: true });
-        container.removeEventListener('touchcancel', handleTouchEnd, { capture: true });
-      };
-    }
-
     if (import.meta.env.VITE_E2E === "true") {
       (window as any).__hay = {
         getBufferText: () => {
@@ -743,6 +559,317 @@ const App = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
+
+  useEffect(() => {
+    if (!isMobile || !terminalReady) {
+      return;
+    }
+
+    const terminal = termRef.current;
+    const container = containerRef.current?.closest(".terminal-scroll");
+    if (!terminal || !container) {
+      return;
+    }
+
+    if ((terminal as any).__touchCleanup) {
+      (terminal as any).__touchCleanup();
+      (terminal as any).__touchCleanup = null;
+    }
+
+    // Selection mode uses native text selection; CSS re-enables pointer events
+    // on xterm rows so iOS handles selection, and we skip custom scrolling.
+    if (selectionMode) {
+      return;
+    }
+
+    // Mobile touch scrolling with momentum (native-feeling)
+    // xterm.js has the viewport underneath the rows, so native scroll doesn't work
+    // We implement our own with inertia/momentum for iOS-like feel
+    let lastY = 0;
+    let scrollDebt = 0; // Accumulated sub-line scroll distance
+    let velocitySamples: number[] = []; // Recent velocities for smoothing
+    let lastMoveTime = 0;
+    let momentumVelocity = 0;
+    let momentumId: number | null = null;
+    let isScrolling = false;
+    let isPanning = false;
+    let panStartScrollLeft = 0;
+    let panStartScrollTop = 0;
+    let panStartX = 0;
+    let panStartY = 0;
+
+    const getCellHeight = () => {
+      const core = (terminal as any)._core;
+      const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
+      return cellHeight && cellHeight > 0 ? cellHeight : 18;
+    };
+
+    const getTwoFingerCenter = (touches: TouchList) => {
+      const x = (touches[0].clientX + touches[1].clientX) / 2;
+      const y = (touches[0].clientY + touches[1].clientY) / 2;
+      return { x, y };
+    };
+
+    const friction = 0.94; // Momentum decay (higher = longer coast)
+    const minMomentumVelocity = 0.25; // Minimum px/frame to continue momentum
+
+    const stopMomentum = () => {
+      if (momentumId !== null) {
+        cancelAnimationFrame(momentumId);
+        momentumId = null;
+      }
+      momentumVelocity = 0;
+    };
+
+    const applyMomentum = () => {
+      if (Math.abs(momentumVelocity) < minMomentumVelocity) {
+        momentumId = null;
+        return;
+      }
+
+      // Apply momentum as fractional scroll
+      scrollDebt += momentumVelocity;
+      const lines = Math.trunc(scrollDebt / getCellHeight());
+      if (lines !== 0) {
+        terminal.scrollLines(lines);
+        scrollDebt -= lines * getCellHeight();
+      }
+
+      momentumVelocity *= friction;
+      momentumId = requestAnimationFrame(applyMomentum);
+    };
+
+    const handleTouchStart = (e: TouchEvent) => {
+      stopMomentum();
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+
+      if (e.touches.length === 2) {
+        isPanning = true;
+        const center = getTwoFingerCenter(e.touches);
+        panStartX = center.x;
+        panStartY = center.y;
+        const panTarget = containerRef.current?.closest(".terminal-scroll");
+        if (panTarget) {
+          panStartScrollLeft = panTarget.scrollLeft;
+          panStartScrollTop = panTarget.scrollTop;
+        }
+        return;
+      }
+
+      if (e.touches.length !== 1) {
+        isPanning = false;
+        isScrolling = false;
+        return;
+      }
+
+      isPanning = false;
+      lastY = e.touches[0].clientY;
+      lastMoveTime = Date.now();
+      scrollDebt = 0;
+      velocitySamples = [];
+      isScrolling = true;
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        if (!isPanning) {
+          isPanning = true;
+          const center = getTwoFingerCenter(e.touches);
+          panStartX = center.x;
+          panStartY = center.y;
+          const panTarget = containerRef.current?.closest(".terminal-scroll");
+          if (panTarget) {
+            panStartScrollLeft = panTarget.scrollLeft;
+            panStartScrollTop = panTarget.scrollTop;
+          }
+        }
+
+        const center = getTwoFingerCenter(e.touches);
+        const deltaX = panStartX - center.x;
+        const deltaY = panStartY - center.y;
+        const panTarget = containerRef.current?.closest(".terminal-scroll");
+        if (panTarget) {
+          panTarget.scrollLeft = panStartScrollLeft + deltaX;
+          panTarget.scrollTop = panStartScrollTop + deltaY;
+        }
+        e.preventDefault();
+        return;
+      }
+
+      if (e.touches.length !== 1) return;
+
+      if (isPanning) {
+        isPanning = false;
+        isScrolling = true;
+      }
+
+      const touchY = e.touches[0].clientY;
+      const now = Date.now();
+      const deltaY = lastY - touchY; // positive = scroll down (finger up)
+      const deltaTime = Math.max(1, now - lastMoveTime);
+
+      // ALWAYS track velocity (even before direction is locked)
+      // This ensures quick flicks have velocity data
+      if (deltaTime > 0 && deltaTime < 100) { // Ignore stale samples
+        velocitySamples.push(deltaY / deltaTime);
+        if (velocitySamples.length > 5) velocitySamples.shift();
+      }
+
+      e.preventDefault();
+      // Accumulate scroll and apply whole lines
+      scrollDebt += deltaY;
+      const lines = Math.trunc(scrollDebt / getCellHeight());
+      if (lines !== 0) {
+        terminal.scrollLines(lines);
+        scrollDebt -= lines * getCellHeight();
+      }
+
+      lastY = touchY;
+      lastMoveTime = now;
+    };
+
+    const handleTouchEnd = () => {
+      if (isPanning) {
+        isPanning = false;
+        return;
+      }
+
+      // Only apply momentum if we were scrolling vertically
+      if (isScrolling && velocitySamples.length > 0) {
+        // Use peak velocity (max absolute value) - users often slow down at end of flick
+        // but we want to capture their flick intent, not their stopping motion
+        let peakVelocity = 0;
+        for (const v of velocitySamples) {
+          if (Math.abs(v) > Math.abs(peakVelocity)) {
+            peakVelocity = v;
+          }
+        }
+        // Convert to pixels per frame (~16ms)
+        momentumVelocity = peakVelocity * 16;
+
+        // Start momentum if significant (lowered threshold for responsiveness)
+        if (Math.abs(momentumVelocity) >= minMomentumVelocity) {
+          momentumId = requestAnimationFrame(applyMomentum);
+        }
+      }
+      isScrolling = false;
+    };
+
+    // Use capture: true to intercept events before xterm's internal handlers
+    container.addEventListener('touchstart', handleTouchStart, { passive: false, capture: true });
+    container.addEventListener('touchmove', handleTouchMove, { passive: false, capture: true });
+    container.addEventListener('touchend', handleTouchEnd, { passive: true, capture: true });
+    container.addEventListener('touchcancel', handleTouchEnd, { passive: true, capture: true });
+
+    // Store cleanup handlers
+    (terminal as any).__touchCleanup = () => {
+      stopMomentum();
+      container.removeEventListener('touchstart', handleTouchStart, { capture: true });
+      container.removeEventListener('touchmove', handleTouchMove, { capture: true });
+      container.removeEventListener('touchend', handleTouchEnd, { capture: true });
+      container.removeEventListener('touchcancel', handleTouchEnd, { capture: true });
+    };
+
+    return () => {
+      if ((terminal as any).__touchCleanup) {
+        (terminal as any).__touchCleanup();
+        (terminal as any).__touchCleanup = null;
+      }
+    };
+  }, [isMobile, selectionMode, terminalReady]);
+
+  useEffect(() => {
+    if (!terminalReady || !isMobile) {
+      return;
+    }
+    const terminal = termRef.current;
+    if (!terminal) {
+      return;
+    }
+    const viewport = (terminal as any)._core?.viewport;
+    if (!viewport) {
+      return;
+    }
+
+    if (!viewportTouchRef.current) {
+      viewportTouchRef.current = {
+        start: typeof viewport.handleTouchStart === "function" ? viewport.handleTouchStart.bind(viewport) : undefined,
+        move: typeof viewport.handleTouchMove === "function" ? viewport.handleTouchMove.bind(viewport) : undefined
+      };
+    }
+
+    // Selection mode: disable xterm's internal touch handlers so Safari's
+    // selection handles can take priority (CSS toggles pointer-events).
+    if (selectionMode) {
+      viewport.handleTouchStart = () => {};
+      viewport.handleTouchMove = () => true;
+    } else if (viewportTouchRef.current) {
+      if (viewportTouchRef.current.start) {
+        viewport.handleTouchStart = viewportTouchRef.current.start;
+      }
+      if (viewportTouchRef.current.move) {
+        viewport.handleTouchMove = viewportTouchRef.current.move;
+      }
+    }
+
+    return () => {
+      if (viewportTouchRef.current) {
+        if (viewportTouchRef.current.start) {
+          viewport.handleTouchStart = viewportTouchRef.current.start;
+        }
+        if (viewportTouchRef.current.move) {
+          viewport.handleTouchMove = viewportTouchRef.current.move;
+        }
+      }
+    };
+  }, [terminalReady, isMobile, selectionMode]);
+
+  useEffect(() => {
+    if (!isMobile || !selectionMode) {
+      return;
+    }
+    const container = containerRef.current?.closest(".terminal-scroll");
+    if (!container) {
+      return;
+    }
+
+    const resetUserSelect = () => {
+      const xterm = containerRef.current?.querySelector(".xterm") as HTMLElement | null;
+      if (!xterm) {
+        return;
+      }
+      xterm.style.webkitUserSelect = "none";
+      xterm.style.userSelect = "none";
+      requestAnimationFrame(() => {
+        xterm.style.webkitUserSelect = "";
+        xterm.style.userSelect = "";
+      });
+    };
+
+    const handleClick = () => {
+      const selection = window.getSelection();
+      if (!selection || !selection.isCollapsed) {
+        return;
+      }
+      const textarea = containerRef.current?.querySelector("textarea") as HTMLTextAreaElement | null;
+      const active = document.activeElement as HTMLElement | null;
+      selection.removeAllRanges();
+      textarea?.blur();
+      if (active && active !== document.body) {
+        active.blur();
+      }
+      termRef.current?.clearSelection?.();
+      termRef.current?.blur?.();
+      resetUserSelect();
+    };
+
+    container.addEventListener("click", handleClick, true);
+    return () => {
+      container.removeEventListener("click", handleClick, true);
+    };
+  }, [isMobile, selectionMode]);
 
   useEffect(() => {
     if (!session) {
@@ -974,7 +1101,9 @@ const App = () => {
           </div>
         </main>
       ) : (
-        <main className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}`}>
+        <main
+          className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}`}
+        >
           <button
             type="button"
             className="drawer-toggle"
@@ -1055,6 +1184,27 @@ const App = () => {
                 </button>
               </div>
             </div>
+            {isMobile && (
+              <div className="selection-mode-control">
+                <label>Selection mode</label>
+                <div className="view-mode-buttons">
+                  <button
+                    type="button"
+                    className={!selectionMode ? "active" : ""}
+                    onClick={() => setSelectionMode(false)}
+                  >
+                    Scroll
+                  </button>
+                  <button
+                    type="button"
+                    className={selectionMode ? "active" : ""}
+                    onClick={() => setSelectionMode(true)}
+                  >
+                    Select
+                  </button>
+                </div>
+              </div>
+            )}
             {notice && <p className="notice">{notice}</p>}
             {(() => {
               const otherSessions = sessions.filter((s) => s.name !== session?.room);

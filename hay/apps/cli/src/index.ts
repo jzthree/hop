@@ -12,14 +12,52 @@ const isMac = process.platform === "darwin";
 const keyLabelShort = isMac ? "Opt" : "Alt";
 const keyLabelLong = isMac ? "Option" : "Alt";
 
-const CONFIG_PATH = path.join(os.homedir(), ".hay-cli.json");
-type CliConfig = { showHints?: boolean };
+type CliConfig = { showHints?: boolean; scrollOff?: number };
+type HopConfig = { "hay-cli"?: CliConfig };
+const DEFAULT_SCROLL_OFF = 3;
+
+// Config file locations (checked in order, first found wins)
+const CONFIG_LOCATIONS = [
+  // Local configs (current directory)
+  { path: ".hay-cli.json", isLegacy: true, isLocal: true },
+  { path: ".hop.json", isLegacy: false, isLocal: true },
+  // Global configs (home directory)
+  { path: path.join(os.homedir(), ".hay-cli.json"), isLegacy: true, isLocal: false },
+  { path: path.join(os.homedir(), ".hop.json"), isLegacy: false, isLocal: false },
+];
+
+// Find which config file to use
+const getConfigPath = (): { path: string; isLegacy: boolean; isLocal: boolean } | null => {
+  for (const loc of CONFIG_LOCATIONS) {
+    if (fs.existsSync(loc.path)) {
+      return loc;
+    }
+  }
+  return null;
+};
+
+// Get the path where we should save config (prefer global .hop.json)
+const getSaveConfigPath = (): { path: string; isLegacy: boolean } => {
+  // If a legacy file exists anywhere, use the global legacy path
+  const existing = getConfigPath();
+  if (existing?.isLegacy) {
+    return { path: path.join(os.homedir(), ".hay-cli.json"), isLegacy: true };
+  }
+  // Otherwise use global .hop.json
+  return { path: path.join(os.homedir(), ".hop.json"), isLegacy: false };
+};
 
 const loadConfig = (): CliConfig => {
   try {
-    const raw = fs.readFileSync(CONFIG_PATH, "utf8");
-    const parsed = JSON.parse(raw) as CliConfig;
-    return parsed ?? {};
+    const loc = getConfigPath();
+    if (!loc) return {};
+    const raw = fs.readFileSync(loc.path, "utf8");
+    const parsed = JSON.parse(raw);
+    if (loc.isLegacy) {
+      return (parsed as CliConfig) ?? {};
+    }
+    // Read from hay-cli key in .hop.json
+    return (parsed as HopConfig)?.["hay-cli"] ?? {};
   } catch {
     return {};
   }
@@ -27,7 +65,22 @@ const loadConfig = (): CliConfig => {
 
 const saveConfig = (config: CliConfig) => {
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    const { path: configPath, isLegacy } = getSaveConfigPath();
+    if (isLegacy) {
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    } else {
+      // Read existing .hop.json and update hay-cli key
+      let hopConfig: HopConfig = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          hopConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+        } catch {
+          hopConfig = {};
+        }
+      }
+      hopConfig["hay-cli"] = config;
+      fs.writeFileSync(configPath, JSON.stringify(hopConfig, null, 2));
+    }
   } catch {
     // Ignore config write errors
   }
@@ -149,9 +202,11 @@ let mouseCapture = true;
 let viewX = 0;
 let viewY = 0;
 let showHints = true;
+let scrollOff = DEFAULT_SCROLL_OFF;
 
 const configFile = loadConfig();
 showHints = configFile.showHints ?? true;
+scrollOff = configFile.scrollOff ?? DEFAULT_SCROLL_OFF;
 
 let uiInitialized = false;
 let renderScheduled = false;
@@ -461,10 +516,15 @@ const applyRemoteSize = (cols: number, rows: number) => {
   remoteCols = nextCols;
   remoteRows = nextRows;
   terminal.resize(remoteCols, remoteRows);
-  // Scroll to show cursor position after resize
+  // Only scroll if cursor is outside viewport (with scrollOff margin)
   const buffer = terminal.buffer.active;
   const cursorRow = buffer.baseY + buffer.cursorY;
-  viewY = Math.max(0, cursorRow - localMetrics.viewportRows + 1);
+  const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
+  if (cursorRow < viewY + margin) {
+    viewY = Math.max(0, cursorRow - margin);
+  } else if (cursorRow >= viewY + localMetrics.viewportRows - margin) {
+    viewY = cursorRow - localMetrics.viewportRows + margin + 1;
+  }
   clampView();
   scheduleRender();
 };
@@ -922,8 +982,14 @@ const connect = () => {
           const cursorWasVisible = cursorRowBefore >= viewY && cursorRowBefore < viewY + localMetrics.viewportRows;
           terminal.write(filtered, () => {
             if (cursorWasVisible) {
+              // Only scroll if cursor moved outside viewport (with scrollOff margin)
               const cursorRowAfter = buffer.baseY + buffer.cursorY;
-              viewY = Math.max(0, cursorRowAfter - localMetrics.viewportRows + 1);
+              const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
+              if (cursorRowAfter < viewY + margin) {
+                viewY = Math.max(0, cursorRowAfter - margin);
+              } else if (cursorRowAfter >= viewY + localMetrics.viewportRows - margin) {
+                viewY = cursorRowAfter - localMetrics.viewportRows + margin + 1;
+              }
               clampView();
             }
             scheduleRender();
@@ -937,11 +1003,15 @@ const connect = () => {
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
-            // Scroll to show cursor position on snapshot restore
+            // On snapshot, only scroll if cursor is outside viewport (with scrollOff margin)
             const buffer = terminal.buffer.active;
             const cursorRow = buffer.baseY + buffer.cursorY;
-            // Position viewport so cursor is visible near the bottom
-            viewY = Math.max(0, cursorRow - localMetrics.viewportRows + 1);
+            const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
+            if (cursorRow < viewY + margin) {
+              viewY = Math.max(0, cursorRow - margin);
+            } else if (cursorRow >= viewY + localMetrics.viewportRows - margin) {
+              viewY = cursorRow - localMetrics.viewportRows + margin + 1;
+            }
             clampView();
             scheduleRender();
           });

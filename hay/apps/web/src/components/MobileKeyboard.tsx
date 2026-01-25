@@ -105,7 +105,6 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
   const bkspTimeout = useRef<number | null>(null);
   const bkspInterval = useRef<number | null>(null);
   const sysInputRef = useRef<HTMLTextAreaElement>(null);
-  const ignoreSysBlurRef = useRef(false);
   const hapticLabelRef = useRef<HTMLLabelElement | null>(null);
 
   // Use refs to avoid stale closures in rapid key presses
@@ -228,18 +227,10 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
   }, []);
 
-  const suppressNextSysBlur = useCallback(() => {
-    ignoreSysBlurRef.current = true;
-    window.setTimeout(() => {
-      ignoreSysBlurRef.current = false;
-    }, 250);
-  }, []);
-
   const closeSysKb = useCallback(() => {
-    suppressNextSysBlur();
     sysInputRef.current?.blur();
     setSysKbOpen(false);
-  }, [suppressNextSysBlur]);
+  }, []);
 
   const focusSysKbInput = useCallback(() => {
     const el = sysInputRef.current;
@@ -587,18 +578,6 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
                 if (e.key === "Enter") {
                   e.preventDefault();
                   handleSysKbSubmit();
-                }
-              }}
-              onBlur={() => {
-                if (!sysKbOpen) return;
-                if (ignoreSysBlurRef.current) {
-                  ignoreSysBlurRef.current = false;
-                  return;
-                }
-                if (sysKbDraft.trim()) {
-                  handleSysKbSubmit();
-                } else {
-                  closeSysKb();
                 }
               }}
               onChange={(e) => {

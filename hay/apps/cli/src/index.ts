@@ -150,6 +150,9 @@ let viewX = 0;
 let viewY = 0;
 let showHints = true;
 
+const configFile = loadConfig();
+showHints = configFile.showHints ?? true;
+
 let uiInitialized = false;
 let renderScheduled = false;
 let lastRenderCols = 0;
@@ -183,9 +186,6 @@ const terminal = new Terminal({
   scrollback: 2000,
   allowProposedApi: true
 });
-
-const configFile = loadConfig();
-showHints = configFile.showHints ?? true;
 
 // Forward terminal-generated responses (eg. DSR cursor reports) back to the PTY.
 terminal.onData((data) => {
@@ -454,6 +454,7 @@ const setStatus = (nextStatus: typeof status) => {
 };
 
 const applyRemoteSize = (cols: number, rows: number) => {
+  localMetrics = getLocalMetrics();
   const nextCols = Math.max(2, Math.min(cols, 500));
   const nextRows = Math.max(1, Math.min(rows, 200));
   if (remoteCols === nextCols && remoteRows === nextRows) return;
@@ -470,6 +471,7 @@ const applyRemoteSize = (cols: number, rows: number) => {
 
 const applySyncSize = () => {
   if (!syncSize) return;
+  localMetrics = getLocalMetrics();
   const cols = localMetrics.viewportCols;
   const rows = localMetrics.viewportRows;
   const needsResize = cols !== remoteCols || rows !== remoteRows;

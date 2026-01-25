@@ -12,6 +12,7 @@ interface MobileKeyboardProps {
   onInput: (data: string) => void;
   visible: boolean;
   onToggle: () => void;
+  hapticsEnabled?: boolean;
 }
 
 type KeyboardView = "abc" | "num";
@@ -90,7 +91,7 @@ const PasteIcon = () => (
   </svg>
 );
 
-export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardProps) => {
+export const MobileKeyboard = ({ onInput, visible, onToggle, hapticsEnabled = true }: MobileKeyboardProps) => {
   const [view, setView] = useState<KeyboardView>("abc");
   const [shift, setShift] = useState(false);
   const [caps, setCaps] = useState(false);
@@ -166,6 +167,7 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
   };
 
   const hapticTap = useCallback(() => {
+    if (!hapticsEnabled) return;
     try {
       if (isIOS()) {
         // iOS: click hidden switch label to trigger native haptic
@@ -178,7 +180,7 @@ export const MobileKeyboard = ({ onInput, visible, onToggle }: MobileKeyboardPro
     } catch {
       // Ignore haptic errors
     }
-  }, []);
+  }, [hapticsEnabled]);
 
   // Use refs in send to avoid stale closures - this is critical for rapid typing
   const send = useCallback(

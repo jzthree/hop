@@ -124,6 +124,10 @@ const App = () => {
     const saved = localStorage.getItem("hay_selection_mode");
     return saved === "true";
   });
+  const [hapticsEnabled, setHapticsEnabled] = useState(() => {
+    const saved = localStorage.getItem("hay_haptics_enabled");
+    return saved !== "false";
+  });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [fontSize, setFontSize] = useState(() => {
@@ -149,6 +153,9 @@ const App = () => {
   useEffect(() => {
     localStorage.setItem("hay_selection_mode", selectionMode ? "true" : "false");
   }, [selectionMode]);
+  useEffect(() => {
+    localStorage.setItem("hay_haptics_enabled", hapticsEnabled ? "true" : "false");
+  }, [hapticsEnabled]);
 
   const typingActive = useRef(false);
   const noticeTimeout = useRef<number | null>(null);
@@ -1205,6 +1212,27 @@ const App = () => {
                 </div>
               </div>
             )}
+            {isMobile && (
+              <div className="haptics-control">
+                <label>Haptics</label>
+                <div className="view-mode-buttons">
+                  <button
+                    type="button"
+                    className={hapticsEnabled ? "active" : ""}
+                    onClick={() => setHapticsEnabled(true)}
+                  >
+                    On
+                  </button>
+                  <button
+                    type="button"
+                    className={!hapticsEnabled ? "active" : ""}
+                    onClick={() => setHapticsEnabled(false)}
+                  >
+                    Off
+                  </button>
+                </div>
+              </div>
+            )}
             {notice && <p className="notice">{notice}</p>}
             {(() => {
               const otherSessions = sessions.filter((s) => s.name !== session?.room);
@@ -1262,6 +1290,7 @@ const App = () => {
               onInput={handleKeyboardInput}
               visible={keyboardVisible}
               onToggle={handleKeyboardToggle}
+              hapticsEnabled={hapticsEnabled}
             />
           )}
         </main>

@@ -277,13 +277,13 @@ button.primary {
 .controls {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
 }
 
 .room-info {
   background: var(--panel);
-  padding: 22px;
-  border-radius: 22px;
+  padding: 16px;
+  border-radius: 16px;
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
@@ -297,19 +297,19 @@ button.primary {
 }
 
 .room-info h2 {
-  margin: 8px 0 4px;
-  font-size: 24px;
+  margin: 6px 0 2px;
+  font-size: 20px;
 }
 
 .room-meta {
   margin: 0;
   color: var(--ink-muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .control-actions {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .status-card {
@@ -366,28 +366,30 @@ button.primary {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 0;
-  border-top: 1px solid var(--line);
+  padding: 8px 0;
 }
 
 .font-size-control label {
-  font-size: 14px;
+  font-size: 12px;
   color: var(--ink-muted);
+  line-height: 1.2;
+  display: flex;
+  align-items: center;
 }
 
 .font-size-buttons {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .font-size-buttons button {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--panel);
-  font-size: 18px;
+  font-size: 16px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -399,23 +401,30 @@ button.primary {
 }
 
 .font-size-buttons span {
-  min-width: 48px;
+  min-width: 40px;
   text-align: center;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
 }
 
-.view-mode-control {
+.view-mode-control,
+.selection-mode-control,
+.haptics-control {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 0;
-  border-top: 1px solid var(--line);
+  padding: 8px 0;
+  min-height: 32px;
 }
 
-.view-mode-control label {
-  font-size: 14px;
+.view-mode-control label,
+.selection-mode-control label,
+.haptics-control label {
+  font-size: 12px;
   color: var(--ink-muted);
+  line-height: 1.2;
+  display: flex;
+  align-items: center;
 }
 
 .view-mode-buttons {
@@ -424,11 +433,12 @@ button.primary {
 }
 
 .view-mode-buttons button {
-  padding: 6px 16px;
+  padding: 4px 12px;
   border-radius: 6px;
   border: 1px solid var(--line);
   background: var(--panel);
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1;
   cursor: pointer;
   color: var(--ink-muted);
   transition: all 0.15s ease;
@@ -703,7 +713,11 @@ button.primary {
     background: var(--panel);
     border: 1px solid var(--line);
     font-size: 18px;
+    line-height: 1;
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .terminal-frame {
@@ -1090,15 +1104,15 @@ button.primary {
 
 .session-switcher {
   background: var(--panel);
-  padding: 16px;
-  border-radius: 16px;
+  padding: 12px;
+  border-radius: 14px;
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
 
 .session-switcher-label {
-  margin: 0 0 12px;
-  font-size: 11px;
+  margin: 0 0 8px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.15em;
   color: var(--ink-muted);
@@ -1123,8 +1137,8 @@ button.primary {
   justify-content: space-between;
   gap: 10px;
   width: 100%;
-  padding: 12px 14px;
-  border-radius: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
   background: var(--bg-alt);
   border: 1px solid transparent;
   cursor: pointer;
@@ -1150,7 +1164,7 @@ button.primary {
 
 .session-list-name {
   flex: 1;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--ink);
   overflow: hidden;

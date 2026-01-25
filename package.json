@@ -1,10 +1,10 @@
 {
-  "name": "hop-shell",
+  "name": "hop2",
   "version": "0.8.0",
-  "description": "🐰 Hop into your terminal from anywhere. Secure remote shell access with 2FA via Cloudflare Tunnel.",
+  "description": "🐰 Hop into your terminal from anywhere. Secure remote shell access with 2FA via Cloudflare Tunnel. Next-gen rewrite with native terminal sharing.",
   "main": "hop",
   "bin": {
-    "hop": "./hop"
+    "hop2": "./hop"
   },
   "scripts": {
     "start": "node hop",

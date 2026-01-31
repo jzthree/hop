@@ -140,6 +140,27 @@ function writePrivateFile(filePath, data, mode = PRIVATE_FILE_MODE) {
 
 ensurePrivateDir(HOME_DIR);
 
+// Sanity check: detect nested config directories (common after manual moves)
+function validateConfigDir() {
+    const suspiciousDirs = ['.hop-shell', '.hop-shell2', '.hop2'];
+    for (const dir of suspiciousDirs) {
+        const nested = path.join(HOME_DIR, dir);
+        if (fs.existsSync(nested) && fs.statSync(nested).isDirectory()) {
+            // Check if it contains config files that should be in HOME_DIR
+            const nestedFiles = ['.auth_secret', '.password_hash', '.domain-config.json'];
+            for (const f of nestedFiles) {
+                if (fs.existsSync(path.join(nested, f))) {
+                    console.error(`\n${RED}ERROR: Config files found in nested directory: ${nested}${RESET}`);
+                    console.error(`Expected config files directly in: ${HOME_DIR}`);
+                    console.error(`\nFix with: mv "${nested}"/* "${nested}"/.[!.]* "${HOME_DIR}/" && rmdir "${nested}"\n`);
+                    process.exit(1);
+                }
+            }
+        }
+    }
+}
+validateConfigDir();
+
 const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
 const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
@@ -2348,12 +2369,10 @@ tunnel: ${domainConfig.tunnelName}
 
     tunnel.on('close', (code) => {
         if (shuttingDown) return;  // Don't restart during cleanup
-        if (code !== null) {
-            log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
-            setTimeout(() => {
-                if (!shuttingDown) startTunnelWithRestart();
-            }, 3000);
-        }
+        log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
+        setTimeout(() => {
+            if (!shuttingDown) startTunnelWithRestart();
+        }, 3000);
     });
 
     tunnel.on('error', (err) => {
@@ -2402,7 +2421,7 @@ tunnel: ${domainConfig.tunnelName}
 
     // For quick tunnels, parse URL from output
     let urlFound = false;
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         tunnel.stderr.on('data', (data) => {
             if (urlFound) return;
             const output = data.toString();
@@ -2425,6 +2444,16 @@ tunnel: ${domainConfig.tunnelName}
                 resolve({ tunnel, publicUrl: parsedUrl });
             }
         });
+
+        // Timeout - don't hang forever waiting for cloudflared
+        setTimeout(() => {
+            if (!urlFound) {
+                tunnel.kill();
+                log(`\n${RED}ERROR: Cloudflare tunnel failed to start (timeout after 30s)${RESET}`, RED);
+                log(`Check your internet connection or try again.`, YELLOW);
+                process.exit(1);
+            }
+        }, 30000);
     });
 }
 
@@ -2456,12 +2485,10 @@ credentials-file: ${path.resolve(credentialsPath)}
 
     tunnel.on('close', (code) => {
         if (shuttingDown) return;  // Don't restart during cleanup
-        if (code !== null) {
-            log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
-            setTimeout(() => {
-                if (!shuttingDown) startTunnelWithRestart();
-            }, 3000);
-        }
+        log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
+        setTimeout(() => {
+            if (!shuttingDown) startTunnelWithRestart();
+        }, 3000);
     });
 
     tunnel.on('error', (err) => {
@@ -2507,7 +2534,16 @@ credentials-file: ${path.resolve(credentialsPath)}
     });
 }
 
+let tunnelRestartInProgress = false;
+
 async function startTunnelWithRestart() {
+    // Prevent concurrent restarts
+    if (tunnelRestartInProgress) {
+        log(`[Tunnel] Restart already in progress, skipping.`, YELLOW);
+        return;
+    }
+    tunnelRestartInProgress = true;
+
     try {
         const { tunnel, publicUrl } = CLIENT_TUNNEL_CONFIG
             ? await startClientTunnel(true)
@@ -2523,9 +2559,57 @@ async function startTunnelWithRestart() {
         }
 
         // Sessions are managed by hay, no tmux styling needed
+        tunnelRestartInProgress = false;
     } catch (e) {
+        tunnelRestartInProgress = false;
         log(`[Tunnel] Failed to restart: ${e.message}. Retrying in 5s...`, RED);
         setTimeout(startTunnelWithRestart, 5000);
+    }
+}
+
+// Tunnel health monitor - detects stale connections (e.g., after VPN change)
+let tunnelHealthInterval = null;
+const TUNNEL_HEALTH_CHECK_INTERVAL = 30000; // Check every 30s
+const TUNNEL_HEALTH_TIMEOUT = 10000; // 10s timeout for health check
+
+function startTunnelHealthMonitor() {
+    if (tunnelHealthInterval) return;
+
+    tunnelHealthInterval = setInterval(async () => {
+        if (shuttingDown || !currentPublicUrl) return;
+
+        try {
+            const https = require('https');
+            const healthCheck = new Promise((resolve, reject) => {
+                const req = https.get(currentPublicUrl, { timeout: TUNNEL_HEALTH_TIMEOUT }, (res) => {
+                    resolve(res.statusCode);
+                });
+                req.on('error', reject);
+                req.on('timeout', () => {
+                    req.destroy();
+                    reject(new Error('Timeout'));
+                });
+            });
+
+            await healthCheck;
+            // Any response (even 401) means tunnel is working
+        } catch (e) {
+            log(`[Tunnel] Health check failed: ${e.message}. Restarting tunnel...`, YELLOW);
+            if (currentTunnelProc && !currentTunnelProc.killed) {
+                try { currentTunnelProc.kill('SIGTERM'); } catch (err) { }
+                // The 'close' handler will trigger restart
+            } else {
+                // Cloudflared already dead, restart directly
+                startTunnelWithRestart();
+            }
+        }
+    }, TUNNEL_HEALTH_CHECK_INTERVAL);
+}
+
+function stopTunnelHealthMonitor() {
+    if (tunnelHealthInterval) {
+        clearInterval(tunnelHealthInterval);
+        tunnelHealthInterval = null;
     }
 }
 
@@ -2686,7 +2770,8 @@ function waitForDaemonReady(timeoutMs = 20000) {
         const start = Date.now();
         const check = () => {
             const state = isServerRunning();
-            if (state) return resolve(state);
+            // State file now written early, so also check that URL is populated
+            if (state && state.url) return resolve(state);
             if (Date.now() - start > timeoutMs) {
                 return reject(new Error('Timed out waiting for hop daemon'));
             }
@@ -3164,6 +3249,9 @@ async function main() {
             startTime: Date.now()
         }));
 
+        // Start tunnel health monitoring (detects stale connections after VPN changes)
+        startTunnelHealthMonitor();
+
         await waitForStart(authEmitter, publicUrl, `Hop-${hostname}`);
 
         await startLocalSession(proxyServer, tunnelProc, publicUrl);
@@ -3290,6 +3378,56 @@ async function main() {
         log(`${state.url}\n`, GREEN);
         qrcode.generate(state.url, { small: true });
         process.exit(0);
+    }
+
+    // Handle `hop health` command - check tunnel health and optionally restart
+    if (process.argv[2] === 'health') {
+        const state = isServerRunning();
+        if (!state) {
+            log(`Hop is not running.`, RED);
+            process.exit(1);
+        }
+
+        log(`\nChecking tunnel health...`, BOLD);
+        log(`  URL: ${state.url}`, RESET);
+
+        const https = require('https');
+        const startTime = Date.now();
+
+        const checkHealth = () => new Promise((resolve) => {
+            const req = https.get(state.url, { timeout: 10000 }, (res) => {
+                // 5xx errors mean Cloudflare couldn't reach origin (tunnel broken)
+                const ok = res.statusCode < 500;
+                resolve({ ok, status: res.statusCode, time: Date.now() - startTime });
+            });
+            req.on('error', (e) => resolve({ ok: false, error: e.message, time: Date.now() - startTime }));
+            req.on('timeout', () => {
+                req.destroy();
+                resolve({ ok: false, error: 'Timeout (10s)', time: Date.now() - startTime });
+            });
+        });
+
+        const result = await checkHealth();
+
+        if (result.ok) {
+            log(`  Status: ${GREEN}OK${RESET} (${result.status}) - ${result.time}ms`, GREEN);
+        } else {
+            const reason = result.error || (result.status ? `HTTP ${result.status}` : 'Unknown error');
+            log(`  Status: ${RED}FAILED${RESET} - ${reason} (${result.time}ms)`, RED);
+
+            if (process.argv[3] === '--restart' || process.argv[3] === '-r') {
+                log(`\nRestarting tunnel...`, YELLOW);
+                try {
+                    process.kill(state.pid, 'SIGUSR1');  // Signal daemon to restart tunnel
+                    log(`Restart signal sent. Check again in a few seconds.`, GREEN);
+                } catch (e) {
+                    log(`Failed to signal daemon: ${e.message}`, RED);
+                }
+            } else {
+                log(`\nRun ${CYAN}hop health --restart${RESET} to force tunnel restart.`, RESET);
+            }
+        }
+        process.exit(result.ok ? 0 : 1);
     }
 
     // Handle `hop domain <hostname>` command - setup custom domain
@@ -3666,6 +3804,19 @@ async function main() {
     }
 
     loadAuthSecret();
+
+    // Write state file early to prevent race condition where multiple daemons spawn
+    // Other hop processes will see this and wait instead of spawning another daemon
+    if (DAEMON_FLAG) {
+        writePrivateFile(STATE_FILE, JSON.stringify({
+            pid: process.pid,
+            port: BASE_PORT,
+            url: null,  // Not yet known, will be updated after tunnel starts
+            sessionSecret: SESSION_SECRET,
+            startTime: Date.now()
+        }));
+    }
+
     await checkAndInstallDependencies();
     await ensureHayLoaded();
     const authEmitter = new EventEmitter();
@@ -3682,11 +3833,16 @@ async function main() {
         startTime: Date.now()
     }));
 
+    // Start tunnel health monitoring (detects stale connections after VPN changes)
+    startTunnelHealthMonitor();
+
     if (DAEMON_FLAG) {
         const cleanup = () => {
             if (shuttingDown) return;
             shuttingDown = true;
             log(`Cleaning up...`, YELLOW);
+
+            stopTunnelHealthMonitor();
 
             if (fs.existsSync(STATE_FILE)) {
                 try { fs.unlinkSync(STATE_FILE); } catch (e) { }
@@ -3703,6 +3859,19 @@ async function main() {
         process.on('SIGINT', cleanup);
         process.on('SIGTERM', cleanup);
         process.on('exit', cleanup);
+
+        // SIGUSR1 = restart tunnel (used by `hop health --restart`)
+        process.on('SIGUSR1', () => {
+            log(`[Tunnel] Received restart signal. Restarting tunnel...`, YELLOW);
+            if (currentTunnelProc && !currentTunnelProc.killed) {
+                try { currentTunnelProc.kill('SIGTERM'); } catch (e) { }
+                // The 'close' handler will trigger startTunnelWithRestart
+            } else {
+                // Cloudflared already dead, restart directly
+                startTunnelWithRestart();
+            }
+        });
+
         await new Promise(() => {});
     }
 

@@ -165,6 +165,8 @@ if (!config.room) {
   process.exit(1);
 }
 
+let sessionLabel = config.room;
+
 const DETACH_EXIT_CODE = 10;
 const KILL_EXIT_CODE = 11;
 const TYPING_IDLE_MS = 1200;
@@ -876,7 +878,7 @@ const render = () => {
   const shareUrl = buildShareUrl();
 
   const statusOrUrl = statusLabel || shareUrl;
-  const bottomLeft = `● ${config.room}`;
+  const bottomLeft = `● ${sessionLabel}`;
   const autofitLabel = syncSize ? "autofit on" : "autofit off";
   const peerLabel = `peers ${presenceNames.length}`;
   const rightPrimary = decorateBottom(
@@ -884,7 +886,7 @@ const render = () => {
     statusLabel ? [peerLabel] : [shareUrl, peerLabel]
   );
   const bottomPrimary = renderBar(
-    decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), statusLabel ? [] : [shareUrl], [config.room]),
+    decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), statusLabel ? [] : [shareUrl], [sessionLabel]),
     "bottom"
   );
 
@@ -1037,6 +1039,11 @@ const connect = () => {
         } else {
           cleanupAndExit();
         }
+        break;
+      case "session_renamed":
+        sessionLabel = message.displayName;
+        pushNotice(`Session renamed to ${message.displayName}`);
+        scheduleRender();
         break;
       case "error":
         pushNotice(message.message);

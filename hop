@@ -14,6 +14,7 @@ const url = require('url');
 const { pathToFileURL } = require('url');
 const net = require('net');
 const WebSocket = require('ws');
+const { resolveActorFromHeaders, canActorAccessSession } = require('./lib/terminal-access');
 
 const os = require('os');
 const DAEMON_FLAG = process.argv.includes('--daemon');
@@ -171,6 +172,8 @@ const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 let SECRET_FILE_PATH = DEFAULT_SECRET_FILE;
 let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
 const SESSIONS_FILE = path.join(HOME_DIR, '.sessions.json');
+const WORKSPACES_DIR = path.join(HOME_DIR, 'workspaces');
+const WORKSPACE_POINTER_FILE = path.join(HOME_DIR, '.workspace');
 
 // Password hashing using scrypt (built-in, no external deps)
 function hashPassword(password) {
@@ -212,6 +215,7 @@ function isPasswordEnabled() {
 const HOP_SESSION_PREFIX = 'hop2-';  // Prefix for hop2 sessions (separate from hop which uses 'hop-')
 
 ensurePrivateDir(LOG_DIR);
+ensurePrivateDir(WORKSPACES_DIR);
 
 function toInternalSessionName(displayName) {
     if (!displayName || typeof displayName !== 'string') return null;
@@ -224,67 +228,613 @@ function toDisplaySessionName(internalName) {
     return internalName.slice(HOP_SESSION_PREFIX.length);
 }
 
-function loadSessionConfigs() {
+const SESSION_STORE_VERSION = 2;
+
+function createEmptySessionStore() {
+    return {
+        version: SESSION_STORE_VERSION,
+        sessions: {},
+        folders: {},
+        order: {
+            folders: [],
+            sessions: { root: [] }
+        }
+    };
+}
+
+function normalizeSessionStore(raw) {
+    const empty = createEmptySessionStore();
+    if (!raw || typeof raw !== 'object') return empty;
+
+    if (raw.version === SESSION_STORE_VERSION && raw.sessions && typeof raw.sessions === 'object') {
+        const sessions = raw.sessions || {};
+        const folders = raw.folders && typeof raw.folders === 'object' ? raw.folders : {};
+        const order = raw.order && typeof raw.order === 'object' ? raw.order : {};
+        const folderOrder = Array.isArray(order.folders)
+            ? order.folders.filter((id) => folders[id])
+            : [];
+        const orderSessions = order.sessions && typeof order.sessions === 'object' ? order.sessions : {};
+
+        const normalized = {
+            version: SESSION_STORE_VERSION,
+            sessions,
+            folders,
+            order: {
+                folders: folderOrder,
+                sessions: { root: [] }
+            }
+        };
+
+        normalized.order.sessions.root = Array.isArray(orderSessions.root)
+            ? orderSessions.root.filter((name) => sessions[name])
+            : [];
+
+        for (const id of Object.keys(folders)) {
+            normalized.order.sessions[id] = Array.isArray(orderSessions[id])
+                ? orderSessions[id].filter((name) => sessions[name])
+                : [];
+            if (!normalized.order.folders.includes(id)) {
+                normalized.order.folders.push(id);
+            }
+        }
+
+        for (const [name, config] of Object.entries(sessions)) {
+            if (!config || typeof config !== 'object') continue;
+            if (!config.displayName) {
+                config.displayName = toDisplaySessionName(name);
+            }
+            const folderId = config.folderId && folders[config.folderId] ? config.folderId : null;
+            if (config.folderId && !folders[config.folderId]) {
+                config.folderId = null;
+            }
+            const bucket = folderId || 'root';
+            if (!normalized.order.sessions[bucket]) {
+                normalized.order.sessions[bucket] = [];
+            }
+            if (!normalized.order.sessions[bucket].includes(name)) {
+                normalized.order.sessions[bucket].push(name);
+            }
+        }
+
+        return normalized;
+    }
+
+    const normalized = createEmptySessionStore();
+    const sessions = raw && typeof raw === 'object' ? raw : {};
+    for (const [name, config] of Object.entries(sessions)) {
+        if (!config || typeof config !== 'object') continue;
+        normalized.sessions[name] = {
+            ...config,
+            displayName: config.displayName || toDisplaySessionName(name),
+            folderId: config.folderId || null
+        };
+    }
+    normalized.order.sessions.root = Object.keys(normalized.sessions).sort((a, b) => {
+        const aName = normalized.sessions[a]?.displayName || toDisplaySessionName(a);
+        const bName = normalized.sessions[b]?.displayName || toDisplaySessionName(b);
+        return aName.localeCompare(bName);
+    });
+    return normalized;
+}
+
+function loadSessionStore() {
     if (fs.existsSync(SESSIONS_FILE)) {
         try {
             ensurePrivateFile(SESSIONS_FILE);
             const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-            return data && typeof data === 'object' ? data : {};
+            return normalizeSessionStore(data);
         } catch (e) {
-            return {};
+            return createEmptySessionStore();
         }
     }
-    return {};
+    return createEmptySessionStore();
 }
 
-function saveSessionConfigs() {
-    writePrivateFile(SESSIONS_FILE, JSON.stringify(sessionConfigs, null, 2));
+function saveSessionStore() {
+    writePrivateFile(SESSIONS_FILE, JSON.stringify(sessionStore, null, 2));
 }
 
-let sessionConfigs = loadSessionConfigs();
+let sessionStore = loadSessionStore();
 
 function getSessionConfig(name) {
-    return sessionConfigs[name] || null;
+    return sessionStore.sessions[name] || null;
+}
+
+function ensureSessionOrder(name, folderId) {
+    const bucket = folderId && sessionStore.folders[folderId] ? folderId : 'root';
+    if (!sessionStore.order.sessions[bucket]) {
+        sessionStore.order.sessions[bucket] = [];
+    }
+    if (!sessionStore.order.sessions[bucket].includes(name)) {
+        sessionStore.order.sessions[bucket].push(name);
+    }
+}
+
+function removeSessionFromOrder(name) {
+    for (const bucket of Object.keys(sessionStore.order.sessions)) {
+        sessionStore.order.sessions[bucket] = sessionStore.order.sessions[bucket].filter((id) => id !== name);
+    }
 }
 
 function setSessionConfig(name, config) {
-    sessionConfigs[name] = config;
-    saveSessionConfigs();
+    sessionStore.sessions[name] = config;
+    const folderId = config?.folderId || null;
+    ensureSessionOrder(name, folderId);
+    saveSessionStore();
 }
 
 function deleteSessionConfig(name) {
-    delete sessionConfigs[name];
-    saveSessionConfigs();
+    delete sessionStore.sessions[name];
+    removeSessionFromOrder(name);
+    saveSessionStore();
 }
 
-function ensureTerminalSessionConfig(name, cwd) {
+function getSessionDisplayName(name) {
+    const config = getSessionConfig(name);
+    if (config?.displayName) return config.displayName;
+    return toDisplaySessionName(name);
+}
+
+function findInternalSessionName(displayName) {
+    if (!displayName) return null;
+    for (const [name, config] of Object.entries(sessionStore.sessions)) {
+        const current = config?.displayName || toDisplaySessionName(name);
+        if (current === displayName) return name;
+    }
+    return null;
+}
+
+function isDisplayNameInUse(displayName) {
+    return !!findInternalSessionName(displayName);
+}
+
+function ensureTerminalSessionConfig(name, cwd, displayName, folderId, opts = {}) {
     const existing = getSessionConfig(name);
     if (!existing) {
+        const createdBy = opts.createdBy === 'agent' ? 'agent' : 'user';
+        const agentPermitted = typeof opts.agentPermitted === 'boolean'
+            ? opts.agentPermitted
+            : createdBy === 'agent';
         setSessionConfig(name, {
             type: 'terminal',
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-            cwd: cwd || undefined
+            cwd: cwd || undefined,
+            shell: opts.shell || undefined,
+            env: opts.env || undefined,
+            cols: Number.isInteger(opts.cols) ? opts.cols : undefined,
+            rows: Number.isInteger(opts.rows) ? opts.rows : undefined,
+            startup: opts.startup || undefined,
+            autoStart: typeof opts.autoStart === 'boolean' ? opts.autoStart : undefined,
+            createdBy,
+            agentPermitted,
+            displayName: displayName || toDisplaySessionName(name),
+            folderId: folderId || null
         });
         return;
     }
+    const next = { ...existing };
+    let changed = false;
+    if (!next.createdBy) {
+        next.createdBy = 'user';
+        changed = true;
+    }
+    if (typeof next.agentPermitted !== 'boolean') {
+        next.agentPermitted = next.createdBy === 'agent';
+        changed = true;
+    }
     if (cwd && existing.cwd !== cwd) {
-        setSessionConfig(name, {
-            ...existing,
-            cwd,
-            updatedAt: new Date().toISOString()
-        });
+        next.cwd = cwd;
+        changed = true;
+    }
+    if (opts.shell && existing.shell !== opts.shell) {
+        next.shell = opts.shell;
+        changed = true;
+    }
+    if (opts.env && existing.env !== opts.env) {
+        next.env = opts.env;
+        changed = true;
+    }
+    if (Number.isInteger(opts.cols) && existing.cols !== opts.cols) {
+        next.cols = opts.cols;
+        changed = true;
+    }
+    if (Number.isInteger(opts.rows) && existing.rows !== opts.rows) {
+        next.rows = opts.rows;
+        changed = true;
+    }
+    if (opts.startup && existing.startup !== opts.startup) {
+        next.startup = opts.startup;
+        changed = true;
+    }
+    if (typeof opts.autoStart === 'boolean' && existing.autoStart !== opts.autoStart) {
+        next.autoStart = opts.autoStart;
+        changed = true;
+    }
+    if (opts.createdBy && existing.createdBy !== opts.createdBy) {
+        next.createdBy = opts.createdBy;
+        changed = true;
+    }
+    if (typeof opts.agentPermitted === 'boolean' && existing.agentPermitted !== opts.agentPermitted) {
+        next.agentPermitted = opts.agentPermitted;
+        changed = true;
+    }
+    if (displayName && existing.displayName !== displayName) {
+        next.displayName = displayName;
+        changed = true;
+    }
+    if (folderId !== undefined && existing.folderId !== folderId) {
+        next.folderId = folderId || null;
+        changed = true;
+    }
+    if (changed) {
+        next.updatedAt = new Date().toISOString();
+        setSessionConfig(name, next);
     }
 }
 
-function setPortSessionConfig(name, port) {
+function setPortSessionConfig(name, port, displayName, folderId) {
     const existing = getSessionConfig(name);
     setSessionConfig(name, {
         type: 'port',
         port,
         createdAt: existing?.createdAt || new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        displayName: displayName || existing?.displayName || toDisplaySessionName(name),
+        folderId: folderId || existing?.folderId || null
     });
+}
+
+function createFolder(name) {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return null;
+    for (const folder of Object.values(sessionStore.folders)) {
+        if (folder.name === trimmed) return null;
+    }
+    let id;
+    do {
+        id = `f_${crypto.randomBytes(4).toString('hex')}`;
+    } while (sessionStore.folders[id]);
+    const now = new Date().toISOString();
+    const folder = { id, name: trimmed, createdAt: now, updatedAt: now };
+    sessionStore.folders[id] = folder;
+    if (!sessionStore.order.folders.includes(id)) {
+        sessionStore.order.folders.push(id);
+    }
+    if (!sessionStore.order.sessions[id]) {
+        sessionStore.order.sessions[id] = [];
+    }
+    saveSessionStore();
+    return folder;
+}
+
+function renameFolder(id, name) {
+    const folder = sessionStore.folders[id];
+    if (!folder) return null;
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return null;
+    for (const [otherId, other] of Object.entries(sessionStore.folders)) {
+        if (otherId !== id && other.name === trimmed) return null;
+    }
+    folder.name = trimmed;
+    folder.updatedAt = new Date().toISOString();
+    sessionStore.folders[id] = folder;
+    saveSessionStore();
+    return folder;
+}
+
+function deleteFolder(id) {
+    if (!sessionStore.folders[id]) return false;
+    const sessionsInFolder = sessionStore.order.sessions[id] || [];
+    delete sessionStore.folders[id];
+    sessionStore.order.folders = sessionStore.order.folders.filter((folderId) => folderId !== id);
+    delete sessionStore.order.sessions[id];
+    for (const name of sessionsInFolder) {
+        const config = getSessionConfig(name);
+        if (config) {
+            config.folderId = null;
+            config.updatedAt = new Date().toISOString();
+            sessionStore.sessions[name] = config;
+        }
+        ensureSessionOrder(name, null);
+    }
+    saveSessionStore();
+    return true;
+}
+
+function moveSessionToFolder(name, folderId, index) {
+    const config = getSessionConfig(name);
+    if (!config) return false;
+    const targetFolder = folderId && sessionStore.folders[folderId] ? folderId : null;
+    removeSessionFromOrder(name);
+    const bucket = targetFolder || 'root';
+    if (!sessionStore.order.sessions[bucket]) {
+        sessionStore.order.sessions[bucket] = [];
+    }
+    const list = sessionStore.order.sessions[bucket];
+    let insertIndex = Number.isInteger(index) ? Math.max(0, Math.min(index, list.length)) : list.length;
+    list.splice(insertIndex, 0, name);
+    config.folderId = targetFolder;
+    config.updatedAt = new Date().toISOString();
+    sessionStore.sessions[name] = config;
+    saveSessionStore();
+    return true;
+}
+
+function setFolderOrder(order) {
+    if (!Array.isArray(order)) return false;
+    const filtered = order.filter((id) => sessionStore.folders[id]);
+    const missing = Object.keys(sessionStore.folders).filter((id) => !filtered.includes(id));
+    sessionStore.order.folders = filtered.concat(missing);
+    saveSessionStore();
+    return true;
+}
+
+const WORKSPACE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+
+function normalizeWorkspaceName(name) {
+    if (!name || typeof name !== 'string') return null;
+    const trimmed = name.trim();
+    if (!trimmed || !WORKSPACE_NAME_RE.test(trimmed)) return null;
+    return trimmed;
+}
+
+function getWorkspacePath(name) {
+    return path.join(WORKSPACES_DIR, `${name}.json`);
+}
+
+function listWorkspaceNames() {
+    try {
+        return fs.readdirSync(WORKSPACES_DIR)
+            .filter((file) => file.endsWith('.json'))
+            .map((file) => file.replace(/\.json$/, ''))
+            .sort();
+    } catch (e) {
+        return [];
+    }
+}
+
+function buildWorkspaceSnapshot(name) {
+    const now = new Date().toISOString();
+    const folderIdToName = {};
+    for (const [id, folder] of Object.entries(sessionStore.folders)) {
+        folderIdToName[id] = folder.name;
+    }
+
+    const sessions = Object.entries(sessionStore.sessions).map(([id, config]) => ({
+        name: config.displayName || toDisplaySessionName(id),
+        type: config.type || 'terminal',
+        port: config.port,
+        cwd: config.cwd,
+        shell: config.shell,
+        env: config.env,
+        cols: config.cols,
+        rows: config.rows,
+        startup: config.startup,
+        autoStart: config.autoStart,
+        createdBy: config.createdBy,
+        agentPermitted: config.agentPermitted,
+        folder: config.folderId ? folderIdToName[config.folderId] || null : null
+    }));
+
+    const order = { folders: [], sessions: { root: [] } };
+    order.folders = sessionStore.order.folders
+        .map((id) => folderIdToName[id])
+        .filter(Boolean);
+
+    for (const [bucket, list] of Object.entries(sessionStore.order.sessions)) {
+        if (bucket === 'root') {
+            order.sessions.root = list.map((id) => sessionStore.sessions[id]?.displayName || toDisplaySessionName(id));
+        } else if (folderIdToName[bucket]) {
+            order.sessions[folderIdToName[bucket]] = list.map((id) => sessionStore.sessions[id]?.displayName || toDisplaySessionName(id));
+        }
+    }
+
+    return {
+        version: 2,
+        name,
+        createdAt: now,
+        sessions,
+        order
+    };
+}
+
+function saveWorkspaceFile(name) {
+    const normalized = normalizeWorkspaceName(name);
+    if (!normalized) return null;
+    const snapshot = buildWorkspaceSnapshot(normalized);
+    const filePath = getWorkspacePath(normalized);
+    writePrivateFile(filePath, JSON.stringify(snapshot, null, 2));
+    return snapshot;
+}
+
+function loadWorkspaceFile(name) {
+    const normalized = normalizeWorkspaceName(name);
+    if (!normalized) return null;
+    const filePath = getWorkspacePath(normalized);
+    if (!fs.existsSync(filePath)) return null;
+    try {
+        ensurePrivateFile(filePath);
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (e) {
+        return null;
+    }
+}
+
+function applyWorkspace(workspace, opts = {}) {
+    const startSessions = !!opts.startSessions;
+    const created = [];
+    const skipped = [];
+    const started = [];
+
+    if (!workspace || typeof workspace !== 'object' || !Array.isArray(workspace.sessions)) {
+        return { created, skipped, started, error: 'Invalid workspace' };
+    }
+
+    const folderNameToId = new Map();
+    for (const [id, folder] of Object.entries(sessionStore.folders)) {
+        folderNameToId.set(folder.name, id);
+    }
+
+    const workspaceFolderNames = new Set();
+    if (workspace.order && Array.isArray(workspace.order.folders)) {
+        workspace.order.folders.forEach((name) => {
+            if (name) workspaceFolderNames.add(name);
+        });
+    }
+    workspace.sessions.forEach((session) => {
+        if (session?.folder) workspaceFolderNames.add(session.folder);
+    });
+
+    for (const name of workspaceFolderNames) {
+        if (!folderNameToId.has(name)) {
+            const createdFolder = createFolder(name);
+            if (createdFolder) {
+                folderNameToId.set(name, createdFolder.id);
+            }
+        }
+    }
+
+    if (workspace.order && Array.isArray(workspace.order.folders)) {
+        const orderIds = workspace.order.folders
+            .map((name) => folderNameToId.get(name))
+            .filter(Boolean);
+        if (orderIds.length > 0) {
+            setFolderOrder(orderIds);
+        }
+    }
+
+    const sessionByName = new Map();
+    workspace.sessions.forEach((session) => {
+        if (session?.name) {
+            sessionByName.set(session.name, session);
+        }
+    });
+
+    const orderedNames = [];
+    if (workspace.order && workspace.order.sessions) {
+        if (Array.isArray(workspace.order.sessions.root)) {
+            workspace.order.sessions.root.forEach((name) => {
+                if (sessionByName.has(name)) orderedNames.push(name);
+            });
+        }
+        if (workspace.order.folders && Array.isArray(workspace.order.folders)) {
+            workspace.order.folders.forEach((folderName) => {
+                const list = workspace.order.sessions[folderName];
+                if (Array.isArray(list)) {
+                    list.forEach((name) => {
+                        if (sessionByName.has(name)) orderedNames.push(name);
+                    });
+                }
+            });
+        }
+    }
+
+    const remainingNames = workspace.sessions
+        .map((s) => s?.name)
+        .filter((name) => name && !orderedNames.includes(name));
+    const createQueue = orderedNames.concat(remainingNames);
+
+    const createdInternal = new Map();
+
+    for (const name of createQueue) {
+        const session = sessionByName.get(name);
+        if (!session) continue;
+        if (!SESSION_NAME_RE.test(name)) {
+            skipped.push({ name, reason: 'invalid-name' });
+            continue;
+        }
+        if (isDisplayNameInUse(name)) {
+            skipped.push({ name, reason: 'exists' });
+            continue;
+        }
+        const internalName = toInternalSessionName(name);
+        if (!internalName || sessionStore.sessions[internalName]) {
+            skipped.push({ name, reason: 'internal-conflict' });
+            continue;
+        }
+        const folderId = session.folder ? (folderNameToId.get(session.folder) || null) : null;
+        if (session.type === 'port') {
+            if (!Number.isInteger(session.port) || session.port < 1 || session.port > 65535) {
+                skipped.push({ name, reason: 'invalid-port' });
+                continue;
+            }
+            setPortSessionConfig(internalName, session.port, name, folderId);
+        } else {
+            ensureTerminalSessionConfig(internalName, session.cwd, name, folderId, {
+                shell: session.shell,
+                env: session.env,
+                cols: session.cols,
+                rows: session.rows,
+                startup: session.startup,
+                autoStart: session.autoStart,
+                createdBy: session.createdBy,
+                agentPermitted: session.agentPermitted
+            });
+        }
+        created.push(name);
+        createdInternal.set(name, internalName);
+    }
+
+    if (workspace.order && workspace.order.sessions) {
+        const applyOrder = (bucketName, list) => {
+            if (!Array.isArray(list)) return;
+            const folderId = bucketName === 'root' ? null : folderNameToId.get(bucketName);
+            list.forEach((displayName) => {
+                const internalName = createdInternal.get(displayName);
+                if (!internalName) return;
+                moveSessionToFolder(internalName, folderId, sessionStore.order.sessions[folderId || 'root']?.length);
+            });
+        };
+        applyOrder('root', workspace.order.sessions.root);
+        if (workspace.order.folders && Array.isArray(workspace.order.folders)) {
+            workspace.order.folders.forEach((folderName) => {
+                applyOrder(folderName, workspace.order.sessions[folderName]);
+            });
+        }
+    }
+
+    if (startSessions) {
+        workspace.sessions.forEach((session) => {
+            if (!session?.name) return;
+            const internalName = findInternalSessionName(session.name) || toInternalSessionName(session.name);
+            const config = getSessionConfig(internalName);
+            if (!config || config.type === 'port') return;
+            try {
+                getOrCreateSession(internalName);
+                started.push(session.name);
+            } catch (e) {
+                skipped.push({ name: session.name, reason: 'start-failed' });
+            }
+        });
+    }
+
+    return { created, skipped, started };
+}
+
+function setDefaultWorkspace(name) {
+    const normalized = normalizeWorkspaceName(name);
+    if (!normalized) return false;
+    writePrivateFile(WORKSPACE_POINTER_FILE, normalized + '\n');
+    return true;
+}
+
+function getDefaultWorkspace() {
+    if (!fs.existsSync(WORKSPACE_POINTER_FILE)) return null;
+    try {
+        ensurePrivateFile(WORKSPACE_POINTER_FILE);
+        return fs.readFileSync(WORKSPACE_POINTER_FILE, 'utf8').trim() || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function loadDefaultWorkspace(startSessions = true) {
+    const workspaceName = getDefaultWorkspace();
+    if (!workspaceName) return null;
+    const workspace = loadWorkspaceFile(workspaceName);
+    if (!workspace) return null;
+    return applyWorkspace(workspace, { startSessions });
 }
 
 // Load domain config if exists
@@ -857,8 +1407,79 @@ const PROXY_PORT = BASE_PORT;
 // Session Management (using hay server - no tmux/ttyd)
 const activeSessions = {}; // { sessionName: { room: HayRoom } }
 const startingSessions = new Set(); // session names being initialized
-const sessionRenames = {};  // { oldName: newName } - track renames for styling updates
+const sessionAliases = {};  // { oldDisplayName: newDisplayName } - in-memory redirects
+const sessionClientSummary = new Map(); // internalName -> { localCliCount: number, total: number }
 let nextPort = BASE_PORT + 1;
+
+// Terminal API sessions (virtual clients attached to hay rooms)
+const terminalApiSessions = new Map(); // id -> { id, sessionName, displayName, actor, client, createdAt }
+const terminalApiStreams = new Map(); // id -> Set<res>
+const terminalApiEventBuffers = new Map(); // id -> { nextId: number, events: Array<{ id: number, payload: object }> }
+const TERMINAL_API_EVENT_BUFFER_LIMIT = 3000;
+
+function ensureTerminalEventBuffer(id) {
+    let state = terminalApiEventBuffers.get(id);
+    if (!state) {
+        state = { nextId: 1, events: [] };
+        terminalApiEventBuffers.set(id, state);
+    }
+    return state;
+}
+
+function appendTerminalEvent(id, payload) {
+    const state = ensureTerminalEventBuffer(id);
+    const event = {
+        id: state.nextId++,
+        payload: { ...payload, streamEventId: state.nextId - 1 }
+    };
+    state.events.push(event);
+    if (state.events.length > TERMINAL_API_EVENT_BUFFER_LIMIT) {
+        state.events.splice(0, state.events.length - TERMINAL_API_EVENT_BUFFER_LIMIT);
+    }
+    return event.payload;
+}
+
+function listTerminalEvents(id, afterId = 0) {
+    const state = terminalApiEventBuffers.get(id);
+    if (!state || state.events.length === 0) return [];
+    const cursor = Number.isFinite(afterId) ? Number(afterId) : 0;
+    if (cursor <= 0) {
+        return state.events.map(entry => entry.payload);
+    }
+    return state.events
+        .filter(entry => entry.id > cursor)
+        .map(entry => entry.payload);
+}
+
+function clearTerminalEventBuffer(id) {
+    terminalApiEventBuffers.delete(id);
+}
+
+function sendTerminalStreamEvent(id, payload) {
+    const enrichedPayload = appendTerminalEvent(id, payload);
+    const streams = terminalApiStreams.get(id);
+    if (!streams || streams.size === 0) return;
+    const line = `data: ${JSON.stringify(enrichedPayload)}\n\n`;
+    for (const res of streams) {
+        res.write(line);
+    }
+}
+
+function registerTerminalStream(id, res) {
+    if (!terminalApiStreams.has(id)) {
+        terminalApiStreams.set(id, new Set());
+    }
+    terminalApiStreams.get(id).add(res);
+}
+
+function unregisterTerminalStream(id, res) {
+    const streams = terminalApiStreams.get(id);
+    if (!streams) return;
+    streams.delete(res);
+    if (streams.size === 0) {
+        terminalApiStreams.delete(id);
+    }
+}
 
 // --- Login Rate Limiting (Exponential Backoff) ---
 const failedAttempts = new Map(); // ip -> { count: number, lastAttempt: number }
@@ -1006,6 +1627,40 @@ function listActiveSessions() {
     return sessions;
 }
 
+function noteClientConnected(sessionName, source) {
+    if (!sessionName) return;
+    const entry = sessionClientSummary.get(sessionName) || { localCliCount: 0, total: 0 };
+    entry.total += 1;
+    if (source === 'local-cli') {
+        entry.localCliCount += 1;
+    }
+    sessionClientSummary.set(sessionName, entry);
+}
+
+function noteClientDisconnected(sessionName, source) {
+    if (!sessionName) return;
+    const entry = sessionClientSummary.get(sessionName);
+    if (!entry) return;
+    entry.total = Math.max(0, entry.total - 1);
+    if (source === 'local-cli') {
+        entry.localCliCount = Math.max(0, entry.localCliCount - 1);
+    }
+    if (entry.total === 0 && entry.localCliCount === 0) {
+        sessionClientSummary.delete(sessionName);
+    } else {
+        sessionClientSummary.set(sessionName, entry);
+    }
+}
+
+function getSessionClientSummary(sessionName) {
+    const entry = sessionClientSummary.get(sessionName) || { localCliCount: 0, total: 0 };
+    return {
+        localCliCount: entry.localCliCount,
+        totalClients: entry.total,
+        hasLocalCli: entry.localCliCount > 0
+    };
+}
+
 function hopSessionExists(name) {
     if (!name) return false;
     return hayRooms.hasRoom(name) || activeSessions[name];
@@ -1018,16 +1673,35 @@ function listAllSessionEntries() {
     for (const s of haySessions) {
         const config = getSessionConfig(s.name);
         const type = config?.type || 'terminal';
+        const displayName = config?.displayName || toDisplaySessionName(s.name);
+        const folderId = config?.folderId || null;
+        const clientSummary = getSessionClientSummary(s.name);
         sessionMap.set(s.name, {
             ...s,
             type,
             port: config?.port,
-            displayName: toDisplaySessionName(s.name)
+            displayName,
+            folderId,
+            internalName: s.name,
+            cwd: config?.cwd,
+            shell: config?.shell,
+            env: config?.env,
+            cols: config?.cols,
+            rows: config?.rows,
+            startup: config?.startup,
+            autoStart: config?.autoStart,
+            createdBy: config?.createdBy || 'user',
+            agentPermitted: config?.agentPermitted === true,
+            localCliCount: clientSummary.localCliCount,
+            hasLocalCli: clientSummary.hasLocalCli
         });
     }
 
-    for (const [name, config] of Object.entries(sessionConfigs)) {
+    for (const [name, config] of Object.entries(sessionStore.sessions)) {
         if (!name.startsWith(HOP_SESSION_PREFIX)) continue;
+        const displayName = config?.displayName || toDisplaySessionName(name);
+        const folderId = config?.folderId || null;
+        const clientSummary = getSessionClientSummary(name);
         if (!sessionMap.has(name)) {
             sessionMap.set(name, {
                 name,
@@ -1035,16 +1709,69 @@ function listAllSessionEntries() {
                 attached: false,
                 type: config.type || 'terminal',
                 port: config.port,
-                displayName: toDisplaySessionName(name)
+                displayName,
+                folderId,
+                internalName: name,
+                cwd: config?.cwd,
+                shell: config?.shell,
+                env: config?.env,
+                cols: config?.cols,
+                rows: config?.rows,
+                startup: config?.startup,
+                autoStart: config?.autoStart,
+                createdBy: config?.createdBy || 'user',
+                agentPermitted: config?.agentPermitted === true,
+                localCliCount: clientSummary.localCliCount,
+                hasLocalCli: clientSummary.hasLocalCli
             });
-        } else if (config?.type === 'port') {
+        } else {
             const entry = sessionMap.get(name);
-            entry.type = 'port';
+            entry.type = config.type || entry.type;
             entry.port = config.port;
+            entry.displayName = displayName;
+            entry.folderId = folderId;
+            entry.internalName = name;
+            entry.cwd = config?.cwd;
+            entry.shell = config?.shell;
+            entry.env = config?.env;
+            entry.cols = config?.cols;
+            entry.rows = config?.rows;
+            entry.startup = config?.startup;
+            entry.autoStart = config?.autoStart;
+            entry.createdBy = config?.createdBy || 'user';
+            entry.agentPermitted = config?.agentPermitted === true;
+            entry.localCliCount = clientSummary.localCliCount;
+            entry.hasLocalCli = clientSummary.hasLocalCli;
         }
     }
 
-    return Array.from(sessionMap.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
+    const folderIndex = new Map();
+    folderIndex.set('root', -1);
+    sessionStore.order.folders.forEach((id, index) => {
+        folderIndex.set(id, index);
+    });
+    const sessionOrderIndex = new Map();
+    for (const [bucket, list] of Object.entries(sessionStore.order.sessions)) {
+        list.forEach((id, index) => {
+            sessionOrderIndex.set(`${bucket}:${id}`, index);
+        });
+    }
+
+    return Array.from(sessionMap.values()).sort((a, b) => {
+        const aBucket = a.folderId && sessionStore.folders[a.folderId] ? a.folderId : 'root';
+        const bBucket = b.folderId && sessionStore.folders[b.folderId] ? b.folderId : 'root';
+        const aFolderIndex = folderIndex.has(aBucket) ? folderIndex.get(aBucket) : Number.MAX_SAFE_INTEGER;
+        const bFolderIndex = folderIndex.has(bBucket) ? folderIndex.get(bBucket) : Number.MAX_SAFE_INTEGER;
+        if (aFolderIndex !== bFolderIndex) return aFolderIndex - bFolderIndex;
+        const aSessionIndex = sessionOrderIndex.has(`${aBucket}:${a.internalName}`)
+            ? sessionOrderIndex.get(`${aBucket}:${a.internalName}`)
+            : Number.MAX_SAFE_INTEGER;
+        const bSessionIndex = sessionOrderIndex.has(`${bBucket}:${b.internalName}`)
+            ? sessionOrderIndex.get(`${bBucket}:${b.internalName}`)
+            : Number.MAX_SAFE_INTEGER;
+        if (aSessionIndex !== bSessionIndex) return aSessionIndex - bSessionIndex;
+        return a.displayName.localeCompare(b.displayName);
+    });
 }
 
 // Light theme for hay terminal
@@ -1066,7 +1793,7 @@ function getTheme() {
 }
 
 // Start or get existing session (uses hay for terminal sharing)
-function getOrCreateSession(sessionName, cwd) {
+function getOrCreateSession(sessionName, cwd, displayName) {
     if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
         throw new Error('Invalid session name');
     }
@@ -1074,7 +1801,7 @@ function getOrCreateSession(sessionName, cwd) {
     if (existingConfig && existingConfig.type === 'port') {
         throw new Error('Session is configured as a port proxy');
     }
-    ensureTerminalSessionConfig(sessionName, cwd);
+    ensureTerminalSessionConfig(sessionName, cwd, displayName);
     if (activeSessions[sessionName]) {
         return activeSessions[sessionName];
     }
@@ -1082,8 +1809,10 @@ function getOrCreateSession(sessionName, cwd) {
     const config = getSessionConfig(sessionName);
     const effectiveCwd = cwd || config?.cwd;
 
+    const initialCols = Number.isInteger(config?.cols) ? config.cols : 80;
+    const initialRows = Number.isInteger(config?.rows) ? config.rows : 24;
     // Create hay room for this session (with optional cwd override)
-    const room = hayRooms.getRoom(sessionName, { cols: 80, rows: 24 }, effectiveCwd);
+    const room = hayRooms.getRoom(sessionName, { cols: initialCols, rows: initialRows }, effectiveCwd);
 
     room.on('empty', () => {
         delete activeSessions[sessionName];
@@ -1091,25 +1820,169 @@ function getOrCreateSession(sessionName, cwd) {
         if (config && config.type !== 'port') {
             deleteSessionConfig(sessionName);
         }
-        log(`Session ${toDisplaySessionName(sessionName)} closed.`, YELLOW);
+        log(`Session ${getSessionDisplayName(sessionName)} closed.`, YELLOW);
+        sessionClientSummary.delete(sessionName);
     });
 
     room.on('exit', () => {
         delete activeSessions[sessionName];
-        log(`Session ${toDisplaySessionName(sessionName)} exited.`, YELLOW);
+        log(`Session ${getSessionDisplayName(sessionName)} exited.`, YELLOW);
+        sessionClientSummary.delete(sessionName);
     });
 
     activeSessions[sessionName] = { room };
-    log(`  Started session "${toDisplaySessionName(sessionName)}" (hay)`, GREEN);
+    log(`  Started session "${getSessionDisplayName(sessionName)}" (hay)`, GREEN);
 
     return activeSessions[sessionName];
 }
 
-// Resolve current session name (follows rename chain)
-function resolveSessionName(name) {
+function createVirtualClientAdapter(onServerMessage) {
+    let messageHandler = null;
+    const closeHandlers = [];
+    let errorHandler = null;
+    let open = true;
+
+    return {
+        adapter: {
+            send: (data) => {
+                if (!open) return;
+                onServerMessage?.(data);
+            },
+            onMessage: (handler) => {
+                messageHandler = handler;
+            },
+            onClose: (handler) => {
+                closeHandlers.push(handler);
+            },
+            onError: (handler) => {
+                errorHandler = handler;
+            },
+            close: () => {
+                if (!open) return;
+                open = false;
+                for (const handler of closeHandlers) {
+                    handler();
+                }
+            },
+            isOpen: () => open
+        },
+        emit: (payload) => {
+            if (!open) return;
+            if (messageHandler) {
+                messageHandler(payload);
+            }
+        },
+        error: (err) => {
+            if (errorHandler) errorHandler(err);
+        },
+        close: () => {
+            if (!open) return;
+            open = false;
+            for (const handler of closeHandlers) {
+                handler();
+            }
+        }
+    };
+}
+
+function attachTerminalApiClient(sessionName, displayName, opts = {}) {
+    const session = activeSessions[sessionName] || getOrCreateSession(sessionName, opts.cwd, displayName);
+    const room = session.room;
+    const cols = Number.isInteger(opts.cols) ? opts.cols : 80;
+    const rows = Number.isInteger(opts.rows) ? opts.rows : 24;
+    const label = opts.label || 'agent';
+    const colorIndex = Math.floor(Math.random() * 1000);
+
+    const terminalId = `t_${crypto.randomBytes(6).toString('hex')}`;
+    const clientId = hay.generateClientId();
+
+    const adapterBundle = createVirtualClientAdapter((payload) => {
+        let parsed = null;
+        try {
+            parsed = hay.safeParseServerMessage ? hay.safeParseServerMessage(payload) : JSON.parse(payload);
+        } catch (e) {
+            parsed = null;
+        }
+        if (!parsed || !parsed.type) return;
+        if (parsed.type === 'output' || parsed.type === 'snapshot') {
+            sendTerminalStreamEvent(terminalId, {
+                type: parsed.type,
+                data: parsed.data,
+                alternateScreen: parsed.alternateScreen,
+                cursorHidden: parsed.cursorHidden,
+                timestamp: Date.now()
+            });
+            return;
+        }
+        if (parsed.type === 'session_ended') {
+            sendTerminalStreamEvent(terminalId, {
+                type: 'session_ended',
+                exitCode: parsed.exitCode,
+                signal: parsed.signal,
+                message: parsed.message,
+                timestamp: Date.now()
+            });
+            const streams = terminalApiStreams.get(terminalId);
+            if (streams) {
+                for (const res of streams) {
+                    res.end();
+                }
+                terminalApiStreams.delete(terminalId);
+            }
+            terminalApiSessions.delete(terminalId);
+            clearTerminalEventBuffer(terminalId);
+            return;
+        }
+    });
+
+    room.attachClient(
+        { id: clientId, name: label, colorIndex, cols, rows },
+        adapterBundle.adapter
+    );
+
+    adapterBundle.adapter.onClose(() => {
+        terminalApiSessions.delete(terminalId);
+        const streams = terminalApiStreams.get(terminalId);
+        if (streams) {
+            for (const res of streams) {
+                res.end();
+            }
+            terminalApiStreams.delete(terminalId);
+        }
+        clearTerminalEventBuffer(terminalId);
+    });
+
+    const sessionEntry = {
+        id: terminalId,
+        sessionName,
+        displayName: displayName || getSessionDisplayName(sessionName),
+        actor: opts.actor || 'user',
+        clientId,
+        adapter: adapterBundle,
+        createdAt: new Date().toISOString()
+    };
+    terminalApiSessions.set(terminalId, sessionEntry);
+    return sessionEntry;
+}
+
+function sendTerminalInput(entry, data) {
+    if (!entry || !data) return;
+    entry.adapter.emit(JSON.stringify({ type: 'input', data }));
+}
+
+function sendTerminalResize(entry, cols, rows) {
+    if (!entry || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
+    entry.adapter.emit(JSON.stringify({ type: 'resize', cols, rows }));
+}
+
+// Resolve display name aliases (follows rename chain)
+function resolveDisplayNameAlias(name) {
+    if (!name || typeof name !== 'string') return name;
     let current = name;
-    while (sessionRenames[current]) {
-        current = sessionRenames[current];
+    const seen = new Set();
+    while (sessionAliases[current] && !seen.has(current)) {
+        seen.add(current);
+        current = sessionAliases[current];
     }
     return current;
 }
@@ -1179,6 +2052,24 @@ function getSessionSwitcherOverlay() {
   text-decoration: none;
   cursor: pointer;
 }
+#hop-session-fab-menu .hop-item-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#hop-session-fab-menu .hop-item-row .hop-item {
+  flex: 1;
+}
+#hop-session-fab-menu .hop-action {
+  border: none;
+  background: #e4e4e7;
+  color: #18181b;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#hop-session-fab-menu .hop-action:active { opacity: 0.85; }
 #hop-session-fab-menu .hop-item:hover,
 #hop-session-fab-menu .hop-link:hover { background: #f4f4f5; }
 #hop-session-fab-menu .hop-item.current { font-weight: 600; }
@@ -1318,6 +2209,10 @@ function getSessionSwitcherOverlay() {
         }
         var current = getCurrentSession();
         sessions.forEach(function(s) {
+          var displayName = s.displayName || s.name;
+          var row = document.createElement('div');
+          row.className = 'hop-item-row';
+
           var item = document.createElement('button');
           item.className = 'hop-item';
           if (s.name === current) item.classList.add('current');
@@ -1328,13 +2223,34 @@ function getSessionSwitcherOverlay() {
           }
           var label = document.createElement('span');
           var suffix = s.type === 'port' ? (s.port ? ' (PORT ' + s.port + ')' : ' (PORT)') : '';
-          label.textContent = (s.displayName || s.name) + suffix;
+          label.textContent = displayName + suffix;
           item.appendChild(label);
           item.addEventListener('click', function(ev) {
             ev.stopPropagation();
             window.location.href = '/s/' + encodeURIComponent(s.name) + '/';
           });
-          list.appendChild(item);
+
+          var renameBtn = document.createElement('button');
+          renameBtn.className = 'hop-action';
+          renameBtn.textContent = 'Rename';
+          renameBtn.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            var nextName = prompt('Rename session:', displayName);
+            if (!nextName || nextName === displayName) return;
+            if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
+              alert('Only letters, numbers, - and _ allowed');
+              return;
+            }
+            fetch('/api/sessions/rename', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ oldName: displayName, newName: nextName })
+            }).then(function() { fetchSessions(); });
+          });
+
+          row.appendChild(item);
+          row.appendChild(renameBtn);
+          list.appendChild(row);
         });
       })
       .catch(function() {
@@ -1359,6 +2275,17 @@ function buildSessionPath(displayName) {
     return `/s/${encodeURIComponent(displayName)}/`;
 }
 
+function resolveSessionDisplayName(displayName) {
+    const resolvedDisplayName = resolveDisplayNameAlias(displayName);
+    const internalFromConfig = findInternalSessionName(resolvedDisplayName);
+    const internalName = internalFromConfig || toInternalSessionName(resolvedDisplayName);
+    return {
+        displayName: resolvedDisplayName,
+        internalName,
+        aliasRedirect: resolvedDisplayName !== displayName
+    };
+}
+
 function stripSessionParam(search) {
     if (!search) return '';
     const params = new URLSearchParams(search);
@@ -1380,14 +2307,17 @@ function parseSessionFromRequest(req, parsedUrl) {
             return null;
         }
         if (!SESSION_NAME_RE.test(displayName)) return null;
-        const internalName = toInternalSessionName(displayName);
+        const resolved = resolveSessionDisplayName(displayName);
+        if (!resolved.internalName) return null;
         const needsSlash = pathname === `/s/${rawName}`;
         const strippedPathname = '/' + parts.join('/');
         const normalizedPathname = strippedPathname === '/' ? '/' : strippedPathname;
         const strippedUrl = normalizedPathname + (parsedUrl.search || '');
         return {
-            displayName,
-            internalName,
+            displayName: resolved.displayName,
+            internalName: resolved.internalName,
+            requestedDisplayName: displayName,
+            aliasRedirect: resolved.aliasRedirect,
             strippedPathname: normalizedPathname,
             strippedUrl,
             source: 'path',
@@ -1398,12 +2328,15 @@ function parseSessionFromRequest(req, parsedUrl) {
     const sessionParam = parsedUrl.query.session;
     if (sessionParam && SESSION_NAME_RE.test(sessionParam)) {
         const displayName = sessionParam;
-        const internalName = toInternalSessionName(displayName);
+        const resolved = resolveSessionDisplayName(displayName);
+        if (!resolved.internalName) return null;
         const strippedPathname = parsedUrl.pathname || '/';
         const strippedUrl = strippedPathname + stripSessionParam(parsedUrl.search || '');
         return {
-            displayName,
-            internalName,
+            displayName: resolved.displayName,
+            internalName: resolved.internalName,
+            requestedDisplayName: displayName,
+            aliasRedirect: resolved.aliasRedirect,
             strippedPathname,
             strippedUrl,
             source: 'query'
@@ -1425,6 +2358,19 @@ function getClientIp(req) {
         req.headers['x-forwarded-for'] ||
         req.socket.remoteAddress ||
         'unknown';
+}
+
+const ACTOR_HEADER = 'x-hop-actor';
+
+function resolveActor(req) {
+    return resolveActorFromHeaders(req?.headers || {}, ACTOR_HEADER);
+}
+
+function resolveSessionInternalName(name, internalName) {
+    if (internalName && sessionStore.sessions[internalName]) return internalName;
+    if (!name) return null;
+    const displayName = resolveDisplayNameAlias(name);
+    return findInternalSessionName(displayName);
 }
 
 function waitForPort(port, host = '127.0.0.1', timeoutMs = 4000, intervalMs = 120) {
@@ -1697,7 +2643,7 @@ function startAuthProxy(authEmitter) {
 
             const requestedDisplayName = sessionInfo?.displayName;
             const requestedInternalName = requestedDisplayName
-                ? toInternalSessionName(requestedDisplayName)
+                ? (resolveSessionDisplayName(requestedDisplayName).internalName || toInternalSessionName(requestedDisplayName))
                 : null;
             const sessionFieldHtml = requestedInternalName
                 ? `<input type="hidden" name="session" value="${escapeHtml(requestedDisplayName)}">`
@@ -1810,6 +2756,13 @@ function startAuthProxy(authEmitter) {
         const strippedUrl = sessionInfoAuth ? sessionInfoAuth.strippedUrl : req.url;
         const strippedPathname = sessionInfoAuth ? sessionInfoAuth.strippedPathname : (parsedUrl.pathname || '/');
 
+        if (sessionInfoAuth && sessionInfoAuth.source === 'path' && sessionInfoAuth.aliasRedirect && shouldRedirectToSessionPath(req)) {
+            const target = buildSessionPath(displayName) + (parsedUrl.search || '');
+            res.writeHead(302, { 'Location': target });
+            res.end();
+            return;
+        }
+
         if (sessionInfoAuth && sessionInfoAuth.source === 'query' && shouldRedirectToSessionPath(req)) {
             res.writeHead(302, { 'Location': buildSessionPath(displayName) });
             res.end();
@@ -1830,20 +2783,95 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: Tunnel status (local diagnostics for hop health)
+        if (parsedUrl.pathname === '/api/tunnel/status' && req.method === 'GET') {
+            let tunnelPid = currentTunnelProc && !currentTunnelProc.killed ? currentTunnelProc.pid : null;
+            let tunnelRunning = false;
+            if (tunnelPid) {
+                try {
+                    process.kill(tunnelPid, 0);
+                    tunnelRunning = true;
+                } catch (e) {
+                    tunnelPid = null;
+                }
+            }
+            if (!tunnelRunning && tunnelStatus.connected) {
+                updateTunnelStatus({
+                    connected: false,
+                    lastEvent: 'stale',
+                    lastError: 'cloudflared process not running'
+                });
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                url: currentPublicUrl,
+                connected: tunnelStatus.connected,
+                lastEvent: tunnelStatus.lastEvent,
+                lastError: tunnelStatus.lastError,
+                lastUpdateAt: tunnelStatus.lastUpdateAt,
+                lastConnectedAt: tunnelStatus.lastConnectedAt,
+                lastRestartAt: tunnelStatus.lastRestartAt,
+                tunnelPid,
+                tunnelRunning
+            }));
+            return;
+        }
+
+        // API: Tunnel restart (local diagnostics for hop health)
+        if (parsedUrl.pathname === '/api/tunnel/restart' && req.method === 'POST') {
+            if (tunnelRestartInProgress) {
+                res.writeHead(202, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, inProgress: true }));
+                return;
+            }
+            updateTunnelStatus({ lastRestartAt: Date.now(), lastEvent: 'restarting' });
+            if (currentTunnelProc && !currentTunnelProc.killed) {
+                try { currentTunnelProc.kill('SIGTERM'); } catch (e) { }
+            } else {
+                startTunnelWithRestart();
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+            return;
+        }
+
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
             const sessions = listAllSessionEntries().map(s => ({
                 name: s.displayName,
                 displayName: s.displayName,
+                internalName: s.internalName,
                 windows: s.windows,
                 attached: s.attached,
                 type: s.type,
-                port: s.port
+                port: s.port,
+                folderId: s.folderId || null,
+                cwd: s.cwd,
+                shell: s.shell,
+                env: s.env,
+                cols: s.cols,
+                rows: s.rows,
+                startup: s.startup,
+                autoStart: s.autoStart,
+                createdBy: s.createdBy || 'user',
+                agentPermitted: s.agentPermitted === true,
+                hasLocalCli: !!s.hasLocalCli,
+                localCliCount: s.localCliCount || 0
             }));
-            const activeSessionNames = Object.keys(activeSessions).map(toDisplaySessionName);
-            const startingSessionNames = Array.from(startingSessions).map(toDisplaySessionName);
+            const activeSessionNames = Object.keys(activeSessions).map(getSessionDisplayName);
+            const startingSessionNames = Array.from(startingSessions).map(getSessionDisplayName);
+            const folders = sessionStore.order.folders
+                .map((id) => sessionStore.folders[id])
+                .filter(Boolean);
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ sessions, active: activeSessionNames, starting: startingSessionNames }));
+            res.end(JSON.stringify({
+                sessions,
+                active: activeSessionNames,
+                starting: startingSessionNames,
+                folders,
+                order: sessionStore.order,
+                aliases: sessionAliases
+            }));
             return;
         }
 
@@ -1853,12 +2881,22 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
-                    let { name, type, port, cwd } = JSON.parse(body);
+                    let { name, type, port, cwd, folderId } = JSON.parse(body);
                     const displayName = name;
                     const internalName = toInternalSessionName(displayName);
-                    if (!internalName) {
+                    if (!internalName || !displayName) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
+                        return;
+                    }
+                    if (isDisplayNameInUse(displayName)) {
+                        res.writeHead(409, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session name already in use' }));
+                        return;
+                    }
+                    if (sessionStore.sessions[internalName]) {
+                        res.writeHead(409, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session internal name already in use' }));
                         return;
                     }
                     type = (type || 'terminal').toLowerCase();
@@ -1867,6 +2905,7 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Invalid session type' }));
                         return;
                     }
+                    const targetFolderId = folderId && sessionStore.folders[folderId] ? folderId : null;
                     if (type === 'port') {
                         const parsedPort = parseInt(port, 10);
                         if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
@@ -1885,7 +2924,7 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
                             return;
                         }
-                        setPortSessionConfig(internalName, parsedPort);
+                        setPortSessionConfig(internalName, parsedPort, displayName, targetFolderId);
                     } else {
                         const existingConfig = getSessionConfig(internalName);
                         if (existingConfig && existingConfig.type === 'port') {
@@ -1893,10 +2932,135 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Port session already exists with this name' }));
                             return;
                         }
-                        getOrCreateSession(internalName, cwd);
+                        getOrCreateSession(internalName, cwd, displayName);
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, name: displayName, type }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Create folder
+        if (parsedUrl.pathname === '/api/folders' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { name } = JSON.parse(body);
+                    const folder = createFolder(name);
+                    if (!folder) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid folder name' }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, folder }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Rename folder
+        if (parsedUrl.pathname === '/api/folders/rename' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { id, name } = JSON.parse(body);
+                    const folder = renameFolder(id, name);
+                    if (!folder) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Folder not found or invalid name' }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, folder }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Delete folder
+        if (parsedUrl.pathname === '/api/folders/delete' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { id } = JSON.parse(body);
+                    const ok = deleteFolder(id);
+                    if (!ok) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Folder not found' }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Reorder folders
+        if (parsedUrl.pathname === '/api/folders/order' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { order } = JSON.parse(body);
+                    const ok = setFolderOrder(order);
+                    if (!ok) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid folder order' }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Move session (folder/order)
+        if (parsedUrl.pathname === '/api/sessions/move' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { name, internalName, folderId, index } = JSON.parse(body);
+                    let targetName = internalName && sessionStore.sessions[internalName] ? internalName : null;
+                    if (!targetName && name) {
+                        const displayName = resolveDisplayNameAlias(name);
+                        targetName = findInternalSessionName(displayName);
+                    }
+                    if (!targetName) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const ok = moveSessionToFolder(targetName, folderId || null, index);
+                    if (!ok) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Failed to move session' }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -1913,55 +3077,58 @@ function startAuthProxy(authEmitter) {
                 let { oldName, newName } = JSON.parse(body);
                 const oldDisplayName = oldName;
                 const newDisplayName = newName;
-                oldName = toInternalSessionName(oldDisplayName);
-                newName = toInternalSessionName(newDisplayName);
-                // Validate BOTH names to prevent command injection
-                if (!oldName) {
+                if (!SESSION_NAME_RE.test(oldDisplayName)) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid old name' }));
                     return;
                 }
-                if (!newName) {
+                if (!SESSION_NAME_RE.test(newDisplayName)) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid new name' }));
                     return;
                 }
-                if (getSessionConfig(newName) || hopSessionExists(newName)) {
+                if (newDisplayName === oldDisplayName) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                    return;
+                }
+                const internalName = findInternalSessionName(oldDisplayName);
+                if (!internalName) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Session not found' }));
+                    return;
+                }
+                if (isDisplayNameInUse(newDisplayName)) {
                     res.writeHead(409, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Session name already in use' }));
+                    return;
+                }
+                const newInternalName = toInternalSessionName(newDisplayName);
+                if (newInternalName && newInternalName !== internalName && sessionStore.sessions[newInternalName]) {
+                    res.writeHead(409, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Session internal name already in use' }));
                     return;
                 }
 
                 // Update config for rename
                 try {
-                    const config = getSessionConfig(oldName);
-                    if (config && config.type === 'port') {
-                        deleteSessionConfig(oldName);
-                        setSessionConfig(newName, { ...config, updatedAt: new Date().toISOString() });
-                    } else {
-                        if (!hopSessionExists(oldName)) {
-                            res.writeHead(404, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ error: 'Session not found' }));
-                            return;
-                        }
-                        // Note: hay rooms can't be renamed - just update config tracking
-                        if (config) {
-                            deleteSessionConfig(oldName);
-                            setSessionConfig(newName, { ...config, type: 'terminal', updatedAt: new Date().toISOString() });
-                        } else {
-                            deleteSessionConfig(oldName);
-                            ensureTerminalSessionConfig(newName);
-                        }
-                    }
+                    const config = getSessionConfig(internalName) || {
+                        type: 'terminal',
+                        createdAt: new Date().toISOString()
+                    };
+                    setSessionConfig(internalName, {
+                        ...config,
+                        displayName: newDisplayName,
+                        updatedAt: new Date().toISOString()
+                    });
 
-                    // Update internal map if it's managed by us
-                    if (activeSessions[oldName]) {
-                        activeSessions[newName] = activeSessions[oldName];
-                        delete activeSessions[oldName];
-                    }
+                    // Track redirect alias in-memory for this daemon
+                    sessionAliases[oldDisplayName] = newDisplayName;
 
-                    // Track rename so styling intervals can follow
-                    sessionRenames[oldName] = newName;
+                    // Notify active clients
+                    if (activeSessions[internalName]?.room?.notifySessionRenamed) {
+                        activeSessions[internalName].room.notifySessionRenamed(newDisplayName);
+                    }
 
                     // Rename log/exit files if they exist (optional cleanup)
 
@@ -1975,14 +3142,52 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: Set agent permission
+        if (parsedUrl.pathname === '/api/sessions/agent-permission' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { name, internalName, allowed } = JSON.parse(body);
+                    const resolved = resolveSessionInternalName(name, internalName);
+                    if (!resolved) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const config = getSessionConfig(resolved);
+                    if (!config || config.type === 'port') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not a terminal' }));
+                        return;
+                    }
+                    const next = { ...config };
+                    next.agentPermitted = !!allowed;
+                    if (!next.createdBy) next.createdBy = 'user';
+                    next.updatedAt = new Date().toISOString();
+                    setSessionConfig(resolved, next);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, agentPermitted: next.agentPermitted }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
         // API: Delete session
         if (parsedUrl.pathname === '/api/sessions/delete' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
-                let { name } = JSON.parse(body);
-                name = toInternalSessionName(name);
-                // Validate name to prevent command injection
+                let { name, internalName } = JSON.parse(body);
+                if (internalName && sessionStore.sessions[internalName]) {
+                    name = internalName;
+                } else {
+                    const displayName = resolveDisplayNameAlias(name);
+                    name = findInternalSessionName(displayName);
+                }
                 if (!name) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid session name' }));
@@ -2014,6 +3219,7 @@ function startAuthProxy(authEmitter) {
                     if (activeSessions[name]) {
                         delete activeSessions[name];
                     }
+                    sessionClientSummary.delete(name);
 
                     // Always remove session config if present
                     if (config) {
@@ -2025,6 +3231,418 @@ function startAuthProxy(authEmitter) {
                 } catch (e) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Delete failed' }));
+                }
+            });
+            return;
+        }
+
+        // API: List terminal API sessions
+        if (parsedUrl.pathname === '/api/terminals' && req.method === 'GET') {
+            const actor = resolveActor(req);
+            const sessions = Array.from(terminalApiSessions.values())
+                .filter((entry) => {
+                    const config = getSessionConfig(entry.sessionName);
+                    return canActorAccessSession(actor, config);
+                })
+                .map(entry => ({
+                    id: entry.id,
+                    sessionName: entry.sessionName,
+                    displayName: entry.displayName,
+                    actor: entry.actor,
+                    createdAt: entry.createdAt
+                }));
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ terminals: sessions }));
+            return;
+        }
+
+        // API: Create terminal session
+        if (parsedUrl.pathname === '/api/terminals' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const actor = resolveActor(req);
+                    const payload = JSON.parse(body || '{}');
+                    const displayName = payload.name || `${actor}-${Date.now()}`;
+                    const cwd = payload.cwd;
+                    const cols = payload.cols;
+                    const rows = payload.rows;
+                    const shell = payload.shell;
+                    const env = payload.env;
+                    const startup = payload.startup;
+                    const autoStart = payload.autoStart;
+                    const folderId = payload.folderId && sessionStore.folders[payload.folderId]
+                        ? payload.folderId
+                        : null;
+
+                    if (!SESSION_NAME_RE.test(displayName)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid session name' }));
+                        return;
+                    }
+                    if (cwd && !path.isAbsolute(cwd)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'cwd must be an absolute path' }));
+                        return;
+                    }
+                    if (isDisplayNameInUse(displayName)) {
+                        res.writeHead(409, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session name already in use' }));
+                        return;
+                    }
+                    const internalName = toInternalSessionName(displayName);
+                    if (!internalName) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid session name' }));
+                        return;
+                    }
+
+                    ensureTerminalSessionConfig(internalName, cwd, displayName, folderId, {
+                        shell,
+                        env,
+                        cols,
+                        rows,
+                        startup,
+                        autoStart,
+                        createdBy: actor,
+                        agentPermitted: actor === 'agent'
+                    });
+
+                    const entry = attachTerminalApiClient(internalName, displayName, {
+                        actor,
+                        cols,
+                        rows,
+                        cwd,
+                        label: actor
+                    });
+
+                    if (startup && autoStart !== false) {
+                        sendTerminalInput(entry, startup.endsWith('\n') ? startup : `${startup}\n`);
+                    }
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        id: entry.id,
+                        sessionName: internalName,
+                        displayName: entry.displayName
+                    }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Attach terminal API client to existing session
+        if (parsedUrl.pathname === '/api/terminals/attach' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const actor = resolveActor(req);
+                    const payload = JSON.parse(body || '{}');
+                    const target = resolveSessionInternalName(payload.name, payload.internalName);
+                    if (!target) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const config = getSessionConfig(target);
+                    if (!canActorAccessSession(actor, config)) {
+                        res.writeHead(403, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Agent access not permitted' }));
+                        return;
+                    }
+                    const entry = attachTerminalApiClient(target, config?.displayName, {
+                        actor,
+                        cols: payload.cols,
+                        rows: payload.rows,
+                        label: actor
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        id: entry.id,
+                        sessionName: entry.sessionName,
+                        displayName: entry.displayName
+                    }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Terminal stream (SSE)
+        const terminalStreamMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/stream$/);
+        if (terminalStreamMatch && req.method === 'GET') {
+            const terminalId = terminalStreamMatch[1];
+            const entry = terminalApiSessions.get(terminalId);
+            if (!entry) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Terminal not found' }));
+                return;
+            }
+            const actor = resolveActor(req);
+            const config = getSessionConfig(entry.sessionName);
+            if (!canActorAccessSession(actor, config)) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Agent access not permitted' }));
+                return;
+            }
+            const afterRaw = parsedUrl.query?.after;
+            const after = Number.isFinite(Number(afterRaw)) ? Number(afterRaw) : 0;
+            res.writeHead(200, {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive'
+            });
+            res.write(`data: ${JSON.stringify({ type: 'ready', timestamp: Date.now() })}\n\n`);
+
+            const replayEvents = listTerminalEvents(terminalId, after);
+            for (const payload of replayEvents) {
+                res.write(`data: ${JSON.stringify(payload)}\n\n`);
+            }
+
+            registerTerminalStream(terminalId, res);
+            req.on('close', () => unregisterTerminalStream(terminalId, res));
+            return;
+        }
+
+        // API: Terminal write
+        const terminalWriteMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/write$/);
+        if (terminalWriteMatch && req.method === 'POST') {
+            const terminalId = terminalWriteMatch[1];
+            const entry = terminalApiSessions.get(terminalId);
+            if (!entry) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Terminal not found' }));
+                return;
+            }
+            const actor = resolveActor(req);
+            const config = getSessionConfig(entry.sessionName);
+            if (!canActorAccessSession(actor, config)) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Agent access not permitted' }));
+                return;
+            }
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const payload = JSON.parse(body || '{}');
+                    const data = payload.data;
+                    if (!data) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Missing data' }));
+                        return;
+                    }
+                    sendTerminalInput(entry, String(data));
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Terminal resize
+        const terminalResizeMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/resize$/);
+        if (terminalResizeMatch && req.method === 'POST') {
+            const terminalId = terminalResizeMatch[1];
+            const entry = terminalApiSessions.get(terminalId);
+            if (!entry) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Terminal not found' }));
+                return;
+            }
+            const actor = resolveActor(req);
+            const config = getSessionConfig(entry.sessionName);
+            if (!canActorAccessSession(actor, config)) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Agent access not permitted' }));
+                return;
+            }
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const payload = JSON.parse(body || '{}');
+                    sendTerminalResize(entry, payload.cols, payload.rows);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Terminal exec (convenience wrapper around write)
+        const terminalExecMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/exec$/);
+        if (terminalExecMatch && req.method === 'POST') {
+            const terminalId = terminalExecMatch[1];
+            const entry = terminalApiSessions.get(terminalId);
+            if (!entry) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Terminal not found' }));
+                return;
+            }
+            const actor = resolveActor(req);
+            const config = getSessionConfig(entry.sessionName);
+            if (!canActorAccessSession(actor, config)) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Agent access not permitted' }));
+                return;
+            }
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const payload = JSON.parse(body || '{}');
+                    const command = payload.command;
+                    if (!command) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Missing command' }));
+                        return;
+                    }
+                    const line = String(command);
+                    sendTerminalInput(entry, line.endsWith('\n') ? line : `${line}\n`);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Terminal detach (optional kill session)
+        const terminalDeleteMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)$/);
+        if (terminalDeleteMatch && req.method === 'DELETE') {
+            const terminalId = terminalDeleteMatch[1];
+            const entry = terminalApiSessions.get(terminalId);
+            if (!entry) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Terminal not found' }));
+                return;
+            }
+            const actor = resolveActor(req);
+            const config = getSessionConfig(entry.sessionName);
+            if (!canActorAccessSession(actor, config)) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Agent access not permitted' }));
+                return;
+            }
+            const killSession = parsedUrl.query?.killSession === 'true';
+            entry.adapter.close();
+            if (killSession) {
+                if (hayRooms.hasRoom(entry.sessionName)) {
+                    hayRooms.closeRoom(entry.sessionName);
+                }
+                if (activeSessions[entry.sessionName]) {
+                    delete activeSessions[entry.sessionName];
+                }
+                sessionClientSummary.delete(entry.sessionName);
+                const config = getSessionConfig(entry.sessionName);
+                if (config) {
+                    deleteSessionConfig(entry.sessionName);
+                }
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+            return;
+        }
+
+        // API: List workspaces
+        if (parsedUrl.pathname === '/api/workspaces' && req.method === 'GET') {
+            const names = listWorkspaceNames();
+            const current = getDefaultWorkspace();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ workspaces: names, current }));
+            return;
+        }
+
+        // API: Save workspace
+        if (parsedUrl.pathname === '/api/workspaces/save' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { name } = JSON.parse(body);
+                    const snapshot = saveWorkspaceFile(name);
+                    if (!snapshot) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid workspace name' }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, workspace: snapshot }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Load workspace (merge + start)
+        if (parsedUrl.pathname === '/api/workspaces/load' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { name, start } = JSON.parse(body);
+                    const workspace = loadWorkspaceFile(name);
+                    if (!workspace) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Workspace not found' }));
+                        return;
+                    }
+                    const result = applyWorkspace(workspace, { startSessions: start !== false });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, result }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Set default workspace
+        if (parsedUrl.pathname === '/api/workspaces/use' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { name } = JSON.parse(body);
+                    const normalized = normalizeWorkspaceName(name);
+                    if (!normalized) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid workspace name' }));
+                        return;
+                    }
+                    const workspace = loadWorkspaceFile(normalized);
+                    if (!workspace) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Workspace not found' }));
+                        return;
+                    }
+                    setDefaultWorkspace(normalized);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, current: normalized }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
                 }
             });
             return;
@@ -2252,7 +3870,8 @@ function startAuthProxy(authEmitter) {
             // Hay CLI format: /ws?room=X
             const roomParam = parsedUrl.query.room;
             if (roomParam && typeof roomParam === 'string') {
-                sessionName = toInternalSessionName(roomParam);
+                const resolved = resolveSessionDisplayName(roomParam);
+                sessionName = resolved.internalName;
             }
         } else {
             // Legacy format: /s/{session}/ws
@@ -2302,9 +3921,20 @@ function startAuthProxy(authEmitter) {
             const clientName = hay.sanitizeName(wsUrl.searchParams.get('name') || 'Anonymous');
             const cols = parseInt(wsUrl.searchParams.get('cols') || '80', 10);
             const rows = parseInt(wsUrl.searchParams.get('rows') || '24', 10);
+            const source = wsUrl.searchParams.get('source') || '';
 
             const clientId = hay.generateClientId();
             const colorIndex = Math.floor(Math.random() * 1000);
+
+            noteClientConnected(sessionName, source);
+            let disconnected = false;
+            const handleDisconnect = () => {
+                if (disconnected) return;
+                disconnected = true;
+                noteClientDisconnected(sessionName, source);
+            };
+            ws.on('close', handleDisconnect);
+            ws.on('error', handleDisconnect);
 
             // Attach client to hay room
             session.room.attachClient(
@@ -2324,6 +3954,19 @@ let currentPublicUrl = null;
 let shuttingDown = false;  // Prevent restart during cleanup
 const tunnelEmitter = new EventEmitter();
 let CLIENT_TUNNEL_CONFIG = null; // { tunnelId, credentialsPath, hostname, configDir }
+const tunnelStatus = {
+    connected: false,
+    lastEvent: null,
+    lastError: null,
+    lastUpdateAt: null,
+    lastConnectedAt: null,
+    lastRestartAt: null
+};
+
+function updateTunnelStatus(update) {
+    Object.assign(tunnelStatus, update);
+    tunnelStatus.lastUpdateAt = Date.now();
+}
 
 function startTunnel(isRestart = false) {
     const domainConfig = getDomainConfig();
@@ -2369,6 +4012,11 @@ tunnel: ${domainConfig.tunnelName}
 
     tunnel.on('close', (code) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        updateTunnelStatus({
+            connected: false,
+            lastEvent: 'closed',
+            lastError: `cloudflared exited (code ${code})`
+        });
         log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -2377,6 +4025,11 @@ tunnel: ${domainConfig.tunnelName}
 
     tunnel.on('error', (err) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        updateTunnelStatus({
+            connected: false,
+            lastEvent: 'error',
+            lastError: err.message
+        });
         log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -2384,6 +4037,7 @@ tunnel: ${domainConfig.tunnelName}
     });
 
     // For named tunnels, resolve immediately with the known URL
+    updateTunnelStatus({ connected: false, lastEvent: isRestart ? 'restarting' : 'starting', lastError: null });
     if (useNamedTunnel) {
         currentTunnelProc = tunnel;
         currentPublicUrl = publicUrl;
@@ -2398,6 +4052,12 @@ tunnel: ${domainConfig.tunnelName}
                 // Look for connection established message
                 if (!resolved && (output.includes('Registered tunnel connection') || output.includes('Connection'))) {
                     resolved = true;
+                    updateTunnelStatus({
+                        connected: true,
+                        lastEvent: 'connected',
+                        lastError: null,
+                        lastConnectedAt: Date.now()
+                    });
                     if (isRestart) {
                         tunnelEmitter.emit('urlChanged', publicUrl);
                         log(`[Tunnel] Reconnected: ${publicUrl}`, GREEN);
@@ -2410,6 +4070,12 @@ tunnel: ${domainConfig.tunnelName}
             setTimeout(() => {
                 if (!resolved) {
                     resolved = true;
+                    updateTunnelStatus({
+                        connected: true,
+                        lastEvent: 'assumed_connected',
+                        lastError: null,
+                        lastConnectedAt: Date.now()
+                    });
                     if (isRestart) {
                         tunnelEmitter.emit('urlChanged', publicUrl);
                     }
@@ -2434,6 +4100,12 @@ tunnel: ${domainConfig.tunnelName}
                 urlFound = true;
                 currentTunnelProc = tunnel;
                 currentPublicUrl = parsedUrl;
+                updateTunnelStatus({
+                    connected: true,
+                    lastEvent: 'connected',
+                    lastError: null,
+                    lastConnectedAt: Date.now()
+                });
 
                 // Emit URL change event for restarts
                 if (isRestart) {
@@ -2485,6 +4157,11 @@ credentials-file: ${path.resolve(credentialsPath)}
 
     tunnel.on('close', (code) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        updateTunnelStatus({
+            connected: false,
+            lastEvent: 'closed',
+            lastError: `cloudflared exited (code ${code})`
+        });
         log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -2493,6 +4170,11 @@ credentials-file: ${path.resolve(credentialsPath)}
 
     tunnel.on('error', (err) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        updateTunnelStatus({
+            connected: false,
+            lastEvent: 'error',
+            lastError: err.message
+        });
         log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -2501,6 +4183,7 @@ credentials-file: ${path.resolve(credentialsPath)}
 
     currentTunnelProc = tunnel;
     currentPublicUrl = publicUrl;
+    updateTunnelStatus({ connected: false, lastEvent: isRestart ? 'restarting' : 'starting', lastError: null });
 
     return new Promise((resolve) => {
         let resolved = false;
@@ -2509,6 +4192,12 @@ credentials-file: ${path.resolve(credentialsPath)}
             const output = data.toString();
             if (!resolved && (output.includes('Registered tunnel connection') || output.includes('Connection'))) {
                 resolved = true;
+                updateTunnelStatus({
+                    connected: true,
+                    lastEvent: 'connected',
+                    lastError: null,
+                    lastConnectedAt: Date.now()
+                });
                 if (isRestart) {
                     if (publicUrl) {
                         tunnelEmitter.emit('urlChanged', publicUrl);
@@ -2525,6 +4214,12 @@ credentials-file: ${path.resolve(credentialsPath)}
         setTimeout(() => {
             if (!resolved) {
                 resolved = true;
+                updateTunnelStatus({
+                    connected: true,
+                    lastEvent: 'assumed_connected',
+                    lastError: null,
+                    lastConnectedAt: Date.now()
+                });
                 if (isRestart && publicUrl) {
                     tunnelEmitter.emit('urlChanged', publicUrl);
                 }
@@ -2535,15 +4230,19 @@ credentials-file: ${path.resolve(credentialsPath)}
 }
 
 let tunnelRestartInProgress = false;
+let tunnelRestartQueued = false;
 
 async function startTunnelWithRestart() {
     // Prevent concurrent restarts
     if (tunnelRestartInProgress) {
-        log(`[Tunnel] Restart already in progress, skipping.`, YELLOW);
+        tunnelRestartQueued = true;
+        log(`[Tunnel] Restart already in progress, queuing.`, YELLOW);
         return;
     }
     tunnelRestartInProgress = true;
+    updateTunnelStatus({ lastRestartAt: Date.now(), lastEvent: 'restarting' });
 
+    let retryDelay = null;
     try {
         const { tunnel, publicUrl } = CLIENT_TUNNEL_CONFIG
             ? await startClientTunnel(true)
@@ -2557,13 +4256,19 @@ async function startTunnelWithRestart() {
                 writePrivateFile(STATE_FILE, JSON.stringify(state));
             } catch (e) { }
         }
-
-        // Sessions are managed by hay, no tmux styling needed
-        tunnelRestartInProgress = false;
     } catch (e) {
-        tunnelRestartInProgress = false;
         log(`[Tunnel] Failed to restart: ${e.message}. Retrying in 5s...`, RED);
-        setTimeout(startTunnelWithRestart, 5000);
+        retryDelay = 5000;
+    } finally {
+        tunnelRestartInProgress = false;
+        if (retryDelay) {
+            setTimeout(startTunnelWithRestart, retryDelay);
+            return;
+        }
+        if (tunnelRestartQueued) {
+            tunnelRestartQueued = false;
+            setTimeout(startTunnelWithRestart, 0);
+        }
     }
 }
 
@@ -2591,8 +4296,12 @@ function startTunnelHealthMonitor() {
                 });
             });
 
-            await healthCheck;
-            // Any response (even 401) means tunnel is working
+            const statusCode = await healthCheck;
+            // Treat 5xx as unhealthy (Cloudflare couldn't reach origin)
+            if (typeof statusCode === 'number' && statusCode >= 500) {
+                throw new Error(`HTTP ${statusCode}`);
+            }
+            // Non-5xx responses (including 401) mean tunnel is working
         } catch (e) {
             log(`[Tunnel] Health check failed: ${e.message}. Restarting tunnel...`, YELLOW);
             if (currentTunnelProc && !currentTunnelProc.killed) {
@@ -2793,16 +4502,27 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     if (existingSessions.length > 0) {
         // Connect to the first existing session (remote user already created it)
         defaultSessionName = existingSessions[0].name;
-        displayName = toDisplaySessionName(defaultSessionName);
+        displayName = getSessionDisplayName(defaultSessionName);
         log(`Connecting to existing session: ${displayName}`, RESET);
     } else {
         // Create new session - find next available name
         const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-        const existingNames = new Set(existingSessions.map(s => s.name));
+        const existingInternalNames = new Set(Object.keys(sessionStore.sessions));
+        const existingDisplayNames = new Set(
+            Object.entries(sessionStore.sessions).map(([name, config]) => config?.displayName || toDisplaySessionName(name))
+        );
+        existingSessions.forEach((s) => {
+            existingInternalNames.add(s.name);
+            existingDisplayNames.add(getSessionDisplayName(s.name));
+        });
         let counter = 1;
         displayName = `${cwdName}-${counter}`;
         defaultSessionName = toInternalSessionName(displayName);
-        while (existingNames.has(defaultSessionName)) {
+        while (
+            !defaultSessionName ||
+            existingInternalNames.has(defaultSessionName) ||
+            existingDisplayNames.has(displayName)
+        ) {
             counter++;
             displayName = `${cwdName}-${counter}`;
             defaultSessionName = toInternalSessionName(displayName);
@@ -2850,7 +4570,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
 
             // Spawn hay CLI to connect to the session
             const hayCli = resolveHayCliPath();
-            const wsUrl = `ws://127.0.0.1:${BASE_PORT}/ws?token=${SESSION_SECRET}`;
+            const wsUrl = `ws://127.0.0.1:${BASE_PORT}/ws?token=${SESSION_SECRET}&source=local-cli`;
 
             const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
                 stdio: 'inherit',
@@ -2915,8 +4635,12 @@ async function attachToExistingTunnel(existingTunnel) {
         // Find next available number
         if (sessionsRes && sessionsRes.sessions && sessionsRes.active) {
             const allNames = new Set([...sessionsRes.active, ...sessionsRes.sessions.map(s => s.name)]);
+            const internalNames = new Set(sessionsRes.sessions.map(s => s.internalName).filter(Boolean));
             let counter = 1;
-            while (allNames.has(`${cwdName}-${counter}`)) {
+            while (
+                allNames.has(`${cwdName}-${counter}`) ||
+                internalNames.has(toInternalSessionName(`${cwdName}-${counter}`))
+            ) {
                 counter++;
             }
             displayName = `${cwdName}-${counter}`;
@@ -2967,7 +4691,7 @@ async function attachToExistingTunnel(existingTunnel) {
 
     // Spawn hay CLI to connect to session
     const hayCli = resolveHayCliPath();
-    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}`;
+    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}&source=local-cli`;
 
     const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
         stdio: 'inherit',
@@ -3016,13 +4740,49 @@ async function fetchSessionList(existingTunnel) {
     return sessionsRes || {};
 }
 
-function pickSessionForDir(sessions, cwdName) {
+async function callLocalApi(existingTunnel, apiPath, method = 'GET', body = null) {
+    return await new Promise((resolve, reject) => {
+        const headers = { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` };
+        let payload = null;
+        if (body) {
+            payload = JSON.stringify(body);
+            headers['Content-Type'] = 'application/json';
+        }
+        const opts = {
+            hostname: '127.0.0.1',
+            port: existingTunnel.port,
+            path: apiPath,
+            method,
+            headers
+        };
+        const req = http.request(opts, res => {
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => {
+                try {
+                    resolve({ status: res.statusCode, data: JSON.parse(data) });
+                } catch (e) {
+                    resolve({ status: res.statusCode, data });
+                }
+            });
+        });
+        req.on('error', reject);
+        if (payload) {
+            req.write(payload);
+        }
+        req.end();
+    });
+}
+
+function pickSessionForDir(sessions, cwdName, opts = {}) {
     const prefix = `${cwdName}-`;
     const matches = sessions
         .filter(s => s.type !== 'port')
         .filter(s => s.displayName === cwdName || s.displayName.startsWith(prefix));
-    if (matches.length === 0) return null;
-    const scored = matches.map(s => {
+    if (matches.length === 0) return { target: null, totalMatches: 0 };
+    const filtered = opts.requireNoLocalCli ? matches.filter(s => !s.hasLocalCli) : matches;
+    if (filtered.length === 0) return { target: null, totalMatches: matches.length };
+    const scored = filtered.map(s => {
         let score = Number.MAX_SAFE_INTEGER;
         if (s.displayName === cwdName) {
             score = 0;
@@ -3034,20 +4794,25 @@ function pickSessionForDir(sessions, cwdName) {
         return { session: s, score };
     });
     scored.sort((a, b) => a.score - b.score || a.session.displayName.localeCompare(b.session.displayName));
-    return scored[0].session;
+    return { target: scored[0].session, totalMatches: matches.length };
 }
 
 async function attachToNamedSession(existingTunnel, displayName) {
     const sessionsRes = await fetchSessionList(existingTunnel);
     const sessions = sessionsRes.sessions || [];
-    const target = sessions.find(s => s.type !== 'port' && s.displayName === displayName);
+    let target = sessions.find(s => s.type !== 'port' && s.displayName === displayName);
+    if (!target && sessionsRes.aliases && sessionsRes.aliases[displayName]) {
+        const resolvedName = sessionsRes.aliases[displayName];
+        target = sessions.find(s => s.type !== 'port' && s.displayName === resolvedName);
+        displayName = resolvedName;
+    }
     if (!target) {
         throw new Error(`Session not found: ${displayName}`);
     }
     log(`Attaching to ${displayName}...`, RESET);
 
     const hayCli = resolveHayCliPath();
-    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}`;
+    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}&source=local-cli`;
 
     const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
         stdio: 'inherit',
@@ -3075,11 +4840,16 @@ async function attachToSessionForDir(existingTunnel) {
     const sessionsRes = await fetchSessionList(existingTunnel);
     const sessions = sessionsRes.sessions || [];
     const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const target = pickSessionForDir(sessions, cwdName);
-    if (!target) {
+    const result = pickSessionForDir(sessions, cwdName, { requireNoLocalCli: true });
+    if (!result.target) {
+        if (result.totalMatches > 0) {
+            log(`All sessions for "${cwdName}" already have a local CLI client attached.`, YELLOW);
+            log(`Specify a session name: hop attach <session>`, RESET);
+            process.exit(1);
+        }
         throw new Error(`No existing session for ${cwdName}`);
     }
-    return attachToNamedSession(existingTunnel, target.displayName);
+    return attachToNamedSession(existingTunnel, result.target.displayName);
 }
 
 async function main() {
@@ -3229,6 +4999,7 @@ async function main() {
 
         await checkAndInstallDependencies();
         await ensureHayLoaded();
+        loadDefaultWorkspace(true);
         const authEmitter = new EventEmitter();
 
         const proxyServer = startAuthProxy(authEmitter);
@@ -3283,7 +5054,7 @@ async function main() {
         }
         const nameArg = process.argv[3];
         const displayName = nameArg && nameArg.startsWith(HOP_SESSION_PREFIX)
-            ? toDisplaySessionName(nameArg)
+            ? getSessionDisplayName(nameArg)
             : nameArg;
         if (displayName) {
             await attachToNamedSession(existing, displayName);
@@ -3345,6 +5116,14 @@ async function main() {
         log(`  hop session add <name>           Add terminal session`, RESET);
         log(`  hop session add <name> --port N  Add port session (proxy)`, RESET);
         log(`  hop session remove <name>        Remove a session`, RESET);
+        log(`  hop session permit <name>        Allow agent access`, RESET);
+        log(`  hop session block <name>         Block agent access`, RESET);
+        log('');
+        log(`${BOLD}Workspaces:${RESET}`, RESET);
+        log(`  hop workspace list            List workspaces`, RESET);
+        log(`  hop workspace save <name>     Save current sessions`, RESET);
+        log(`  hop workspace load <name>     Load workspace (merge + start)`, RESET);
+        log(`  hop workspace use <name>      Set default workspace`, RESET);
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
@@ -3408,20 +5187,47 @@ async function main() {
         });
 
         const result = await checkHealth();
+        let localStatus = null;
+        try {
+            const localRes = await callLocalApi(state, '/api/tunnel/status', 'GET');
+            if (localRes && localRes.status === 200) {
+                localStatus = localRes.data;
+            }
+        } catch (e) { }
 
         if (result.ok) {
             log(`  Status: ${GREEN}OK${RESET} (${result.status}) - ${result.time}ms`, GREEN);
         } else {
             const reason = result.error || (result.status ? `HTTP ${result.status}` : 'Unknown error');
             log(`  Status: ${RED}FAILED${RESET} - ${reason} (${result.time}ms)`, RED);
+            if (localStatus) {
+                const tunnelState = localStatus.connected ? `${GREEN}connected${RESET}` : `${RED}disconnected${RESET}`;
+                log(`  Local tunnel: ${tunnelState}`, RESET);
+                if (localStatus.lastEvent) {
+                    log(`  Last event: ${localStatus.lastEvent}`, RESET);
+                }
+                if (localStatus.lastError) {
+                    log(`  Last error: ${localStatus.lastError}`, YELLOW);
+                }
+            }
 
             if (process.argv[3] === '--restart' || process.argv[3] === '-r') {
                 log(`\nRestarting tunnel...`, YELLOW);
+                let restarted = false;
                 try {
-                    process.kill(state.pid, 'SIGUSR1');  // Signal daemon to restart tunnel
-                    log(`Restart signal sent. Check again in a few seconds.`, GREEN);
-                } catch (e) {
-                    log(`Failed to signal daemon: ${e.message}`, RED);
+                    const res = await callLocalApi(state, '/api/tunnel/restart', 'POST');
+                    if (res && res.status >= 200 && res.status < 300) {
+                        restarted = true;
+                        log(`Restart request sent. Check again in a few seconds.`, GREEN);
+                    }
+                } catch (e) { }
+                if (!restarted) {
+                    try {
+                        process.kill(state.pid, 'SIGUSR1');  // Fallback to signal daemon to restart tunnel
+                        log(`Restart signal sent. Check again in a few seconds.`, GREEN);
+                    } catch (e) {
+                        log(`Failed to signal daemon: ${e.message}`, RED);
+                    }
                 }
             } else {
                 log(`\nRun ${CYAN}hop health --restart${RESET} to force tunnel restart.`, RESET);
@@ -3590,6 +5396,132 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop workspace` commands
+    if (process.argv[2] === 'workspace') {
+        const subcommand = process.argv[3];
+        const nameArg = process.argv[4];
+        const existing = isServerRunning();
+
+        if (!subcommand || subcommand === 'list') {
+            if (existing) {
+                const res = await callLocalApi(existing, '/api/workspaces', 'GET');
+                if (res.status !== 200) {
+                    log(`Failed to list workspaces.`, RED);
+                    process.exit(1);
+                }
+                const names = res.data.workspaces || [];
+                const current = res.data.current;
+                if (names.length === 0) {
+                    log(`No workspaces found.`, YELLOW);
+                } else {
+                    log(`\n${BOLD}Workspaces:${RESET}\n`, CYAN);
+                    names.forEach((name) => {
+                        const marker = current === name ? `${GREEN}*${RESET}` : ' ';
+                        log(` ${marker} ${name}`, RESET);
+                    });
+                }
+            } else {
+                const names = listWorkspaceNames();
+                const current = getDefaultWorkspace();
+                if (names.length === 0) {
+                    log(`No workspaces found.`, YELLOW);
+                } else {
+                    log(`\n${BOLD}Workspaces:${RESET}\n`, CYAN);
+                    names.forEach((name) => {
+                        const marker = current === name ? `${GREEN}*${RESET}` : ' ';
+                        log(` ${marker} ${name}`, RESET);
+                    });
+                }
+            }
+            process.exit(0);
+        }
+
+        if (subcommand === 'save') {
+            if (!nameArg) {
+                log(`Usage: hop workspace save <name>`, RED);
+                process.exit(1);
+            }
+            if (existing) {
+                const res = await callLocalApi(existing, '/api/workspaces/save', 'POST', { name: nameArg });
+                if (res.status !== 200) {
+                    log(`Failed to save workspace.`, RED);
+                    process.exit(1);
+                }
+            } else {
+                const snapshot = saveWorkspaceFile(nameArg);
+                if (!snapshot) {
+                    log(`Invalid workspace name.`, RED);
+                    process.exit(1);
+                }
+            }
+            log(`Workspace "${nameArg}" saved.`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'load') {
+            if (!nameArg) {
+                log(`Usage: hop workspace load <name>`, RED);
+                process.exit(1);
+            }
+            if (existing) {
+                const res = await callLocalApi(existing, '/api/workspaces/load', 'POST', { name: nameArg });
+                if (res.status !== 200) {
+                    log(`Failed to load workspace.`, RED);
+                    process.exit(1);
+                }
+                const result = res.data.result || {};
+                if (result.created?.length) {
+                    log(`Created sessions: ${result.created.join(', ')}`, GREEN);
+                }
+                if (result.skipped?.length) {
+                    log(`Skipped sessions: ${result.skipped.map(s => s.name).join(', ')}`, YELLOW);
+                }
+            } else {
+                const workspace = loadWorkspaceFile(nameArg);
+                if (!workspace) {
+                    log(`Workspace not found: ${nameArg}`, RED);
+                    process.exit(1);
+                }
+                applyWorkspace(workspace, { startSessions: false });
+            }
+            log(`Workspace "${nameArg}" loaded.`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'use') {
+            if (!nameArg) {
+                log(`Usage: hop workspace use <name>`, RED);
+                process.exit(1);
+            }
+            if (existing) {
+                const res = await callLocalApi(existing, '/api/workspaces/use', 'POST', { name: nameArg });
+                if (res.status !== 200) {
+                    log(`Failed to set default workspace.`, RED);
+                    process.exit(1);
+                }
+            } else {
+                const workspace = loadWorkspaceFile(nameArg);
+                if (!workspace) {
+                    log(`Workspace not found: ${nameArg}`, RED);
+                    process.exit(1);
+                }
+                if (!setDefaultWorkspace(nameArg)) {
+                    log(`Invalid workspace name.`, RED);
+                    process.exit(1);
+                }
+            }
+            log(`Default workspace set to "${nameArg}".`, GREEN);
+            process.exit(0);
+        }
+
+        log(`\n${BOLD}Workspace commands:${RESET}\n`, CYAN);
+        log(`  hop workspace list           List workspaces`, RESET);
+        log(`  hop workspace save <name>    Save current sessions as a workspace`, RESET);
+        log(`  hop workspace load <name>    Load workspace (merge + start)`, RESET);
+        log(`  hop workspace use <name>     Set default workspace on startup`, RESET);
+        process.exit(0);
+    }
+
     // Handle `hop session` commands
     if (process.argv[2] === 'session') {
         await ensureHayLoaded();
@@ -3624,6 +5556,14 @@ async function main() {
                 log(`Invalid session name.`, RED);
                 process.exit(1);
             }
+            if (isDisplayNameInUse(displayName)) {
+                log(`Session name already in use.`, RED);
+                process.exit(1);
+            }
+            if (sessionStore.sessions[name]) {
+                log(`Session internal name already exists.`, RED);
+                process.exit(1);
+            }
             const portArgIndex = process.argv.indexOf('--port');
             if (portArgIndex !== -1) {
                 const portArg = parseInt(process.argv[portArgIndex + 1], 10);
@@ -3645,8 +5585,45 @@ async function main() {
                 log(`Port session already exists with this name.`, RED);
                 process.exit(1);
             }
-            ensureTerminalSessionConfig(name);
+            ensureTerminalSessionConfig(name, undefined, displayName);
             log(`Added terminal session "${displayName}".`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'permit' || subcommand === 'block') {
+            if (!nameArg) {
+                log(`Usage: hop session ${subcommand} <name>`, RED);
+                process.exit(1);
+            }
+            const displayName = nameArg;
+            const resolvedDisplayName = resolveDisplayNameAlias(displayName);
+            const internalName = findInternalSessionName(resolvedDisplayName) || toInternalSessionName(resolvedDisplayName);
+            const allowed = subcommand === 'permit';
+
+            const existingTunnel = isServerRunning();
+            if (existingTunnel) {
+                try {
+                    const res = await callLocalApi(existingTunnel, '/api/sessions/agent-permission', 'POST', {
+                        internalName,
+                        allowed
+                    });
+                    if (res.status >= 200 && res.status < 300) {
+                        log(`${allowed ? 'Allowed' : 'Blocked'} agent access for "${displayName}".`, GREEN);
+                        process.exit(0);
+                    }
+                } catch (e) { }
+            }
+
+            const config = getSessionConfig(internalName);
+            if (!config || config.type === 'port') {
+                log(`Session not found or not a terminal.`, RED);
+                process.exit(1);
+            }
+            config.agentPermitted = allowed;
+            if (!config.createdBy) config.createdBy = 'user';
+            config.updatedAt = new Date().toISOString();
+            setSessionConfig(internalName, config);
+            log(`${allowed ? 'Allowed' : 'Blocked'} agent access for "${displayName}".`, GREEN);
             process.exit(0);
         }
 
@@ -3656,9 +5633,12 @@ async function main() {
                 process.exit(1);
             }
             const displayName = nameArg;
-            const name = toInternalSessionName(displayName);
+            const resolvedDisplayName = resolveDisplayNameAlias(displayName);
+            const name = sessionStore.sessions[displayName]
+                ? displayName
+                : (findInternalSessionName(resolvedDisplayName) || null);
             if (!name) {
-                log(`Invalid session name.`, RED);
+                log(`Session not found.`, RED);
                 process.exit(1);
             }
             const config = getSessionConfig(name);
@@ -3684,6 +5664,8 @@ async function main() {
         log(`  hop session add <name>           Add terminal session`, RESET);
         log(`  hop session add <name> --port N  Add port session`, RESET);
         log(`  hop session remove <name>        Remove a session`, RESET);
+        log(`  hop session permit <name>        Allow agent access`, RESET);
+        log(`  hop session block <name>         Block agent access`, RESET);
         process.exit(0);
     }
 
@@ -3753,7 +5735,7 @@ async function main() {
             log(`Done.`, GREEN);
         } else {
             // Server not running - just clean up config files
-            const sessions = Object.keys(sessionConfigs).filter(s => s.startsWith(HOP_SESSION_PREFIX));
+            const sessions = Object.keys(sessionStore.sessions).filter(s => s.startsWith(HOP_SESSION_PREFIX));
             if (sessions.length === 0) {
                 log(`No hop sessions to clean up.`, GREEN);
                 process.exit(0);
@@ -3761,7 +5743,7 @@ async function main() {
             log(`Cleaning up ${sessions.length} session config(s)...`, YELLOW);
             for (const name of sessions) {
                 deleteSessionConfig(name);
-                log(`  - ${toDisplaySessionName(name)}`, RESET);
+                log(`  - ${getSessionDisplayName(name)}`, RESET);
             }
             log(`Done.`, GREEN);
         }
@@ -3819,6 +5801,7 @@ async function main() {
 
     await checkAndInstallDependencies();
     await ensureHayLoaded();
+    loadDefaultWorkspace(true);
     const authEmitter = new EventEmitter();
 
     const proxyServer = startAuthProxy(authEmitter);

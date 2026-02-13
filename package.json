@@ -4,12 +4,15 @@
   "description": "🐰 Hop into your terminal from anywhere. Secure remote shell access with 2FA via Cloudflare Tunnel. Next-gen rewrite with native terminal sharing.",
   "main": "hop",
   "bin": {
-    "hop": "./hop"
+    "hop": "./hop",
+    "hop-mcp": "./mcp/hop-mcp.js",
+    "hop-mcp-setup": "./setup-mcp.js"
   },
   "scripts": {
     "start": "node hop",
     "build": "npm --prefix hay install && npm --prefix hay run build && rsync -a --delete hay/apps/web/dist/ hay-web/",
-    "test": "node --check hop"
+    "test": "node --check hop",
+    "setup-mcp": "node setup-mcp.js"
   },
   "keywords": [
     "terminal",

@@ -89,22 +89,21 @@ const isEmbeddedInHop = () => !!getHopSession()?.room;
 const App = () => {
   const params = new URLSearchParams(window.location.search);
   const hopSession = getHopSession();
+  const initialRoom = hopSession?.room ?? params.get("room") ?? createRoomId();
 
   const [name, setName] = useState(() => {
     return params.get("name") ?? localStorage.getItem("hay_name") ?? "User";
   });
-  const [room, setRoom] = useState(() => {
-    if (hopSession?.room) return hopSession.room;
-    return params.get("room") ?? createRoomId();
-  });
+  const [room, setRoom] = useState(() => initialRoom);
   // Auto-start session when embedded in Hop (skip join page)
   const [session, setSession] = useState<{ name: string; room: string } | null>(() => {
     if (hopSession?.room) {
       const userName = params.get("name") ?? localStorage.getItem("hay_name") ?? "User";
-      return { name: userName, room: hopSession.room };
+      return { name: userName, room: initialRoom };
     }
     return null;
   });
+  const [sessionLabel, setSessionLabel] = useState(() => initialRoom);
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [presence, setPresence] = useState<PresenceClient[]>([]);
   const [collabMode, setCollabMode] = useState(true);
@@ -130,6 +129,12 @@ const App = () => {
   });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+
+  useEffect(() => {
+    if (session?.room) {
+      setSessionLabel(session.room);
+    }
+  }, [session?.room]);
   const [fontSize, setFontSize] = useState(() => {
     const saved = localStorage.getItem("hay_font_size");
     return saved ? parseInt(saved, 10) : 14;
@@ -176,8 +181,11 @@ const App = () => {
   };
 
   const shareUrl = useMemo(() => {
-    return session ? createShareLink(session.room) : createShareLink(room);
-  }, [session, room]);
+    if (session) {
+      return createShareLink(sessionLabel || session.room);
+    }
+    return createShareLink(room);
+  }, [session, room, sessionLabel]);
 
   const sortedPresence = useMemo(() => sortPresence(presence, clientId), [presence, clientId]);
 
@@ -419,6 +427,10 @@ const App = () => {
           pushNotice(message.message);
           ws.close();
           setStatus("disconnected");
+          break;
+        case "session_renamed":
+          setSessionLabel(message.displayName);
+          pushNotice(`Session renamed to ${message.displayName}`);
           break;
         default:
           break;
@@ -1141,7 +1153,7 @@ const App = () => {
             </button>
             <div className="room-info">
               <p className="room-label">Session</p>
-              <h2>{session.room}</h2>
+              <h2>{sessionLabel || session.room}</h2>
               <p className="room-meta">
                 {status === "connected" ? "Live" : status === "connecting" ? "Connecting" : "Offline"}
               </p>
@@ -1235,7 +1247,8 @@ const App = () => {
             )}
             {notice && <p className="notice">{notice}</p>}
             {(() => {
-              const otherSessions = sessions.filter((s) => s.name !== session?.room);
+              const currentSessionName = sessionLabel || session?.room;
+              const otherSessions = sessions.filter((s) => s.name !== currentSessionName);
               return (
                 <div className="session-switcher">
                   <p className="session-switcher-label">Switch session</p>

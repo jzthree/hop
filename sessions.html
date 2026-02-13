@@ -10,6 +10,19 @@
             h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
             .subtitle { color: #71717a; font-size: 0.875rem; margin-bottom: 1rem; }
             .session-list { background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; overflow: hidden; margin-bottom: 1.5rem; }
+            .session-groups { margin-bottom: 1.5rem; }
+            .toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
+            .toolbar .btn { width: 100%; padding: 0.6rem 0.9rem; font-size: 0.875rem; min-width: auto; }
+            .toolbar details { width: 100%; }
+            .folder-group { margin-bottom: 1.25rem; }
+            .folder-header { display: flex; align-items: center; justify-content: space-between; background: #f4f4f5; border: 1px solid #e4e4e7; border-bottom: none; padding: 0.5rem 0.75rem; border-radius: 12px 12px 0 0; }
+            .folder-title { font-weight: 600; font-size: 0.9rem; color: #18181b; }
+            .folder-actions { display: flex; gap: 0.35rem; }
+            .folder-actions .btn { padding: 0.35rem 0.6rem; font-size: 0.75rem; min-width: auto; }
+            .folder-list { border-radius: 0 0 12px 12px; }
+            .root-list { margin-bottom: 1.25rem; border-radius: 12px; }
+            .drag-over { outline: 2px dashed #a1a1aa; outline-offset: -6px; }
+            .session-item-wrapper.dragging { opacity: 0.6; }
             .session-item-wrapper { position: relative; overflow: hidden; border-bottom: 1px solid #e4e4e7; }
             .session-item-wrapper:last-child { border-bottom: none; }
             .session-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; gap: 1rem; background: #fff; position: relative; transition: transform 0.2s ease-out; }
@@ -25,11 +38,18 @@
             .active-badge { background: #22c55e; color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .starting-badge { background: #f59e0b; color: #111827; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .session-meta { color: #71717a; font-size: 0.8rem; margin-top: 0.25rem; }
-            .btn { padding: 0.75rem 1.25rem; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 500; text-decoration: none; display: inline-block; min-width: 80px; text-align: center; transition: opacity 0.2s; }
+            .agent-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; }
+            .agent-label { font-size: 0.7rem; color: #52525b; text-transform: uppercase; letter-spacing: 0.08em; }
+            .agent-toggle { border: 1px solid #e4e4e7; border-radius: 999px; padding: 0.2rem 0.6rem; font-size: 0.7rem; cursor: pointer; background: #f4f4f5; color: #18181b; }
+            .agent-toggle.on { background: #16a34a; border-color: #16a34a; color: #fff; }
+            .agent-toggle.off { background: #f4f4f5; border-color: #e4e4e7; color: #71717a; }
+            .agent-badge { background: #2563eb; color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
+            .btn { padding: 0.75rem 1.25rem; border: 1px solid transparent; border-radius: 10px; cursor: pointer; font-size: 1rem; font-weight: 500; text-decoration: none; display: inline-block; min-width: 80px; text-align: center; transition: background 0.15s ease, border-color 0.15s ease, opacity 0.2s; }
             .btn-primary { background: #18181b; color: #fff; }
             .btn-primary:hover, .btn-primary:active { opacity: 0.85; }
-            .btn-secondary { background: #e4e4e7; color: #18181b; }
-            .btn-secondary:hover { background: #d4d4d8; }
+            .btn-secondary { background: #fff; border-color: #e4e4e7; color: #18181b; }
+            .btn-secondary:hover { background: #fafafa; border-color: #d4d4d8; }
+            .btn-secondary:active { background: #f4f4f5; }
             .btn:disabled { opacity: 0.5; cursor: wait; }
             .new-session { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
             .new-session input,
@@ -45,12 +65,22 @@
             .loading.show { display: flex; }
             .spinner { width: 40px; height: 40px; border: 3px solid #e4e4e7; border-top-color: #7c3aed; border-radius: 50%; animation: spin 1s linear infinite; }
             @keyframes spin { to { transform: rotate(360deg); } }
+            details.menu { position: relative; }
+            details.menu > summary { list-style: none; }
+            details.menu > summary::-webkit-details-marker { display: none; }
+            .menu-panel { position: absolute; top: calc(100% + 0.5rem); right: 0; z-index: 20; min-width: 220px; background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; box-shadow: 0 10px 25px rgba(24, 24, 27, 0.08); padding: 0.35rem; }
+            .menu-item { width: 100%; text-align: left; padding: 0.65rem 0.75rem; border: 0; border-radius: 10px; background: transparent; cursor: pointer; font-size: 0.9rem; color: #18181b; }
+            .menu-item:hover { background: #fafafa; }
+            .menu-item:active { background: #f4f4f5; }
+            .menu-help { padding: 0.5rem 0.75rem 0.35rem; font-size: 0.75rem; color: #71717a; }
             @media (max-width: 480px) {
                 body { padding: 1rem; }
                 .new-session { flex-direction: column; }
                 .new-session input,
                 .new-session select { min-width: 100%; }
                 .new-session .btn { width: 100%; }
+                .toolbar { grid-template-columns: 1fr; }
+                .menu-panel { position: static; margin-top: 0.5rem; box-shadow: none; }
             }
         </style>
     </head>
@@ -61,7 +91,7 @@
         </div>
         <div class="container">
             <h1>Session Picker</h1>
-            <p class="subtitle">Create a terminal or port session, rename existing ones, or join one. Swipe left to delete.</p>
+            <p class="subtitle">Create sessions, drag them into folders, or load a workspace. Swipe left to delete.</p>
             <div class="new-session">
                 <input type="text" id="newName" placeholder="Session name..." pattern="[a-zA-Z0-9_-]+">
                 <select id="sessionType">
@@ -71,7 +101,19 @@
                 <input type="number" id="portInput" placeholder="Port (e.g. 3000)" min="1" max="65535" style="display:none;">
                 <button class="btn btn-primary" onclick="createSession()">Create</button>
             </div>
-            <div class="session-list" id="sessionList">
+            <div class="toolbar">
+                <button class="btn btn-secondary" onclick="createFolderPrompt()">New folder</button>
+                <details class="menu" id="workspaceMenu">
+                    <summary class="btn btn-secondary">Workspace</summary>
+                    <div class="menu-panel">
+                        <div class="menu-help">Workspaces save and restore sets of sessions.</div>
+                        <button class="menu-item" onclick="closeMenus(); saveWorkspacePrompt()">Save workspace...</button>
+                        <button class="menu-item" onclick="closeMenus(); loadWorkspacePrompt()">Load workspace...</button>
+                        <button class="menu-item" onclick="closeMenus(); useWorkspacePrompt()">Set default workspace...</button>
+                    </div>
+                </details>
+            </div>
+            <div class="session-groups" id="sessionList">
                 <div class="empty">Loading sessions...</div>
             </div>
         </div>
@@ -80,46 +122,120 @@
                 document.getElementById('loading').classList.add('show');
             }
 
+            let dragSessionId = null;
+
             async function loadSessions() {
                 const res = await fetch('/api/sessions');
                 const data = await res.json();
                 const list = document.getElementById('sessionList');
+                const sessions = data.sessions || [];
+                const active = data.active || [];
 
-                if (data.sessions.length === 0 && data.active.length === 0) {
+                if (sessions.length === 0 && active.length === 0) {
                     list.innerHTML = '<div class="empty">Waiting for first session to start...</div>';
                     return;
                 }
 
-                // Build session list using displayName for UI, name for API
-                const sessionMap = new Map();
-                data.sessions.forEach(s => sessionMap.set(s.name, s));
-                data.active.forEach(n => { if (!sessionMap.has(n)) sessionMap.set(n, { name: n }); });
+                const folders = data.folders || [];
+                const order = data.order || { folders: [], sessions: { root: [] } };
 
-                list.innerHTML = Array.from(sessionMap.values()).map(s => {
-                    const name = s.name;
-                    const displayName = s.displayName || name;
-                    const isActive = data.active.includes(name);
-                    const isStarting = (data.starting || []).includes(name);
+                const sessionMap = new Map();
+                sessions.forEach(s => {
+                    const internalName = s.internalName || s.name;
+                    sessionMap.set(internalName, s);
+                });
+
+                const orderedIdsByFolder = order.sessions || {};
+                const usedIds = new Set();
+
+                function orderedSessionsForFolder(folderId) {
+                    const bucket = folderId || 'root';
+                    const orderedIds = Array.isArray(orderedIdsByFolder[bucket]) ? orderedIdsByFolder[bucket] : [];
+                    const items = [];
+                    orderedIds.forEach(id => {
+                        if (sessionMap.has(id)) {
+                            items.push(sessionMap.get(id));
+                            usedIds.add(id);
+                        }
+                    });
+                    sessions.forEach(s => {
+                        const internalName = s.internalName || s.name;
+                        const sessionFolder = s.folderId || null;
+                        if (sessionFolder === folderId && !usedIds.has(internalName)) {
+                            items.push(s);
+                            usedIds.add(internalName);
+                        }
+                    });
+                    return items;
+                }
+
+                function renderSessionItem(s) {
+                    const internalName = s.internalName || s.name;
+                    const displayName = s.displayName || s.name;
+                    const isActive = (data.active || []).includes(displayName);
+                    const isStarting = (data.starting || []).includes(displayName);
                     const isPort = s.type === 'port';
                     const portLabel = isPort ? `PORT ${s.port || ''}`.trim() : '';
+                    const createdBy = s.createdBy || 'user';
+                    const agentPermitted = s.agentPermitted === true;
+                    const agentBadge = createdBy === 'agent' ? '<span class="agent-badge">AGENT</span>' : '';
+                    const agentToggle = !isPort ? `
+                        <div class="agent-row">
+                            <span class="agent-label">Agent access</span>
+                            <button class="agent-toggle ${agentPermitted ? 'on' : 'off'}" onclick="toggleAgentAccess('${internalName}', ${agentPermitted ? 'false' : 'true'})">
+                                ${agentPermitted ? 'On' : 'Off'}
+                            </button>
+                        </div>
+                    ` : '';
                     return `
-                        <div class="session-item-wrapper" data-session="${name}">
-                            <div class="session-action rename" onclick="renameSession('${name}', '${displayName}')">Rename</div>
-                            <div class="session-action delete" onclick="deleteSession('${name}')">Delete</div>
+                        <div class="session-item-wrapper" draggable="true" data-session="${internalName}" data-display="${displayName}">
+                            <div class="session-action rename" onclick="renameSession('${displayName}')">Rename</div>
+                            <div class="session-action delete" onclick="deleteSession('${internalName}', '${displayName}')">Delete</div>
                             <div class="session-item">
                                 <div class="session-info">
                                     <div class="session-header">
                                         <span class="session-name">${displayName}</span>
+                                        ${agentBadge}
                                         ${isActive ? '<span class="active-badge">LIVE</span>' : (isStarting ? '<span class="starting-badge">STARTING</span>' : (isPort ? `<span class="port-badge">${portLabel}</span>` : ''))}
                                     </div>
                                     <div class="session-meta">${isPort ? `Proxy to localhost:${s.port || ''}` : (s.windows ? s.windows + ' window(s)' : (isStarting ? 'Starting...' : 'Not started'))}</div>
+                                    ${agentToggle}
                                 </div>
-                                <a href="/s/${encodeURIComponent(name)}/" class="btn btn-primary" onclick="showLoading()">Join</a>
+                                <a href="/s/${encodeURIComponent(displayName)}/" class="btn btn-primary" onclick="showLoading()">Join</a>
                             </div>
                         </div>
                     `;
-                }).join('');
+                }
+
+                const rootSessions = orderedSessionsForFolder(null);
+                let html = '';
+                html += `
+                    <div class="session-list folder-list root-list" data-folder-id="">
+                        ${rootSessions.length ? rootSessions.map(renderSessionItem).join('') : (folders.length ? '<div class="empty">Drop sessions here to remove from folders</div>' : '<div class="empty">No sessions</div>')}
+                    </div>
+                `;
+
+                folders.forEach(folder => {
+                    const folderSessions = orderedSessionsForFolder(folder.id);
+                    html += `
+                        <div class="folder-group" data-folder-id="${folder.id}">
+                            <div class="folder-header">
+                                <div class="folder-title">${folder.name}</div>
+                                <div class="folder-actions">
+                                    <button class="btn btn-secondary" onclick="renameFolderPrompt('${folder.id}', '${folder.name}')">Rename</button>
+                                    <button class="btn btn-secondary" onclick="deleteFolderPrompt('${folder.id}', '${folder.name}')">Delete</button>
+                                </div>
+                            </div>
+                            <div class="session-list folder-list" data-folder-id="${folder.id}">
+                                ${folderSessions.length ? folderSessions.map(renderSessionItem).join('') : '<div class="empty">No sessions</div>'}
+                            </div>
+                        </div>
+                    `;
+                });
+
+                list.innerHTML = html;
                 initSwipe();
+                initDragAndDrop();
             }
 
             async function createSession() {
@@ -149,7 +265,7 @@
                 window.location.href = '/s/' + encodeURIComponent(data.name) + '/';
             }
 
-            async function renameSession(oldName, oldDisplayName) {
+            async function renameSession(oldDisplayName) {
                 const newDisplayName = prompt('Enter new session name:', oldDisplayName);
                 if (!newDisplayName || newDisplayName === oldDisplayName) return;
                 if (!/^[a-zA-Z0-9_-]+$/.test(newDisplayName)) return alert('Only letters, numbers, - and _ allowed');
@@ -157,18 +273,115 @@
                 await fetch('/api/sessions/rename', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ oldName, newName: newDisplayName })
+                    body: JSON.stringify({ oldName: oldDisplayName, newName: newDisplayName })
                 });
                 loadSessions();
             }
 
-            async function deleteSession(name) {
-                if (!confirm('Delete session "' + name + '"? This will remove the session.')) return;
+            async function toggleAgentAccess(internalName, allowed) {
+                await fetch('/api/sessions/agent-permission', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ internalName, allowed })
+                });
+                loadSessions();
+            }
+
+            async function deleteSession(internalName, displayName) {
+                if (!confirm('Delete session "' + displayName + '"? This will remove the session.')) return;
 
                 await fetch('/api/sessions/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ internalName })
+                });
+                loadSessions();
+            }
+
+            async function createFolderPrompt() {
+                const name = prompt('Folder name:');
+                if (!name) return;
+                await fetch('/api/folders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name })
+                });
+                loadSessions();
+            }
+
+            async function renameFolderPrompt(id, currentName) {
+                const name = prompt('Rename folder:', currentName);
+                if (!name || name === currentName) return;
+                await fetch('/api/folders/rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, name })
+                });
+                loadSessions();
+            }
+
+            async function deleteFolderPrompt(id, name) {
+                if (!confirm('Delete folder "' + name + '"? Sessions will be moved out of the folder.')) return;
+                await fetch('/api/folders/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id })
+                });
+                loadSessions();
+            }
+
+            function closeMenus() {
+                document.querySelectorAll('details.menu[open]').forEach(d => { d.open = false; });
+            }
+
+            async function saveWorkspacePrompt() {
+                const name = prompt('Save workspace as:');
+                if (!name) return;
+                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
+                const res = await fetch('/api/workspaces/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                if (!res.ok) {
+                    alert('Failed to save workspace.');
+                }
+            }
+
+            async function loadWorkspacePrompt() {
+                const name = prompt('Load workspace:');
+                if (!name) return;
+                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
+                const res = await fetch('/api/workspaces/load', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                if (!res.ok) {
+                    alert('Failed to load workspace.');
+                }
+                loadSessions();
+            }
+
+            async function useWorkspacePrompt() {
+                const name = prompt('Set default workspace:');
+                if (!name) return;
+                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
+                const res = await fetch('/api/workspaces/use', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                if (!res.ok) {
+                    alert('Failed to set default workspace.');
+                }
+            }
+
+            async function moveSession(internalName, folderId, index) {
+                await fetch('/api/sessions/move', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ internalName, folderId: folderId || null, index })
                 });
                 loadSessions();
             }
@@ -220,6 +433,59 @@
                 });
             }
 
+            function initDragAndDrop() {
+                document.querySelectorAll('.session-item-wrapper').forEach(wrapper => {
+                    wrapper.addEventListener('dragstart', e => {
+                        dragSessionId = wrapper.dataset.session;
+                        wrapper.classList.add('dragging');
+                        if (e.dataTransfer) {
+                            e.dataTransfer.setData('text/plain', dragSessionId);
+                        }
+                    });
+
+                    wrapper.addEventListener('dragend', () => {
+                        wrapper.classList.remove('dragging');
+                        dragSessionId = null;
+                    });
+
+                    wrapper.addEventListener('dragover', e => {
+                        e.preventDefault();
+                    });
+
+                    wrapper.addEventListener('drop', e => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (!dragSessionId) return;
+                        const list = wrapper.closest('.folder-list');
+                        if (!list) return;
+                        list.classList.remove('drag-over');
+                        const items = Array.from(list.querySelectorAll('.session-item-wrapper'));
+                        const index = items.indexOf(wrapper);
+                        moveSession(dragSessionId, list.dataset.folderId || null, index);
+                    });
+                });
+
+                document.querySelectorAll('.folder-list').forEach(list => {
+                    list.addEventListener('dragover', e => {
+                        e.preventDefault();
+                        list.classList.add('drag-over');
+                    });
+
+                    list.addEventListener('dragleave', () => {
+                        list.classList.remove('drag-over');
+                    });
+
+                    list.addEventListener('drop', e => {
+                        e.preventDefault();
+                        list.classList.remove('drag-over');
+                        if (!dragSessionId) return;
+                        const items = Array.from(list.querySelectorAll('.session-item-wrapper'));
+                        const index = items.length;
+                        moveSession(dragSessionId, list.dataset.folderId || null, index);
+                    });
+                });
+            }
+
             document.getElementById('newName').addEventListener('keypress', e => {
                 if (e.key === 'Enter') createSession();
             });
@@ -234,6 +500,12 @@
                     portInput.style.display = 'none';
                     portInput.value = '';
                 }
+            });
+
+            document.addEventListener('click', e => {
+                document.querySelectorAll('details.menu[open]').forEach(d => {
+                    if (!d.contains(e.target)) d.open = false;
+                });
             });
 
             loadSessions();

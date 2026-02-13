@@ -268,6 +268,10 @@ export class Room extends EventEmitter {
     this.endSession({ exitCode: null, signal: null, message: "Session terminated" });
   }
 
+  notifySessionRenamed(displayName: string) {
+    this.broadcast({ type: "session_renamed", displayName });
+  }
+
   private handleInput(client: ClientState, data: string) {
     if (!this.collabMode && this.controllerId !== client.id) {
       client.socket.send(

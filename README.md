@@ -100,6 +100,26 @@ Use the Session Picker or:
 hop session add myapp --port 3000
 ```
 
+## 🧾 Session History & Audit Logs
+
+Hop isolates shell history per terminal session and writes per-session audit logs by default.
+
+- History file: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
+- Audit log (NDJSON): `~/.hop2/workspaces/<workspace>/logs/<internal-session>/audit.ndjson`
+- Audit events include `session_start`, `input`, `resize`, `session_end`, plus:
+- `audit_mode` / `pty_state` transitions (auto-switches between `stream` and `tui_keyframe`)
+- `tui_keyframe` snapshots (diff-suppressed; emitted only when content changes)
+- `command_launch` metadata (captures launched command token and detected agent CLI type)
+- Large input/output chunks are truncated with metadata (`bytes`, `omittedBytes`, `dataHead`, `dataTail`)
+
+Tunable defaults:
+
+- `HOP_SESSION_HISTORY_SIZE` (default `5000`)
+- `HOP_SESSION_AUDIT_INLINE_MAX_BYTES` (default `4096`)
+- `HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS` (default `750`)
+- `HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS` (default `20000`)
+- `HOP_SESSION_TUI_KEYFRAME_MAX_LINES` (default `80`)
+
 ## 🌐 Custom Domains & Multi‑User
 
 ### Admin (your machine)
@@ -225,6 +245,22 @@ npm run build
 
 This builds hay (web + cli) and syncs `hay/apps/web/dist` into `hay-web/` for Hop to serve.
 If `./hay` exists and the dist folder is missing, `hop` will auto-build hay on startup.
+
+## 🤖 Hop MCP (One Subagent Terminal)
+
+Use one dedicated terminal when driving a subagent CLI through Hop MCP.
+
+1. Create a terminal with `hop_create_terminal` (set `name` and `cwd`).
+2. Start the agent CLI with `hop_write_terminal` (`claude` or `codex`).
+3. Wait for readiness with `hop_wait_terminal(until_prompt=true)`.
+4. Send one instruction at a time via `hop_write_terminal`.
+5. After each turn, collect output with `hop_wait_terminal` or incremental `hop_read_terminal` cursor reads.
+6. Interrupt with `hop_send_key(key="ctrl_c")` and close using `hop_close_terminal`.
+
+Safety tips:
+- Keep one subagent per terminal.
+- Do not queue a second instruction before reading the first response.
+- For attached user sessions, confirm `agentPermitted` before sending input.
 
 ## 🐛 Troubleshooting
 

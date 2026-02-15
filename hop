@@ -169,11 +169,27 @@ const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
 const LOG_DIR = path.join(HOME_DIR, 'logs');
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const DEFAULT_WORKSPACE_NAME = 'default';
+const HISTORY_DIR_NAME = 'history';
+const WORKSPACE_LOGS_DIR_NAME = 'logs';
+const SESSION_HISTORY_SIZE = parsePositiveIntEnv('HOP_SESSION_HISTORY_SIZE', 5000);
+const SESSION_AUDIT_INLINE_MAX_BYTES = parsePositiveIntEnv('HOP_SESSION_AUDIT_INLINE_MAX_BYTES', 4096);
+const SESSION_TUI_KEYFRAME_INTERVAL_MS = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS', 750);
+const SESSION_TUI_KEYFRAME_TAIL_CHARS = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS', 20000);
+const SESSION_TUI_KEYFRAME_MAX_LINES = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_MAX_LINES', 80);
 let SECRET_FILE_PATH = DEFAULT_SECRET_FILE;
 let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
 const SESSIONS_FILE = path.join(HOME_DIR, '.sessions.json');
 const WORKSPACES_DIR = path.join(HOME_DIR, 'workspaces');
 const WORKSPACE_POINTER_FILE = path.join(HOME_DIR, '.workspace');
+
+function parsePositiveIntEnv(name, fallback) {
+    const raw = process.env[name];
+    if (!raw) return fallback;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return parsed;
+}
 
 // Password hashing using scrypt (built-in, no external deps)
 function hashPassword(password) {
@@ -225,7 +241,9 @@ function toInternalSessionName(displayName) {
 
 function toDisplaySessionName(internalName) {
     if (!internalName || typeof internalName !== 'string') return '';
-    return internalName.slice(HOP_SESSION_PREFIX.length);
+    return internalName.startsWith(HOP_SESSION_PREFIX)
+        ? internalName.slice(HOP_SESSION_PREFIX.length)
+        : internalName;
 }
 
 const SESSION_STORE_VERSION = 2;
@@ -390,6 +408,7 @@ function isDisplayNameInUse(displayName) {
 
 function ensureTerminalSessionConfig(name, cwd, displayName, folderId, opts = {}) {
     const existing = getSessionConfig(name);
+    const workspaceName = resolveSessionWorkspaceName(existing, { workspaceName: opts.workspaceName });
     if (!existing) {
         const createdBy = opts.createdBy === 'agent' ? 'agent' : 'user';
         const agentPermitted = typeof opts.agentPermitted === 'boolean'
@@ -409,7 +428,8 @@ function ensureTerminalSessionConfig(name, cwd, displayName, folderId, opts = {}
             createdBy,
             agentPermitted,
             displayName: displayName || toDisplaySessionName(name),
-            folderId: folderId || null
+            folderId: folderId || null,
+            workspaceName
         });
         return;
     }
@@ -421,6 +441,13 @@ function ensureTerminalSessionConfig(name, cwd, displayName, folderId, opts = {}
     }
     if (typeof next.agentPermitted !== 'boolean') {
         next.agentPermitted = next.createdBy === 'agent';
+        changed = true;
+    }
+    if (!normalizeWorkspaceName(next.workspaceName)) {
+        next.workspaceName = workspaceName;
+        changed = true;
+    } else if (opts.workspaceName && next.workspaceName !== workspaceName) {
+        next.workspaceName = workspaceName;
         changed = true;
     }
     if (cwd && existing.cwd !== cwd) {
@@ -473,15 +500,17 @@ function ensureTerminalSessionConfig(name, cwd, displayName, folderId, opts = {}
     }
 }
 
-function setPortSessionConfig(name, port, displayName, folderId) {
+function setPortSessionConfig(name, port, displayName, folderId, opts = {}) {
     const existing = getSessionConfig(name);
+    const workspaceName = resolveSessionWorkspaceName(existing, { workspaceName: opts.workspaceName });
     setSessionConfig(name, {
         type: 'port',
         port,
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         displayName: displayName || existing?.displayName || toDisplaySessionName(name),
-        folderId: folderId || existing?.folderId || null
+        folderId: folderId || existing?.folderId || null,
+        workspaceName
     });
 }
 
@@ -663,6 +692,7 @@ function loadWorkspaceFile(name) {
 
 function applyWorkspace(workspace, opts = {}) {
     const startSessions = !!opts.startSessions;
+    const workspaceName = normalizeWorkspaceName(opts.workspaceName) || null;
     const created = [];
     const skipped = [];
     const started = [];
@@ -759,7 +789,9 @@ function applyWorkspace(workspace, opts = {}) {
                 skipped.push({ name, reason: 'invalid-port' });
                 continue;
             }
-            setPortSessionConfig(internalName, session.port, name, folderId);
+            setPortSessionConfig(internalName, session.port, name, folderId, {
+                workspaceName
+            });
         } else {
             ensureTerminalSessionConfig(internalName, session.cwd, name, folderId, {
                 shell: session.shell,
@@ -769,7 +801,8 @@ function applyWorkspace(workspace, opts = {}) {
                 startup: session.startup,
                 autoStart: session.autoStart,
                 createdBy: session.createdBy,
-                agentPermitted: session.agentPermitted
+                agentPermitted: session.agentPermitted,
+                workspaceName
             });
         }
         created.push(name);
@@ -829,12 +862,496 @@ function getDefaultWorkspace() {
     }
 }
 
+function resolveSessionWorkspaceName(config, opts = {}) {
+    const explicit = normalizeWorkspaceName(opts.workspaceName);
+    if (explicit) return explicit;
+    const fromConfig = normalizeWorkspaceName(config?.workspaceName);
+    if (fromConfig) return fromConfig;
+    const fromDefault = normalizeWorkspaceName(getDefaultWorkspace());
+    return fromDefault || DEFAULT_WORKSPACE_NAME;
+}
+
+function ensurePrivateWritableFile(filePath) {
+    if (!fs.existsSync(filePath)) {
+        writePrivateFile(filePath, '');
+        return;
+    }
+    ensurePrivateFile(filePath);
+}
+
+function ensureWorkspaceDataDirs(workspaceName) {
+    const normalized = normalizeWorkspaceName(workspaceName) || DEFAULT_WORKSPACE_NAME;
+    const workspaceDir = path.join(WORKSPACES_DIR, normalized);
+    const historyDir = path.join(workspaceDir, HISTORY_DIR_NAME);
+    const logsDir = path.join(workspaceDir, WORKSPACE_LOGS_DIR_NAME);
+    ensurePrivateDir(workspaceDir);
+    ensurePrivateDir(historyDir);
+    ensurePrivateDir(logsDir);
+    return {
+        workspaceName: normalized,
+        workspaceDir,
+        historyDir,
+        logsDir
+    };
+}
+
+function getSessionHistoryFileInfo(sessionName, workspaceName) {
+    const dirs = ensureWorkspaceDataDirs(workspaceName);
+    const filePath = path.join(dirs.historyDir, `${sessionName}.history`);
+    ensurePrivateWritableFile(filePath);
+    return { workspaceName: dirs.workspaceName, filePath };
+}
+
+function normalizeSessionEnvOverrides(rawEnv) {
+    if (!rawEnv || typeof rawEnv !== 'object' || Array.isArray(rawEnv)) return {};
+    const normalized = {};
+    for (const [key, value] of Object.entries(rawEnv)) {
+        if (!key || typeof key !== 'string') continue;
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+            normalized[key] = String(value);
+        }
+    }
+    return normalized;
+}
+
+function buildSessionPtyEnv(sessionName, config, workspaceName) {
+    const baseEnv = normalizeSessionEnvOverrides(config?.env);
+    const history = getSessionHistoryFileInfo(sessionName, workspaceName);
+    const historySize = String(SESSION_HISTORY_SIZE);
+    return {
+        workspaceName: history.workspaceName,
+        historyFile: history.filePath,
+        env: {
+            ...baseEnv,
+            HISTFILE: history.filePath,
+            HISTSIZE: baseEnv.HISTSIZE || historySize,
+            SAVEHIST: baseEnv.SAVEHIST || historySize,
+            HISTFILESIZE: baseEnv.HISTFILESIZE || String(SESSION_HISTORY_SIZE * 2)
+        }
+    };
+}
+
+function escapeSingleQuotedShell(value) {
+    return String(value ?? '').replace(/'/g, `'\"'\"'`);
+}
+
+function shellBasename(shellPath) {
+    if (!shellPath || typeof shellPath !== 'string') return '';
+    return path.basename(shellPath).toLowerCase();
+}
+
+function isPosixHistoryShell(shellPath) {
+    const base = shellBasename(shellPath);
+    return base === 'zsh' || base === 'bash' || base === 'sh' || base === 'ksh' || base === 'dash';
+}
+
+function buildPostStartupHistoryIsolationCommand(env) {
+    if (!env || typeof env !== 'object') return null;
+    const keys = ['HISTFILE', 'HISTSIZE', 'SAVEHIST', 'HISTFILESIZE'];
+    const exports = [];
+    for (const key of keys) {
+        const value = env[key];
+        if (!value) continue;
+        exports.push(`export ${key}='${escapeSingleQuotedShell(value)}'`);
+    }
+    if (exports.length === 0) return null;
+    return `${exports.join('; ')}; history -a 2>/dev/null || true\n`;
+}
+
+function applyPostStartupHistoryIsolation(room, config, ptyRuntime) {
+    const roomSupportsSystemInput = room && typeof room.sendSystemInput === 'function';
+    if (!roomSupportsSystemInput) return false;
+    const shellPath = config?.shell || process.env.SHELL || '';
+    if (!isPosixHistoryShell(shellPath)) return false;
+    const command = buildPostStartupHistoryIsolationCommand(ptyRuntime?.env);
+    if (!command) return false;
+    room.sendSystemInput(command, 'hop-history-init');
+    return true;
+}
+
+function getSessionAuditSink(sessionName, workspaceName) {
+    const existing = sessionAuditSinks.get(sessionName);
+    if (existing && !existing.stream.destroyed) {
+        return existing;
+    }
+    const dirs = ensureWorkspaceDataDirs(workspaceName);
+    const sessionDir = path.join(dirs.logsDir, sessionName);
+    ensurePrivateDir(sessionDir);
+    const filePath = path.join(sessionDir, 'audit.ndjson');
+    ensurePrivateWritableFile(filePath);
+    const stream = fs.createWriteStream(filePath, { flags: 'a', mode: PRIVATE_FILE_MODE });
+    const sink = {
+        stream,
+        filePath,
+        workspaceName: dirs.workspaceName,
+        failed: false
+    };
+    stream.on('error', () => {
+        if (sink.failed) return;
+        sink.failed = true;
+        log(`[Audit] Failed to write session audit log for ${sessionName}`, YELLOW);
+    });
+    sessionAuditSinks.set(sessionName, sink);
+    return sink;
+}
+
+function closeSessionAuditSink(sessionName) {
+    const sink = sessionAuditSinks.get(sessionName);
+    if (!sink) return;
+    sessionAuditSinks.delete(sessionName);
+    clearSessionAuditState(sessionName);
+    try {
+        sink.stream.end();
+    } catch (e) { }
+}
+
+function closeAllSessionAuditSinks() {
+    sessionAuditStates.clear();
+    for (const sessionName of Array.from(sessionAuditSinks.keys())) {
+        closeSessionAuditSink(sessionName);
+    }
+}
+
+function truncateAuditText(value) {
+    const raw = typeof value === 'string' ? value : String(value ?? '');
+    const totalBytes = Buffer.byteLength(raw, 'utf8');
+    if (totalBytes <= SESSION_AUDIT_INLINE_MAX_BYTES) {
+        return {
+            data: raw,
+            bytes: totalBytes,
+            truncated: false
+        };
+    }
+    const buffer = Buffer.from(raw, 'utf8');
+    const headBytes = Math.max(1, Math.floor(SESSION_AUDIT_INLINE_MAX_BYTES * 0.7));
+    const tailBytes = Math.max(0, SESSION_AUDIT_INLINE_MAX_BYTES - headBytes);
+    return {
+        dataHead: buffer.subarray(0, headBytes).toString('utf8'),
+        dataTail: tailBytes > 0 ? buffer.subarray(buffer.length - tailBytes).toString('utf8') : '',
+        bytes: totalBytes,
+        omittedBytes: Math.max(0, totalBytes - SESSION_AUDIT_INLINE_MAX_BYTES),
+        truncated: true
+    };
+}
+
+const ANSI_OSC_SEQUENCE_RE = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g;
+const ANSI_CSI_SEQUENCE_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const ANSI_ST_SEQUENCE_RE = /\x1b[P^_].*?\x1b\\/gs;
+const AGENT_COMMAND_WRAPPERS = new Set(['npx', 'pnpm', 'pnpx', 'yarn', 'bunx', 'uvx']);
+const AGENT_TRAJECTORY_HINT_CANDIDATES = {
+    claude: [
+        path.join(os.homedir(), '.claude', 'projects'),
+        path.join(os.homedir(), '.claude', 'tasks'),
+        path.join(os.homedir(), '.claude', 'history.jsonl')
+    ],
+    codex: [
+        path.join(os.homedir(), '.codex', 'sessions'),
+        path.join(os.homedir(), '.codex', 'history.jsonl')
+    ],
+    gemini: [
+        path.join(os.homedir(), '.gemini'),
+        path.join(os.homedir(), '.gemini', 'antigravity')
+    ],
+    opencode: [
+        path.join(os.homedir(), '.opencode'),
+        path.join(os.homedir(), '.config', 'opencode')
+    ]
+};
+
+function stripAnsiForAudit(text) {
+    return String(text || '')
+        .replace(ANSI_OSC_SEQUENCE_RE, '')
+        .replace(ANSI_ST_SEQUENCE_RE, '')
+        .replace(ANSI_CSI_SEQUENCE_RE, '')
+        .replace(/\x1b[@-_]/g, '');
+}
+
+function normalizeTuiTextForAudit(text) {
+    if (!text) return '';
+    return stripAnsiForAudit(text)
+        .replace(/\r/g, '\n')
+        .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+        .replace(/[ \t]+$/gm, '')
+        .replace(/\n{5,}/g, '\n\n\n\n');
+}
+
+function appendTailText(current, next, maxChars) {
+    const merged = `${current || ''}${next || ''}`;
+    if (merged.length <= maxChars) return merged;
+    return merged.slice(merged.length - maxChars);
+}
+
+function buildTuiSnapshotFromTail(tail) {
+    if (!tail) return '';
+    const lines = String(tail)
+        .split('\n')
+        .map(line => line.replace(/[ \t]+$/g, ''));
+    return lines.slice(-SESSION_TUI_KEYFRAME_MAX_LINES).join('\n').trim();
+}
+
+function hashAuditText(text) {
+    return crypto.createHash('sha1').update(String(text || ''), 'utf8').digest('hex');
+}
+
+function detectAgentKindFromCommandToken(token) {
+    if (!token) return null;
+    const raw = String(token).trim().toLowerCase();
+    if (!raw) return null;
+    const base = path.basename(raw);
+    if (base.startsWith('claude') || raw.includes('claude')) return 'claude';
+    if (base.startsWith('codex') || raw.includes('openai/codex')) return 'codex';
+    if (base.startsWith('gemini') || raw.includes('/gemini')) return 'gemini';
+    if (base.startsWith('opencode') || raw.includes('/opencode')) return 'opencode';
+    return null;
+}
+
+function extractCommandMetadata(line) {
+    if (typeof line !== 'string') return null;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return null;
+    const tokens = trimmed.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return null;
+
+    let idx = 0;
+    while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[idx])) {
+        idx += 1;
+    }
+    if (idx >= tokens.length) return null;
+
+    let wrapper = null;
+    let commandToken = tokens[idx];
+    if (AGENT_COMMAND_WRAPPERS.has(commandToken) && idx + 1 < tokens.length) {
+        wrapper = commandToken;
+        commandToken = tokens[idx + 1];
+    }
+
+    const agentKind = detectAgentKindFromCommandToken(commandToken);
+    return {
+        line: trimmed,
+        commandToken,
+        wrapper,
+        agentKind
+    };
+}
+
+function getAgentTrajectoryHints(agentKind) {
+    if (!agentKind) return [];
+    const candidates = AGENT_TRAJECTORY_HINT_CANDIDATES[agentKind];
+    if (!Array.isArray(candidates)) return [];
+    return candidates.filter((candidate) => {
+        try {
+            return fs.existsSync(candidate);
+        } catch (e) {
+            return false;
+        }
+    });
+}
+
+function createSessionAuditState(sessionName, workspaceName, displayName) {
+    return {
+        sessionName,
+        workspaceName,
+        displayName,
+        mode: 'stream',
+        alternateScreen: false,
+        cursorHidden: false,
+        tailText: '',
+        lastKeyframeHash: null,
+        lastKeyframeTs: 0,
+        suppressedOutputEvents: 0,
+        suppressedOutputBytes: 0,
+        inputBufferByActor: new Map()
+    };
+}
+
+function getSessionAuditState(sessionName, workspaceName, displayName) {
+    let state = sessionAuditStates.get(sessionName);
+    if (!state) {
+        state = createSessionAuditState(sessionName, workspaceName, displayName);
+        sessionAuditStates.set(sessionName, state);
+    }
+    if (workspaceName) state.workspaceName = workspaceName;
+    if (displayName) state.displayName = displayName;
+    return state;
+}
+
+function clearSessionAuditState(sessionName) {
+    if (!sessionName) return;
+    sessionAuditStates.delete(sessionName);
+}
+
+function flushSessionTuiKeyframe(state, timestamp, force = false) {
+    if (!state) return false;
+    const nowTs = Number.isFinite(timestamp) ? Number(timestamp) : Date.now();
+    if (!force && (nowTs - state.lastKeyframeTs) < SESSION_TUI_KEYFRAME_INTERVAL_MS) {
+        return false;
+    }
+    const snapshot = buildTuiSnapshotFromTail(state.tailText);
+    if (!snapshot) return false;
+    const nextHash = hashAuditText(snapshot);
+    if (nextHash === state.lastKeyframeHash) {
+        return false;
+    }
+    state.lastKeyframeHash = nextHash;
+    state.lastKeyframeTs = nowTs;
+    appendSessionAuditEvent(state.sessionName, state.workspaceName, 'tui_keyframe', {
+        displayName: state.displayName,
+        workspaceName: state.workspaceName,
+        mode: state.mode,
+        alternateScreen: state.alternateScreen,
+        cursorHidden: state.cursorHidden,
+        hash: nextHash,
+        suppressedOutputEvents: state.suppressedOutputEvents,
+        suppressedOutputBytes: state.suppressedOutputBytes,
+        ...truncateAuditText(snapshot)
+    });
+    state.suppressedOutputEvents = 0;
+    state.suppressedOutputBytes = 0;
+    return true;
+}
+
+function setSessionAuditMode(state, nextMode, reason, timestamp) {
+    if (!state || !nextMode || state.mode === nextMode) return;
+    const previous = state.mode;
+    if (previous === 'tui_keyframe') {
+        flushSessionTuiKeyframe(state, timestamp, true);
+    }
+    state.mode = nextMode;
+    appendSessionAuditEvent(state.sessionName, state.workspaceName, 'audit_mode', {
+        displayName: state.displayName,
+        workspaceName: state.workspaceName,
+        from: previous,
+        to: nextMode,
+        reason: reason || null,
+        alternateScreen: state.alternateScreen,
+        cursorHidden: state.cursorHidden
+    });
+}
+
+function handleSessionAuditOutput(state, outputEvent) {
+    if (!state) return;
+    const data = typeof outputEvent?.data === 'string' ? outputEvent.data : String(outputEvent?.data ?? '');
+    const eventTs = Number.isFinite(outputEvent?.timestamp) ? Number(outputEvent.timestamp) : Date.now();
+    if (state.mode !== 'tui_keyframe') {
+        appendSessionAuditEvent(state.sessionName, state.workspaceName, 'output', {
+            displayName: state.displayName,
+            workspaceName: state.workspaceName,
+            ...truncateAuditText(data)
+        });
+        return;
+    }
+
+    state.suppressedOutputEvents += 1;
+    state.suppressedOutputBytes += Buffer.byteLength(data, 'utf8');
+    const normalized = normalizeTuiTextForAudit(data);
+    if (normalized) {
+        state.tailText = appendTailText(state.tailText, normalized, SESSION_TUI_KEYFRAME_TAIL_CHARS);
+    }
+    flushSessionTuiKeyframe(state, eventTs, false);
+}
+
+function detectAndRecordCommandLaunch(state, inputEvent, actor, clientId) {
+    if (!state || !inputEvent) return;
+    if (actor === 'system') return;
+    const raw = typeof inputEvent.data === 'string' ? inputEvent.data : String(inputEvent.data ?? '');
+    if (!raw) return;
+    const key = String(clientId || actor || 'unknown');
+    let buffer = state.inputBufferByActor.get(key) || '';
+
+    for (const ch of raw) {
+        if (ch === '\r' || ch === '\n') {
+            const commandInfo = extractCommandMetadata(buffer);
+            if (commandInfo) {
+                const trajectoryHints = commandInfo.agentKind ? getAgentTrajectoryHints(commandInfo.agentKind) : [];
+                appendSessionAuditEvent(state.sessionName, state.workspaceName, 'command_launch', {
+                    displayName: state.displayName,
+                    workspaceName: state.workspaceName,
+                    actor,
+                    clientId: clientId || null,
+                    line: commandInfo.line,
+                    commandToken: commandInfo.commandToken,
+                    wrapper: commandInfo.wrapper,
+                    agentKind: commandInfo.agentKind,
+                    trajectoryHints
+                });
+            }
+            buffer = '';
+            continue;
+        }
+        if (ch === '\u0003' || ch === '\u0004') {
+            buffer = '';
+            continue;
+        }
+        if (ch === '\u0008' || ch === '\u007f') {
+            buffer = buffer.slice(0, -1);
+            continue;
+        }
+        if (ch >= ' ' && ch !== '\u007f') {
+            buffer += ch;
+            if (buffer.length > 2048) {
+                buffer = buffer.slice(buffer.length - 2048);
+            }
+        }
+    }
+    if (buffer) {
+        state.inputBufferByActor.set(key, buffer);
+    } else {
+        state.inputBufferByActor.delete(key);
+    }
+}
+
+function appendSessionAuditEvent(sessionName, workspaceName, type, payload = {}) {
+    const sink = getSessionAuditSink(sessionName, workspaceName);
+    if (!sink || sink.stream.destroyed) return;
+    const record = {
+        ts: new Date().toISOString(),
+        session: sessionName,
+        type,
+        ...payload
+    };
+    try {
+        sink.stream.write(JSON.stringify(record) + '\n');
+    } catch (e) { }
+}
+
+function registerSessionClientActor(sessionName, clientId, actor) {
+    if (!sessionName || !clientId) return;
+    let actors = sessionClientActors.get(sessionName);
+    if (!actors) {
+        actors = new Map();
+        sessionClientActors.set(sessionName, actors);
+    }
+    actors.set(clientId, actor || 'unknown');
+}
+
+function unregisterSessionClientActor(sessionName, clientId) {
+    if (!sessionName || !clientId) return;
+    const actors = sessionClientActors.get(sessionName);
+    if (!actors) return;
+    actors.delete(clientId);
+    if (actors.size === 0) {
+        sessionClientActors.delete(sessionName);
+    }
+}
+
+function resolveSessionClientActor(sessionName, clientId) {
+    if (!sessionName || !clientId) return null;
+    const actors = sessionClientActors.get(sessionName);
+    if (!actors) return null;
+    return actors.get(clientId) || null;
+}
+
+function clearSessionClientActors(sessionName) {
+    if (!sessionName) return;
+    sessionClientActors.delete(sessionName);
+}
+
 function loadDefaultWorkspace(startSessions = true) {
     const workspaceName = getDefaultWorkspace();
     if (!workspaceName) return null;
     const workspace = loadWorkspaceFile(workspaceName);
     if (!workspace) return null;
-    return applyWorkspace(workspace, { startSessions });
+    return applyWorkspace(workspace, { startSessions, workspaceName });
 }
 
 // Load domain config if exists
@@ -1416,6 +1933,9 @@ const terminalApiSessions = new Map(); // id -> { id, sessionName, displayName, 
 const terminalApiStreams = new Map(); // id -> Set<res>
 const terminalApiEventBuffers = new Map(); // id -> { nextId: number, events: Array<{ id: number, payload: object }> }
 const TERMINAL_API_EVENT_BUFFER_LIMIT = 3000;
+const sessionClientActors = new Map(); // sessionName -> Map<clientId, actor>
+const sessionAuditSinks = new Map(); // sessionName -> { stream, filePath, workspaceName, failed }
+const sessionAuditStates = new Map(); // sessionName -> runtime state for adaptive audit logging
 
 function ensureTerminalEventBuffer(id) {
     let state = terminalApiEventBuffers.get(id);
@@ -1686,6 +2206,7 @@ function listAllSessionEntries() {
             cwd: config?.cwd,
             shell: config?.shell,
             env: config?.env,
+            workspaceName: config?.workspaceName || resolveSessionWorkspaceName(config),
             cols: config?.cols,
             rows: config?.rows,
             startup: config?.startup,
@@ -1715,6 +2236,7 @@ function listAllSessionEntries() {
                 cwd: config?.cwd,
                 shell: config?.shell,
                 env: config?.env,
+                workspaceName: config?.workspaceName || resolveSessionWorkspaceName(config),
                 cols: config?.cols,
                 rows: config?.rows,
                 startup: config?.startup,
@@ -1734,6 +2256,7 @@ function listAllSessionEntries() {
             entry.cwd = config?.cwd;
             entry.shell = config?.shell;
             entry.env = config?.env;
+            entry.workspaceName = config?.workspaceName || resolveSessionWorkspaceName(config);
             entry.cols = config?.cols;
             entry.rows = config?.rows;
             entry.startup = config?.startup;
@@ -1807,26 +2330,100 @@ function getOrCreateSession(sessionName, cwd, displayName) {
     }
 
     const config = getSessionConfig(sessionName);
+    const workspaceName = resolveSessionWorkspaceName(config);
+    const ptyRuntime = buildSessionPtyEnv(sessionName, config, workspaceName);
     const effectiveCwd = cwd || config?.cwd;
-
     const initialCols = Number.isInteger(config?.cols) ? config.cols : 80;
     const initialRows = Number.isInteger(config?.rows) ? config.rows : 24;
-    // Create hay room for this session (with optional cwd override)
-    const room = hayRooms.getRoom(sessionName, { cols: initialCols, rows: initialRows }, effectiveCwd);
+    const display = config?.displayName || getSessionDisplayName(sessionName);
+
+    // Create hay room for this session (with optional cwd/shell/env override)
+    const room = hayRooms.getRoom(sessionName, { cols: initialCols, rows: initialRows }, {
+        cwd: effectiveCwd,
+        shell: config?.shell,
+        env: ptyRuntime.env
+    });
+    const auditState = getSessionAuditState(sessionName, ptyRuntime.workspaceName, display);
+
+    appendSessionAuditEvent(sessionName, ptyRuntime.workspaceName, 'session_start', {
+        displayName: display,
+        workspaceName: ptyRuntime.workspaceName,
+        cwd: effectiveCwd || null,
+        shell: config?.shell || null,
+        historyFile: ptyRuntime.historyFile,
+        auditMode: auditState.mode
+    });
+
+    room.on('pty_output', (event) => {
+        handleSessionAuditOutput(auditState, event);
+    });
+
+    room.on('pty_input', (event) => {
+        const actor = event?.actor || resolveSessionClientActor(sessionName, event?.clientId) || 'unknown';
+        appendSessionAuditEvent(sessionName, ptyRuntime.workspaceName, 'input', {
+            displayName: display,
+            workspaceName: ptyRuntime.workspaceName,
+            clientId: event?.clientId || null,
+            actor,
+            source: event?.source || null,
+            ...truncateAuditText(event?.data)
+        });
+        detectAndRecordCommandLaunch(auditState, event, actor, event?.clientId || null);
+    });
+
+    room.on('pty_state', (event) => {
+        const eventTs = Number.isFinite(event?.timestamp) ? Number(event.timestamp) : Date.now();
+        const nextAlternate = event?.alternateScreen === true;
+        const nextCursorHidden = event?.cursorHidden === true;
+        auditState.alternateScreen = nextAlternate;
+        auditState.cursorHidden = nextCursorHidden;
+        setSessionAuditMode(
+            auditState,
+            nextAlternate ? 'tui_keyframe' : 'stream',
+            'pty_state',
+            eventTs
+        );
+        appendSessionAuditEvent(sessionName, ptyRuntime.workspaceName, 'pty_state', {
+            displayName: display,
+            workspaceName: ptyRuntime.workspaceName,
+            alternateScreen: nextAlternate,
+            cursorHidden: nextCursorHidden
+        });
+    });
+
+    room.on('pty_resize', (event) => {
+        appendSessionAuditEvent(sessionName, ptyRuntime.workspaceName, 'resize', {
+            displayName: display,
+            workspaceName: ptyRuntime.workspaceName,
+            clientId: event?.clientId || null,
+            actor: resolveSessionClientActor(sessionName, event?.clientId) || 'unknown',
+            cols: event?.cols,
+            rows: event?.rows
+        });
+    });
+
+    room.on('session_end', (event) => {
+        flushSessionTuiKeyframe(auditState, event?.timestamp, true);
+        appendSessionAuditEvent(sessionName, ptyRuntime.workspaceName, 'session_end', {
+            displayName: display,
+            workspaceName: ptyRuntime.workspaceName,
+            exitCode: event?.exitCode ?? null,
+            signal: event?.signal ?? null,
+            message: event?.message || 'Session ended'
+        });
+    });
+
+    applyPostStartupHistoryIsolation(room, config, ptyRuntime);
 
     room.on('empty', () => {
+        closeSessionAuditSink(sessionName);
+        clearSessionClientActors(sessionName);
         delete activeSessions[sessionName];
         const config = getSessionConfig(sessionName);
         if (config && config.type !== 'port') {
             deleteSessionConfig(sessionName);
         }
         log(`Session ${getSessionDisplayName(sessionName)} closed.`, YELLOW);
-        sessionClientSummary.delete(sessionName);
-    });
-
-    room.on('exit', () => {
-        delete activeSessions[sessionName];
-        log(`Session ${getSessionDisplayName(sessionName)} exited.`, YELLOW);
         sessionClientSummary.delete(sessionName);
     });
 
@@ -1939,8 +2536,10 @@ function attachTerminalApiClient(sessionName, displayName, opts = {}) {
         { id: clientId, name: label, colorIndex, cols, rows },
         adapterBundle.adapter
     );
+    registerSessionClientActor(sessionName, clientId, opts.actor || label || 'agent');
 
     adapterBundle.adapter.onClose(() => {
+        unregisterSessionClientActor(sessionName, clientId);
         terminalApiSessions.delete(terminalId);
         const streams = terminalApiStreams.get(terminalId);
         if (streams) {
@@ -3607,7 +4206,10 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Workspace not found' }));
                         return;
                     }
-                    const result = applyWorkspace(workspace, { startSessions: start !== false });
+                    const result = applyWorkspace(workspace, {
+                        startSessions: start !== false,
+                        workspaceName: name
+                    });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, result }));
                 } catch (e) {
@@ -3925,13 +4527,16 @@ function startAuthProxy(authEmitter) {
 
             const clientId = hay.generateClientId();
             const colorIndex = Math.floor(Math.random() * 1000);
+            const actorLabel = source ? `web:${source}` : 'web';
 
             noteClientConnected(sessionName, source);
+            registerSessionClientActor(sessionName, clientId, actorLabel);
             let disconnected = false;
             const handleDisconnect = () => {
                 if (disconnected) return;
                 disconnected = true;
                 noteClientDisconnected(sessionName, source);
+                unregisterSessionClientActor(sessionName, clientId);
             };
             ws.on('close', handleDisconnect);
             ws.on('error', handleDisconnect);
@@ -4552,6 +5157,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
 
         // Close all hay rooms
         hayRooms.closeAll();
+        closeAllSessionAuditSinks();
 
         // Kill cloudflared tunnel (use currentTunnelProc in case it was restarted)
         try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }
@@ -5482,7 +6088,7 @@ async function main() {
                     log(`Workspace not found: ${nameArg}`, RED);
                     process.exit(1);
                 }
-                applyWorkspace(workspace, { startSessions: false });
+                applyWorkspace(workspace, { startSessions: false, workspaceName: nameArg });
             }
             log(`Workspace "${nameArg}" loaded.`, GREEN);
             process.exit(0);
@@ -5832,6 +6438,7 @@ async function main() {
             }
 
             hayRooms.closeAll();
+            closeAllSessionAuditSinks();
 
             try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }
             try { proxyServer.close(); } catch (e) { }

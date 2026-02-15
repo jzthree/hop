@@ -21,6 +21,12 @@ export type ClientInfo = {
   rows: number;
 };
 
+export type RoomCreateOptions = {
+  cwd?: string;
+  env?: Record<string, string>;
+  shell?: string;
+};
+
 const MAX_BUFFER_SIZE = 200_000;
 // Keep rooms alive indefinitely; only explicit kill/remove should end a session.
 const CLEANUP_DELAY_MS = 0;
@@ -80,10 +86,16 @@ export class Room extends EventEmitter {
   private cleanupTimer: NodeJS.Timeout | null = null;
   private ended = false;
 
-  constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, cwd?: string) {
+  constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, options?: RoomCreateOptions) {
     super();
     this.id = id;
-    this.pty = ptyFactory({ cols: initialSize.cols, rows: initialSize.rows, cwd });
+    this.pty = ptyFactory({
+      cols: initialSize.cols,
+      rows: initialSize.rows,
+      cwd: options?.cwd,
+      env: options?.env,
+      shell: options?.shell
+    });
     this.activeCols = initialSize.cols;
     this.activeRows = initialSize.rows;
 
@@ -91,6 +103,7 @@ export class Room extends EventEmitter {
       this.outputBuffer = clampBuffer(this.outputBuffer + data);
       this.updateTerminalState(data);
       this.broadcast({ type: "output", data });
+      this.emit("pty_output", { roomId: this.id, data, timestamp: now() });
     });
 
     const handleExit = (exitCode?: number | null, signal?: number | string) => {
@@ -243,17 +256,29 @@ export class Room extends EventEmitter {
       }
     }
 
+    let stateChanged = false;
     if (nextAlternate !== this.alternateScreen) {
       if (DEBUG_STATE) {
         console.log(`[hay] room=${this.id} alternateScreen=${nextAlternate}`);
       }
       this.alternateScreen = nextAlternate;
+      stateChanged = true;
     }
     if (nextCursorHidden !== this.cursorHidden) {
       if (DEBUG_STATE) {
         console.log(`[hay] room=${this.id} cursorHidden=${nextCursorHidden}`);
       }
       this.cursorHidden = nextCursorHidden;
+      stateChanged = true;
+    }
+
+    if (stateChanged) {
+      this.emit("pty_state", {
+        roomId: this.id,
+        alternateScreen: this.alternateScreen,
+        cursorHidden: this.cursorHidden,
+        timestamp: now()
+      });
     }
 
     this.controlSequenceTail = combined.slice(-CONTROL_SEQUENCE_TAIL);
@@ -272,6 +297,19 @@ export class Room extends EventEmitter {
     this.broadcast({ type: "session_renamed", displayName });
   }
 
+  sendSystemInput(data: string, source = "system") {
+    if (!data) return;
+    this.pty.write(data);
+    this.emit("pty_input", {
+      roomId: this.id,
+      clientId: null,
+      actor: "system",
+      source,
+      data,
+      timestamp: now()
+    });
+  }
+
   private handleInput(client: ClientState, data: string) {
     if (!this.collabMode && this.controllerId !== client.id) {
       client.socket.send(
@@ -281,6 +319,7 @@ export class Room extends EventEmitter {
     }
     client.lastActive = now();
     this.pty.write(data);
+    this.emit("pty_input", { roomId: this.id, clientId: client.id, data, timestamp: now() });
   }
 
   private handleResize(client: ClientState, cols: number, rows: number) {
@@ -301,6 +340,7 @@ export class Room extends EventEmitter {
       this.activeClientId = client.id;
       // Broadcast the new active size to other clients so they can adjust
       this.broadcastActiveSize(client);
+      this.emit("pty_resize", { roomId: this.id, clientId: client.id, cols, rows, timestamp: now() });
     }
   }
 
@@ -379,6 +419,7 @@ export class Room extends EventEmitter {
       client.socket.close();
     }
     this.clients.clear();
+    this.emit("session_end", { roomId: this.id, ...payload, timestamp: now() });
     this.emit("empty");
   }
 }
@@ -393,12 +434,18 @@ export class RoomManager {
     this.cwd = cwd;
   }
 
-  getRoom(roomId: string, initialSize: { cols: number; rows: number }, cwd?: string) {
+  getRoom(roomId: string, initialSize: { cols: number; rows: number }, cwdOrOptions?: string | RoomCreateOptions) {
     const existing = this.rooms.get(roomId);
     if (existing) {
       return existing;
     }
-    const room = new Room(roomId, this.ptyFactory, initialSize, cwd ?? this.cwd);
+    const options = typeof cwdOrOptions === "string"
+      ? { cwd: cwdOrOptions }
+      : (cwdOrOptions ?? {});
+    if (!options.cwd && this.cwd) {
+      options.cwd = this.cwd;
+    }
+    const room = new Room(roomId, this.ptyFactory, initialSize, options);
     room.on("empty", () => {
       this.rooms.delete(roomId);
     });

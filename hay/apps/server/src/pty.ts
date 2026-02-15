@@ -2,13 +2,20 @@ import os from "node:os";
 import { EventEmitter } from "node:events";
 import pty, { IPty } from "node-pty-prebuilt-multiarch";
 
-export type PtyFactory = (options: {
+export type PtyFactoryOptions = {
   cols: number;
   rows: number;
   cwd?: string;
-}) => IPty;
+  env?: Record<string, string>;
+  shell?: string;
+};
 
-const resolveShell = () => {
+export type PtyFactory = (options: PtyFactoryOptions) => IPty;
+
+const resolveShell = (shellOverride?: string) => {
+  if (shellOverride) {
+    return shellOverride;
+  }
   if (process.env.SHELL) {
     return process.env.SHELL;
   }
@@ -18,7 +25,7 @@ const resolveShell = () => {
   return "/bin/bash";
 };
 
-export const createPty: PtyFactory = ({ cols, rows, cwd }) => {
+export const createPty: PtyFactory = ({ cols, rows, cwd, env: envOverrides, shell }) => {
   const mode = process.env.PTY_MODE ?? "native";
   if (mode === "mock") {
     return createMockPty();
@@ -30,11 +37,17 @@ export const createPty: PtyFactory = ({ cols, rows, cwd }) => {
         env[key] = value;
       }
     }
+    if (envOverrides && typeof envOverrides === "object") {
+      for (const [key, value] of Object.entries(envOverrides)) {
+        if (!key || typeof value !== "string") continue;
+        env[key] = value;
+      }
+    }
     env.TERM = "xterm-256color";
     if (!env.COLORTERM) {
       env.COLORTERM = "truecolor";
     }
-    return pty.spawn(resolveShell(), [], {
+    return pty.spawn(resolveShell(shell), [], {
       cols,
       rows,
       cwd: cwd ?? process.cwd(),

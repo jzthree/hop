@@ -17,8 +17,14 @@ const SERVER_VERSION = '0.2.2';
 const READ_TERMINAL_MODES = ['raw', 'ui', 'readable_raw'];
 const READABLE_CONTROL_LEVELS = ['full', 'structural', 'none'];
 const DEFAULT_READABLE_CONTROL_LEVEL = 'none';
+const READABLE_NOISE_FILTERS = ['balanced', 'off'];
+const DEFAULT_READABLE_NOISE_FILTER = 'balanced';
 const DEFAULT_READABLE_COALESCE_MS = 250;
 const DEFAULT_READABLE_COALESCE_MAX_CHARS = 32768;
+const READABLE_NOISE_REWRITE_WINDOW_MS = 1000;
+const READABLE_NOISE_STABLE_MS = 800;
+const READABLE_NOISE_MIN_REWRITES = 2;
+const READABLE_SPINNER_PREFIX_RE = /^(?:[\u2800-\u28ff]|[✳✢✶✻✽·◐◓◑◒◴◷◶◵])+\s*/u;
 const WAIT_START_MODES = ['latest', 'cursor', 'beginning'];
 const MAX_BUFFER_EVENTS = 2000;
 const STREAM_CONNECT_TIMEOUT_MS = 800;
@@ -30,6 +36,7 @@ const DEFAULT_SEND_KEY_REPEAT = 1;
 const WAIT_POLL_INTERVAL_MS = 40;
 const DEFAULT_WAIT_MAX_MS = 30000;
 const DEFAULT_WAIT_CAPTURE_MAX_EVENTS = 120;
+const DEFAULT_WAIT_AGENT_DONE_IDLE_MS = 1200;
 const WAIT_TEXT_WINDOW_MAX_CHARS = 65536;
 const DEFAULT_WAIT_PROMPT_REGEX = '(?:^|\\r?\\n)[^\\r\\n]*[#$>%] ?$';
 const STRUCTURAL_READABLE_CONTROL_KINDS = new Set([
@@ -242,6 +249,16 @@ function normalizeReadableControlLevel(raw) {
   return normalized;
 }
 
+function normalizeReadableNoiseFilter(raw) {
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_READABLE_NOISE_FILTER;
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) return DEFAULT_READABLE_NOISE_FILTER;
+  if (!READABLE_NOISE_FILTERS.includes(normalized)) return null;
+  return normalized;
+}
+
 function normalizeReadableCoalesceMs(raw) {
   if (!Number.isFinite(raw)) return DEFAULT_READABLE_COALESCE_MS;
   return Math.max(0, Math.floor(raw));
@@ -281,6 +298,206 @@ function isReadableEmptyOutputEvent(event) {
     && typeof event.text === 'string'
     && event.text.length === 0
   );
+}
+
+function readableEventHasControl(event, kind) {
+  if (!event || typeof event !== 'object') return false;
+  if (!Array.isArray(event.controls) || event.controls.length === 0) return false;
+  return event.controls.some((control) => (
+    control
+    && typeof control === 'object'
+    && control.kind === kind
+  ));
+}
+
+function stripReadableStatusDotAnimation(line) {
+  if (typeof line !== 'string' || line.length === 0) return '';
+  const match = line.match(/^(.*?)(?:\s*(?:\.{1,3}|…))+$/u);
+  if (!match) return line;
+  const stem = match[1].trimEnd();
+  if (/^[A-Za-z0-9][A-Za-z0-9 ()/_-]{0,120}$/.test(stem)) {
+    return stem;
+  }
+  return line;
+}
+
+function normalizeReadableNoiseLine(line) {
+  if (typeof line !== 'string' || line.length === 0) return '';
+  const withoutSpinner = line.replace(READABLE_SPINNER_PREFIX_RE, '');
+  const withoutAnimation = stripReadableStatusDotAnimation(withoutSpinner);
+  return withoutAnimation.replace(/[ \t]+$/g, '');
+}
+
+function normalizeReadableNoiseText(text) {
+  if (typeof text !== 'string' || text.length === 0) return '';
+  return text
+    .split('\n')
+    .map((line) => normalizeReadableNoiseLine(line))
+    .join('\n');
+}
+
+function canonicalizeReadableNoiseText(text) {
+  const normalized = normalizeReadableNoiseText(text);
+  if (!normalized) return '';
+  return normalized
+    .split('\n')
+    .map((line) => line.trim())
+    .join('\n')
+    .trim();
+}
+
+function createReadableNoiseState() {
+  return {
+    filteredBaseByEventId: new Map(),
+    pendingRewrite: null,
+    lastCommittedKey: null,
+    lastSuppressedRewrite: null
+  };
+}
+
+function createReadableEventFromTemplate(templateEvent, text, timestamp) {
+  const event = templateEvent && typeof templateEvent === 'object'
+    ? { ...templateEvent }
+    : { type: 'output' };
+  event.text = text;
+  if (Number.isFinite(timestamp)) {
+    event.timestamp = timestamp;
+  }
+  return event;
+}
+
+function isNoisyPendingRewrite(pending) {
+  return !!(
+    pending
+    && pending.rewriteCount >= READABLE_NOISE_MIN_REWRITES
+  );
+}
+
+function escapeRegExp(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripNoisyRewriteKeyPrefix(text, rewriteKey) {
+  if (typeof text !== 'string' || text.length === 0) return text;
+  const key = canonicalizeReadableNoiseText(typeof rewriteKey === 'string' ? rewriteKey : '');
+  if (!key) return text;
+  const pattern = new RegExp(`^\\s*${escapeRegExp(key)}(?:\\s*(?:\\.{1,3}|…))?\\s*`, 'u');
+  return text.replace(pattern, '');
+}
+
+function maybeEmitReadableCommittedEvent(noiseState, templateEvent, text, timestamp) {
+  const normalizedText = normalizeReadableNoiseText(text);
+  const commitKey = canonicalizeReadableNoiseText(normalizedText);
+  if (!commitKey) return null;
+  if (noiseState.lastCommittedKey === commitKey) return null;
+  noiseState.lastCommittedKey = commitKey;
+  return createReadableEventFromTemplate(templateEvent, normalizedText, timestamp);
+}
+
+function flushReadablePendingRewrite(noiseState, nowTs, output, force = false) {
+  if (!noiseState || !noiseState.pendingRewrite) return;
+  const pending = noiseState.pendingRewrite;
+  const elapsed = Number.isFinite(nowTs) && Number.isFinite(pending.lastTs)
+    ? nowTs - pending.lastTs
+    : 0;
+  const isStable = elapsed >= READABLE_NOISE_STABLE_MS;
+
+  if (!isStable) {
+    if (force) {
+      noiseState.pendingRewrite = null;
+    }
+    return;
+  }
+
+  if (!isNoisyPendingRewrite(pending)) {
+    const committed = maybeEmitReadableCommittedEvent(
+      noiseState,
+      pending.templateEvent,
+      pending.text,
+      pending.lastTs
+    );
+    if (committed) output.push(committed);
+  } else {
+    noiseState.lastSuppressedRewrite = {
+      key: pending.key,
+      lastTs: pending.lastTs
+    };
+  }
+  noiseState.pendingRewrite = null;
+}
+
+function applyBalancedReadableNoiseFilter(noiseState, event) {
+  const output = [];
+  if (event === undefined) return output;
+  if (event === null || typeof event !== 'object') {
+    output.push(event);
+    return output;
+  }
+  const eventTs = Number.isFinite(event && event.timestamp) ? Math.floor(event.timestamp) : Date.now();
+  flushReadablePendingRewrite(noiseState, eventTs, output, false);
+
+  if (!isReadableOutputEvent(event)) {
+    output.push(event);
+    return output;
+  }
+
+  const text = typeof event.text === 'string' ? event.text : '';
+  const hasLineFeed = text.includes('\n') || readableEventHasControl(event, 'line_feed');
+  const isRewriteCandidate = !hasLineFeed
+    && (readableEventHasControl(event, 'carriage_return') || readableEventHasControl(event, 'erase_line'));
+
+  if (isRewriteCandidate) {
+    const normalizedText = normalizeReadableNoiseText(text);
+    const rewriteKey = canonicalizeReadableNoiseText(normalizedText);
+    if (!rewriteKey) {
+      noiseState.pendingRewrite = null;
+      return output;
+    }
+
+    const pending = noiseState.pendingRewrite;
+    const canExtend = pending
+      && pending.key === rewriteKey
+      && Number.isFinite(pending.lastTs)
+      && (eventTs - pending.lastTs) <= READABLE_NOISE_REWRITE_WINDOW_MS;
+
+    if (canExtend) {
+      pending.rewriteCount += 1;
+      pending.lastTs = eventTs;
+      pending.text = normalizedText;
+      pending.templateEvent = event;
+    } else {
+      flushReadablePendingRewrite(noiseState, eventTs, output, true);
+      noiseState.pendingRewrite = {
+        key: rewriteKey,
+        text: normalizedText,
+        firstTs: eventTs,
+        lastTs: eventTs,
+        rewriteCount: 1,
+        templateEvent: event
+      };
+    }
+    return output;
+  }
+
+  let commitText = text;
+  if (noiseState.pendingRewrite) {
+    if (isNoisyPendingRewrite(noiseState.pendingRewrite)) {
+      commitText = stripNoisyRewriteKeyPrefix(commitText, noiseState.pendingRewrite.key);
+    }
+  } else if (
+    noiseState.lastSuppressedRewrite
+    && Number.isFinite(noiseState.lastSuppressedRewrite.lastTs)
+    && (eventTs - noiseState.lastSuppressedRewrite.lastTs) <= READABLE_NOISE_REWRITE_WINDOW_MS
+  ) {
+    commitText = stripNoisyRewriteKeyPrefix(commitText, noiseState.lastSuppressedRewrite.key);
+  }
+  flushReadablePendingRewrite(noiseState, eventTs, output, true);
+  const committed = maybeEmitReadableCommittedEvent(noiseState, event, commitText, eventTs);
+  if (committed) {
+    output.push(committed);
+    noiseState.lastSuppressedRewrite = null;
+  }
+  return output;
 }
 
 function coalesceReadableOutputEvents(events, options = {}) {
@@ -982,7 +1199,8 @@ class TerminalStreamManager {
       cursorHidden: false,
       readableRaw: {
         parser: new ReadableOutputParser(),
-        parsedByEventId: new Map()
+        parsedByEventId: new Map(),
+        noise: createReadableNoiseState()
       }
     };
     this.resetConnectPromise(state);
@@ -1360,6 +1578,17 @@ class TerminalStreamManager {
           state.readableRaw.parsedByEventId.delete(id);
         }
       }
+      if (
+        state.readableRaw.noise
+        && state.readableRaw.noise.filteredBaseByEventId
+        && typeof state.readableRaw.noise.filteredBaseByEventId.delete === 'function'
+      ) {
+        for (const id of state.readableRaw.noise.filteredBaseByEventId.keys()) {
+          if (id < minId) {
+            state.readableRaw.noise.filteredBaseByEventId.delete(id);
+          }
+        }
+      }
     }
   }
 
@@ -1367,6 +1596,24 @@ class TerminalStreamManager {
     const state = this.streams.get(terminalId);
     if (!state) return null;
     return state.nextId - 1;
+  }
+
+  getTerminalFlags(terminalId) {
+    const state = this.streams.get(terminalId);
+    if (!state) {
+      return {
+        exists: false,
+        closed: true,
+        alternateScreen: false,
+        cursorHidden: false
+      };
+    }
+    return {
+      exists: true,
+      closed: !!state.closed,
+      alternateScreen: !!state.alternateScreen,
+      cursorHidden: !!state.cursorHidden
+    };
   }
 
   getBeginningCursor(terminalId) {
@@ -1423,20 +1670,25 @@ class TerminalStreamManager {
       ? Math.max(1, Math.floor(options.maxControlOps))
       : 200;
     const includeRawData = options.includeRawData === true;
+    const includeMetaEvents = options.includeMetaEvents === true;
     const controlLevel = normalizeReadableControlLevel(options.controlLevel) || DEFAULT_READABLE_CONTROL_LEVEL;
+    const noiseFilter = normalizeReadableNoiseFilter(options.noiseFilter) || DEFAULT_READABLE_NOISE_FILTER;
     const coalesceMs = normalizeReadableCoalesceMs(options.coalesceMs);
     const coalesceMaxChars = normalizeReadableCoalesceMaxChars(options.coalesceMaxChars);
     const parsedByEventId = state.readableRaw.parsedByEventId;
     const parser = state.readableRaw.parser;
+    const noiseState = state.readableRaw.noise || (state.readableRaw.noise = createReadableNoiseState());
 
-    const mappedEvents = (records || []).map((record) => {
+    const mappedEntries = (records || []).map((record) => {
       if (!record || typeof record !== 'object') return record;
 
       const event = record.payload;
-      if (!event || typeof event !== 'object') return event;
+      if (!event || typeof event !== 'object') {
+        return { id: record.id, event, rawData: null };
+      }
 
       if ((event.type !== 'output' && event.type !== 'snapshot') || typeof event.data !== 'string') {
-        return event;
+        return { id: record.id, event, rawData: null };
       }
 
       let mapped = parsedByEventId.get(record.id);
@@ -1455,14 +1707,73 @@ class TerminalStreamManager {
         parsedByEventId.set(record.id, mapped);
       }
 
-      const shouldFilterControls = controlLevel !== 'full';
-      let next = mapped;
+      return {
+        id: record.id,
+        event: mapped,
+        rawData: event.data
+      };
+    });
+
+    const withRawData = (event, rawData) => {
+      if (!includeRawData) return event;
+      if (!event || typeof event !== 'object') return event;
+      if (!isReadableOutputEvent(event) && !isReadableEmptyOutputEvent(event)) return event;
+      return {
+        ...event,
+        rawData: typeof rawData === 'string' ? rawData : ''
+      };
+    };
+
+    let mappedEvents;
+    if (noiseFilter === 'balanced') {
+      mappedEvents = [];
+      for (const entry of mappedEntries) {
+        if (!entry || typeof entry !== 'object') continue;
+        const recordId = Number.isFinite(entry.id) ? Math.floor(entry.id) : null;
+        const mappedEvent = entry.event;
+
+        if (recordId === null) {
+          const filtered = applyBalancedReadableNoiseFilter(noiseState, mappedEvent);
+          mappedEvents.push(...filtered.map((item) => withRawData(item, entry.rawData)));
+          continue;
+        }
+
+        let filteredEvents = noiseState.filteredBaseByEventId.get(recordId);
+        if (!filteredEvents) {
+          filteredEvents = applyBalancedReadableNoiseFilter(noiseState, mappedEvent);
+          noiseState.filteredBaseByEventId.set(recordId, filteredEvents);
+        }
+        if (Array.isArray(filteredEvents) && filteredEvents.length > 0) {
+          mappedEvents.push(...filteredEvents.map((item) => withRawData(item, entry.rawData)));
+        }
+      }
+
+      const flushed = [];
+      flushReadablePendingRewrite(noiseState, Date.now(), flushed, false);
+      if (flushed.length > 0) {
+        mappedEvents.push(...flushed.map((item) => withRawData(item, null)));
+      }
+    } else {
+      mappedEvents = mappedEntries.map((entry) => {
+        if (!entry || typeof entry !== 'object') return entry;
+        return withRawData(entry.event, entry.rawData);
+      });
+    }
+
+    const shouldFilterControls = controlLevel !== 'full';
+    const controlFilteredEvents = mappedEvents.map((event) => {
+      if (!event || typeof event !== 'object') return event;
+      if (!isReadableOutputEvent(event) && !isReadableEmptyOutputEvent(event)) {
+        return event;
+      }
+
+      let next = event;
       if (shouldFilterControls || includeRawData) {
-        next = { ...mapped };
+        next = { ...event };
       }
 
       if (shouldFilterControls) {
-        const filteredControls = filterReadableControls(mapped.controls, controlLevel);
+        const filteredControls = filterReadableControls(event.controls, controlLevel);
         if (filteredControls.length > 0) {
           next.controls = filteredControls;
         } else {
@@ -1472,16 +1783,25 @@ class TerminalStreamManager {
       }
 
       if (includeRawData) {
-        next.rawData = event.data;
+        if (!Object.prototype.hasOwnProperty.call(next, 'rawData')) {
+          next.rawData = '';
+        }
       }
 
       return next;
     });
 
     const dropEmptyOutput = controlLevel === 'none' && !includeRawData;
-    const normalizedEvents = dropEmptyOutput
-      ? mappedEvents.filter((event) => !isReadableEmptyOutputEvent(event))
-      : mappedEvents;
+    const nonEmptyEvents = dropEmptyOutput
+      ? controlFilteredEvents.filter((event) => !isReadableEmptyOutputEvent(event))
+      : controlFilteredEvents;
+    const normalizedEvents = includeMetaEvents
+      ? nonEmptyEvents
+      : nonEmptyEvents.filter((event) => (
+        event
+        && typeof event === 'object'
+        && (event.type === 'output' || event.type === 'snapshot')
+      ));
 
     if (coalesceMs > 0) {
       return coalesceReadableOutputEvents(normalizedEvents, { coalesceMs, coalesceMaxChars });
@@ -1532,10 +1852,15 @@ class HopMCPServer {
       },
       readTerminal: {
         modes: READ_TERMINAL_MODES,
+        startFromModes: WAIT_START_MODES,
+        defaultStartFrom: 'beginning',
         uiWindowing: 'cursor_centered_with_densest_nonempty_fallback',
         supportsRawTail: true,
         supportsReadableControls: true,
         readableControlLevels: READABLE_CONTROL_LEVELS,
+        readableNoiseFilters: READABLE_NOISE_FILTERS,
+        readableNoiseDefault: DEFAULT_READABLE_NOISE_FILTER,
+        readableIncludeMetaEventsDefault: false,
         readableRawCoalesce: true,
         readableRawParser: 'stateful_incremental',
         createAttachWarmupMs: CREATE_TERMINAL_OUTPUT_WARMUP_MS,
@@ -1543,6 +1868,13 @@ class HopMCPServer {
           cols: DEFAULT_TERMINAL_COLS,
           rows: DEFAULT_TERMINAL_ROWS
         }
+      },
+      waitTerminal: {
+        startFromModes: WAIT_START_MODES,
+        defaultStartFrom: 'latest',
+        defaultCapture: 'readable_raw',
+        defaultCondition: 'until_agent_done',
+        defaultAgentDoneIdleMs: DEFAULT_WAIT_AGENT_DONE_IDLE_MS
       },
       headless: {
         available: headlessAvailable,
@@ -1738,8 +2070,54 @@ class HopMCPServer {
         }
       },
       {
+        name: 'hop_send_and_wait',
+        description: 'Write input (and optional keypress), then wait for completion/output in one call. Defaults to agent-friendly completion when no explicit wait condition is provided.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            terminal_id: { type: 'string' },
+            data: { type: 'string', description: 'Raw text to write before waiting.' },
+            press_enter: { type: 'boolean', description: 'If true, send an Enter key after data (default: false).' },
+            key: { type: 'string', description: 'Optional named key to send after data (for example enter, esc, ctrl_c).' },
+            repeat: { type: 'number', description: 'Repeat keypress count when key is provided (default: 1).' },
+            wait: { type: 'boolean', description: 'If false, only sends input and skips wait logic (default: true).' },
+            cursor: { type: 'number' },
+            start_from: {
+              type: 'string',
+              enum: WAIT_START_MODES,
+              description: 'Where to start scanning output: latest (tail), cursor (requires cursor), or beginning (oldest buffered event).'
+            },
+            until_regex: { type: 'string' },
+            regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
+            until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
+            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
+            prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
+            idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
+            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
+            capture: { type: 'string', enum: ['raw', 'readable_raw'], description: 'Capture format for returned events (default: readable_raw).' },
+            capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 120).' },
+            maxControlOps: { type: 'number', description: 'In readable_raw capture, max parsed control ops per event (default: 200).' },
+            includeRawData: { type: 'boolean', description: 'In readable_raw capture, include original event data.' },
+            includeMetaEvents: { type: 'boolean', description: 'In readable_raw capture, include non-output meta events (default: false).' },
+            control_level: {
+              type: 'string',
+              enum: READABLE_CONTROL_LEVELS,
+              description: 'In readable_raw capture, control detail level: full, structural, or none.'
+            },
+            noise_filter: {
+              type: 'string',
+              enum: READABLE_NOISE_FILTERS,
+              description: 'In readable_raw capture, text noise filter mode: balanced (default) or off.'
+            },
+            coalesce_ms: { type: 'number', description: 'In readable_raw capture, merge adjacent text frames within this time window (ms).' },
+            coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
+          },
+          required: ['terminal_id']
+        }
+      },
+      {
         name: 'hop_wait_terminal',
-        description: 'Wait for terminal output conditions (regex, prompt, idle) without client polling loops.',
+        description: 'Wait for terminal output conditions (regex, prompt, idle, agent_done) without client polling loops. Defaults to agent_done when no explicit wait condition is provided.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1753,6 +2131,7 @@ class HopMCPServer {
             until_regex: { type: 'string' },
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
+            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
             idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
             max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
@@ -1760,10 +2139,16 @@ class HopMCPServer {
             capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 120).' },
             maxControlOps: { type: 'number', description: 'In readable_raw capture, max parsed control ops per event (default: 200).' },
             includeRawData: { type: 'boolean', description: 'In readable_raw capture, include original event data.' },
+            includeMetaEvents: { type: 'boolean', description: 'In readable_raw capture, include non-output meta events (default: false).' },
             control_level: {
               type: 'string',
               enum: READABLE_CONTROL_LEVELS,
               description: 'In readable_raw capture, control detail level: full, structural, or none.'
+            },
+            noise_filter: {
+              type: 'string',
+              enum: READABLE_NOISE_FILTERS,
+              description: 'In readable_raw capture, text noise filter mode: balanced (default) or off.'
             },
             coalesce_ms: { type: 'number', description: 'In readable_raw capture, merge adjacent text frames within this time window (ms).' },
             coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
@@ -1792,6 +2177,11 @@ class HopMCPServer {
           properties: {
             terminal_id: { type: 'string' },
             cursor: { type: 'number' },
+            start_from: {
+              type: 'string',
+              enum: WAIT_START_MODES,
+              description: 'Where to start reading: latest (tail), cursor (requires cursor), or beginning (oldest buffered event).'
+            },
             maxBytes: { type: 'number' },
             maxEvents: { type: 'number' },
             mode: { type: 'string', enum: READ_TERMINAL_MODES },
@@ -1800,10 +2190,16 @@ class HopMCPServer {
             rawTailMaxEvents: { type: 'number', description: 'In UI mode, max raw tail events to include (default: 40).' },
             maxControlOps: { type: 'number', description: 'In readable_raw mode, max parsed control ops per event (default: 200).' },
             includeRawData: { type: 'boolean', description: 'In readable_raw mode, include original data string per event.' },
+            includeMetaEvents: { type: 'boolean', description: 'In readable_raw mode, include non-output meta events (default: false).' },
             control_level: {
               type: 'string',
               enum: READABLE_CONTROL_LEVELS,
               description: 'In readable_raw mode, control detail level: full, structural, or none.'
+            },
+            noise_filter: {
+              type: 'string',
+              enum: READABLE_NOISE_FILTERS,
+              description: 'In readable_raw mode, text noise filter mode: balanced (default) or off.'
             },
             coalesce_ms: { type: 'number', description: 'In readable_raw mode, merge adjacent text frames within this time window (ms).' },
             coalesce_max_chars: { type: 'number', description: 'In readable_raw mode, max chars per merged frame (default: 16384).' }
@@ -1993,6 +2389,8 @@ class HopMCPServer {
           { endpoint: `/api/terminals/${encodeURIComponent(args.terminal_id)}/write` }
         );
       }
+      case 'hop_send_and_wait':
+        return await this.handleSendAndWait(args);
       case 'hop_wait_terminal':
         return await this.handleWaitTerminal(args);
       case 'hop_resize_terminal': {
@@ -2080,9 +2478,21 @@ class HopMCPServer {
     return this.callApiWithConnection(method, this.baseUrl, this.token, endpoint, body);
   }
 
+  isApiFailurePayload(payload) {
+    const status = payload && Number.isFinite(payload.status) ? Math.floor(payload.status) : null;
+    return !!(
+      payload
+      && typeof payload === 'object'
+      && (
+        payload.ok === false
+        || (status !== null && status >= 400)
+      )
+    );
+  }
+
   wrapApiResult(payload, options = {}) {
     const status = payload && Number.isFinite(payload.status) ? Math.floor(payload.status) : null;
-    if (!payload || typeof payload !== 'object' || (payload.ok !== false && (status === null || status < 400))) {
+    if (!this.isApiFailurePayload(payload)) {
       return this.wrapJson(payload);
     }
 
@@ -2126,31 +2536,132 @@ class HopMCPServer {
     }
   }
 
-  async handleWaitTerminal(args) {
+  async handleSendAndWait(args) {
     const terminalId = args.terminal_id;
     if (!terminalId) {
       return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
+    }
+
+    const data = typeof args.data === 'string' ? args.data : '';
+    const pressEnter = args.press_enter === true;
+    const key = typeof args.key === 'string' ? args.key : '';
+    const shouldWait = args.wait !== false;
+    if (!data && !pressEnter && !key) {
+      return {
+        content: [{ type: 'text', text: 'Error: provide at least one input action (data, press_enter=true, or key).' }],
+        isError: true
+      };
+    }
+
+    await this.prewarmTerminalStream(terminalId);
+    const endpoint = `/api/terminals/${encodeURIComponent(terminalId)}/write`;
+    const cursorBeforeSend = this.streamManager.getLatestCursor(terminalId);
+    const sent = [];
+
+    const sendPayload = async (payload, source) => {
+      const result = await this.callApi('POST', endpoint, { data: payload });
+      if (this.isApiFailurePayload(result)) {
+        return { errorResponse: this.wrapApiResult(result, { endpoint }) };
+      }
+      sent.push({
+        source,
+        bytes: Buffer.byteLength(payload, 'utf8')
+      });
+      return { ok: true };
+    };
+
+    if (data) {
+      const wrote = await sendPayload(data, 'data');
+      if (wrote.errorResponse) return wrote.errorResponse;
+    }
+
+    if (pressEnter) {
+      const entered = await sendPayload('\r', 'press_enter');
+      if (entered.errorResponse) return entered.errorResponse;
+    }
+
+    if (key) {
+      const mapped = resolveSendKeyInput(key, args.repeat);
+      if (!mapped.ok) {
+        return { content: [{ type: 'text', text: `Error: ${mapped.error}` }], isError: true };
+      }
+      const keyed = await sendPayload(mapped.data, `key:${normalizeSendKeyName(key)}`);
+      if (keyed.errorResponse) return keyed.errorResponse;
+    }
+
+    if (!shouldWait) {
+      return this.wrapJson({
+        ok: true,
+        terminal_id: terminalId,
+        sent,
+        waited: false,
+        cursorStart: cursorBeforeSend,
+        cursorEnd: this.streamManager.getLatestCursor(terminalId),
+        next_cursor: this.streamManager.getLatestCursor(terminalId)
+      });
+    }
+
+    const waitArgs = { ...args, terminal_id: terminalId };
+    delete waitArgs.data;
+    delete waitArgs.press_enter;
+    delete waitArgs.key;
+    delete waitArgs.repeat;
+    delete waitArgs.wait;
+
+    if (waitArgs.cursor === undefined && waitArgs.start_from === undefined) {
+      waitArgs.start_from = 'cursor';
+      waitArgs.cursor = cursorBeforeSend;
+    }
+
+    const waited = await this.runWaitTerminal(waitArgs);
+    if (waited.errorResponse) return waited.errorResponse;
+
+    return this.wrapJson({
+      ok: true,
+      terminal_id: terminalId,
+      sent,
+      waited: true,
+      wait: waited.payload,
+      cursorStart: waited.payload.cursorStart,
+      cursorEnd: waited.payload.cursorEnd,
+      next_cursor: waited.payload.cursorEnd
+    });
+  }
+
+  async runWaitTerminal(args) {
+    const terminalId = args.terminal_id;
+    if (!terminalId) {
+      return { errorResponse: { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true } };
     }
 
     const captureMode = typeof args.capture === 'string'
       ? String(args.capture).toLowerCase()
       : 'readable_raw';
     if (captureMode !== 'raw' && captureMode !== 'readable_raw') {
-      return { content: [{ type: 'text', text: 'Error: capture must be "raw" or "readable_raw".' }], isError: true };
+      return { errorResponse: { content: [{ type: 'text', text: 'Error: capture must be "raw" or "readable_raw".' }], isError: true } };
     }
 
     const untilRegexPattern = typeof args.until_regex === 'string' && args.until_regex.length > 0
       ? args.until_regex
       : null;
     const untilPrompt = args.until_prompt === true;
+    const untilAgentDoneRequested = args.until_agent_done === true;
+    const idleWasProvided = args.idle_ms !== undefined && args.idle_ms !== null;
     const idleMs = Number.isFinite(args.idle_ms)
       ? Math.max(1, Math.floor(args.idle_ms))
       : null;
+    let untilAgentDone = untilAgentDoneRequested;
 
-    if (!untilRegexPattern && !untilPrompt && idleMs === null) {
+    if (!untilRegexPattern && !untilPrompt && idleMs === null && args.until_agent_done === undefined) {
+      untilAgentDone = true;
+    }
+
+    if (!untilRegexPattern && !untilPrompt && idleMs === null && !untilAgentDone) {
       return {
-        content: [{ type: 'text', text: 'Error: Provide at least one wait condition: until_regex, until_prompt, or idle_ms.' }],
-        isError: true
+        errorResponse: {
+          content: [{ type: 'text', text: 'Error: Provide at least one wait condition: until_regex, until_prompt, idle_ms, or until_agent_done.' }],
+          isError: true
+        }
       };
     }
 
@@ -2158,7 +2669,7 @@ class HopMCPServer {
     if (untilRegexPattern) {
       const compiled = compileRegex(untilRegexPattern, args.regex_flags, 'm');
       if (!compiled.ok) {
-        return { content: [{ type: 'text', text: `Error: Invalid until_regex (${compiled.error})` }], isError: true };
+        return { errorResponse: { content: [{ type: 'text', text: `Error: Invalid until_regex (${compiled.error})` }], isError: true } };
       }
       untilRegex = compiled.regex;
     }
@@ -2170,7 +2681,7 @@ class HopMCPServer {
         : DEFAULT_WAIT_PROMPT_REGEX;
       const compiled = compileRegex(promptPattern, 'm', 'm');
       if (!compiled.ok) {
-        return { content: [{ type: 'text', text: `Error: Invalid prompt_regex (${compiled.error})` }], isError: true };
+        return { errorResponse: { content: [{ type: 'text', text: `Error: Invalid prompt_regex (${compiled.error})` }], isError: true } };
       }
       promptRegex = compiled.regex;
     }
@@ -2185,26 +2696,43 @@ class HopMCPServer {
       ? Math.max(1, Math.floor(args.maxControlOps))
       : 200;
     const includeRawData = args.includeRawData === true;
+    const includeMetaEvents = args.includeMetaEvents === true;
     let controlLevel = DEFAULT_READABLE_CONTROL_LEVEL;
+    let noiseFilter = DEFAULT_READABLE_NOISE_FILTER;
     let coalesceMs = DEFAULT_READABLE_COALESCE_MS;
     let coalesceMaxChars = DEFAULT_READABLE_COALESCE_MAX_CHARS;
     if (captureMode === 'readable_raw') {
       controlLevel = normalizeReadableControlLevel(args.control_level);
       if (!controlLevel) {
         return {
-          content: [{ type: 'text', text: `Error: control_level must be one of "${READABLE_CONTROL_LEVELS.join('", "')}".` }],
-          isError: true
+          errorResponse: {
+            content: [{ type: 'text', text: `Error: control_level must be one of "${READABLE_CONTROL_LEVELS.join('", "')}".` }],
+            isError: true
+          }
+        };
+      }
+      noiseFilter = normalizeReadableNoiseFilter(args.noise_filter);
+      if (!noiseFilter) {
+        return {
+          errorResponse: {
+            content: [{ type: 'text', text: `Error: noise_filter must be one of "${READABLE_NOISE_FILTERS.join('", "')}".` }],
+            isError: true
+          }
         };
       }
       coalesceMs = normalizeReadableCoalesceMs(args.coalesce_ms);
       coalesceMaxChars = normalizeReadableCoalesceMaxChars(args.coalesce_max_chars);
     }
+
+    const agentDoneIdleMs = untilAgentDone
+      ? (idleMs !== null ? idleMs : DEFAULT_WAIT_AGENT_DONE_IDLE_MS)
+      : null;
     const providedCursor = typeof args.cursor === 'number' ? Math.floor(args.cursor) : null;
     const startFrom = typeof args.start_from === 'string'
       ? String(args.start_from).toLowerCase()
       : null;
     if (startFrom && !WAIT_START_MODES.includes(startFrom)) {
-      return { content: [{ type: 'text', text: 'Error: start_from must be one of "latest", "cursor", or "beginning".' }], isError: true };
+      return { errorResponse: { content: [{ type: 'text', text: 'Error: start_from must be one of "latest", "cursor", or "beginning".' }], isError: true } };
     }
 
     this.streamManager.ensure(this.baseUrl, this.token, this.actor, terminalId);
@@ -2218,7 +2746,7 @@ class HopMCPServer {
 
     if (startFromResolved === 'cursor') {
       if (providedCursor === null) {
-        return { content: [{ type: 'text', text: 'Error: start_from="cursor" requires cursor.' }], isError: true };
+        return { errorResponse: { content: [{ type: 'text', text: 'Error: start_from="cursor" requires cursor.' }], isError: true } };
       }
       cursor = providedCursor;
     } else if (startFromResolved === 'beginning') {
@@ -2238,6 +2766,7 @@ class HopMCPServer {
     let matchedText = null;
     let status = 'timed_out';
     let lastRead = null;
+    let sawOutputLike = false;
 
     while (true) {
       const readResult = this.streamManager.readEvents(terminalId, cursor, 0, captureMaxEvents || 200);
@@ -2248,7 +2777,9 @@ class HopMCPServer {
           ? this.streamManager.mapReadableRawEvents(terminalId, readResult.records, {
             maxControlOps,
             includeRawData,
+            includeMetaEvents,
             controlLevel,
+            noiseFilter,
             coalesceMs,
             coalesceMaxChars
           })
@@ -2256,6 +2787,7 @@ class HopMCPServer {
 
         for (const event of mappedEvents) {
           if (isOutputLikeEvent(event, captureMode)) {
+            sawOutputLike = true;
             lastOutputAt = Date.now();
           }
           textWindow = appendRollingText(textWindow, getOutputTextFromEvent(event, captureMode));
@@ -2289,7 +2821,17 @@ class HopMCPServer {
       }
 
       const now = Date.now();
-      if (idleMs !== null && (now - lastOutputAt) >= idleMs) {
+      if (untilAgentDone && agentDoneIdleMs !== null && sawOutputLike && (now - lastOutputAt) >= agentDoneIdleMs) {
+        const flags = this.streamManager.getTerminalFlags(terminalId);
+        if (flags.exists && !flags.closed && !flags.alternateScreen && !flags.cursorHidden) {
+          matched = 'agent_done';
+          matchedText = null;
+          status = 'matched';
+          break;
+        }
+      }
+
+      if (idleWasProvided && idleMs !== null && (now - lastOutputAt) >= idleMs) {
         matched = 'idle';
         matchedText = null;
         status = 'matched';
@@ -2309,21 +2851,32 @@ class HopMCPServer {
       await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_INTERVAL_MS));
     }
 
-    return this.wrapJson({
+    return {
+      payload: {
       ok: status === 'matched',
       status,
       matched,
       matchedText,
       cursorStart,
       cursorEnd: cursor,
+      next_cursor: cursor,
       startFrom: startFromResolved,
+      untilAgentDone,
+      agentDoneIdleMs,
       waitedMs: Date.now() - startedAt,
       captureMode,
       eventCount: capturedEvents.length,
       events: capturedEvents,
       closed: status === 'closed',
       error: lastRead ? lastRead.error : null
-    });
+      }
+    };
+  }
+
+  async handleWaitTerminal(args) {
+    const outcome = await this.runWaitTerminal(args);
+    if (outcome.errorResponse) return outcome.errorResponse;
+    return this.wrapJson(outcome.payload);
   }
 
   async handleReadTerminal(args) {
@@ -2331,7 +2884,13 @@ class HopMCPServer {
     if (!terminalId) {
       return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
     }
-    const cursor = typeof args.cursor === 'number' ? args.cursor : null;
+    const providedCursor = typeof args.cursor === 'number' ? Math.floor(args.cursor) : null;
+    const startFrom = typeof args.start_from === 'string'
+      ? String(args.start_from).toLowerCase()
+      : null;
+    if (startFrom && !WAIT_START_MODES.includes(startFrom)) {
+      return { content: [{ type: 'text', text: 'Error: start_from must be one of "latest", "cursor", or "beginning".' }], isError: true };
+    }
     const maxBytes = typeof args.maxBytes === 'number' ? args.maxBytes : 0;
     const maxEvents = typeof args.maxEvents === 'number' ? args.maxEvents : 0;
     const mode = typeof args.mode === 'string' ? String(args.mode).toLowerCase() : 'raw';
@@ -2342,12 +2901,37 @@ class HopMCPServer {
     }
 
     this.streamManager.ensure(this.baseUrl, this.token, this.actor, terminalId);
-    if (cursor === null) {
-      await this.streamManager.waitUntilConnected(terminalId, 300);
+    await this.streamManager.waitUntilConnected(terminalId, 300);
+
+    let startFromResolved = startFrom;
+    if (!startFromResolved) {
+      startFromResolved = providedCursor === null ? 'beginning' : 'cursor';
     }
-    const result = this.streamManager.readEvents(terminalId, cursor, maxBytes, maxEvents);
+    let cursorStart = null;
+    if (startFromResolved === 'cursor') {
+      if (providedCursor === null) {
+        return { content: [{ type: 'text', text: 'Error: start_from="cursor" requires cursor.' }], isError: true };
+      }
+      cursorStart = providedCursor;
+    } else if (startFromResolved === 'beginning') {
+      cursorStart = this.streamManager.getBeginningCursor(terminalId);
+    } else {
+      cursorStart = this.streamManager.getLatestCursor(terminalId);
+    }
+    if (cursorStart === null) {
+      cursorStart = this.streamManager.getLatestCursor(terminalId);
+    }
+
+    const result = this.streamManager.readEvents(terminalId, cursorStart, maxBytes, maxEvents);
+    const cursorEnd = result.cursor;
     if (mode === 'raw') {
-      return this.wrapJson(result);
+      return this.wrapJson({
+        ...result,
+        cursorStart,
+        cursorEnd,
+        next_cursor: cursorEnd,
+        startFrom: startFromResolved
+      });
     }
 
     if (mode === 'readable_raw') {
@@ -2355,10 +2939,18 @@ class HopMCPServer {
         ? Math.max(1, Math.floor(args.maxControlOps))
         : 200;
       const includeRawData = args.includeRawData === true;
+      const includeMetaEvents = args.includeMetaEvents === true;
       const controlLevel = normalizeReadableControlLevel(args.control_level);
       if (!controlLevel) {
         return {
           content: [{ type: 'text', text: `Error: control_level must be one of "${READABLE_CONTROL_LEVELS.join('", "')}".` }],
+          isError: true
+        };
+      }
+      const noiseFilter = normalizeReadableNoiseFilter(args.noise_filter);
+      if (!noiseFilter) {
+        return {
+          content: [{ type: 'text', text: `Error: noise_filter must be one of "${READABLE_NOISE_FILTERS.join('", "')}".` }],
           isError: true
         };
       }
@@ -2367,14 +2959,20 @@ class HopMCPServer {
       const events = this.streamManager.mapReadableRawEvents(terminalId, result.records || [], {
         maxControlOps,
         includeRawData,
+        includeMetaEvents,
         controlLevel,
+        noiseFilter,
         coalesceMs,
         coalesceMaxChars
       });
 
       return this.wrapJson({
         mode: 'readable_raw',
-        cursor: result.cursor,
+        cursor: cursorEnd,
+        cursorStart,
+        cursorEnd,
+        next_cursor: cursorEnd,
+        startFrom: startFromResolved,
         done: result.done,
         closed: result.closed,
         error: result.error,
@@ -2394,7 +2992,11 @@ class HopMCPServer {
     await this.streamManager.flushVirtualScreen(terminalId);
     const payload = {
       mode: 'ui',
-      cursor: result.cursor,
+      cursor: cursorEnd,
+      cursorStart,
+      cursorEnd,
+      next_cursor: cursorEnd,
+      startFrom: startFromResolved,
       done: result.done,
       closed: result.closed,
       error: result.error,

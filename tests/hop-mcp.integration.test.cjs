@@ -276,6 +276,7 @@ test('hop-mcp tools/resources basic flow', async () => {
     const tools = await call('tools/list');
     const toolNames = tools.result.tools.map(t => t.name);
     assert.ok(toolNames.includes('hop_create_terminal'));
+    assert.ok(toolNames.includes('hop_send_and_wait'));
     assert.ok(toolNames.includes('hop_wait_terminal'));
     assert.ok(!toolNames.includes('hop_exec_terminal'));
     assert.ok(toolNames.includes('hop_server_info'));
@@ -528,6 +529,98 @@ test('hop_wait_terminal matches idle condition when terminal is quiet', async ()
   }
 });
 
+test('hop_wait_terminal defaults to until_agent_done when no condition is provided', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: '' });
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+
+    const created = await call('tools/call', {
+      name: 'hop_create_terminal',
+      arguments: { name: 'wait-agent-done-default-test' }
+    });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+    assert.ok(createdPayload.id);
+
+    await call('tools/call', {
+      name: 'hop_write_terminal',
+      arguments: { terminal_id: createdPayload.id, data: 'TASK_COMPLETE\n' }
+    });
+
+    const waited = await call('tools/call', {
+      name: 'hop_wait_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        start_from: 'beginning',
+        max_wait_ms: 2500,
+        capture: 'readable_raw'
+      }
+    });
+    const parsed = JSON.parse(waited.result.content[0].text);
+    const text = (parsed.events || [])
+      .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
+      .join('');
+
+    assert.equal(parsed.status, 'matched');
+    assert.equal(parsed.matched, 'agent_done');
+    assert.equal(parsed.untilAgentDone, true);
+    assert.equal(parsed.startFrom, 'beginning');
+    assert.equal(parsed.next_cursor, parsed.cursorEnd);
+    assert.match(text, /TASK_COMPLETE/);
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
+test('hop_send_and_wait writes input and returns waited delta output', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: '' });
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+
+    const created = await call('tools/call', {
+      name: 'hop_create_terminal',
+      arguments: { name: 'send-and-wait-test' }
+    });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+    assert.ok(createdPayload.id);
+
+    const sent = await call('tools/call', {
+      name: 'hop_send_and_wait',
+      arguments: {
+        terminal_id: createdPayload.id,
+        data: 'SENT_AND_WAIT_MARKER\n',
+        max_wait_ms: 2500,
+        capture: 'readable_raw'
+      }
+    });
+    const parsed = JSON.parse(sent.result.content[0].text);
+    const waitPayload = parsed.wait || {};
+    const text = (waitPayload.events || [])
+      .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
+      .join('');
+
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.waited, true);
+    assert.equal(waitPayload.status, 'matched');
+    assert.equal(waitPayload.matched, 'agent_done');
+    assert.equal(waitPayload.next_cursor, waitPayload.cursorEnd);
+    assert.match(text, /SENT_AND_WAIT_MARKER/);
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
 test('hop_read_terminal ui mode returns screen snapshot and raw tail', async () => {
   const { server, port } = await startMockHopStreamServer();
   const { child, call } = startMcp({
@@ -665,6 +758,42 @@ test('hop_read_terminal readable_raw preserves text with compact controls', asyn
   }
 });
 
+test('hop_read_terminal readable_raw excludes meta events by default', async () => {
+  const { server, port } = await startMockHopStreamServer();
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+
+    const created = await call('tools/call', { name: 'hop_create_terminal', arguments: { name: 'readable-meta-default-test' } });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+    assert.ok(createdPayload.id);
+
+    const read = await call('tools/call', {
+      name: 'hop_read_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        mode: 'readable_raw',
+        maxEvents: 40
+      }
+    });
+
+    const parsed = JSON.parse(read.result.content[0].text);
+    assert.ok(Array.isArray(parsed.events));
+    assert.ok(parsed.events.every((event) => (
+      event
+      && typeof event === 'object'
+      && (event.type === 'output' || event.type === 'snapshot')
+    )));
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
 test('hop_read_terminal readable_raw supports structural control filtering', async () => {
   const { server, port } = await startMockHopStreamServer({ startupOutput: '' });
   const { child, call } = startMcp({
@@ -759,6 +888,151 @@ test('hop_read_terminal readable_raw coalesces adjacent output frames', async ()
     assert.match(allText, /COALESCE_ABC/);
     assert.equal(outputEvents.length, 1);
     assert.ok(outputEvents.every((event) => !Object.prototype.hasOwnProperty.call(event, 'controls')));
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
+test('hop_read_terminal readable_raw default balanced noise filter suppresses rewrite bursts', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: '' });
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+
+    const created = await call('tools/call', { name: 'hop_create_terminal', arguments: { name: 'readable-noise-balanced-test' } });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+    assert.ok(createdPayload.id);
+
+    const spinnerFrames = ['\rSpinning...', '\rSpinning...', '\rSpinning...'];
+    for (const frame of spinnerFrames) {
+      await call('tools/call', {
+        name: 'hop_write_terminal',
+        arguments: { terminal_id: createdPayload.id, data: frame }
+      });
+    }
+    await call('tools/call', {
+      name: 'hop_write_terminal',
+      arguments: { terminal_id: createdPayload.id, data: 'DONE\n' }
+    });
+
+    const read = await call('tools/call', {
+      name: 'hop_read_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        mode: 'readable_raw',
+        maxEvents: 120
+      }
+    });
+    const parsed = JSON.parse(read.result.content[0].text);
+    const text = (parsed.events || [])
+      .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
+      .join('');
+
+    assert.match(text, /DONE/);
+    assert.ok(!/Spinning/.test(text), `expected spinner/status burst to be suppressed, got: ${text}`);
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
+test('hop_read_terminal readable_raw noise_filter=off preserves rewrite burst text', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: '' });
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+
+    const created = await call('tools/call', { name: 'hop_create_terminal', arguments: { name: 'readable-noise-off-test' } });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+    assert.ok(createdPayload.id);
+
+    const spinnerFrames = ['\rSpinning...', '\rSpinning...', '\rSpinning...'];
+    for (const frame of spinnerFrames) {
+      await call('tools/call', {
+        name: 'hop_write_terminal',
+        arguments: { terminal_id: createdPayload.id, data: frame }
+      });
+    }
+
+    const read = await call('tools/call', {
+      name: 'hop_read_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        mode: 'readable_raw',
+        noise_filter: 'off',
+        maxEvents: 120
+      }
+    });
+    const parsed = JSON.parse(read.result.content[0].text);
+    const text = (parsed.events || [])
+      .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
+      .join('');
+
+    assert.match(text, /Spinning/);
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
+test('hop_read_terminal readable_raw balanced commits a single stable rewrite line', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: '' });
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+
+    const created = await call('tools/call', { name: 'hop_create_terminal', arguments: { name: 'readable-noise-stable-test' } });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+    assert.ok(createdPayload.id);
+
+    await call('tools/call', {
+      name: 'hop_write_terminal',
+      arguments: { terminal_id: createdPayload.id, data: '\rPROMPT> ' }
+    });
+
+    const firstRead = await call('tools/call', {
+      name: 'hop_read_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        mode: 'readable_raw',
+        maxEvents: 60
+      }
+    });
+    const firstPayload = JSON.parse(firstRead.result.content[0].text);
+    const firstText = (firstPayload.events || [])
+      .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
+      .join('');
+    assert.ok(!/PROMPT>/.test(firstText), `expected rewrite line to be pending initially, got: ${firstText}`);
+
+    await delay(900);
+
+    const secondRead = await call('tools/call', {
+      name: 'hop_read_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        mode: 'readable_raw',
+        cursor: firstPayload.cursor,
+        maxEvents: 60
+      }
+    });
+    const secondPayload = JSON.parse(secondRead.result.content[0].text);
+    const secondText = (secondPayload.events || [])
+      .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
+      .join('');
+    assert.match(secondText, /PROMPT>/);
   } finally {
     child.kill();
     server.close();
@@ -1194,6 +1468,68 @@ test('hop_wait_terminal start_from cursor requires cursor argument', async () =>
     });
     assert.equal(waited.result.isError, true);
     assert.match(waited.result.content[0].text, /requires cursor/);
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
+test('hop_read_terminal supports start_from cursor for deterministic deltas', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: 'BOOT_READY\n' });
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const created = await call('tools/call', { name: 'hop_create_terminal', arguments: { name: 'read-start-delta-test' } });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+    assert.ok(createdPayload.id);
+
+    const firstRead = await call('tools/call', {
+      name: 'hop_read_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        mode: 'raw',
+        start_from: 'beginning',
+        maxEvents: 60
+      }
+    });
+    const firstPayload = JSON.parse(firstRead.result.content[0].text);
+    const firstText = (firstPayload.events || [])
+      .filter((event) => event && event.type === 'output' && typeof event.data === 'string')
+      .map((event) => event.data)
+      .join('');
+    assert.match(firstText, /BOOT_READY/);
+    assert.equal(firstPayload.startFrom, 'beginning');
+    assert.equal(firstPayload.next_cursor, firstPayload.cursorEnd);
+
+    await call('tools/call', {
+      name: 'hop_write_terminal',
+      arguments: { terminal_id: createdPayload.id, data: 'DELTA_ONLY\n' }
+    });
+
+    const secondRead = await call('tools/call', {
+      name: 'hop_read_terminal',
+      arguments: {
+        terminal_id: createdPayload.id,
+        mode: 'raw',
+        start_from: 'cursor',
+        cursor: firstPayload.cursorEnd,
+        maxEvents: 60
+      }
+    });
+    const secondPayload = JSON.parse(secondRead.result.content[0].text);
+    const secondText = (secondPayload.events || [])
+      .filter((event) => event && event.type === 'output' && typeof event.data === 'string')
+      .map((event) => event.data)
+      .join('');
+    assert.equal(secondPayload.startFrom, 'cursor');
+    assert.equal(secondPayload.cursorStart, firstPayload.cursorEnd);
+    assert.equal(secondPayload.next_cursor, secondPayload.cursorEnd);
+    assert.match(secondText, /DELTA_ONLY/);
+    assert.ok(!/BOOT_READY/.test(secondText));
   } finally {
     child.kill();
     server.close();

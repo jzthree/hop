@@ -81,6 +81,25 @@ const findMessages = (socket: FakeSocket, type: string) => {
 };
 
 describe("Room", () => {
+  it("passes room create options to the PTY factory", () => {
+    let capturedOptions: any = null;
+    const factory: PtyFactory = (options) => {
+      capturedOptions = options;
+      return new FakePty() as any;
+    };
+
+    const manager = new RoomManager(factory);
+    manager.getRoom("opts", { cols: 80, rows: 24 }, {
+      cwd: "/tmp/demo",
+      env: { HISTFILE: "/tmp/.history" },
+      shell: "/bin/zsh"
+    });
+
+    expect(capturedOptions?.cwd).toBe("/tmp/demo");
+    expect(capturedOptions?.env?.HISTFILE).toBe("/tmp/.history");
+    expect(capturedOptions?.shell).toBe("/bin/zsh");
+  });
+
   it("broadcasts pty output to all clients", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {
@@ -142,5 +161,65 @@ describe("Room", () => {
     const presenceMessages = findMessages(socketA, "presence");
     const latest = presenceMessages.at(-1) as any;
     expect(latest?.clients).toHaveLength(1);
+  });
+
+  it("emits room PTY lifecycle events for embedding servers", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("events", { cols: 80, rows: 24 });
+    const socket = new FakeSocket();
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socket);
+
+    const inputs: any[] = [];
+    const outputs: any[] = [];
+    const resizes: any[] = [];
+    const states: any[] = [];
+    const ends: any[] = [];
+    room.on("pty_input", (payload) => inputs.push(payload));
+    room.on("pty_output", (payload) => outputs.push(payload));
+    room.on("pty_resize", (payload) => resizes.push(payload));
+    room.on("pty_state", (payload) => states.push(payload));
+    room.on("session_end", (payload) => ends.push(payload));
+
+    socket.emitMessage({ type: "input", data: "pwd\n" });
+    ptyInstance?.emit("ok\n");
+    ptyInstance?.emit("\x1b[?1049h");
+    ptyInstance?.emit("\x1b[?1049l");
+    socket.emitMessage({ type: "resize", cols: 100, rows: 30 });
+    room.kill();
+
+    expect(inputs.at(-1)?.clientId).toBe("a");
+    expect(inputs.at(-1)?.data).toBe("pwd\n");
+    expect(outputs.some((payload) => payload?.data === "ok\n")).toBe(true);
+    expect(resizes.at(-1)?.cols).toBe(100);
+    expect(resizes.at(-1)?.rows).toBe(30);
+    expect(states.at(0)?.alternateScreen).toBe(true);
+    expect(states.at(1)?.alternateScreen).toBe(false);
+    expect(ends.at(-1)?.message).toBe("Session terminated");
+  });
+
+  it("supports system input writes for host-level session setup", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("system", { cols: 80, rows: 24 });
+    const inputs: any[] = [];
+    room.on("pty_input", (payload) => inputs.push(payload));
+
+    room.sendSystemInput("export HISTFILE=/tmp/demo.history\\n", "hop");
+
+    expect(ptyInstance?.writes.at(-1)).toBe("export HISTFILE=/tmp/demo.history\\n");
+    expect(inputs.at(-1)?.actor).toBe("system");
+    expect(inputs.at(-1)?.source).toBe("hop");
+    expect(inputs.at(-1)?.clientId).toBe(null);
   });
 });

@@ -83,20 +83,6 @@ Safety notes:
 - Keep one subagent per terminal (no multiplexing multiple agent CLIs in one PTY).
 - For existing user sessions, verify `agentPermitted` (or set with `hop_set_agent_permission`) before writing input.
 
-## Safe Multi-Agent Runs
-
-For team orchestration with rollback/interrupt controls, see:
-
-- `AGENT-TEAM-RUNBOOK.md`
-
-Quick control commands:
-
-```bash
-npm run agent-team -- start my-run
-npm run agent-team -- interrupt <terminal-id> ...
-npm run agent-team -- rollback
-```
-
 ## Remote Hop
 
 To connect to a remote hop instance, set env vars or use `connect_server`:

@@ -69,9 +69,6 @@ source ~/.zshrc
 ```bash
 # Start hopping!
 hop
-
-# Use iTerm control mode for local session
-hop --iterm
 ```
 
 **First time:**
@@ -102,9 +99,13 @@ hop session add myapp --port 3000
 
 ## 🧾 Session History & Audit Logs
 
-Hop isolates shell history per terminal session and writes per-session audit logs by default.
+Hop always writes per-session audit logs.
+Shell history isolation is role-based by default:
 
-- History file: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
+- Agent-created terminal sessions: isolated history file per session
+- User-created terminal sessions: keep your shell default history file (opt-in isolation available)
+
+- Isolated history file path: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
 - Audit log (NDJSON): `~/.hop2/workspaces/<workspace>/logs/<internal-session>/audit.ndjson`
 - Audit events include `session_start`, `input`, `resize`, `session_end`, plus:
 - `audit_mode` / `pty_state` transitions (auto-switches between `stream` and `tui_keyframe`)
@@ -115,6 +116,10 @@ Hop isolates shell history per terminal session and writes per-session audit log
 Tunable defaults:
 
 - `HOP_SESSION_HISTORY_SIZE` (default `5000`)
+- `HOP_AGENT_HISTORY_ISOLATION` (default `1`)
+- `HOP_USER_HISTORY_ISOLATION` (default `0`)
+- `HOP_AGENT_POST_START_HISTORY_INIT` (default `1`)
+- `HOP_POST_START_HISTORY_INIT` (default `0`, forces post-start history init for all sessions)
 - `HOP_SESSION_AUDIT_INLINE_MAX_BYTES` (default `4096`)
 - `HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS` (default `750`)
 - `HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS` (default `20000`)
@@ -165,13 +170,13 @@ On mobile devices, Hop provides a custom virtual keyboard designed for terminal 
 - First-time users will see a tooltip pointing to the native keyboard button
 - Use the native keyboard for longer text input with autocomplete
 
-## 🖥️ iTerm Integration
+## 🖥️ Local Attach
 
 ```bash
-hop --iterm
+hop attach <session>
 ```
 
-Uses tmux control mode (`-CC`) for native scrolling, copy/paste, splits, and search. Session remains accessible via web.
+Attach your local terminal client to an existing hop terminal session.
 
 ## 🔌 Port Sessions
 
@@ -189,7 +194,8 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | Command | Description |
 |---------|-------------|
 | `hop` | Start hop (or attach to existing tunnel) |
-| `hop --iterm` | Use iTerm tmux control mode for local session |
+| `hop attach all` | Attach sequentially to all terminal sessions |
+| `hop local [session]` | Start/attach a daemonless local terminal |
 | `hop url` | Print current tunnel URL |
 | `hop qr` | Show QR code for current URL |
 | `hop domain <hostname>` | Set custom domain (named tunnel) |
@@ -205,14 +211,20 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | `hop session add <name> --port N` | Create a port session (proxy) |
 | `hop session remove <name>` | Remove a session |
 | `hop client <credentials>` | Run hop with exported credentials |
-| `hop wipe` | Kill all hop tmux sessions |
+| `hop wipe` | Remove all hop sessions |
 | `quit` | Type at exit prompt to shutdown tunnel |
+
+## 🧪 Terminal Backend
+
+`hop` now defaults to the `external` terminal backend (PTYs in a separate local hay host process).
+
+- The host persists across hop daemon restarts.
+- Host state is tracked in `~/.hop2/.hay-host-state`.
+- Set `HOP_TERMINAL_BACKEND=embedded` to force legacy in-process PTYs.
 
 ## 📦 Dependencies
 
 Installed automatically via Homebrew:
-- `tmux` — Terminal multiplexer
-- `ttyd` — Web terminal
 - `cloudflared` — Cloudflare tunnel
 
 Node.js packages:
@@ -275,7 +287,7 @@ Make sure `cloudflared` is installed: `brew install cloudflared`
 
 **Stuck processes?**
 ```bash
-pkill ttyd; pkill cloudflared; tmux kill-server
+pkill cloudflared
 ```
 
 ## 📝 License

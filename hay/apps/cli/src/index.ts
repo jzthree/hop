@@ -175,7 +175,15 @@ const PAN_STEP = 2;
 const PAN_FAST_STEP = 10;
 let cursorVisible = true;
 const SCROLL_STEP = 3;
+const REMOTE_MOUSE_MODE_PARAMS = new Set([9, 1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016]);
+const REMOTE_ALT_SCREEN_PARAMS = new Set([47, 1047, 1049]);
+const REMOTE_APPLICATION_CURSOR_MODE_PARAM = 1;
+const PRIVATE_MODE_TAIL_CHARS = 64;
 let pendingInput = "";
+let remoteMouseModes = new Set<number>();
+let remoteAlternateScreen = false;
+let remoteApplicationCursor = false;
+let pendingPrivateMode = "";
 type RgbColor = { r: number; g: number; b: number };
 let defaultFg: RgbColor | null = null;
 let defaultBg: RgbColor | null = null;
@@ -193,6 +201,7 @@ let typingTimeout: NodeJS.Timeout | null = null;
 let noticeTimer: NodeJS.Timeout | null = null;
 let exitCode = 0;
 let exitMessage: string | null = null;
+let shortcutsEnabledAt = 0;
 
 let collabMode = true;
 let controllerId: string | null = null;
@@ -252,21 +261,35 @@ terminal.onData((data) => {
 
 const filterFocusSequences = (data: string) => data.replace(/\x1b\[I/g, "").replace(/\x1b\[O/g, "");
 
+const getDirectionalKey = (direction: number) => {
+  if (remoteApplicationCursor) {
+    return direction > 0 ? "\x1bOB" : "\x1bOA";
+  }
+  return direction > 0 ? "\x1b[B" : "\x1b[A";
+};
+
 const stripMouseSequences = (data: string) => {
-  let didScroll = false;
-  const cleaned = data.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (_, buttonText, _x, _y, kind) => {
+  const cleaned = data.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (sequence, buttonText, _x, _y, kind) => {
     const button = Number(buttonText);
     const isWheel = (button & 64) === 64;
     if (isWheel && kind === "M") {
       const direction = (button & 1) === 1 ? 1 : -1;
+      const isTuiLikeMode = remoteAlternateScreen || remoteMouseModes.size > 0;
+      if (isTuiLikeMode) {
+        return getDirectionalKey(direction).repeat(SCROLL_STEP);
+      }
+      // In normal shell mode, wheel should pan local viewport scrollback.
       viewY += direction * SCROLL_STEP;
       clampView();
       scheduleRender();
-      didScroll = true;
+      return "";
+    }
+    if (remoteMouseModes.size > 0) {
+      return sequence;
     }
     return "";
   });
-  return { cleaned, didScroll };
+  return { cleaned };
 };
 
 const parseOscColor = (value: string): RgbColor | null => {
@@ -391,17 +414,65 @@ const setCursorVisible = (visible: boolean) => {
   scheduleRender();
 };
 
-terminal.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
-  if (params.includes(25)) {
-    setCursorVisible(false);
+const applyPrivateModes = (params: readonly number[], enabled: boolean) => {
+  for (const param of params) {
+    if (param === REMOTE_APPLICATION_CURSOR_MODE_PARAM) {
+      remoteApplicationCursor = enabled;
+      continue;
+    }
+    if (param === 25) {
+      setCursorVisible(enabled);
+      continue;
+    }
+    if (REMOTE_MOUSE_MODE_PARAMS.has(param)) {
+      if (enabled) {
+        remoteMouseModes.add(param);
+      } else {
+        remoteMouseModes.delete(param);
+      }
+      continue;
+    }
+    if (REMOTE_ALT_SCREEN_PARAMS.has(param)) {
+      remoteAlternateScreen = enabled;
+    }
   }
+};
+
+const trackPrivateModes = (chunk: string) => {
+  if (!chunk) return;
+  const combined = pendingPrivateMode + chunk;
+  const modeRegex = /\x1b\[\?([0-9;]*)([hl])/g;
+  let match: RegExpExecArray | null;
+  let lastCompleteIndex = 0;
+  while ((match = modeRegex.exec(combined)) !== null) {
+    const params = match[1]
+      .split(";")
+      .filter(Boolean)
+      .map((param) => Number.parseInt(param, 10))
+      .filter((param) => Number.isFinite(param));
+    applyPrivateModes(params, match[2] === "h");
+    lastCompleteIndex = modeRegex.lastIndex;
+  }
+
+  const trailingStart = combined.lastIndexOf("\x1b[?");
+  if (trailingStart !== -1 && trailingStart >= lastCompleteIndex) {
+    const trailing = combined.slice(trailingStart);
+    if (!/[hl]/.test(trailing)) {
+      pendingPrivateMode = trailing.slice(-PRIVATE_MODE_TAIL_CHARS);
+      return;
+    }
+  }
+
+  pendingPrivateMode = combined.slice(-PRIVATE_MODE_TAIL_CHARS);
+};
+
+terminal.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+  applyPrivateModes(params, false);
   return false;
 });
 
 terminal.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
-  if (params.includes(25)) {
-    setCursorVisible(true);
-  }
+  applyPrivateModes(params, true);
   return false;
 });
 
@@ -945,6 +1016,11 @@ const connect = () => {
 
   ws.on("open", () => {
     connected = true;
+    remoteMouseModes.clear();
+    remoteAlternateScreen = false;
+    remoteApplicationCursor = false;
+    pendingPrivateMode = "";
+    shortcutsEnabledAt = Date.now() + 400;
     reconnectAttempt = 0;
     setStatus("connected");
     initUi();
@@ -975,6 +1051,7 @@ const connect = () => {
         break;
       case "output":
         {
+          trackPrivateModes(message.data);
           trackOscColors(message.data);
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
@@ -1000,6 +1077,10 @@ const connect = () => {
         break;
       case "snapshot":
         {
+          trackPrivateModes(message.data);
+          if (typeof message.alternateScreen === "boolean") {
+            remoteAlternateScreen = message.alternateScreen;
+          }
           trackOscColors(message.data);
           terminal.clear();
           const filtered = filterFocusSequences(message.data);
@@ -1102,9 +1183,10 @@ const handleLocalShortcut = (input: string) => {
 
   const shouldExitImmediately =
     !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+  const ctrlShortcutsReady = Date.now() >= shortcutsEnabledAt;
 
   // Ctrl+Q to kill session
-  if (input === "\x11") {
+  if (ctrlShortcutsReady && input === "\x11") {
     shouldReconnect = false;
     exitCode = KILL_EXIT_CODE;
     if (reconnectTimer) {
@@ -1120,7 +1202,7 @@ const handleLocalShortcut = (input: string) => {
   }
 
   // Ctrl+G to detach
-  if (input === "\x07") {
+  if (ctrlShortcutsReady && input === "\x07") {
     shouldReconnect = false;
     exitCode = DETACH_EXIT_CODE;
     if (reconnectTimer) {
@@ -1135,7 +1217,7 @@ const handleLocalShortcut = (input: string) => {
   }
 
   // Ctrl+T toggles hint bar
-  if (input === "\x14") {
+  if (ctrlShortcutsReady && input === "\x14") {
     showHints = !showHints;
     saveConfig({ ...configFile, showHints });
     pushNotice(`Hints ${showHints ? "on" : "off"}`);

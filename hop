@@ -21,6 +21,7 @@ const DAEMON_FLAG = process.argv.includes('--daemon');
 
 // Hay integration for terminal sharing (built from ./hay)
 const HAY_ROOT = path.join(__dirname, 'hay');
+const TERMINAL_BACKEND = process.env.HOP_TERMINAL_BACKEND === 'embedded' ? 'embedded' : 'external';
 let didBuildHay = false;
 let hay = null;
 let hayRooms = null;
@@ -177,11 +178,18 @@ const SESSION_AUDIT_INLINE_MAX_BYTES = parsePositiveIntEnv('HOP_SESSION_AUDIT_IN
 const SESSION_TUI_KEYFRAME_INTERVAL_MS = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS', 750);
 const SESSION_TUI_KEYFRAME_TAIL_CHARS = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS', 20000);
 const SESSION_TUI_KEYFRAME_MAX_LINES = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_MAX_LINES', 80);
+const ENABLE_AGENT_HISTORY_ISOLATION = process.env.HOP_AGENT_HISTORY_ISOLATION !== '0';
+const ENABLE_USER_HISTORY_ISOLATION = process.env.HOP_USER_HISTORY_ISOLATION === '1';
+const ENABLE_AGENT_POST_START_HISTORY_INIT = process.env.HOP_AGENT_POST_START_HISTORY_INIT !== '0';
+const ENABLE_POST_START_HISTORY_INIT = process.env.HOP_POST_START_HISTORY_INIT === '1';
 let SECRET_FILE_PATH = DEFAULT_SECRET_FILE;
 let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
 const SESSIONS_FILE = path.join(HOME_DIR, '.sessions.json');
 const WORKSPACES_DIR = path.join(HOME_DIR, 'workspaces');
 const WORKSPACE_POINTER_FILE = path.join(HOME_DIR, '.workspace');
+const HAY_HOST_STATE_FILE = path.join(HOME_DIR, '.hay-host-state');
+const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 5000);
+let hayHostState = null;
 
 function parsePositiveIntEnv(name, fallback) {
     const raw = process.env[name];
@@ -228,7 +236,22 @@ function clearPassword() {
 function isPasswordEnabled() {
     return fs.existsSync(PASSWORD_FILE_PATH);
 }
-const HOP_SESSION_PREFIX = 'hop2-';  // Prefix for hop2 sessions (separate from hop which uses 'hop-')
+const LEGACY_SESSION_PREFIXES = ['hop2-'];
+
+function stripLegacySessionPrefix(name) {
+    if (!name || typeof name !== 'string') return name;
+    for (const prefix of LEGACY_SESSION_PREFIXES) {
+        if (name.startsWith(prefix)) {
+            return name.slice(prefix.length);
+        }
+    }
+    return name;
+}
+
+function isLegacyInternalSessionName(name) {
+    if (!name || typeof name !== 'string') return false;
+    return LEGACY_SESSION_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
 
 ensurePrivateDir(LOG_DIR);
 ensurePrivateDir(WORKSPACES_DIR);
@@ -236,14 +259,12 @@ ensurePrivateDir(WORKSPACES_DIR);
 function toInternalSessionName(displayName) {
     if (!displayName || typeof displayName !== 'string') return null;
     if (!SESSION_NAME_RE.test(displayName)) return null;
-    return HOP_SESSION_PREFIX + displayName;
+    return displayName;
 }
 
 function toDisplaySessionName(internalName) {
     if (!internalName || typeof internalName !== 'string') return '';
-    return internalName.startsWith(HOP_SESSION_PREFIX)
-        ? internalName.slice(HOP_SESSION_PREFIX.length)
-        : internalName;
+    return stripLegacySessionPrefix(internalName);
 }
 
 const SESSION_STORE_VERSION = 2;
@@ -265,13 +286,42 @@ function normalizeSessionStore(raw) {
     if (!raw || typeof raw !== 'object') return empty;
 
     if (raw.version === SESSION_STORE_VERSION && raw.sessions && typeof raw.sessions === 'object') {
-        const sessions = raw.sessions || {};
+        const rawSessions = raw.sessions || {};
+        const sessions = {};
+        const canonicalNameMap = new Map();
+        for (const [name, config] of Object.entries(rawSessions)) {
+            if (!config || typeof config !== 'object') continue;
+            let targetName = name;
+            if (isLegacyInternalSessionName(name)) {
+                const stripped = stripLegacySessionPrefix(name);
+                // Migrate legacy prefixed keys when no collision with existing session.
+                if (stripped && !rawSessions[stripped] && !sessions[stripped]) {
+                    targetName = stripped;
+                }
+            }
+            if (sessions[targetName]) continue;
+            sessions[targetName] = config;
+            canonicalNameMap.set(name, targetName);
+        }
         const folders = raw.folders && typeof raw.folders === 'object' ? raw.folders : {};
         const order = raw.order && typeof raw.order === 'object' ? raw.order : {};
         const folderOrder = Array.isArray(order.folders)
             ? order.folders.filter((id) => folders[id])
             : [];
         const orderSessions = order.sessions && typeof order.sessions === 'object' ? order.sessions : {};
+        const canonicalName = (name) => canonicalNameMap.get(name) || name;
+        const canonicalizeOrderList = (list) => {
+            if (!Array.isArray(list)) return [];
+            const out = [];
+            const seen = new Set();
+            for (const name of list) {
+                const mapped = canonicalName(name);
+                if (!sessions[mapped] || seen.has(mapped)) continue;
+                seen.add(mapped);
+                out.push(mapped);
+            }
+            return out;
+        };
 
         const normalized = {
             version: SESSION_STORE_VERSION,
@@ -283,14 +333,10 @@ function normalizeSessionStore(raw) {
             }
         };
 
-        normalized.order.sessions.root = Array.isArray(orderSessions.root)
-            ? orderSessions.root.filter((name) => sessions[name])
-            : [];
+        normalized.order.sessions.root = canonicalizeOrderList(orderSessions.root);
 
         for (const id of Object.keys(folders)) {
-            normalized.order.sessions[id] = Array.isArray(orderSessions[id])
-                ? orderSessions[id].filter((name) => sessions[name])
-                : [];
+            normalized.order.sessions[id] = canonicalizeOrderList(orderSessions[id]);
             if (!normalized.order.folders.includes(id)) {
                 normalized.order.folders.push(id);
             }
@@ -914,13 +960,32 @@ function normalizeSessionEnvOverrides(rawEnv) {
     return normalized;
 }
 
+function shouldIsolateSessionHistory(config) {
+    if (config?.createdBy === 'agent') {
+        return ENABLE_AGENT_HISTORY_ISOLATION;
+    }
+    return ENABLE_USER_HISTORY_ISOLATION;
+}
+
 function buildSessionPtyEnv(sessionName, config, workspaceName) {
     const baseEnv = normalizeSessionEnvOverrides(config?.env);
+    const isolated = shouldIsolateSessionHistory(config);
+    if (!isolated) {
+        return {
+            workspaceName,
+            historyFile: null,
+            historyIsolated: false,
+            env: {
+                ...baseEnv
+            }
+        };
+    }
     const history = getSessionHistoryFileInfo(sessionName, workspaceName);
     const historySize = String(SESSION_HISTORY_SIZE);
     return {
         workspaceName: history.workspaceName,
         historyFile: history.filePath,
+        historyIsolated: true,
         env: {
             ...baseEnv,
             HISTFILE: history.filePath,
@@ -959,6 +1024,10 @@ function buildPostStartupHistoryIsolationCommand(env) {
 }
 
 function applyPostStartupHistoryIsolation(room, config, ptyRuntime) {
+    const isAgentSession = config?.createdBy === 'agent';
+    const allowPostStart = ENABLE_POST_START_HISTORY_INIT || (isAgentSession && ENABLE_AGENT_POST_START_HISTORY_INIT);
+    if (!allowPostStart) return false;
+    if (!ptyRuntime?.historyIsolated) return false;
     const roomSupportsSystemInput = room && typeof room.sendSystemInput === 'function';
     if (!roomSupportsSystemInput) return false;
     const shellPath = config?.shell || process.env.SHELL || '';
@@ -2136,6 +2205,13 @@ async function checkAndInstallDependencies() {
 
 // List active hay rooms as sessions
 function listActiveSessions() {
+    if (isExternalTerminalBackend()) {
+        return Object.keys(activeSessions).map((name) => ({
+            name,
+            windows: 1,
+            attached: false
+        }));
+    }
     const sessions = [];
     for (const [name, room] of hayRooms.rooms) {
         sessions.push({
@@ -2183,11 +2259,14 @@ function getSessionClientSummary(sessionName) {
 
 function hopSessionExists(name) {
     if (!name) return false;
+    if (isExternalTerminalBackend()) {
+        return !!activeSessions[name] || !!sessionStore.sessions[name];
+    }
     return hayRooms.hasRoom(name) || activeSessions[name];
 }
 
 function listAllSessionEntries() {
-    const haySessions = listActiveSessions().filter(s => s.name.startsWith(HOP_SESSION_PREFIX));
+    const haySessions = listActiveSessions();
     const sessionMap = new Map();
 
     for (const s of haySessions) {
@@ -2219,7 +2298,6 @@ function listAllSessionEntries() {
     }
 
     for (const [name, config] of Object.entries(sessionStore.sessions)) {
-        if (!name.startsWith(HOP_SESSION_PREFIX)) continue;
         const displayName = config?.displayName || toDisplaySessionName(name);
         const folderId = config?.folderId || null;
         const clientSummary = getSessionClientSummary(name);
@@ -2326,6 +2404,14 @@ function getOrCreateSession(sessionName, cwd, displayName) {
     }
     ensureTerminalSessionConfig(sessionName, cwd, displayName);
     if (activeSessions[sessionName]) {
+        return activeSessions[sessionName];
+    }
+    if (isExternalTerminalBackend()) {
+        const hostState = getExternalHayHostStateOrThrow();
+        activeSessions[sessionName] = {
+            backend: 'external',
+            hostPort: hostState.port
+        };
         return activeSessions[sessionName];
     }
 
@@ -2482,7 +2568,128 @@ function createVirtualClientAdapter(onServerMessage) {
     };
 }
 
+function closeTerminalApiEntry(terminalId) {
+    terminalApiSessions.delete(terminalId);
+    const streams = terminalApiStreams.get(terminalId);
+    if (streams) {
+        for (const res of streams) {
+            res.end();
+        }
+        terminalApiStreams.delete(terminalId);
+    }
+    clearTerminalEventBuffer(terminalId);
+}
+
+function handleTerminalApiServerMessage(terminalId, parsed) {
+    if (!parsed || !parsed.type) return;
+    if (parsed.type === 'output' || parsed.type === 'snapshot') {
+        sendTerminalStreamEvent(terminalId, {
+            type: parsed.type,
+            data: parsed.data,
+            alternateScreen: parsed.alternateScreen,
+            cursorHidden: parsed.cursorHidden,
+            timestamp: Date.now()
+        });
+        return;
+    }
+    if (parsed.type === 'session_ended') {
+        sendTerminalStreamEvent(terminalId, {
+            type: 'session_ended',
+            exitCode: parsed.exitCode,
+            signal: parsed.signal,
+            message: parsed.message,
+            timestamp: Date.now()
+        });
+        closeTerminalApiEntry(terminalId);
+    }
+}
+
+function attachExternalTerminalApiClient(sessionName, displayName, opts = {}) {
+    getOrCreateSession(sessionName, opts.cwd, displayName);
+
+    const cols = Number.isInteger(opts.cols) ? opts.cols : 80;
+    const rows = Number.isInteger(opts.rows) ? opts.rows : 24;
+    const label = opts.label || 'agent';
+    const terminalId = `t_${crypto.randomBytes(6).toString('hex')}`;
+    const clientId = hay.generateClientId();
+    const wsUrl = buildExternalHayWsUrl(sessionName, {
+        name: label,
+        cols,
+        rows,
+        source: `terminal-api-${opts.actor || 'user'}`
+    });
+    const ws = new WebSocket(wsUrl);
+    let open = false;
+    let closed = false;
+    const pendingPayloads = [];
+
+    const adapterBundle = {
+        emit: (payload) => {
+            if (closed || !payload) return;
+            if (open && ws.readyState === WebSocket.OPEN) {
+                ws.send(payload);
+                return;
+            }
+            pendingPayloads.push(payload);
+        },
+        close: () => {
+            if (closed) return;
+            closed = true;
+            closeTerminalApiEntry(terminalId);
+            try { ws.close(); } catch (e) { }
+        }
+    };
+
+    ws.on('open', () => {
+        if (closed) return;
+        open = true;
+        while (pendingPayloads.length > 0 && ws.readyState === WebSocket.OPEN) {
+            const payload = pendingPayloads.shift();
+            if (payload) {
+                ws.send(payload);
+            }
+        }
+    });
+
+    ws.on('message', (payload) => {
+        let parsed = null;
+        try {
+            parsed = hay.safeParseServerMessage ? hay.safeParseServerMessage(payload.toString()) : JSON.parse(payload.toString());
+        } catch (e) {
+            parsed = null;
+        }
+        handleTerminalApiServerMessage(terminalId, parsed);
+    });
+
+    ws.on('close', () => {
+        if (closed) return;
+        closed = true;
+        closeTerminalApiEntry(terminalId);
+    });
+
+    ws.on('error', () => {
+        if (closed) return;
+        closed = true;
+        closeTerminalApiEntry(terminalId);
+    });
+
+    const sessionEntry = {
+        id: terminalId,
+        sessionName,
+        displayName: displayName || getSessionDisplayName(sessionName),
+        actor: opts.actor || 'user',
+        clientId,
+        adapter: adapterBundle,
+        createdAt: new Date().toISOString()
+    };
+    terminalApiSessions.set(terminalId, sessionEntry);
+    return sessionEntry;
+}
+
 function attachTerminalApiClient(sessionName, displayName, opts = {}) {
+    if (isExternalTerminalBackend()) {
+        return attachExternalTerminalApiClient(sessionName, displayName, opts);
+    }
     const session = activeSessions[sessionName] || getOrCreateSession(sessionName, opts.cwd, displayName);
     const room = session.room;
     const cols = Number.isInteger(opts.cols) ? opts.cols : 80;
@@ -2500,36 +2707,7 @@ function attachTerminalApiClient(sessionName, displayName, opts = {}) {
         } catch (e) {
             parsed = null;
         }
-        if (!parsed || !parsed.type) return;
-        if (parsed.type === 'output' || parsed.type === 'snapshot') {
-            sendTerminalStreamEvent(terminalId, {
-                type: parsed.type,
-                data: parsed.data,
-                alternateScreen: parsed.alternateScreen,
-                cursorHidden: parsed.cursorHidden,
-                timestamp: Date.now()
-            });
-            return;
-        }
-        if (parsed.type === 'session_ended') {
-            sendTerminalStreamEvent(terminalId, {
-                type: 'session_ended',
-                exitCode: parsed.exitCode,
-                signal: parsed.signal,
-                message: parsed.message,
-                timestamp: Date.now()
-            });
-            const streams = terminalApiStreams.get(terminalId);
-            if (streams) {
-                for (const res of streams) {
-                    res.end();
-                }
-                terminalApiStreams.delete(terminalId);
-            }
-            terminalApiSessions.delete(terminalId);
-            clearTerminalEventBuffer(terminalId);
-            return;
-        }
+        handleTerminalApiServerMessage(terminalId, parsed);
     });
 
     room.attachClient(
@@ -2540,15 +2718,7 @@ function attachTerminalApiClient(sessionName, displayName, opts = {}) {
 
     adapterBundle.adapter.onClose(() => {
         unregisterSessionClientActor(sessionName, clientId);
-        terminalApiSessions.delete(terminalId);
-        const streams = terminalApiStreams.get(terminalId);
-        if (streams) {
-            for (const res of streams) {
-                res.end();
-            }
-            terminalApiStreams.delete(terminalId);
-        }
-        clearTerminalEventBuffer(terminalId);
+        closeTerminalApiEntry(terminalId);
     });
 
     const sessionEntry = {
@@ -2992,6 +3162,230 @@ function waitForPort(port, host = '127.0.0.1', timeoutMs = 4000, intervalMs = 12
         };
         tryConnect();
     });
+}
+
+function isExternalTerminalBackend() {
+    return TERMINAL_BACKEND === 'external';
+}
+
+function isProcessAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+function readHayHostStateFile() {
+    if (!fs.existsSync(HAY_HOST_STATE_FILE)) return null;
+    try {
+        ensurePrivateFile(HAY_HOST_STATE_FILE);
+        const parsed = JSON.parse(fs.readFileSync(HAY_HOST_STATE_FILE, 'utf8'));
+        const pid = Number(parsed?.pid);
+        const port = Number(parsed?.port);
+        if (!Number.isInteger(pid) || pid <= 0) return null;
+        if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+        return { pid, port, startedAt: Number(parsed?.startedAt) || Date.now() };
+    } catch (e) {
+        return null;
+    }
+}
+
+function writeHayHostStateFile(state) {
+    if (!state) return;
+    hayHostState = { pid: state.pid, port: state.port, startedAt: state.startedAt || Date.now() };
+    writePrivateFile(HAY_HOST_STATE_FILE, JSON.stringify(hayHostState));
+}
+
+function clearHayHostStateFile() {
+    hayHostState = null;
+    try {
+        if (fs.existsSync(HAY_HOST_STATE_FILE)) {
+            fs.unlinkSync(HAY_HOST_STATE_FILE);
+        }
+    } catch (e) { }
+}
+
+function getExternalHayHostStateOrThrow() {
+    if (!isExternalTerminalBackend()) return null;
+    if (!hayHostState) {
+        hayHostState = readHayHostStateFile();
+    }
+    if (!hayHostState || !isProcessAlive(hayHostState.pid)) {
+        clearHayHostStateFile();
+        throw new Error('External hay host is not running');
+    }
+    return hayHostState;
+}
+
+async function ensureExternalHayHostReady() {
+    if (!isExternalTerminalBackend()) return null;
+
+    const existing = hayHostState || readHayHostStateFile();
+    if (existing && isProcessAlive(existing.pid)) {
+        const ready = await waitForPort(existing.port, '127.0.0.1', 1200, 120);
+        if (ready) {
+            hayHostState = existing;
+            return existing;
+        }
+    }
+
+    clearHayHostStateFile();
+
+    const hostScript = path.join(__dirname, 'scripts', 'hay-host.js');
+    if (!fs.existsSync(hostScript)) {
+        throw new Error('Hay host script missing');
+    }
+
+    const requestedPort = Number.parseInt(process.env.HOP_HAY_HOST_PORT || '', 10);
+    const hostPort = Number.isInteger(requestedPort) && requestedPort > 0 ? String(requestedPort) : '';
+
+    const child = spawn(process.execPath, [hostScript], {
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...process.env,
+            HAY_HOST_PORT: hostPort,
+            HAY_HOST_CWD: process.cwd()
+        }
+    });
+
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+
+    const started = await new Promise((resolve, reject) => {
+        let settled = false;
+
+        const finish = (err, state) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (err) {
+                try { child.kill('SIGTERM'); } catch (e) { }
+                reject(err);
+                return;
+            }
+            resolve(state);
+        };
+
+        const timer = setTimeout(() => {
+            const details = stderrBuffer.trim();
+            finish(new Error(details ? `Hay host start timeout (${details})` : 'Hay host start timeout'));
+        }, HAY_HOST_READY_TIMEOUT_MS);
+
+        child.on('error', (err) => {
+            finish(err);
+        });
+
+        child.on('exit', (code, signal) => {
+            const details = stderrBuffer.trim();
+            finish(new Error(
+                details || `Hay host exited before ready (code=${code ?? 'null'} signal=${signal ?? 'null'})`
+            ));
+        });
+
+        child.stderr.on('data', (chunk) => {
+            stderrBuffer += chunk.toString();
+        });
+
+        child.stdout.on('data', (chunk) => {
+            stdoutBuffer += chunk.toString();
+            let newlineIndex = stdoutBuffer.indexOf('\n');
+            while (newlineIndex !== -1) {
+                const line = stdoutBuffer.slice(0, newlineIndex).trim();
+                stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+                if (line) {
+                    try {
+                        const parsed = JSON.parse(line);
+                        const pid = Number(parsed?.pid) || child.pid;
+                        const port = Number(parsed?.port);
+                        if (Number.isInteger(pid) && pid > 0 && Number.isInteger(port) && port > 0 && port <= 65535) {
+                            finish(null, { pid, port, startedAt: Date.now() });
+                            return;
+                        }
+                    } catch (e) { }
+                }
+                newlineIndex = stdoutBuffer.indexOf('\n');
+            }
+        });
+    });
+
+    const ready = await waitForPort(started.port, '127.0.0.1', HAY_HOST_READY_TIMEOUT_MS, 120);
+    if (!ready) {
+        throw new Error('Hay host did not open its port in time');
+    }
+
+    writeHayHostStateFile(started);
+    try {
+        child.stdout.destroy();
+        child.stderr.destroy();
+    } catch (e) { }
+    child.unref();
+    return started;
+}
+
+function buildExternalHayWsPath(parsedUrl, sessionName) {
+    const params = new URLSearchParams();
+    const query = parsedUrl?.query || {};
+    for (const [key, value] of Object.entries(query)) {
+        if (key === 'room' || key === 'token') continue;
+        if (Array.isArray(value)) {
+            for (const part of value) {
+                if (part !== undefined && part !== null) {
+                    params.append(key, String(part));
+                }
+            }
+        } else if (value !== undefined && value !== null) {
+            params.append(key, String(value));
+        }
+    }
+    params.set('room', sessionName);
+    return `/ws?${params.toString()}`;
+}
+
+function buildExternalHayWsUrl(sessionName, options = {}) {
+    const state = getExternalHayHostStateOrThrow();
+    const params = new URLSearchParams();
+    params.set('room', sessionName);
+    if (options.name) params.set('name', String(options.name));
+    if (Number.isFinite(options.cols)) params.set('cols', String(Math.floor(Number(options.cols))));
+    if (Number.isFinite(options.rows)) params.set('rows', String(Math.floor(Number(options.rows))));
+    if (options.source) params.set('source', String(options.source));
+    return `ws://127.0.0.1:${state.port}/ws?${params.toString()}`;
+}
+
+function terminateExternalHaySession(sessionName) {
+    if (!isExternalTerminalBackend() || !sessionName) return;
+    let ws;
+    try {
+        ws = new WebSocket(buildExternalHayWsUrl(sessionName, {
+            name: 'hop-control',
+            cols: 80,
+            rows: 24,
+            source: 'hop-kill'
+        }));
+    } catch (e) {
+        return;
+    }
+
+    let finished = false;
+    const finish = () => {
+        if (finished) return;
+        finished = true;
+        try { ws.close(); } catch (e) { }
+    };
+
+    ws.once('open', () => {
+        try {
+            ws.send(JSON.stringify({ type: 'kill_session' }));
+        } catch (e) { }
+        setTimeout(finish, 120);
+    });
+    ws.once('error', finish);
+    ws.once('close', finish);
+    setTimeout(finish, 800);
 }
 
 function sendStartingPage(res, displayName) {
@@ -3809,8 +4203,10 @@ function startAuthProxy(authEmitter) {
                         return;
                     }
 
-                    // Close the hay room if it exists
-                    if (hayRooms.hasRoom(name)) {
+                    // Close the terminal session if it exists
+                    if (isExternalTerminalBackend()) {
+                        terminateExternalHaySession(name);
+                    } else if (hayRooms.hasRoom(name)) {
                         hayRooms.closeRoom(name);
                     }
 
@@ -4144,7 +4540,9 @@ function startAuthProxy(authEmitter) {
             const killSession = parsedUrl.query?.killSession === 'true';
             entry.adapter.close();
             if (killSession) {
-                if (hayRooms.hasRoom(entry.sessionName)) {
+                if (isExternalTerminalBackend()) {
+                    terminateExternalHaySession(entry.sessionName);
+                } else if (hayRooms.hasRoom(entry.sessionName)) {
                     hayRooms.closeRoom(entry.sessionName);
                 }
                 if (activeSessions[entry.sessionName]) {
@@ -4504,6 +4902,45 @@ function startAuthProxy(authEmitter) {
         }
 
         // Get or create hay session
+        if (isExternalTerminalBackend()) {
+            try {
+                getOrCreateSession(sessionName);
+            } catch (e) {
+                socket.write('HTTP/1.1 500 Server Error\r\n\r\n');
+                socket.destroy();
+                return;
+            }
+
+            const source = typeof parsedUrl.query.source === 'string' ? parsedUrl.query.source : '';
+            noteClientConnected(sessionName, source);
+            let disconnected = false;
+            const handleDisconnect = () => {
+                if (disconnected) return;
+                disconnected = true;
+                noteClientDisconnected(sessionName, source);
+            };
+            socket.once('close', handleDisconnect);
+            socket.once('error', handleDisconnect);
+
+            try {
+                const hostState = getExternalHayHostStateOrThrow();
+                const proxy = httpProxy.createProxyServer({ target: `ws://127.0.0.1:${hostState.port}`, ws: true });
+                proxy.once('error', () => {
+                    handleDisconnect();
+                    try { socket.destroy(); } catch (e) { }
+                });
+                const originalUrl = req.url;
+                req.url = buildExternalHayWsPath(parsedUrl, sessionName);
+                proxy.ws(req, socket, head);
+                req.url = originalUrl;
+            } catch (e) {
+                handleDisconnect();
+                socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+                socket.destroy();
+            }
+            return;
+        }
+
         let session = activeSessions[sessionName];
         if (!session) {
             try {
@@ -5098,15 +5535,21 @@ function waitForDaemonReady(timeoutMs = 20000) {
 async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     log(`[4/4] Attaching to session...`, BOLD);
 
-    // Check if there's already an active session (from remote login)
+    // Reuse an actively attached user-facing session (typically remote login),
+    // otherwise create a fresh local session for this CLI invocation.
     const existingSessions = listActiveSessions();
+    const preferredExistingSession = existingSessions.find((session) => {
+        if (!session?.attached) return false;
+        const config = getSessionConfig(session.name);
+        if (config?.type === 'port') return false;
+        return config?.createdBy !== 'agent';
+    });
     let displayName;
     let defaultSessionName;
 
     let sessionCwd;
-    if (existingSessions.length > 0) {
-        // Connect to the first existing session (remote user already created it)
-        defaultSessionName = existingSessions[0].name;
+    if (preferredExistingSession) {
+        defaultSessionName = preferredExistingSession.name;
         displayName = getSessionDisplayName(defaultSessionName);
         log(`Connecting to existing session: ${displayName}`, RESET);
     } else {
@@ -5147,16 +5590,21 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
             try { fs.unlinkSync(STATE_FILE); } catch (e) { }
         }
 
-        // Remove session config for this local session
-        try {
-            const config = getSessionConfig(defaultSessionName);
-            if (config && config.type !== 'port') {
-                deleteSessionConfig(defaultSessionName);
-            }
-        } catch (e) { }
+        // Remove session config for this local session in embedded mode.
+        // External backend keeps terminal definitions persistent across hop restarts.
+        if (!isExternalTerminalBackend()) {
+            try {
+                const config = getSessionConfig(defaultSessionName);
+                if (config && config.type !== 'port') {
+                    deleteSessionConfig(defaultSessionName);
+                }
+            } catch (e) { }
+        }
 
-        // Close all hay rooms
-        hayRooms.closeAll();
+        // Close all in-process rooms (external backend persists independently)
+        if (!isExternalTerminalBackend()) {
+            hayRooms.closeAll();
+        }
         closeAllSessionAuditSinks();
 
         // Kill cloudflared tunnel (use currentTunnelProc in case it was restarted)
@@ -5403,6 +5851,147 @@ function pickSessionForDir(sessions, cwdName, opts = {}) {
     return { target: scored[0].session, totalMatches: matches.length };
 }
 
+async function runHayCliConnect(wsUrl, roomName, shareUrl) {
+    const hayCli = resolveHayCliPath();
+    return new Promise((resolve) => {
+        const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', roomName, '-n', 'Local'], {
+            stdio: 'inherit',
+            env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: shareUrl || '' }
+        });
+
+        cliProc.on('close', (code) => {
+            resolve(code || 0);
+        });
+
+        cliProc.on('error', (err) => {
+            log(`\nConnection error: ${err.message}`, RED);
+            resolve(1);
+        });
+    });
+}
+
+async function runHayCliAttach(existingTunnel, displayName) {
+    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}&source=local-cli`;
+    return runHayCliConnect(wsUrl, displayName, existingTunnel.url || '');
+}
+
+function resolveOrCreateLocalTerminalSession(nameArg) {
+    const requested = String(nameArg || '').trim();
+
+    if (requested) {
+        const requestedDisplay = resolveDisplayNameAlias(requested);
+        const existingInternal = sessionStore.sessions[requested]
+            ? requested
+            : findInternalSessionName(requestedDisplay);
+
+        if (existingInternal) {
+            const existingConfig = getSessionConfig(existingInternal);
+            if (existingConfig?.type === 'port') {
+                throw new Error('Session is configured as a port proxy');
+            }
+            return {
+                internalName: existingInternal,
+                displayName: getSessionDisplayName(existingInternal)
+            };
+        }
+
+        const displayName = isLegacyInternalSessionName(requested)
+            ? toDisplaySessionName(requested)
+            : requestedDisplay;
+        const internalName = toInternalSessionName(displayName);
+        if (!internalName) {
+            throw new Error('Invalid session name');
+        }
+        ensureTerminalSessionConfig(internalName, process.cwd(), displayName, null, {
+            createdBy: 'user',
+            agentPermitted: false
+        });
+        return { internalName, displayName };
+    }
+
+    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const cwdPath = process.cwd();
+    const prefix = `${cwdName}-`;
+    const reusableCandidates = Object.entries(sessionStore.sessions)
+        .filter(([internalName, config]) => {
+            if (!internalName || !config || config.type !== 'terminal') return false;
+            if ((config.createdBy || 'user') !== 'user') return false;
+            if (config.cwd && config.cwd !== cwdPath) return false;
+            const displayName = config.displayName || toDisplaySessionName(internalName);
+            if (displayName === cwdName) return true;
+            if (!displayName.startsWith(prefix)) return false;
+            const suffix = displayName.slice(prefix.length);
+            return /^\d+$/.test(suffix);
+        })
+        .map(([internalName, config]) => {
+            const displayName = config.displayName || toDisplaySessionName(internalName);
+            const score = displayName === cwdName ? 0 : Number.parseInt(displayName.slice(prefix.length), 10);
+            return { internalName, displayName, score: Number.isFinite(score) ? score : Number.MAX_SAFE_INTEGER };
+        })
+        .sort((a, b) => a.score - b.score || a.displayName.localeCompare(b.displayName));
+
+    if (reusableCandidates.length > 0) {
+        const target = reusableCandidates[0];
+        ensureTerminalSessionConfig(target.internalName, cwdPath, target.displayName, null, {
+            createdBy: 'user',
+            agentPermitted: false
+        });
+        return {
+            internalName: target.internalName,
+            displayName: target.displayName
+        };
+    }
+
+    const existingInternalNames = new Set(Object.keys(sessionStore.sessions));
+    const existingDisplayNames = new Set(
+        Object.entries(sessionStore.sessions).map(([name, config]) => config?.displayName || toDisplaySessionName(name))
+    );
+
+    let counter = 1;
+    let displayName = `${cwdName}-${counter}`;
+    let internalName = toInternalSessionName(displayName);
+    while (
+        !internalName ||
+        existingInternalNames.has(internalName) ||
+        existingDisplayNames.has(displayName)
+    ) {
+        counter += 1;
+        displayName = `${cwdName}-${counter}`;
+        internalName = toInternalSessionName(displayName);
+    }
+
+    ensureTerminalSessionConfig(internalName, process.cwd(), displayName, null, {
+        createdBy: 'user',
+        agentPermitted: false
+    });
+    return { internalName, displayName };
+}
+
+async function runLocalOnlyTerminal(nameArg) {
+    if (!isExternalTerminalBackend()) {
+        log(`hop local requires HOP_TERMINAL_BACKEND=external.`, RED);
+        process.exit(1);
+    }
+
+    await ensureHayLoaded();
+    const hostState = await ensureExternalHayHostReady();
+    if (!hostState || !Number.isInteger(hostState.port)) {
+        throw new Error('Local hay host is not ready');
+    }
+
+    const target = resolveOrCreateLocalTerminalSession(nameArg);
+    log(`Launching local terminal: ${target.displayName}`, RESET);
+
+    const wsUrl = `ws://127.0.0.1:${hostState.port}/ws?source=local-cli`;
+    const code = await runHayCliConnect(wsUrl, target.internalName, '');
+    if (code === 10) {
+        log(`\nDetached from local session.`, YELLOW);
+        process.exit(0);
+    }
+    log(`\nLocal session ended.`, YELLOW);
+    process.exit(code || 0);
+}
+
 async function attachToNamedSession(existingTunnel, displayName) {
     const sessionsRes = await fetchSessionList(existingTunnel);
     const sessions = sessionsRes.sessions || [];
@@ -5416,30 +6005,13 @@ async function attachToNamedSession(existingTunnel, displayName) {
         throw new Error(`Session not found: ${displayName}`);
     }
     log(`Attaching to ${displayName}...`, RESET);
-
-    const hayCli = resolveHayCliPath();
-    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}&source=local-cli`;
-
-    const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
-        stdio: 'inherit',
-        env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: existingTunnel.url || '' }
-    });
-
-    cliProc.on('close', (code) => {
-        if (code === 10) {
-            log(`\nDetached from local session.`, YELLOW);
-            process.exit(0);
-        }
-        log(`\nSession disconnected.`, YELLOW);
-        process.exit(code || 0);
-    });
-
-    cliProc.on('error', (err) => {
-        log(`\nConnection error: ${err.message}`, RED);
-        process.exit(1);
-    });
-
-    await new Promise(() => {});
+    const code = await runHayCliAttach(existingTunnel, displayName);
+    if (code === 10) {
+        log(`\nDetached from local session.`, YELLOW);
+        process.exit(0);
+    }
+    log(`\nSession disconnected.`, YELLOW);
+    process.exit(code || 0);
 }
 
 async function attachToSessionForDir(existingTunnel) {
@@ -5456,6 +6028,42 @@ async function attachToSessionForDir(existingTunnel) {
         throw new Error(`No existing session for ${cwdName}`);
     }
     return attachToNamedSession(existingTunnel, result.target.displayName);
+}
+
+async function attachToAllSessions(existingTunnel) {
+    const sessionsRes = await fetchSessionList(existingTunnel);
+    const sessions = (sessionsRes.sessions || [])
+        .filter((s) => s && s.type !== 'port' && typeof s.displayName === 'string' && s.displayName);
+
+    if (sessions.length === 0) {
+        log(`No terminal sessions found.`, YELLOW);
+        process.exit(1);
+    }
+
+    sessions.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    log(`Attaching sequentially to ${sessions.length} session(s).`, CYAN);
+    log(`Detach from a session (Ctrl+G) to continue to the next one.`, RESET);
+
+    let sawNonZero = false;
+    for (let i = 0; i < sessions.length; i++) {
+        const s = sessions[i];
+        log(`\n[${i + 1}/${sessions.length}] Attaching to ${s.displayName}...`, BOLD);
+        const code = await runHayCliAttach(existingTunnel, s.displayName);
+        if (code === 10) {
+            log(`Detached from ${s.displayName}.`, YELLOW);
+            continue;
+        }
+        if (code !== 0) {
+            sawNonZero = true;
+            log(`Session ${s.displayName} exited with code ${code}.`, YELLOW);
+        }
+    }
+
+    if (sawNonZero) {
+        process.exit(1);
+    }
+    log(`Finished attaching all sessions.`, GREEN);
+    process.exit(0);
 }
 
 async function main() {
@@ -5605,6 +6213,7 @@ async function main() {
 
         await checkAndInstallDependencies();
         await ensureHayLoaded();
+        await ensureExternalHayHostReady();
         loadDefaultWorkspace(true);
         const authEmitter = new EventEmitter();
 
@@ -5659,7 +6268,12 @@ async function main() {
             process.exit(1);
         }
         const nameArg = process.argv[3];
-        const displayName = nameArg && nameArg.startsWith(HOP_SESSION_PREFIX)
+        const attachAll = nameArg === 'all' || nameArg === '--all';
+        if (attachAll) {
+            await attachToAllSessions(existing);
+            return;
+        }
+        const displayName = nameArg && isLegacyInternalSessionName(nameArg)
             ? getSessionDisplayName(nameArg)
             : nameArg;
         if (displayName) {
@@ -5667,6 +6281,13 @@ async function main() {
         } else {
             await attachToSessionForDir(existing);
         }
+        return;
+    }
+
+    // Handle `hop local` command - daemonless local terminal
+    if (process.argv[2] === 'local') {
+        const nameArg = process.argv[3];
+        await runLocalOnlyTerminal(nameArg);
         return;
     }
 
@@ -5693,7 +6314,9 @@ async function main() {
         log(`${BOLD}Usage:${RESET}`, RESET);
         log(`  hop                       Start tunnel (or attach to existing)`, RESET);
         log(`  hop start                 Start hop daemon and print QR codes`, RESET);
-        log(`  hop attach [session]       Attach to an existing session`, RESET);
+        log(`  hop attach [session]      Attach to an existing session`, RESET);
+        log(`  hop attach all            Attach sequentially to all sessions`, RESET);
+        log(`  hop local [session]       Start/attach a daemonless local terminal`, RESET);
         log(`  hop stop                  Stop hop daemon`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');
@@ -6254,7 +6877,9 @@ async function main() {
                 process.exit(0);
             }
             // Close hay room if it exists
-            if (hayRooms.hasRoom(name)) {
+            if (isExternalTerminalBackend()) {
+                terminateExternalHaySession(name);
+            } else if (hayRooms.hasRoom(name)) {
                 hayRooms.closeRoom(name);
             }
             if (activeSessions[name]) {
@@ -6341,7 +6966,7 @@ async function main() {
             log(`Done.`, GREEN);
         } else {
             // Server not running - just clean up config files
-            const sessions = Object.keys(sessionStore.sessions).filter(s => s.startsWith(HOP_SESSION_PREFIX));
+            const sessions = Object.keys(sessionStore.sessions);
             if (sessions.length === 0) {
                 log(`No hop sessions to clean up.`, GREEN);
                 process.exit(0);
@@ -6407,6 +7032,7 @@ async function main() {
 
     await checkAndInstallDependencies();
     await ensureHayLoaded();
+    await ensureExternalHayHostReady();
     loadDefaultWorkspace(true);
     const authEmitter = new EventEmitter();
 
@@ -6437,7 +7063,9 @@ async function main() {
                 try { fs.unlinkSync(STATE_FILE); } catch (e) { }
             }
 
-            hayRooms.closeAll();
+            if (!isExternalTerminalBackend()) {
+                hayRooms.closeAll();
+            }
             closeAllSessionAuditSinks();
 
             try { (currentTunnelProc || tunnelProc).kill('SIGTERM'); } catch (e) { }

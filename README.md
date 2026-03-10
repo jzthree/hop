@@ -193,9 +193,9 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 
 | Command | Description |
 |---------|-------------|
-| `hop` | Start hop (or attach to existing tunnel) |
+| `hop` | Start hop daemon/tunnel if needed, then launch a local terminal |
 | `hop attach all` | Attach sequentially to all terminal sessions |
-| `hop local [session]` | Start/attach a daemonless local terminal |
+| `hop local [session]` | Start a daemonless local terminal (`[session]` attaches if it exists) |
 | `hop url` | Print current tunnel URL |
 | `hop qr` | Show QR code for current URL |
 | `hop domain <hostname>` | Set custom domain (named tunnel) |
@@ -214,13 +214,19 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | `hop wipe` | Remove all hop sessions |
 | `quit` | Type at exit prompt to shutdown tunnel |
 
+Startup behavior:
+- Hop reconciles already-running external Hay sessions first, then applies the default workspace as additional startup state.
+
 ## 🧪 Terminal Backend
 
-`hop` now defaults to the `external` terminal backend (PTYs in a separate local hay host process).
+Hop always uses the `external` terminal runtime (PTYs in a separate local hay host process).
 
 - The host persists across hop daemon restarts.
 - Host state is tracked in `~/.hop2/.hay-host-state`.
-- Set `HOP_TERMINAL_BACKEND=embedded` to force legacy in-process PTYs.
+- On startup and session listing, Hop discovers live hay-host processes and adopts the one(s) that still own runtime rooms if the state file is stale.
+- Local CLI transport is direct to hay-host; daemon restarts do not terminate local terminal sessions.
+- Bare `hop` prompts on cwd match (`Attach existing` vs `Create new`, default `Create new`); non-interactive runs always create new.
+- `HOP_TERMINAL_BACKEND` is accepted for compatibility but ignored.
 
 ## 📦 Dependencies
 
@@ -265,9 +271,11 @@ Use one dedicated terminal when driving a subagent CLI through Hop MCP.
 1. Create a terminal with `hop_create_terminal` (set `name` and `cwd`).
 2. Start the agent CLI with `hop_write_terminal` (`claude` or `codex`).
 3. Wait for readiness with `hop_wait_terminal(until_prompt=true)`.
-4. Send one instruction at a time via `hop_write_terminal`.
-5. After each turn, collect output with `hop_wait_terminal` or incremental `hop_read_terminal` cursor reads.
-6. Interrupt with `hop_send_key(key="ctrl_c")` and close using `hop_close_terminal`.
+4. Send one instruction at a time via `hopx_send_and_wait` (or `hop_write_terminal` + `hop_wait_terminal`).
+5. Optional helper path: use `hopx_agent_turn(mode="auto")` for a single send+wait turn with mode-aware output (`ui` for TUI screens, `readable_raw` otherwise); it auto-promotes to `ui` if alternate-screen starts mid-turn and uses lean capture defaults (`capture_max_events=60` for readable modes, `0` for `ui` unless overridden, plus `text_only=true` by default for readable waits).
+6. For long waits, prefer `hopx_agent_turn(async=true, ...)` and continue with `hopx_agent_turn(wait_id=..., wait=true, control="wait")`; fall back to `hop_wait_start(...)` / `hop_wait_poll(...)` when you want the lower-level primitives directly.
+7. After each turn, collect output with `hop_wait_terminal` or incremental `hop_read_terminal` cursor reads.
+8. Interrupt with `hop_send_key(key="ctrl_c")` and close using `hop_close_terminal`.
 
 Safety tips:
 - Keep one subagent per terminal.
@@ -284,6 +292,9 @@ Delete `~/.hop2/clients/<tunnel-id>/` and run `hop client` again.
 
 **Tunnel not starting?**
 Make sure `cloudflared` is installed: `brew install cloudflared`
+
+**Tunnel returns 502 or died after network changes?**
+Run `hop health --restart`. Hop now waits for the public URL to become healthy again instead of only sending a fire-and-forget restart request.
 
 **Stuck processes?**
 ```bash

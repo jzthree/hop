@@ -15,16 +15,34 @@ const DEFAULT_ACTOR_HEADER = 'x-hop-actor';
 const DEFAULT_ACTOR = 'agent';
 const SERVER_VERSION = '0.2.2';
 const READ_TERMINAL_MODES = ['raw', 'ui', 'readable_raw'];
+const HOPX_TURN_MODES = ['auto', 'raw', 'ui', 'readable_raw'];
 const READABLE_CONTROL_LEVELS = ['full', 'structural', 'none'];
 const DEFAULT_READABLE_CONTROL_LEVEL = 'none';
 const READABLE_NOISE_FILTERS = ['balanced', 'off'];
 const DEFAULT_READABLE_NOISE_FILTER = 'balanced';
 const DEFAULT_READABLE_COALESCE_MS = 250;
 const DEFAULT_READABLE_COALESCE_MAX_CHARS = 32768;
+const DEFAULT_HOPX_WAIT_CAPTURE_MAX_EVENTS = 60;
+const DEFAULT_HOPX_READABLE_COALESCE_MS = 350;
+const DEFAULT_HOPX_UI_INCLUDE_RAW_TAIL = false;
+const DEFAULT_HOPX_UI_WAIT_CAPTURE_MAX_EVENTS = 0;
+const DEFAULT_HOPX_TEXT_ONLY_READABLE = true;
+const DEFAULT_HOPX_UI_BUSY_GUARD_MAX_WAIT_MS = 12000;
+const DEFAULT_HOPX_UI_BUSY_GUARD_POLL_MS = 500;
+const HOPX_UI_BUSY_LINE_PATTERNS = [
+  /\besc to interrupt\b/i,
+  /\bwaiting for process\b/i,
+  /^\s*[•*]\s+.*\b(working|starting|thinking|running|processing)\b/i
+];
 const READABLE_NOISE_REWRITE_WINDOW_MS = 1000;
 const READABLE_NOISE_STABLE_MS = 800;
 const READABLE_NOISE_MIN_REWRITES = 2;
 const READABLE_SPINNER_PREFIX_RE = /^(?:[\u2800-\u28ff]|[✳✢✶✻✽·◐◓◑◒◴◷◶◵])+\s*/u;
+const READABLE_ECHO_CANDIDATE_TTL_MS = 5000;
+const READABLE_ECHO_MAX_CANDIDATES = 24;
+const READABLE_PROMPT_ECHO_PREFIX_RE = /^[^\r\n]{0,160}[#$>%]\s*/;
+const READABLE_PROMPT_PADDING_RE = /^\s+[#$>%]\s*$/;
+const READABLE_PROMPT_PADDING_COMPLEX_RE = /^\s{4,}(?:\([^)\r\n]{0,24}\)\s*)?[^\r\n]{0,220}[#$>%]\s*$/;
 const WAIT_START_MODES = ['latest', 'cursor', 'beginning'];
 const MAX_BUFFER_EVENTS = 2000;
 const STREAM_CONNECT_TIMEOUT_MS = 800;
@@ -37,6 +55,9 @@ const WAIT_POLL_INTERVAL_MS = 40;
 const DEFAULT_WAIT_MAX_MS = 30000;
 const DEFAULT_WAIT_CAPTURE_MAX_EVENTS = 120;
 const DEFAULT_WAIT_AGENT_DONE_IDLE_MS = 1200;
+const DEFAULT_WAIT_POLL_MAX_MS = 30000;
+const WAIT_JOB_TTL_MS = 15 * 60 * 1000;
+const WAIT_JOB_MAX_ENTRIES = 256;
 const WAIT_TEXT_WINDOW_MAX_CHARS = 65536;
 const DEFAULT_WAIT_PROMPT_REGEX = '(?:^|\\r?\\n)[^\\r\\n]*[#$>%] ?$';
 const STRUCTURAL_READABLE_CONTROL_KINDS = new Set([
@@ -93,6 +114,19 @@ function normalizeSendKeyName(key) {
     .toLowerCase()
     .replace(/\+/g, '_')
     .replace(/[\s-]+/g, '_');
+}
+
+function normalizeHopxTurnMode(value) {
+  if (value === undefined || value === null || value === '') return 'auto';
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return HOPX_TURN_MODES.includes(normalized) ? normalized : null;
+}
+
+function resolveHopxTextOnly(raw, captureMode) {
+  if (raw === true) return true;
+  if (raw === false) return false;
+  return captureMode === 'readable_raw' && DEFAULT_HOPX_TEXT_ONLY_READABLE;
 }
 
 function resolveSendKeyInput(key, repeatRaw) {
@@ -183,6 +217,65 @@ function isOutputLikeEvent(event, captureMode) {
       || event.type === 'snapshot';
   }
   return event.type === 'output' || event.type === 'snapshot';
+}
+
+function condenseReadableWaitPayload(waitPayload) {
+  if (!waitPayload || typeof waitPayload !== 'object') return waitPayload;
+  if (waitPayload.captureMode !== 'readable_raw') return waitPayload;
+  if (
+    Array.isArray(waitPayload.events)
+    && waitPayload.events.length === 0
+    && typeof waitPayload.text === 'string'
+    && Number.isFinite(waitPayload.originalEventCount)
+  ) {
+    return waitPayload;
+  }
+
+  const events = Array.isArray(waitPayload.events) ? waitPayload.events : [];
+  const originalEventCount = Number.isFinite(waitPayload.eventCount)
+    ? Math.max(0, Math.floor(waitPayload.eventCount))
+    : events.length;
+  const text = events
+    .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
+    .join('');
+
+  return {
+    ...waitPayload,
+    text,
+    originalEventCount,
+    eventCount: 0,
+    events: []
+  };
+}
+
+function extractUiBusyLine(uiPayload) {
+  const ui = uiPayload && typeof uiPayload === 'object' ? uiPayload.ui : null;
+  const lines = ui && Array.isArray(ui.lines) ? ui.lines : [];
+  if (lines.length === 0) return null;
+  const recentNonEmpty = lines
+    .map((line) => (line && typeof line.text === 'string' ? line.text : ''))
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-8);
+  for (const line of recentNonEmpty) {
+    for (const pattern of HOPX_UI_BUSY_LINE_PATTERNS) {
+      if (pattern.test(line)) {
+        return line;
+      }
+    }
+  }
+  return null;
+}
+
+function extractToolErrorText(response) {
+  if (!response || typeof response !== 'object') return 'Unknown error';
+  const content = Array.isArray(response.content) ? response.content : [];
+  for (const item of content) {
+    if (item && typeof item === 'object' && typeof item.text === 'string' && item.text.trim().length > 0) {
+      return item.text.trim();
+    }
+  }
+  return 'Unknown error';
 }
 
 function resolveHomeDir() {
@@ -344,6 +437,135 @@ function canonicalizeReadableNoiseText(text) {
     .map((line) => line.trim())
     .join('\n')
     .trim();
+}
+
+function normalizeReadableEchoLine(line) {
+  if (typeof line !== 'string' || line.length === 0) return '';
+  return line
+    .replace(/\r/g, '')
+    .replace(/[ \t]+$/g, '');
+}
+
+function canonicalizeReadableEchoLine(line) {
+  return normalizeReadableEchoLine(line).trim();
+}
+
+function createReadableEchoState() {
+  return {
+    candidates: []
+  };
+}
+
+function pruneReadableEchoCandidates(echoState, nowTs) {
+  if (!echoState || !Array.isArray(echoState.candidates)) return;
+  const now = Number.isFinite(nowTs) ? nowTs : Date.now();
+  echoState.candidates = echoState.candidates.filter((candidate) => (
+    candidate
+    && typeof candidate.text === 'string'
+    && candidate.text.length > 0
+    && Number.isFinite(candidate.ts)
+    && (now - candidate.ts) <= READABLE_ECHO_CANDIDATE_TTL_MS
+  ));
+  if (echoState.candidates.length > READABLE_ECHO_MAX_CANDIDATES) {
+    echoState.candidates.splice(0, echoState.candidates.length - READABLE_ECHO_MAX_CANDIDATES);
+  }
+}
+
+function recordReadableEchoCandidates(echoState, input, nowTs) {
+  if (!echoState || typeof input !== 'string' || input.length === 0) return;
+  const now = Number.isFinite(nowTs) ? nowTs : Date.now();
+  pruneReadableEchoCandidates(echoState, now);
+
+  const segments = input.replace(/\r/g, '\n').split('\n');
+  for (const segment of segments) {
+    const candidate = canonicalizeReadableEchoLine(segment);
+    if (!candidate) continue;
+    if (candidate.length > 512) continue;
+    if (candidate.length === 1 && !/[A-Za-z0-9]/.test(candidate)) continue;
+
+    const existing = echoState.candidates.find((item) => item.text === candidate);
+    if (existing) {
+      existing.ts = now;
+      continue;
+    }
+    echoState.candidates.push({ text: candidate, ts: now });
+  }
+
+  pruneReadableEchoCandidates(echoState, now);
+}
+
+function isLikelyPromptEchoLine(line, candidate) {
+  if (typeof line !== 'string' || typeof candidate !== 'string' || !line || !candidate) return false;
+  const normalizedLine = normalizeReadableEchoLine(line);
+  const hasPromptPrefix = READABLE_PROMPT_ECHO_PREFIX_RE.test(normalizedLine);
+  const promptStripped = canonicalizeReadableEchoLine(
+    hasPromptPrefix ? normalizedLine.replace(READABLE_PROMPT_ECHO_PREFIX_RE, '') : normalizedLine
+  );
+  if (!promptStripped) return false;
+
+  if (hasPromptPrefix && promptStripped === candidate) return true;
+  if (candidate.length > 1 && promptStripped === `${candidate[0]}${candidate}`) return true;
+  return false;
+}
+
+function suppressReadableEchoAndPromptNoise(echoState, events) {
+  if (!Array.isArray(events) || events.length === 0) return events;
+  const now = Date.now();
+  if (echoState) {
+    pruneReadableEchoCandidates(echoState, now);
+  }
+  const candidates = (echoState && Array.isArray(echoState.candidates)) ? echoState.candidates : [];
+
+  return events.map((event) => {
+    if (!isReadableOutputEvent(event)) return event;
+    const text = typeof event.text === 'string' ? event.text : '';
+    if (!text) return event;
+    const hasRewriteControls = readableEventHasControl(event, 'carriage_return')
+      || readableEventHasControl(event, 'erase_line')
+      || readableEventHasControl(event, 'backspace');
+
+    let changed = false;
+    const parts = text.split('\n');
+    const hasMultipleNonEmptyLines = parts.filter((part) => normalizeReadableEchoLine(part).trim().length > 0).length >= 2;
+    const kept = [];
+
+    for (const part of parts) {
+      const normalizedLine = normalizeReadableEchoLine(part);
+      if (
+        READABLE_PROMPT_PADDING_RE.test(normalizedLine)
+        || READABLE_PROMPT_PADDING_COMPLEX_RE.test(normalizedLine)
+      ) {
+        changed = true;
+        continue;
+      }
+
+      let suppressed = false;
+      for (let i = candidates.length - 1; i >= 0; i -= 1) {
+        const candidate = candidates[i];
+        if (!candidate || typeof candidate.text !== 'string') continue;
+        const matchesPromptEcho = isLikelyPromptEchoLine(normalizedLine, candidate.text);
+        const matchesExactEcho = hasMultipleNonEmptyLines && (
+          normalizedLine === candidate.text
+          || (candidate.text.length > 1 && normalizedLine === `${candidate.text[0]}${candidate.text}`)
+        );
+        const matchesRewriteEcho = hasRewriteControls && matchesExactEcho;
+        if (matchesPromptEcho || matchesRewriteEcho || matchesExactEcho) {
+          suppressed = true;
+          changed = true;
+          candidate.ts = now;
+          break;
+        }
+      }
+
+      if (!suppressed) kept.push(part);
+    }
+
+    if (!changed) return event;
+    return {
+      ...event,
+      text: kept.join('\n')
+    };
+  });
 }
 
 function createReadableNoiseState() {
@@ -1162,6 +1384,14 @@ class TerminalStreamManager {
     this.applySizing(state, { cols, rows });
   }
 
+  noteTerminalInput(terminalId, data) {
+    if (typeof data !== 'string' || data.length === 0) return;
+    const state = this.streams.get(terminalId);
+    if (!state || !state.readableRaw) return;
+    const echoState = state.readableRaw.echo || (state.readableRaw.echo = createReadableEchoState());
+    recordReadableEchoCandidates(echoState, data, Date.now());
+  }
+
   ensure(baseUrl, token, actor, terminalId, options = {}) {
     const existing = this.streams.get(terminalId);
     if (existing) {
@@ -1200,7 +1430,8 @@ class TerminalStreamManager {
       readableRaw: {
         parser: new ReadableOutputParser(),
         parsedByEventId: new Map(),
-        noise: createReadableNoiseState()
+        noise: createReadableNoiseState(),
+        echo: createReadableEchoState()
       }
     };
     this.resetConnectPromise(state);
@@ -1633,7 +1864,7 @@ class TerminalStreamManager {
     const events = [];
     const records = [];
     let bytes = 0;
-    let lastId = cursor || null;
+    let lastId = typeof cursor === 'number' ? cursor : null;
 
     for (const event of state.events) {
       if (event.id < startId) continue;
@@ -1760,8 +1991,12 @@ class TerminalStreamManager {
       });
     }
 
+    const echoSuppressedEvents = noiseFilter === 'balanced'
+      ? suppressReadableEchoAndPromptNoise(state.readableRaw.echo, mappedEvents)
+      : mappedEvents;
+
     const shouldFilterControls = controlLevel !== 'full';
-    const controlFilteredEvents = mappedEvents.map((event) => {
+    const controlFilteredEvents = echoSuppressedEvents.map((event) => {
       if (!event || typeof event !== 'object') return event;
       if (!isReadableOutputEvent(event) && !isReadableEmptyOutputEvent(event)) {
         return event;
@@ -1802,11 +2037,12 @@ class TerminalStreamManager {
         && typeof event === 'object'
         && (event.type === 'output' || event.type === 'snapshot')
       ));
+    const compactedEvents = normalizedEvents;
 
     if (coalesceMs > 0) {
-      return coalesceReadableOutputEvents(normalizedEvents, { coalesceMs, coalesceMaxChars });
+      return coalesceReadableOutputEvents(compactedEvents, { coalesceMs, coalesceMaxChars });
     }
-    return normalizedEvents;
+    return compactedEvents;
   }
 }
 
@@ -1820,6 +2056,9 @@ class HopMCPServer {
     this.token = null;
     this.actor = process.env.HOP_ACTOR || DEFAULT_ACTOR;
     this.streamManager = new TerminalStreamManager();
+    this.waitJobs = new Map();
+    this.terminalHandles = new Map(); // terminalId -> { internalName, sessionName, displayName, cols, rows }
+    this.terminalAliases = new Map(); // staleTerminalId -> liveTerminalId
 
     const resolved = resolveDefaultConnection();
     if (resolved) {
@@ -1869,12 +2108,26 @@ class HopMCPServer {
           rows: DEFAULT_TERMINAL_ROWS
         }
       },
+      hopx: {
+        waitCaptureMaxEventsDefault: DEFAULT_HOPX_WAIT_CAPTURE_MAX_EVENTS,
+        readableCoalesceMsDefault: DEFAULT_HOPX_READABLE_COALESCE_MS,
+        uiIncludeRawTailDefault: DEFAULT_HOPX_UI_INCLUDE_RAW_TAIL,
+        uiWaitCaptureMaxEventsDefault: DEFAULT_HOPX_UI_WAIT_CAPTURE_MAX_EVENTS,
+        textOnlyReadableDefault: DEFAULT_HOPX_TEXT_ONLY_READABLE,
+        uiBusyGuardMaxWaitMsDefault: DEFAULT_HOPX_UI_BUSY_GUARD_MAX_WAIT_MS
+      },
       waitTerminal: {
         startFromModes: WAIT_START_MODES,
         defaultStartFrom: 'latest',
         defaultCapture: 'readable_raw',
         defaultCondition: 'until_agent_done',
-        defaultAgentDoneIdleMs: DEFAULT_WAIT_AGENT_DONE_IDLE_MS
+        defaultAgentDoneIdleMs: DEFAULT_WAIT_AGENT_DONE_IDLE_MS,
+        supportsAsyncJobs: true,
+        waitJobTtlMs: WAIT_JOB_TTL_MS
+      },
+      toolNamespaces: {
+        corePrefix: 'hop_',
+        helperPrefix: 'hopx_'
       },
       headless: {
         available: headlessAvailable,
@@ -2070,8 +2323,8 @@ class HopMCPServer {
         }
       },
       {
-        name: 'hop_send_and_wait',
-        description: 'Write input (and optional keypress), then wait for completion/output in one call. Defaults to agent-friendly completion when no explicit wait condition is provided.',
+        name: 'hopx_send_and_wait',
+        description: 'Convenience helper: write input (and optional keypress), then wait for completion/output in one call. Defaults to agent-friendly completion when no explicit wait condition is provided.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2081,6 +2334,49 @@ class HopMCPServer {
             key: { type: 'string', description: 'Optional named key to send after data (for example enter, esc, ctrl_c).' },
             repeat: { type: 'number', description: 'Repeat keypress count when key is provided (default: 1).' },
             wait: { type: 'boolean', description: 'If false, only sends input and skips wait logic (default: true).' },
+            cursor: { type: 'number' },
+            start_from: {
+              type: 'string',
+              enum: WAIT_START_MODES,
+              description: 'Where to start scanning output: latest (tail), cursor (requires cursor), or beginning (oldest buffered event).'
+            },
+            until_regex: { type: 'string' },
+            regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
+            until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
+            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
+            prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
+            idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
+            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
+            capture: { type: 'string', enum: ['raw', 'readable_raw'], description: 'Capture format for returned events (default: readable_raw).' },
+            capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 60 for hopx helper).' },
+            text_only: { type: 'boolean', description: 'If true and capture="readable_raw", return concatenated wait.text and omit wait.events for smaller payloads. Default is true for readable_raw capture.' },
+            maxControlOps: { type: 'number', description: 'In readable_raw capture, max parsed control ops per event (default: 200).' },
+            includeRawData: { type: 'boolean', description: 'In readable_raw capture, include original event data.' },
+            includeMetaEvents: { type: 'boolean', description: 'In readable_raw capture, include non-output meta events (default: false).' },
+            control_level: {
+              type: 'string',
+              enum: READABLE_CONTROL_LEVELS,
+              description: 'In readable_raw capture, control detail level: full, structural, or none.'
+            },
+            noise_filter: {
+              type: 'string',
+              enum: READABLE_NOISE_FILTERS,
+              description: 'In readable_raw capture, text noise filter mode: balanced (default) or off.'
+            },
+            coalesce_ms: { type: 'number', description: 'In readable_raw capture, merge adjacent text frames within this time window (ms).' },
+            coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
+          },
+          required: ['terminal_id']
+        }
+      },
+      {
+        name: 'hop_wait_terminal',
+        description: 'Wait for terminal output conditions (regex, prompt, idle, agent_done) without client polling loops. Defaults to agent_done when no explicit wait condition is provided.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            terminal_id: { type: 'string' },
+            async: { type: 'boolean', description: 'If true, start the wait as a background job and return wait_id immediately.' },
             cursor: { type: 'number' },
             start_from: {
               type: 'string',
@@ -2116,8 +2412,8 @@ class HopMCPServer {
         }
       },
       {
-        name: 'hop_wait_terminal',
-        description: 'Wait for terminal output conditions (regex, prompt, idle, agent_done) without client polling loops. Defaults to agent_done when no explicit wait condition is provided.',
+        name: 'hop_wait_start',
+        description: 'Start a background terminal wait job and return wait_id immediately.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2154,6 +2450,20 @@ class HopMCPServer {
             coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
           },
           required: ['terminal_id']
+        }
+      },
+      {
+        name: 'hop_wait_poll',
+        description: 'Poll or await completion of a background wait job created by hop_wait_start (or hop_wait_terminal with async=true).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            wait_id: { type: 'string' },
+            wait: { type: 'boolean', description: 'If true, block until job finishes or max_wait_ms elapses.' },
+            max_wait_ms: { type: 'number', description: 'Max time to block when wait=true (default: 30000).' },
+            consume: { type: 'boolean', description: 'If true, remove completed job after returning payload.' }
+          },
+          required: ['wait_id']
         }
       },
       {
@@ -2266,6 +2576,62 @@ class HopMCPServer {
           properties: { name: { type: 'string' } },
           required: ['name']
         }
+      },
+      {
+        name: 'hopx_agent_turn',
+        description: 'Convenience helper: send one turn to a terminal agent, wait, and return mode-appropriate output. Built on top of core hop_* tools.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            terminal_id: { type: 'string' },
+            wait_id: { type: 'string', description: 'Existing async hopx turn wait_id to poll or control.' },
+            data: { type: 'string', description: 'Text to send to the terminal.' },
+            message: { type: 'string', description: 'Alias for data.' },
+            press_enter: { type: 'boolean', description: 'Send Enter after data. Defaults to true when data/message is provided.' },
+            key: { type: 'string', description: 'Optional named key to send after data (for example enter, esc, ctrl_c).' },
+            repeat: { type: 'number', description: 'Repeat keypress count when key is provided (default: 1).' },
+            wait: { type: 'boolean', description: 'If false, send only and skip waiting.' },
+            async: { type: 'boolean', description: 'If true, start the wait as a background job and return wait_id immediately.' },
+            control: {
+              type: 'string',
+              enum: ['send', 'wait', 'interrupt', 'terminate'],
+              description: 'send (default), wait-only continuation, or explicit interrupt/terminate control.'
+            },
+            interrupt_key: { type: 'string', description: 'Named key used for interrupt/terminate control (default: esc).' },
+            terminate_message: { type: 'string', description: 'Optional follow-up instruction to send after terminate interrupt.' },
+            mode: {
+              type: 'string',
+              enum: HOPX_TURN_MODES,
+              description: 'auto (default), readable_raw/raw capture, or ui snapshot output.'
+            },
+            cursor: { type: 'number' },
+            start_from: {
+              type: 'string',
+              enum: WAIT_START_MODES,
+              description: 'Where waiting begins: latest, cursor, or beginning.'
+            },
+            until_regex: { type: 'string' },
+            regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
+            until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
+            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion.' },
+            prompt_regex: { type: 'string', description: 'Prompt matcher regex.' },
+            idle_ms: { type: 'number', description: 'Match when output-like events are quiet for this duration.' },
+            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
+            capture_max_events: { type: 'number', description: 'Max captured wait events (default: 60 for hopx helper; 0 when selected mode is ui unless overridden).' },
+            text_only: { type: 'boolean', description: 'If true, condense readable waits to wait.text + metadata. Ignored for mode="ui" output snapshots. Default is true for readable modes.' },
+            maxControlOps: { type: 'number' },
+            includeRawData: { type: 'boolean' },
+            includeMetaEvents: { type: 'boolean' },
+            control_level: { type: 'string', enum: READABLE_CONTROL_LEVELS },
+            noise_filter: { type: 'string', enum: READABLE_NOISE_FILTERS },
+            coalesce_ms: { type: 'number' },
+            coalesce_max_chars: { type: 'number' },
+            uiMaxLines: { type: 'number', description: 'For mode=ui, max visible lines to include.' },
+            includeRawTail: { type: 'boolean', description: 'For mode=ui, include raw output tail (default: false in hopx helper).' },
+            rawTailMaxEvents: { type: 'number', description: 'For mode=ui, max raw tail events.' }
+          },
+          required: ['terminal_id']
+        }
       }
     ];
   }
@@ -2317,6 +2683,7 @@ class HopMCPServer {
       }
       this.baseUrl = baseUrl;
       this.token = token;
+      this.clearTransientTerminalState();
       return { content: [{ type: 'text', text: `Connected to ${this.baseUrl}` }] };
     }
 
@@ -2329,8 +2696,20 @@ class HopMCPServer {
     switch (name) {
       case 'hop_list_sessions':
         return this.wrapApiResult(await this.callApi('GET', '/api/sessions'), { endpoint: '/api/sessions' });
-      case 'hop_list_terminals':
-        return this.wrapApiResult(await this.callApi('GET', '/api/terminals'), { endpoint: '/api/terminals' });
+      case 'hop_list_terminals': {
+        const listed = await this.callApi('GET', '/api/terminals');
+        if (!this.isApiFailurePayload(listed) && Array.isArray(listed.terminals)) {
+          for (const terminal of listed.terminals) {
+            if (!terminal || typeof terminal.id !== 'string') continue;
+            this.rememberTerminalHandle(terminal.id, {
+              internalName: terminal.sessionName || null,
+              sessionName: terminal.sessionName || null,
+              displayName: terminal.displayName || null
+            });
+          }
+        }
+        return this.wrapApiResult(listed, { endpoint: '/api/terminals' });
+      }
       case 'hop_create_terminal': {
         const created = await this.callApi('POST', '/api/terminals', {
           name: args.name,
@@ -2349,6 +2728,11 @@ class HopMCPServer {
             rows: args.rows,
             waitForOutputMs: CREATE_TERMINAL_OUTPUT_WARMUP_MS
           });
+          this.rememberTerminalHandleFromPayload(created, {
+            displayName: args.name,
+            cols: args.cols,
+            rows: args.rows
+          });
         }
         return this.wrapApiResult(created, { endpoint: '/api/terminals' });
       }
@@ -2365,51 +2749,99 @@ class HopMCPServer {
             rows: args.rows,
             waitForOutputMs: CREATE_TERMINAL_OUTPUT_WARMUP_MS
           });
+          this.rememberTerminalHandleFromPayload(attached, {
+            internalName: args.internalName,
+            displayName: args.name,
+            cols: args.cols,
+            rows: args.rows
+          });
         }
         return this.wrapApiResult(attached, { endpoint: '/api/terminals/attach' });
       }
       case 'hop_write_terminal':
-        await this.prewarmTerminalStream(args.terminal_id);
-        return this.wrapApiResult(
-          await this.callApi('POST', `/api/terminals/${encodeURIComponent(args.terminal_id)}/write`, {
-            data: args.data
-          }),
-          { endpoint: `/api/terminals/${encodeURIComponent(args.terminal_id)}/write` }
-        );
+        {
+          const resolvedId = await this.ensureTerminalReadyWithRecovery(args.terminal_id);
+          if (typeof args.data === 'string' && args.data.length > 0) {
+            this.streamManager.noteTerminalInput(resolvedId, args.data);
+          }
+          const call = await this.callTerminalEndpointWithRecovery(
+            args.terminal_id,
+            'POST',
+            (terminalId) => `/api/terminals/${encodeURIComponent(terminalId)}/write`,
+            { data: args.data }
+          );
+          if (call.terminalId && call.terminalId !== resolvedId && typeof args.data === 'string' && args.data.length > 0) {
+            this.streamManager.noteTerminalInput(call.terminalId, args.data);
+          }
+          return this.wrapApiResult(call.payload, { endpoint: call.endpoint });
+        }
       case 'hop_send_key': {
         const mapped = resolveSendKeyInput(args.key, args.repeat);
         if (!mapped.ok) {
           return { content: [{ type: 'text', text: `Error: ${mapped.error}` }], isError: true };
         }
-        await this.prewarmTerminalStream(args.terminal_id);
-        return this.wrapApiResult(
-          await this.callApi('POST', `/api/terminals/${encodeURIComponent(args.terminal_id)}/write`, {
-            data: mapped.data
-          }),
-          { endpoint: `/api/terminals/${encodeURIComponent(args.terminal_id)}/write` }
-        );
+        {
+          const resolvedId = await this.ensureTerminalReadyWithRecovery(args.terminal_id);
+          this.streamManager.noteTerminalInput(resolvedId, mapped.data);
+          const call = await this.callTerminalEndpointWithRecovery(
+            args.terminal_id,
+            'POST',
+            (terminalId) => `/api/terminals/${encodeURIComponent(terminalId)}/write`,
+            { data: mapped.data }
+          );
+          if (call.terminalId && call.terminalId !== resolvedId) {
+            this.streamManager.noteTerminalInput(call.terminalId, mapped.data);
+          }
+          return this.wrapApiResult(call.payload, { endpoint: call.endpoint });
+        }
       }
-      case 'hop_send_and_wait':
+      case 'hopx_send_and_wait':
         return await this.handleSendAndWait(args);
       case 'hop_wait_terminal':
-        return await this.handleWaitTerminal(args);
-      case 'hop_resize_terminal': {
-        this.streamManager.ensure(this.baseUrl, this.token, this.actor, args.terminal_id, { cols: args.cols, rows: args.rows });
-        const resized = await this.callApi('POST', `/api/terminals/${encodeURIComponent(args.terminal_id)}/resize`, {
-          cols: args.cols,
-          rows: args.rows
-        });
-        if (resized && resized.ok !== false) {
-          this.streamManager.setTerminalSize(args.terminal_id, args.cols, args.rows);
+        if (args.async === true) {
+          return await this.handleWaitStart(args);
         }
-        return this.wrapApiResult(resized, { endpoint: `/api/terminals/${encodeURIComponent(args.terminal_id)}/resize` });
+        return await this.handleWaitTerminal(args);
+      case 'hop_wait_start':
+        return await this.handleWaitStart(args);
+      case 'hop_wait_poll':
+        return await this.handleWaitPoll(args);
+      case 'hop_resize_terminal': {
+        const resolvedId = await this.ensureTerminalReadyWithRecovery(args.terminal_id, { cols: args.cols, rows: args.rows });
+        this.streamManager.ensure(this.baseUrl, this.token, this.actor, resolvedId, { cols: args.cols, rows: args.rows });
+        const call = await this.callTerminalEndpointWithRecovery(
+          args.terminal_id,
+          'POST',
+          (terminalId) => `/api/terminals/${encodeURIComponent(terminalId)}/resize`,
+          {
+            cols: args.cols,
+            rows: args.rows
+          },
+          { cols: args.cols, rows: args.rows }
+        );
+        if (call.payload && call.payload.ok !== false) {
+          this.streamManager.setTerminalSize(call.terminalId, args.cols, args.rows);
+          this.rememberTerminalHandle(call.terminalId, {
+            cols: Number.isFinite(args.cols) ? Math.floor(args.cols) : undefined,
+            rows: Number.isFinite(args.rows) ? Math.floor(args.rows) : undefined
+          });
+        }
+        return this.wrapApiResult(call.payload, { endpoint: call.endpoint });
       }
       case 'hop_read_terminal':
         return await this.handleReadTerminal(args);
       case 'hop_close_terminal': {
-        const closed = await this.callApi('DELETE', `/api/terminals/${encodeURIComponent(args.terminal_id)}${args.killSession ? '?killSession=true' : ''}`);
-        this.streamManager.remove(args.terminal_id);
-        return this.wrapApiResult(closed, { endpoint: `/api/terminals/${encodeURIComponent(args.terminal_id)}` });
+        const call = await this.callTerminalEndpointWithRecovery(
+          args.terminal_id,
+          'DELETE',
+          (terminalId) => `/api/terminals/${encodeURIComponent(terminalId)}${args.killSession ? '?killSession=true' : ''}`,
+          undefined
+        );
+        if (!this.isApiFailurePayload(call.payload)) {
+          this.forgetTerminalHandle(args.terminal_id);
+          this.forgetTerminalHandle(call.terminalId);
+        }
+        return this.wrapApiResult(call.payload, { endpoint: call.endpoint });
       }
       case 'hop_set_agent_permission':
         return this.wrapApiResult(
@@ -2437,6 +2869,8 @@ class HopMCPServer {
           await this.callApi('POST', '/api/workspaces/use', { name: args.name }),
           { endpoint: '/api/workspaces/use' }
         );
+      case 'hopx_agent_turn':
+        return await this.handleHopxAgentTurn(args);
       default:
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -2464,6 +2898,173 @@ class HopMCPServer {
     }
 
     return { contents: [{ uri, mimeType: 'text/plain', text: `Error: resource not found (${uri})` }] };
+  }
+
+  clearTransientTerminalState() {
+    for (const terminalId of Array.from(this.streamManager.streams.keys())) {
+      this.streamManager.remove(terminalId);
+    }
+    this.waitJobs.clear();
+    this.terminalHandles.clear();
+    this.terminalAliases.clear();
+  }
+
+  resolveTerminalAlias(terminalId) {
+    if (typeof terminalId !== 'string' || terminalId.length === 0) return terminalId;
+    let current = terminalId;
+    const seen = new Set();
+    while (this.terminalAliases.has(current) && !seen.has(current)) {
+      seen.add(current);
+      current = this.terminalAliases.get(current);
+    }
+    return current;
+  }
+
+  getTerminalHandle(terminalId) {
+    if (typeof terminalId !== 'string' || terminalId.length === 0) return null;
+    const resolved = this.resolveTerminalAlias(terminalId);
+    return this.terminalHandles.get(terminalId) || this.terminalHandles.get(resolved) || null;
+  }
+
+  rememberTerminalHandle(terminalId, details = {}) {
+    if (typeof terminalId !== 'string' || terminalId.length === 0) return;
+    const existing = this.getTerminalHandle(terminalId) || {};
+    const merged = {
+      ...existing,
+      ...details
+    };
+    this.terminalHandles.set(terminalId, merged);
+    const resolved = this.resolveTerminalAlias(terminalId);
+    if (resolved && resolved !== terminalId) {
+      this.terminalHandles.set(resolved, merged);
+    }
+  }
+
+  rememberTerminalHandleFromPayload(payload, fallback = {}) {
+    if (!payload || typeof payload !== 'object' || !payload.id) return;
+    const terminalId = String(payload.id);
+    const sessionName = typeof payload.sessionName === 'string'
+      ? payload.sessionName
+      : (typeof fallback.sessionName === 'string' ? fallback.sessionName : null);
+    const internalName = typeof payload.internalName === 'string'
+      ? payload.internalName
+      : (typeof fallback.internalName === 'string'
+        ? fallback.internalName
+        : sessionName);
+    const displayName = typeof payload.displayName === 'string'
+      ? payload.displayName
+      : (typeof fallback.displayName === 'string' ? fallback.displayName : null);
+    this.rememberTerminalHandle(terminalId, {
+      internalName: internalName || null,
+      sessionName: sessionName || internalName || null,
+      displayName: displayName || null,
+      cols: Number.isFinite(fallback.cols) ? Math.floor(fallback.cols) : undefined,
+      rows: Number.isFinite(fallback.rows) ? Math.floor(fallback.rows) : undefined
+    });
+  }
+
+  forgetTerminalHandle(terminalId) {
+    if (typeof terminalId !== 'string' || terminalId.length === 0) return;
+    const resolved = this.resolveTerminalAlias(terminalId);
+    this.terminalHandles.delete(terminalId);
+    this.terminalHandles.delete(resolved);
+    this.streamManager.remove(terminalId);
+    this.streamManager.remove(resolved);
+
+    for (const [alias, target] of Array.from(this.terminalAliases.entries())) {
+      if (alias === terminalId || alias === resolved || target === terminalId || target === resolved) {
+        this.terminalAliases.delete(alias);
+      }
+    }
+  }
+
+  isTerminalNotFoundPayload(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    const status = Number.isFinite(payload.status) ? Math.floor(payload.status) : null;
+    const err = payload.error;
+    const errText = typeof err === 'string'
+      ? err
+      : (err && typeof err === 'object'
+        ? String(err.error || err.message || JSON.stringify(err))
+        : '');
+    return status === 404 || /terminal not found/i.test(errText);
+  }
+
+  isTerminalNotFoundStreamError(rawError) {
+    if (!rawError) return false;
+    const text = String(rawError);
+    if (/terminal not found/i.test(text)) return true;
+    if (/stream request failed\s*\(404\)/i.test(text)) return true;
+    return false;
+  }
+
+  async recoverTerminalId(requestedTerminalId, currentTerminalId, options = {}) {
+    const handle = this.getTerminalHandle(currentTerminalId) || this.getTerminalHandle(requestedTerminalId);
+    if (!handle) return null;
+
+    const attachBody = {
+      internalName: handle.internalName || handle.sessionName || options.internalName,
+      name: handle.displayName || options.name,
+      cols: Number.isFinite(options.cols) ? Math.floor(options.cols) : handle.cols,
+      rows: Number.isFinite(options.rows) ? Math.floor(options.rows) : handle.rows
+    };
+    if (!attachBody.internalName && !attachBody.name) return null;
+
+    const attached = await this.callApi('POST', '/api/terminals/attach', attachBody);
+    if (this.isApiFailurePayload(attached) || !attached.id) {
+      return null;
+    }
+
+    const recoveredId = String(attached.id);
+    this.rememberTerminalHandleFromPayload(attached, attachBody);
+    if (requestedTerminalId && requestedTerminalId !== recoveredId) {
+      this.terminalAliases.set(requestedTerminalId, recoveredId);
+    }
+    if (currentTerminalId && currentTerminalId !== recoveredId) {
+      this.terminalAliases.set(currentTerminalId, recoveredId);
+    }
+    this.streamManager.remove(currentTerminalId);
+    await this.prewarmTerminalStream(recoveredId, {
+      cols: attachBody.cols,
+      rows: attachBody.rows
+    });
+    return recoveredId;
+  }
+
+  async callTerminalEndpointWithRecovery(requestedTerminalId, method, endpointBuilder, body, options = {}) {
+    let terminalId = this.resolveTerminalAlias(requestedTerminalId);
+    let endpoint = endpointBuilder(terminalId);
+    let payload = await this.callApi(method, endpoint, typeof body === 'function' ? body(terminalId) : body);
+
+    if (this.isTerminalNotFoundPayload(payload)) {
+      const recoveredId = await this.recoverTerminalId(requestedTerminalId, terminalId, options);
+      if (recoveredId) {
+        terminalId = recoveredId;
+        endpoint = endpointBuilder(terminalId);
+        payload = await this.callApi(method, endpoint, typeof body === 'function' ? body(terminalId) : body);
+      }
+    }
+
+    return { payload, endpoint, terminalId };
+  }
+
+  async ensureTerminalReadyWithRecovery(requestedTerminalId, options = {}) {
+    let terminalId = this.resolveTerminalAlias(requestedTerminalId);
+    await this.prewarmTerminalStream(terminalId, options);
+
+    const cursor = this.streamManager.getLatestCursor(terminalId);
+    const probe = this.streamManager.readEvents(terminalId, cursor, 0, 1);
+    if (!this.isTerminalNotFoundStreamError(probe.error)) {
+      return terminalId;
+    }
+
+    const recoveredId = await this.recoverTerminalId(requestedTerminalId, terminalId, options);
+    if (!recoveredId) {
+      return terminalId;
+    }
+    terminalId = recoveredId;
+    await this.prewarmTerminalStream(terminalId, options);
+    return terminalId;
   }
 
   async callApiWithConnection(method, baseUrl, token, endpoint, body) {
@@ -2526,19 +3127,830 @@ class HopMCPServer {
 
   async prewarmTerminalStream(terminalId, options = {}) {
     if (!terminalId) return;
-    this.streamManager.ensure(this.baseUrl, this.token, this.actor, terminalId, options);
-    await this.streamManager.waitUntilConnected(terminalId);
+    const resolvedId = this.resolveTerminalAlias(terminalId);
+    this.streamManager.ensure(this.baseUrl, this.token, this.actor, resolvedId, options);
+    await this.streamManager.waitUntilConnected(resolvedId);
     const waitForOutputMs = Number.isFinite(options.waitForOutputMs)
       ? Math.max(0, Math.floor(options.waitForOutputMs))
       : 0;
     if (waitForOutputMs > 0) {
-      await this.streamManager.waitForOutputEvent(terminalId, waitForOutputMs);
+      await this.streamManager.waitForOutputEvent(resolvedId, waitForOutputMs);
+    }
+    return resolvedId;
+  }
+
+  createWaitJobId() {
+    return `wait_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+  }
+
+  pruneWaitJobs(nowTs = Date.now()) {
+    const now = Number.isFinite(nowTs) ? nowTs : Date.now();
+
+    for (const [waitId, job] of this.waitJobs.entries()) {
+      if (!job || typeof job !== 'object') {
+        this.waitJobs.delete(waitId);
+        continue;
+      }
+      if (!job.done) continue;
+      const updatedAt = Number.isFinite(job.updatedAt) ? job.updatedAt : now;
+      if ((now - updatedAt) > WAIT_JOB_TTL_MS) {
+        this.waitJobs.delete(waitId);
+      }
+    }
+
+    if (this.waitJobs.size <= WAIT_JOB_MAX_ENTRIES) return;
+
+    const entries = Array.from(this.waitJobs.entries())
+      .sort((left, right) => {
+        const leftTs = Number.isFinite(left[1]?.updatedAt) ? left[1].updatedAt : 0;
+        const rightTs = Number.isFinite(right[1]?.updatedAt) ? right[1].updatedAt : 0;
+        return leftTs - rightTs;
+      });
+
+    for (const [waitId, job] of entries) {
+      if (this.waitJobs.size <= WAIT_JOB_MAX_ENTRIES) break;
+      if (job && job.done) this.waitJobs.delete(waitId);
+    }
+    for (const [waitId] of entries) {
+      if (this.waitJobs.size <= WAIT_JOB_MAX_ENTRIES) break;
+      this.waitJobs.delete(waitId);
     }
   }
 
+  startWaitJob(args, metadata = null) {
+    const waitId = this.createWaitJobId();
+    const now = Date.now();
+    const waitArgs = { ...args };
+    delete waitArgs.async;
+
+    const job = {
+      waitId,
+      createdAt: now,
+      updatedAt: now,
+      done: false,
+      status: 'pending',
+      result: null,
+      error: null,
+      promise: null,
+      metadata: metadata && typeof metadata === 'object' ? { ...metadata } : null
+    };
+
+    job.promise = (async () => {
+      try {
+        const outcome = await this.runWaitTerminal(waitArgs);
+        if (outcome.errorResponse) {
+          job.status = 'error';
+          job.error = extractToolErrorText(outcome.errorResponse);
+        } else {
+          job.status = outcome.payload && typeof outcome.payload.status === 'string'
+            ? outcome.payload.status
+            : 'matched';
+          job.result = outcome.payload || null;
+        }
+      } catch (err) {
+        job.status = 'error';
+        job.error = err instanceof Error ? err.message : String(err);
+      } finally {
+        job.done = true;
+        job.updatedAt = Date.now();
+        this.pruneWaitJobs(job.updatedAt);
+      }
+    })();
+
+    this.waitJobs.set(waitId, job);
+    this.pruneWaitJobs(now);
+    return job;
+  }
+
+  summarizeWaitJob(job) {
+    const payload = {
+      ok: job.done ? job.status !== 'error' : true,
+      wait_id: job.waitId,
+      done: !!job.done,
+      status: job.done ? job.status : 'pending',
+      createdAt: new Date(job.createdAt).toISOString(),
+      updatedAt: new Date(job.updatedAt).toISOString()
+    };
+    if (job.metadata && typeof job.metadata === 'object') {
+      payload.metadata = job.metadata;
+    }
+    return payload;
+  }
+
+  async handleWaitStart(args) {
+    if (!args || typeof args !== 'object') {
+      return { content: [{ type: 'text', text: 'Error: wait arguments are required.' }], isError: true };
+    }
+    if (!args.terminal_id) {
+      return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
+    }
+
+    const job = this.startWaitJob(args);
+    return this.wrapJson({
+      ...this.summarizeWaitJob(job),
+      async: true
+    });
+  }
+
+  async handleWaitPoll(args) {
+    const waitId = typeof args.wait_id === 'string' ? args.wait_id.trim() : '';
+    if (!waitId) {
+      return { content: [{ type: 'text', text: 'Error: wait_id is required.' }], isError: true };
+    }
+
+    const job = this.waitJobs.get(waitId);
+    if (!job) {
+      return {
+        content: [{ type: 'text', text: `Error: wait job not found (${waitId}). It may be stale after daemon or MCP restart.` }],
+        isError: true
+      };
+    }
+
+    if (args.wait === true && !job.done) {
+      const maxWaitMs = Number.isFinite(args.max_wait_ms)
+        ? Math.max(1, Math.floor(args.max_wait_ms))
+        : DEFAULT_WAIT_POLL_MAX_MS;
+      await Promise.race([
+        job.promise,
+        new Promise((resolve) => setTimeout(resolve, maxWaitMs))
+      ]);
+    }
+
+    const payload = this.summarizeWaitJob(job);
+    if (job.done && job.result) {
+      payload.result = job.result;
+    }
+    if (job.done && job.status === 'error') {
+      payload.error = job.error || 'Unknown wait failure';
+    }
+
+    if (args.consume === true && job.done) {
+      this.waitJobs.delete(waitId);
+    }
+
+    if (job.done && job.status === 'error') {
+      return {
+        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+        isError: true
+      };
+    }
+    return this.wrapJson(payload);
+  }
+
+  parseToolJsonResponse(response, label) {
+    if (!response || typeof response !== 'object') {
+      return { ok: false, error: `${label}: invalid response` };
+    }
+    if (response.isError) {
+      return { ok: false, error: `${label}: ${extractToolErrorText(response)}` };
+    }
+    const content = Array.isArray(response.content) ? response.content : [];
+    const first = content.length > 0 ? content[0] : null;
+    if (!first || typeof first.text !== 'string') {
+      return { ok: false, error: `${label}: missing response text payload` };
+    }
+    try {
+      return { ok: true, payload: JSON.parse(first.text) };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `${label}: failed to parse JSON (${err instanceof Error ? err.message : String(err)})`
+      };
+    }
+  }
+
+  getHopxControlMode(args, hasInputAction) {
+    const requested = typeof args.control === 'string' ? String(args.control).toLowerCase() : '';
+    if (requested === 'send' || requested === 'wait' || requested === 'interrupt' || requested === 'terminate') {
+      return requested;
+    }
+    return hasInputAction ? 'send' : 'wait';
+  }
+
+  getHopxInterruptKey(args) {
+    if (typeof args.interrupt_key === 'string' && args.interrupt_key.trim().length > 0) {
+      return args.interrupt_key.trim();
+    }
+    return 'esc';
+  }
+
+  async sendHopxControlInput(terminalId, key, repeat = 1) {
+    const mapped = resolveSendKeyInput(key, repeat);
+    if (!mapped.ok) {
+      return {
+        errorResponse: { content: [{ type: 'text', text: `Error: ${mapped.error}` }], isError: true }
+      };
+    }
+
+    const resolvedId = await this.ensureTerminalReadyWithRecovery(terminalId);
+    this.streamManager.noteTerminalInput(resolvedId, mapped.data);
+    const call = await this.callTerminalEndpointWithRecovery(
+      terminalId,
+      'POST',
+      (currentTerminalId) => `/api/terminals/${encodeURIComponent(currentTerminalId)}/write`,
+      { data: mapped.data }
+    );
+    if (this.isApiFailurePayload(call.payload)) {
+      return { errorResponse: this.wrapApiResult(call.payload, { endpoint: call.endpoint }) };
+    }
+    return {
+      payload: {
+        terminal_id: terminalId,
+        sent: [{ source: `key:${normalizeSendKeyName(key)}`, bytes: Buffer.byteLength(mapped.data, 'utf8') }]
+      }
+    };
+  }
+
+  async formatHopxAsyncWaitResponse(job, options = {}) {
+    const metadata = job && job.metadata && typeof job.metadata === 'object' ? job.metadata : {};
+    const payload = this.summarizeWaitJob(job);
+    const includeUiRawTail = metadata.includeUiRawTail === true;
+    const selectedMode = typeof metadata.selected_mode === 'string' ? metadata.selected_mode : 'readable_raw';
+    payload.helper = 'hopx_agent_turn';
+    payload.async = true;
+    payload.selected_mode = selectedMode;
+    payload.terminal_id = metadata.terminal_id || options.terminal_id || null;
+    payload.sent = Array.isArray(metadata.sent) ? metadata.sent : [];
+    payload.waited = true;
+
+    if (job.done && job.result) {
+      const waitCaptureMode = job.result && typeof job.result.captureMode === 'string'
+        ? String(job.result.captureMode).toLowerCase()
+        : 'readable_raw';
+      payload.wait = (
+        metadata.text_only === true
+        && waitCaptureMode === 'readable_raw'
+      )
+        ? condenseReadableWaitPayload(job.result)
+        : job.result;
+      if (selectedMode === 'ui' && payload.terminal_id) {
+        const uiOutcome = await this.readHopxUiSnapshot(
+          payload.terminal_id,
+          metadata.uiMaxLines,
+          metadata.rawTailMaxEvents,
+          includeUiRawTail
+        );
+        if (uiOutcome.errorResponse) return uiOutcome.errorResponse;
+        payload.output = uiOutcome.payload;
+      }
+    }
+    if (job.done && job.status === 'error') {
+      payload.error = job.error || 'Unknown wait failure';
+      return {
+        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+        isError: true
+      };
+    }
+
+    return this.wrapJson(payload);
+  }
+
+  applyHopxWaitDefaults(waitArgs) {
+    const next = { ...waitArgs };
+    if (next.capture_max_events === undefined || next.capture_max_events === null) {
+      next.capture_max_events = DEFAULT_HOPX_WAIT_CAPTURE_MAX_EVENTS;
+    }
+
+    const captureMode = typeof next.capture === 'string'
+      ? String(next.capture).toLowerCase()
+      : 'readable_raw';
+    if (captureMode === 'readable_raw') {
+      if (next.control_level === undefined || next.control_level === null || next.control_level === '') {
+        next.control_level = DEFAULT_READABLE_CONTROL_LEVEL;
+      }
+      if (next.noise_filter === undefined || next.noise_filter === null || next.noise_filter === '') {
+        next.noise_filter = DEFAULT_READABLE_NOISE_FILTER;
+      }
+      if (next.coalesce_ms === undefined || next.coalesce_ms === null) {
+        next.coalesce_ms = DEFAULT_HOPX_READABLE_COALESCE_MS;
+      }
+    }
+    return next;
+  }
+
+  shouldApplyHopxUiBusyGuard(args, waitPayload) {
+    if (!waitPayload || typeof waitPayload !== 'object') return false;
+    if (waitPayload.matched !== 'agent_done') return false;
+    if (args.until_agent_done === false) return false;
+    if (typeof args.until_regex === 'string' && args.until_regex.length > 0) return false;
+    if (args.until_prompt === true) return false;
+    if (args.idle_ms !== undefined && args.idle_ms !== null) return false;
+    return true;
+  }
+
+  async readHopxUiSnapshot(terminalId, uiMaxLines, rawTailMaxEvents, includeRawTail = false) {
+    const uiRead = await this.handleReadTerminal({
+      terminal_id: terminalId,
+      mode: 'ui',
+      start_from: 'latest',
+      uiMaxLines,
+      includeRawTail,
+      rawTailMaxEvents
+    });
+    if (uiRead.isError) return { errorResponse: uiRead };
+    const parsedUi = this.parseToolJsonResponse(uiRead, 'hop_read_terminal');
+    if (!parsedUi.ok) {
+      return {
+        errorResponse: { content: [{ type: 'text', text: `Error: ${parsedUi.error}` }], isError: true }
+      };
+    }
+    return { payload: parsedUi.payload };
+  }
+
+  async waitForHopxUiNotBusy(args) {
+    const requestedTerminalId = typeof args.terminal_id === 'string' ? args.terminal_id : '';
+    if (!requestedTerminalId) {
+      return {
+        errorResponse: { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true }
+      };
+    }
+
+    const startedAt = Date.now();
+    const maxWaitMsInput = Number.isFinite(args.max_wait_ms)
+      ? Math.max(0, Math.floor(args.max_wait_ms))
+      : DEFAULT_HOPX_UI_BUSY_GUARD_MAX_WAIT_MS;
+    const guardMaxWaitMs = Math.min(maxWaitMsInput, DEFAULT_HOPX_UI_BUSY_GUARD_MAX_WAIT_MS);
+    let checks = 0;
+    let lastBusyLine = null;
+    let lastOutput = null;
+
+    while (true) {
+      const uiOutcome = await this.readHopxUiSnapshot(
+        requestedTerminalId,
+        args.uiMaxLines,
+        args.rawTailMaxEvents,
+        false
+      );
+      if (uiOutcome.errorResponse) return uiOutcome;
+      const uiPayload = uiOutcome.payload;
+      lastOutput = uiPayload;
+      checks += 1;
+      const busyLine = extractUiBusyLine(uiPayload);
+      if (!busyLine) {
+        return {
+          payload: {
+            applied: true,
+            busy: false,
+            busyLine: null,
+            checks,
+            waitedMs: Date.now() - startedAt,
+            output: uiPayload
+          }
+        };
+      }
+      lastBusyLine = busyLine;
+
+      if (guardMaxWaitMs <= 0 || (Date.now() - startedAt) >= guardMaxWaitMs) {
+        return {
+          payload: {
+            applied: true,
+            busy: true,
+            busyLine: lastBusyLine,
+            checks,
+            waitedMs: Date.now() - startedAt,
+            output: lastOutput
+          }
+        };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, DEFAULT_HOPX_UI_BUSY_GUARD_POLL_MS));
+    }
+  }
+
+  async handleHopxAgentTurn(args) {
+    const requestedTerminalId = typeof args.terminal_id === 'string' ? args.terminal_id : '';
+    const waitId = typeof args.wait_id === 'string' ? args.wait_id.trim() : '';
+    if (!requestedTerminalId && !waitId) {
+      return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
+    }
+
+    const data = typeof args.data === 'string'
+      ? args.data
+      : (typeof args.message === 'string' ? args.message : '');
+    const key = typeof args.key === 'string' ? args.key : '';
+    const pressEnter = args.press_enter === true || (args.press_enter === undefined && data.length > 0);
+    const shouldWait = args.wait !== false;
+    const shouldAsync = args.async === true && shouldWait;
+    const hasInputAction = Boolean(data || key || pressEnter);
+    const controlMode = this.getHopxControlMode(args, hasInputAction);
+    const captureMaxEventsProvided = args.capture_max_events !== undefined && args.capture_max_events !== null;
+    const selectedModeInput = normalizeHopxTurnMode(args.mode);
+    if (!selectedModeInput) {
+      return {
+        content: [{ type: 'text', text: `Error: mode must be one of "${HOPX_TURN_MODES.join('", "')}".` }],
+        isError: true
+      };
+    }
+
+    if (waitId) {
+      const job = this.waitJobs.get(waitId);
+      if (!job) {
+        return {
+          content: [{ type: 'text', text: `Error: wait job not found (${waitId}). It may be stale after daemon or MCP restart.` }],
+          isError: true
+        };
+      }
+
+      const terminalIdFromJob = job.metadata && typeof job.metadata.terminal_id === 'string'
+        ? job.metadata.terminal_id
+        : requestedTerminalId;
+
+      if (controlMode === 'interrupt' || controlMode === 'terminate') {
+        const interruptOutcome = await this.sendHopxControlInput(
+          terminalIdFromJob,
+          this.getHopxInterruptKey(args),
+          1
+        );
+        if (interruptOutcome.errorResponse) return interruptOutcome.errorResponse;
+        if (controlMode === 'terminate' && typeof args.terminate_message === 'string' && args.terminate_message.length > 0) {
+          const terminateSend = await this.handleSendAndWait({
+            terminal_id: terminalIdFromJob,
+            data: args.terminate_message,
+            press_enter: true,
+            wait: false
+          });
+          if (terminateSend.isError) return terminateSend;
+        }
+      }
+
+      if (args.wait === true && !job.done) {
+        const maxWaitMs = Number.isFinite(args.max_wait_ms)
+          ? Math.max(1, Math.floor(args.max_wait_ms))
+          : DEFAULT_WAIT_POLL_MAX_MS;
+        await Promise.race([
+          job.promise,
+          new Promise((resolve) => setTimeout(resolve, maxWaitMs))
+        ]);
+      }
+
+      return await this.formatHopxAsyncWaitResponse(job, { terminal_id: terminalIdFromJob });
+    }
+
+    if (!hasInputAction && controlMode === 'send') {
+      return {
+        content: [{ type: 'text', text: 'Error: provide at least one input action, or use control=\"wait\" for wait-only mode.' }],
+        isError: true
+      };
+    }
+
+    let terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
+    let selectedMode = selectedModeInput;
+    if (selectedMode === 'auto') {
+      const flags = this.streamManager.getTerminalFlags(terminalId);
+      selectedMode = flags.exists && flags.alternateScreen ? 'ui' : 'readable_raw';
+    }
+    const readableTextOnly = resolveHopxTextOnly(args.text_only, selectedMode);
+    const includeUiRawTail = args.includeRawTail === true ? true : DEFAULT_HOPX_UI_INCLUDE_RAW_TAIL;
+    const sent = [];
+
+    let sendOnlyPayload = {
+      sent: [],
+      cursorStart: this.streamManager.getLatestCursor(terminalId)
+    };
+    if (controlMode === 'interrupt' || controlMode === 'terminate') {
+      const interruptOutcome = await this.sendHopxControlInput(
+        requestedTerminalId,
+        this.getHopxInterruptKey(args),
+        1
+      );
+      if (interruptOutcome.errorResponse) return interruptOutcome.errorResponse;
+      sent.push(...interruptOutcome.payload.sent);
+      if (controlMode === 'terminate' && typeof args.terminate_message === 'string' && args.terminate_message.length > 0) {
+        const terminateSend = await this.handleSendAndWait({
+          terminal_id: requestedTerminalId,
+          data: args.terminate_message,
+          press_enter: true,
+          wait: false
+        });
+        if (terminateSend.isError) return terminateSend;
+        const parsedTerminateSend = this.parseToolJsonResponse(terminateSend, 'hopx_send_and_wait');
+        if (!parsedTerminateSend.ok) {
+          return { content: [{ type: 'text', text: `Error: ${parsedTerminateSend.error}` }], isError: true };
+        }
+        sent.push(...(Array.isArray(parsedTerminateSend.payload.sent) ? parsedTerminateSend.payload.sent : []));
+      }
+    } else if (hasInputAction) {
+      const sendOnly = await this.handleSendAndWait({
+        terminal_id: requestedTerminalId,
+        data,
+        press_enter: pressEnter,
+        key,
+        repeat: args.repeat,
+        wait: false
+      });
+      if (sendOnly.isError) return sendOnly;
+
+      const parsedSend = this.parseToolJsonResponse(sendOnly, 'hopx_send_and_wait');
+      if (!parsedSend.ok) {
+        return { content: [{ type: 'text', text: `Error: ${parsedSend.error}` }], isError: true };
+      }
+      sendOnlyPayload = parsedSend.payload;
+      sent.push(...(Array.isArray(parsedSend.payload.sent) ? parsedSend.payload.sent : []));
+    }
+
+    if (selectedMode === 'ui') {
+      let waitPayload = null;
+      if (shouldWait) {
+        const preSendCursor = Number.isFinite(sendOnlyPayload && sendOnlyPayload.cursorStart)
+          ? Math.floor(sendOnlyPayload.cursorStart)
+          : null;
+        const waitStartFrom = (args.start_from !== undefined && args.start_from !== null)
+          ? args.start_from
+          : (preSendCursor === null ? undefined : 'cursor');
+        const waitCursor = (args.cursor !== undefined && args.cursor !== null)
+          ? args.cursor
+          : (preSendCursor === null ? undefined : preSendCursor);
+        const waitArgs = this.applyHopxWaitDefaults({
+          terminal_id: requestedTerminalId,
+          cursor: waitCursor,
+          start_from: waitStartFrom,
+          until_regex: args.until_regex,
+          regex_flags: args.regex_flags,
+          until_prompt: args.until_prompt,
+          until_agent_done: args.until_agent_done,
+          prompt_regex: args.prompt_regex,
+          idle_ms: args.idle_ms,
+          max_wait_ms: args.max_wait_ms,
+          capture: 'readable_raw',
+          capture_max_events: captureMaxEventsProvided
+            ? args.capture_max_events
+            : DEFAULT_HOPX_UI_WAIT_CAPTURE_MAX_EVENTS,
+          maxControlOps: args.maxControlOps,
+          includeRawData: args.includeRawData,
+          includeMetaEvents: args.includeMetaEvents,
+          control_level: args.control_level,
+          noise_filter: args.noise_filter,
+          coalesce_ms: args.coalesce_ms,
+          coalesce_max_chars: args.coalesce_max_chars
+        });
+        if (shouldAsync) {
+          const job = this.startWaitJob(waitArgs, {
+            helper: 'hopx_agent_turn',
+            terminal_id: requestedTerminalId,
+            selected_mode: 'ui',
+            sent,
+            text_only: false,
+            uiMaxLines: args.uiMaxLines,
+            rawTailMaxEvents: args.rawTailMaxEvents,
+            includeUiRawTail
+          });
+          return this.wrapJson({
+            ...this.summarizeWaitJob(job),
+            helper: 'hopx_agent_turn',
+            terminal_id: requestedTerminalId,
+            selected_mode: 'ui',
+            sent,
+            waited: true,
+            async: true
+          });
+        }
+        const waited = await this.runWaitTerminal(waitArgs);
+        if (waited.errorResponse) return waited.errorResponse;
+        waitPayload = waited.payload;
+      }
+
+      let outputPayload = null;
+      const firstUiSnapshot = await this.readHopxUiSnapshot(
+        requestedTerminalId,
+        args.uiMaxLines,
+        args.rawTailMaxEvents,
+        includeUiRawTail
+      );
+      if (firstUiSnapshot.errorResponse) return firstUiSnapshot.errorResponse;
+      outputPayload = firstUiSnapshot.payload;
+
+      if (this.shouldApplyHopxUiBusyGuard(args, waitPayload)) {
+        const guardOutcome = await this.waitForHopxUiNotBusy({
+          terminal_id: requestedTerminalId,
+          max_wait_ms: args.max_wait_ms,
+          uiMaxLines: args.uiMaxLines,
+          rawTailMaxEvents: args.rawTailMaxEvents
+        });
+        if (guardOutcome.errorResponse) return guardOutcome.errorResponse;
+        outputPayload = guardOutcome.payload.output || outputPayload;
+        if (includeUiRawTail) {
+          const finalUiSnapshot = await this.readHopxUiSnapshot(
+            requestedTerminalId,
+            args.uiMaxLines,
+            args.rawTailMaxEvents,
+            true
+          );
+          if (finalUiSnapshot.errorResponse) return finalUiSnapshot.errorResponse;
+          outputPayload = finalUiSnapshot.payload;
+        }
+        if (waitPayload && typeof waitPayload === 'object') {
+          waitPayload = {
+            ...waitPayload,
+            uiBusyGuard: {
+              applied: true,
+              busy: guardOutcome.payload.busy === true,
+              busyLine: guardOutcome.payload.busyLine || null,
+              checks: guardOutcome.payload.checks,
+              waitedMs: guardOutcome.payload.waitedMs
+            }
+          };
+        }
+      }
+
+      return this.wrapJson({
+        ok: true,
+        helper: 'hopx_agent_turn',
+        terminal_id: requestedTerminalId,
+        selected_mode: selectedMode,
+        sent,
+        waited: shouldWait,
+        wait: waitPayload,
+        output: outputPayload
+      });
+    }
+
+    if (shouldAsync && shouldWait) {
+      const waitArgs = this.applyHopxWaitDefaults({
+        terminal_id: requestedTerminalId,
+        capture: selectedMode,
+        cursor: args.cursor,
+        start_from: args.start_from,
+        until_regex: args.until_regex,
+        regex_flags: args.regex_flags,
+        until_prompt: args.until_prompt,
+        until_agent_done: args.until_agent_done,
+        prompt_regex: args.prompt_regex,
+        idle_ms: args.idle_ms,
+        max_wait_ms: args.max_wait_ms,
+        capture_max_events: args.capture_max_events,
+        maxControlOps: args.maxControlOps,
+        includeRawData: args.includeRawData,
+        includeMetaEvents: args.includeMetaEvents,
+        control_level: args.control_level,
+        noise_filter: args.noise_filter,
+        coalesce_ms: args.coalesce_ms,
+        coalesce_max_chars: args.coalesce_max_chars
+      });
+      if (waitArgs.cursor === undefined && waitArgs.start_from === undefined) {
+        const preSendCursor = Number.isFinite(sendOnlyPayload && sendOnlyPayload.cursorStart)
+          ? Math.floor(sendOnlyPayload.cursorStart)
+          : null;
+        if (preSendCursor !== null) {
+          waitArgs.start_from = 'cursor';
+          waitArgs.cursor = preSendCursor;
+        }
+      }
+      const job = this.startWaitJob(waitArgs, {
+        helper: 'hopx_agent_turn',
+        terminal_id: requestedTerminalId,
+        selected_mode: selectedMode,
+        sent,
+        text_only: readableTextOnly
+      });
+      return this.wrapJson({
+        ...this.summarizeWaitJob(job),
+        helper: 'hopx_agent_turn',
+        terminal_id: requestedTerminalId,
+        selected_mode: selectedMode,
+        sent,
+        waited: true,
+        async: true
+      });
+    }
+
+    if ((controlMode === 'interrupt' || controlMode === 'terminate') && !shouldWait && !hasInputAction) {
+      return this.wrapJson({
+        ok: true,
+        helper: 'hopx_agent_turn',
+        terminal_id: requestedTerminalId,
+        selected_mode: selectedMode,
+        sent,
+        waited: false,
+        next_cursor: this.streamManager.getLatestCursor(terminalId)
+      });
+    }
+
+    const sendAndWait = await this.handleSendAndWait({
+      terminal_id: requestedTerminalId,
+      data,
+      press_enter: pressEnter,
+      key,
+      repeat: args.repeat,
+      wait: shouldWait,
+      capture: selectedMode,
+      cursor: args.cursor,
+      start_from: args.start_from,
+      until_regex: args.until_regex,
+      regex_flags: args.regex_flags,
+      until_prompt: args.until_prompt,
+      until_agent_done: args.until_agent_done,
+      prompt_regex: args.prompt_regex,
+      idle_ms: args.idle_ms,
+      max_wait_ms: args.max_wait_ms,
+      capture_max_events: args.capture_max_events,
+      maxControlOps: args.maxControlOps,
+      includeRawData: args.includeRawData,
+      includeMetaEvents: args.includeMetaEvents,
+      control_level: args.control_level,
+      noise_filter: args.noise_filter,
+      coalesce_ms: args.coalesce_ms,
+      coalesce_max_chars: args.coalesce_max_chars,
+      text_only: readableTextOnly
+    });
+    if (sendAndWait.isError) return sendAndWait;
+
+    const parsedSendAndWait = this.parseToolJsonResponse(sendAndWait, 'hopx_send_and_wait');
+    if (!parsedSendAndWait.ok) {
+      return { content: [{ type: 'text', text: `Error: ${parsedSendAndWait.error}` }], isError: true };
+    }
+
+    const canAutoPromoteUi = (
+      selectedModeInput === 'auto'
+      && selectedMode === 'readable_raw'
+      && shouldWait
+    );
+    if (canAutoPromoteUi) {
+      terminalId = this.resolveTerminalAlias(requestedTerminalId);
+      const postFlags = this.streamManager.getTerminalFlags(terminalId);
+      if (postFlags.exists && postFlags.alternateScreen) {
+        let outputPayload = null;
+        const firstUiSnapshot = await this.readHopxUiSnapshot(
+          requestedTerminalId,
+          args.uiMaxLines,
+          args.rawTailMaxEvents,
+          includeUiRawTail
+        );
+        if (firstUiSnapshot.errorResponse) return firstUiSnapshot.errorResponse;
+        outputPayload = firstUiSnapshot.payload;
+
+        const promotedPayload = {
+          ...parsedSendAndWait.payload,
+          helper: 'hopx_agent_turn',
+          selected_mode: 'ui',
+          auto_switched_to_ui: true,
+          output: outputPayload
+        };
+        if (this.shouldApplyHopxUiBusyGuard(args, promotedPayload.wait)) {
+          const guardOutcome = await this.waitForHopxUiNotBusy({
+            terminal_id: requestedTerminalId,
+            max_wait_ms: args.max_wait_ms,
+            uiMaxLines: args.uiMaxLines,
+            rawTailMaxEvents: args.rawTailMaxEvents
+          });
+          if (guardOutcome.errorResponse) return guardOutcome.errorResponse;
+          outputPayload = guardOutcome.payload.output || outputPayload;
+          if (includeUiRawTail) {
+            const finalUiSnapshot = await this.readHopxUiSnapshot(
+              requestedTerminalId,
+              args.uiMaxLines,
+              args.rawTailMaxEvents,
+              true
+            );
+            if (finalUiSnapshot.errorResponse) return finalUiSnapshot.errorResponse;
+            outputPayload = finalUiSnapshot.payload;
+          }
+          promotedPayload.output = outputPayload;
+          if (promotedPayload.wait && typeof promotedPayload.wait === 'object') {
+            promotedPayload.wait = {
+              ...promotedPayload.wait,
+              uiBusyGuard: {
+                applied: true,
+                busy: guardOutcome.payload.busy === true,
+                busyLine: guardOutcome.payload.busyLine || null,
+                checks: guardOutcome.payload.checks,
+                waitedMs: guardOutcome.payload.waitedMs
+              }
+            };
+          }
+        }
+        if (
+          !captureMaxEventsProvided
+          && promotedPayload.wait
+          && typeof promotedPayload.wait === 'object'
+          && Array.isArray(promotedPayload.wait.events)
+        ) {
+          promotedPayload.wait = {
+            ...promotedPayload.wait,
+            eventCount: 0,
+            events: []
+          };
+        }
+        return this.wrapJson({
+          ...promotedPayload
+        });
+      }
+    }
+
+    const finalPayload = {
+      ...parsedSendAndWait.payload,
+      helper: 'hopx_agent_turn',
+      selected_mode: selectedMode
+    };
+    if (controlMode === 'interrupt' || controlMode === 'terminate') {
+      finalPayload.sent = sent;
+    }
+
+    return this.wrapJson(finalPayload);
+  }
+
   async handleSendAndWait(args) {
-    const terminalId = args.terminal_id;
-    if (!terminalId) {
+    const requestedTerminalId = args.terminal_id;
+    if (!requestedTerminalId) {
       return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
     }
 
@@ -2546,22 +3958,30 @@ class HopMCPServer {
     const pressEnter = args.press_enter === true;
     const key = typeof args.key === 'string' ? args.key : '';
     const shouldWait = args.wait !== false;
-    if (!data && !pressEnter && !key) {
+    if (!data && !pressEnter && !key && !shouldWait) {
       return {
-        content: [{ type: 'text', text: 'Error: provide at least one input action (data, press_enter=true, or key).' }],
+        content: [{ type: 'text', text: 'Error: provide at least one input action (data, press_enter=true, or key), or set wait=true for wait-only mode.' }],
         isError: true
       };
     }
 
-    await this.prewarmTerminalStream(terminalId);
-    const endpoint = `/api/terminals/${encodeURIComponent(terminalId)}/write`;
+    let terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
     const cursorBeforeSend = this.streamManager.getLatestCursor(terminalId);
     const sent = [];
 
     const sendPayload = async (payload, source) => {
-      const result = await this.callApi('POST', endpoint, { data: payload });
-      if (this.isApiFailurePayload(result)) {
-        return { errorResponse: this.wrapApiResult(result, { endpoint }) };
+      if (typeof payload === 'string' && payload.length > 0) {
+        this.streamManager.noteTerminalInput(terminalId, payload);
+      }
+      const call = await this.callTerminalEndpointWithRecovery(
+        requestedTerminalId,
+        'POST',
+        (currentTerminalId) => `/api/terminals/${encodeURIComponent(currentTerminalId)}/write`,
+        { data: payload }
+      );
+      terminalId = call.terminalId;
+      if (this.isApiFailurePayload(call.payload)) {
+        return { errorResponse: this.wrapApiResult(call.payload, { endpoint: call.endpoint }) };
       }
       sent.push({
         source,
@@ -2592,7 +4012,7 @@ class HopMCPServer {
     if (!shouldWait) {
       return this.wrapJson({
         ok: true,
-        terminal_id: terminalId,
+        terminal_id: requestedTerminalId,
         sent,
         waited: false,
         cursorStart: cursorBeforeSend,
@@ -2601,36 +4021,44 @@ class HopMCPServer {
       });
     }
 
-    const waitArgs = { ...args, terminal_id: terminalId };
+    const waitArgs = { ...args, terminal_id: requestedTerminalId };
     delete waitArgs.data;
     delete waitArgs.press_enter;
     delete waitArgs.key;
     delete waitArgs.repeat;
     delete waitArgs.wait;
+    delete waitArgs.text_only;
 
     if (waitArgs.cursor === undefined && waitArgs.start_from === undefined) {
       waitArgs.start_from = 'cursor';
       waitArgs.cursor = cursorBeforeSend;
     }
 
-    const waited = await this.runWaitTerminal(waitArgs);
+    const waited = await this.runWaitTerminal(this.applyHopxWaitDefaults(waitArgs));
     if (waited.errorResponse) return waited.errorResponse;
+    let waitPayload = waited.payload;
+    const waitCaptureMode = waitPayload && typeof waitPayload.captureMode === 'string'
+      ? String(waitPayload.captureMode).toLowerCase()
+      : (typeof args.capture === 'string' ? String(args.capture).toLowerCase() : 'readable_raw');
+    if (resolveHopxTextOnly(args.text_only, waitCaptureMode)) {
+      waitPayload = condenseReadableWaitPayload(waitPayload);
+    }
 
     return this.wrapJson({
       ok: true,
-      terminal_id: terminalId,
+      terminal_id: requestedTerminalId,
       sent,
       waited: true,
-      wait: waited.payload,
-      cursorStart: waited.payload.cursorStart,
-      cursorEnd: waited.payload.cursorEnd,
-      next_cursor: waited.payload.cursorEnd
+      wait: waitPayload,
+      cursorStart: waitPayload.cursorStart,
+      cursorEnd: waitPayload.cursorEnd,
+      next_cursor: waitPayload.cursorEnd
     });
   }
 
   async runWaitTerminal(args) {
-    const terminalId = args.terminal_id;
-    if (!terminalId) {
+    const requestedTerminalId = args.terminal_id;
+    if (!requestedTerminalId) {
       return { errorResponse: { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true } };
     }
 
@@ -2735,8 +4163,16 @@ class HopMCPServer {
       return { errorResponse: { content: [{ type: 'text', text: 'Error: start_from must be one of "latest", "cursor", or "beginning".' }], isError: true } };
     }
 
-    this.streamManager.ensure(this.baseUrl, this.token, this.actor, terminalId);
-    await this.streamManager.waitUntilConnected(terminalId, 300);
+    let terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
+    const readyProbe = this.streamManager.readEvents(terminalId, this.streamManager.getLatestCursor(terminalId), 0, 1);
+    if (this.isTerminalNotFoundStreamError(readyProbe.error)) {
+      return {
+        errorResponse: {
+          content: [{ type: 'text', text: 'Error: terminal_id is stale or missing (likely daemon restart). Reattach or recreate terminal.' }],
+          isError: true
+        }
+      };
+    }
 
     let cursor = null;
     let startFromResolved = startFrom;
@@ -2767,10 +4203,28 @@ class HopMCPServer {
     let status = 'timed_out';
     let lastRead = null;
     let sawOutputLike = false;
+    let recoveredInLoop = false;
 
     while (true) {
       const readResult = this.streamManager.readEvents(terminalId, cursor, 0, captureMaxEvents || 200);
       lastRead = readResult;
+      if (this.isTerminalNotFoundStreamError(readResult.error)) {
+        if (!recoveredInLoop) {
+          const recoveredId = await this.recoverTerminalId(requestedTerminalId, terminalId);
+          if (recoveredId && recoveredId !== terminalId) {
+            terminalId = recoveredId;
+            cursor = this.streamManager.getLatestCursor(terminalId);
+            recoveredInLoop = true;
+            continue;
+          }
+        }
+        return {
+          errorResponse: {
+            content: [{ type: 'text', text: 'Error: terminal_id is stale or missing (likely daemon restart). Reattach or recreate terminal.' }],
+            isError: true
+          }
+        };
+      }
       if (readResult.records.length > 0) {
         cursor = readResult.cursor;
         const mappedEvents = captureMode === 'readable_raw'
@@ -2880,8 +4334,8 @@ class HopMCPServer {
   }
 
   async handleReadTerminal(args) {
-    const terminalId = args.terminal_id;
-    if (!terminalId) {
+    const requestedTerminalId = args.terminal_id;
+    if (!requestedTerminalId) {
       return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
     }
     const providedCursor = typeof args.cursor === 'number' ? Math.floor(args.cursor) : null;
@@ -2900,8 +4354,7 @@ class HopMCPServer {
       return { content: [{ type: 'text', text: `Error: mode must be one of ${supported}.` }], isError: true };
     }
 
-    this.streamManager.ensure(this.baseUrl, this.token, this.actor, terminalId);
-    await this.streamManager.waitUntilConnected(terminalId, 300);
+    let terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
 
     let startFromResolved = startFrom;
     if (!startFromResolved) {
@@ -2922,7 +4375,28 @@ class HopMCPServer {
       cursorStart = this.streamManager.getLatestCursor(terminalId);
     }
 
-    const result = this.streamManager.readEvents(terminalId, cursorStart, maxBytes, maxEvents);
+    let result = this.streamManager.readEvents(terminalId, cursorStart, maxBytes, maxEvents);
+    if (this.isTerminalNotFoundStreamError(result.error)) {
+      const recoveredId = await this.recoverTerminalId(requestedTerminalId, terminalId);
+      if (recoveredId && recoveredId !== terminalId) {
+        terminalId = recoveredId;
+        if (startFromResolved === 'beginning') {
+          cursorStart = this.streamManager.getBeginningCursor(terminalId);
+        } else if (startFromResolved === 'latest') {
+          cursorStart = this.streamManager.getLatestCursor(terminalId);
+        }
+        if (cursorStart === null) {
+          cursorStart = this.streamManager.getLatestCursor(terminalId);
+        }
+        result = this.streamManager.readEvents(terminalId, cursorStart, maxBytes, maxEvents);
+      }
+    }
+    if (this.isTerminalNotFoundStreamError(result.error)) {
+      return {
+        content: [{ type: 'text', text: 'Error: terminal_id is stale or missing (likely daemon restart). Reattach or recreate terminal.' }],
+        isError: true
+      };
+    }
     const cursorEnd = result.cursor;
     if (mode === 'raw') {
       return this.wrapJson({

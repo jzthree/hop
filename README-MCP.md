@@ -68,7 +68,8 @@ hop_wait_terminal(until_prompt=true, start_from="latest")
 ```
 
 4) Run a multi-turn loop:
-- preferred: `hop_send_and_wait(data="<task>", press_enter=true, capture="readable_raw")`
+- preferred: `hopx_send_and_wait(data="<task>", press_enter=true, capture="readable_raw")`
+- helper alternative: `hopx_agent_turn(data="<task>", mode="auto")`
 - manual split (if needed):
 - send one instruction with `hop_write_terminal(data="<task>\n")`
 - wait for output with `hop_wait_terminal(capture="readable_raw")` (defaults to `until_agent_done`)
@@ -105,6 +106,7 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
 
 ## Tools
 
+Core tools (`hop_`): stable atomic operations.
 - `connect_server`
 - `hop_server_info`
 - `hop_list_sessions`
@@ -113,8 +115,9 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
 - `hop_attach_terminal`
 - `hop_write_terminal`
 - `hop_send_key`
-- `hop_send_and_wait`
 - `hop_wait_terminal`
+- `hop_wait_start`
+- `hop_wait_poll`
 - `hop_resize_terminal`
 - `hop_read_terminal`
 - `hop_close_terminal`
@@ -123,6 +126,10 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
 - `hop_save_workspace`
 - `hop_load_workspace`
 - `hop_use_workspace`
+
+Helper tools (`hopx_`): convenience wrappers built on top of core tools.
+- `hopx_send_and_wait` (single-call send + wait wrapper)
+- `hopx_agent_turn` (single-turn send + wait + mode-aware output, default `mode="auto"`)
 
 ## Resources
 
@@ -133,6 +140,8 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
 ## Notes
 
 - Agent access is gated by `agentPermitted` for sessions created by users.
+- `terminal_id` is an ephemeral daemon attachment handle; underlying hop `sessionName` is the stable identity.
+- On daemon restart, terminal-scoped tools auto-reattach once using stored session identity and retry transparently when possible.
 - `hop_read_terminal` returns a cursor for incremental polling.
 - `hop_read_terminal` supports `mode: "ui"` for structured terminal snapshots:
   - `ui.lines`: visible screen lines
@@ -149,6 +158,7 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
   - `none` (default; text only)
   - `noise_filter` tunes status/spinner suppression:
   - `balanced` (default; suppresses CR/erase rewrite bursts, commits stable lines, strips spinner-prefix/dot animation for dedupe)
+  - in `balanced`, recent shell echo lines for agent-sent input (prompt + command) and prompt-padding artifacts are compacted
   - `off` (raw parsed text; useful for parser debugging)
   - in default `none`, empty output frames are dropped to reduce event noise
   - `coalesce_ms` and `coalesce_max_chars` can merge adjacent output frames for cleaner streaming text
@@ -163,16 +173,35 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
   - `cursor`: requires `cursor` argument
   - `beginning`: oldest buffered event
   - if no explicit condition is provided, it defaults to `until_agent_done=true`
+  - `async=true` starts a background wait job and returns `wait_id` immediately
   - `until_agent_done` matches when output has started, terminal becomes quiet, and interactive cursor is visible (agent-friendly completion)
   - regex match via `until_regex`
   - prompt match via `until_prompt` (optional custom `prompt_regex`)
   - quiet-period detection via `idle_ms`
   - bounded event capture in `raw` or `readable_raw`
   - for `capture="readable_raw"`, supports `control_level`, `noise_filter`, `coalesce_ms`, `coalesce_max_chars`, and optional `includeMetaEvents`
-- `hop_send_and_wait` combines input send + optional enter/key + wait, and defaults to cursor-based delta capture from just before send.
+- `hop_wait_start` / `hop_wait_poll` provide explicit async wait orchestration for long-running conditions:
+  - start with `hop_wait_start(...)` and poll with `hop_wait_poll(wait_id=..., wait=true)`
+  - use `consume=true` on poll to remove completed jobs
+- `hopx_send_and_wait` combines input send + optional enter/key + wait, and defaults to cursor-based delta capture from just before send.
+  - helper defaults are token-thrifty for interactive loops: `capture_max_events=60`, `control_level=none`, `noise_filter=balanced`, `coalesce_ms=350` (unless overridden)
+  - for `capture="readable_raw"`, `text_only` defaults to `true`; this condenses wait payloads by returning joined `wait.text`, setting `wait.events=[]`, `wait.eventCount=0`, and preserving prior count in `wait.originalEventCount` (set `text_only=false` to keep full events)
 - `hop_read_terminal` supports deterministic delta reads:
   - `start_from`: `beginning` (default), `cursor`, or `latest`
   - response includes `cursorStart`, `cursorEnd`, and `next_cursor`
+- `hopx_agent_turn` is a helper wrapper (not a core primitive):
+  - default `mode="auto"` chooses `ui` when terminal is in alternate-screen, otherwise `readable_raw`
+  - in `mode="auto"`, if alternate-screen starts during the same turn, it auto-promotes to `ui` for that response
+  - wait-only continuation is supported: omit `data`/`message` and use `control="wait"` to keep waiting on a terminal without sending new input
+  - `async=true` starts the turn wait in the background and returns `wait_id` immediately; continue polling or controlling that turn with `hopx_agent_turn(wait_id=..., wait=true|false, control=...)`
+  - `control="interrupt"` / `control="terminate"` send an explicit interrupt key (default `esc`); `terminate_message` can send a final follow-up after the interrupt
+  - `mode="ui"` returns a UI snapshot payload after wait
+  - for readable modes, `text_only` defaults to `true` and condenses waits the same way as `hopx_send_and_wait` (set `text_only=false` to keep full wait events)
+  - `text_only` is ignored for `mode="ui"` output snapshots
+  - `mode="ui"` defaults `includeRawTail=false` to reduce noisy tail payloads (opt in with `includeRawTail=true`)
+  - `mode="ui"` defaults wait capture to `capture_max_events=0` (override when you need readable wait-event diagnostics)
+  - when using default `until_agent_done` semantics in `mode="ui"`, hopx applies a short UI busy-guard pass to avoid returning while status lines still indicate active work (`esc to interrupt`, `working`, `waiting for process`, etc.)
+  - `mode="readable_raw"` / `mode="raw"` returns the same wait payload shape as `hopx_send_and_wait`
 - Tool calls that fail at the Hop API layer now return MCP errors (`isError: true`) with normalized fields:
   - `ok`
   - `status`

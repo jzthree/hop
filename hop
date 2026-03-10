@@ -21,10 +21,15 @@ const DAEMON_FLAG = process.argv.includes('--daemon');
 
 // Hay integration for terminal sharing (built from ./hay)
 const HAY_ROOT = path.join(__dirname, 'hay');
-const TERMINAL_BACKEND = process.env.HOP_TERMINAL_BACKEND === 'embedded' ? 'embedded' : 'external';
+const REQUESTED_TERMINAL_BACKEND = String(process.env.HOP_TERMINAL_BACKEND || '').trim().toLowerCase();
+const TERMINAL_BACKEND = 'external';
+if (REQUESTED_TERMINAL_BACKEND && REQUESTED_TERMINAL_BACKEND !== 'external') {
+    console.error('[Hop] HOP_TERMINAL_BACKEND is deprecated and ignored; using external runtime.');
+}
 let didBuildHay = false;
 let hay = null;
 let hayRooms = null;
+let hayHostDiscoveryCache = { expiresAt: 0, hosts: [] };
 
 function ensureHayBuilt() {
     if (didBuildHay) return;
@@ -58,7 +63,7 @@ async function ensureHayLoaded() {
         throw new Error('Hay server build missing. Run `npm --prefix hay run build`.');
     }
     hay = await import(pathToFileURL(libPath));
-    hayRooms = new hay.RoomManager(hay.createPty, process.cwd());
+    hayRooms = new hay.RoomManager(hay.createPty);
 }
 
 function resolveHayWebDir() {
@@ -189,6 +194,7 @@ const WORKSPACES_DIR = path.join(HOME_DIR, 'workspaces');
 const WORKSPACE_POINTER_FILE = path.join(HOME_DIR, '.workspace');
 const HAY_HOST_STATE_FILE = path.join(HOME_DIR, '.hay-host-state');
 const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 5000);
+const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_CACHE_MS', 1500);
 let hayHostState = null;
 
 function parsePositiveIntEnv(name, fallback) {
@@ -736,7 +742,7 @@ function loadWorkspaceFile(name) {
     }
 }
 
-function applyWorkspace(workspace, opts = {}) {
+async function applyWorkspace(workspace, opts = {}) {
     const startSessions = !!opts.startSessions;
     const workspaceName = normalizeWorkspaceName(opts.workspaceName) || null;
     const created = [];
@@ -879,13 +885,30 @@ function applyWorkspace(workspace, opts = {}) {
             const internalName = findInternalSessionName(session.name) || toInternalSessionName(session.name);
             const config = getSessionConfig(internalName);
             if (!config || config.type === 'port') return;
+            started.push({ internalName, session });
+        });
+    }
+
+    if (startSessions) {
+        for (const entry of started.slice()) {
+            const internalName = entry.internalName;
+            const session = entry.session;
             try {
-                getOrCreateSession(internalName);
-                started.push(session.name);
+                if (isExternalTerminalBackend()) {
+                    await ensureExternalRuntimeSession(internalName);
+                } else {
+                    getOrCreateSession(internalName);
+                }
+                entry.name = session.name;
             } catch (e) {
                 skipped.push({ name: session.name, reason: 'start-failed' });
             }
-        });
+        }
+        const startedNames = started
+            .map((entry) => entry?.name)
+            .filter(Boolean);
+        started.length = 0;
+        started.push(...startedNames);
     }
 
     return { created, skipped, started };
@@ -1034,8 +1057,13 @@ function applyPostStartupHistoryIsolation(room, config, ptyRuntime) {
     if (!isPosixHistoryShell(shellPath)) return false;
     const command = buildPostStartupHistoryIsolationCommand(ptyRuntime?.env);
     if (!command) return false;
-    room.sendSystemInput(command, 'hop-history-init');
-    return true;
+    try {
+        room.sendSystemInput(command, 'hop-history-init');
+        return true;
+    } catch (e) {
+        log('[History] Post-start isolation injection skipped due to terminal startup race', YELLOW);
+        return false;
+    }
 }
 
 function getSessionAuditSink(sessionName, workspaceName) {
@@ -1415,12 +1443,12 @@ function clearSessionClientActors(sessionName) {
     sessionClientActors.delete(sessionName);
 }
 
-function loadDefaultWorkspace(startSessions = true) {
+async function loadDefaultWorkspace(startSessions = true) {
     const workspaceName = getDefaultWorkspace();
     if (!workspaceName) return null;
     const workspace = loadWorkspaceFile(workspaceName);
     if (!workspace) return null;
-    return applyWorkspace(workspace, { startSessions, workspaceName });
+    return await applyWorkspace(workspace, { startSessions, workspaceName });
 }
 
 // Load domain config if exists
@@ -2223,6 +2251,29 @@ function listActiveSessions() {
     return sessions;
 }
 
+async function listActiveSessionsRuntimeFirst() {
+    if (!isExternalTerminalBackend()) {
+        return { sessions: listActiveSessions(), runtimeAvailable: true };
+    }
+    try {
+        await reconcileExternalRuntimeSessions();
+    } catch (e) {
+        return { sessions: [], runtimeAvailable: false };
+    }
+    const runtimeRooms = await fetchExternalHayRuntimeRooms();
+    if (!Array.isArray(runtimeRooms)) {
+        return { sessions: [], runtimeAvailable: false };
+    }
+    const sessions = runtimeRooms.map((room) => ({
+        name: room.id,
+        windows: 1,
+        attached: Number(room.clientCount) > 0,
+        cwd: room.cwd,
+        hostPort: room.hostPort
+    }));
+    return { sessions, runtimeAvailable: true };
+}
+
 function noteClientConnected(sessionName, source) {
     if (!sessionName) return;
     const entry = sessionClientSummary.get(sessionName) || { localCliCount: 0, total: 0 };
@@ -2265,24 +2316,28 @@ function hopSessionExists(name) {
     return hayRooms.hasRoom(name) || activeSessions[name];
 }
 
-function listAllSessionEntries() {
-    const haySessions = listActiveSessions();
+function buildSessionEntries(haySessions, opts = {}) {
+    const includeStoredTerminalSessions = opts.includeStoredTerminalSessions !== false;
     const sessionMap = new Map();
 
-    for (const s of haySessions) {
+    for (const s of Array.isArray(haySessions) ? haySessions : []) {
         const config = getSessionConfig(s.name);
         const type = config?.type || 'terminal';
-        const displayName = config?.displayName || toDisplaySessionName(s.name);
+        const displayName = config?.displayName || s.name;
         const folderId = config?.folderId || null;
         const clientSummary = getSessionClientSummary(s.name);
+        const attached = typeof s.attached === 'boolean'
+            ? s.attached
+            : (clientSummary.totalClients > 0);
         sessionMap.set(s.name, {
             ...s,
+            attached,
             type,
             port: config?.port,
             displayName,
             folderId,
             internalName: s.name,
-            cwd: config?.cwd,
+            cwd: s.cwd || config?.cwd,
             shell: config?.shell,
             env: config?.env,
             workspaceName: config?.workspaceName || resolveSessionWorkspaceName(config),
@@ -2298,6 +2353,10 @@ function listAllSessionEntries() {
     }
 
     for (const [name, config] of Object.entries(sessionStore.sessions)) {
+        const type = config?.type || 'terminal';
+        if (type !== 'port' && !includeStoredTerminalSessions && !sessionMap.has(name)) {
+            continue;
+        }
         const displayName = config?.displayName || toDisplaySessionName(name);
         const folderId = config?.folderId || null;
         const clientSummary = getSessionClientSummary(name);
@@ -2306,7 +2365,7 @@ function listAllSessionEntries() {
                 name,
                 windows: null,
                 attached: false,
-                type: config.type || 'terminal',
+                type,
                 port: config.port,
                 displayName,
                 folderId,
@@ -2326,7 +2385,7 @@ function listAllSessionEntries() {
             });
         } else {
             const entry = sessionMap.get(name);
-            entry.type = config.type || entry.type;
+            entry.type = type || entry.type;
             entry.port = config.port;
             entry.displayName = displayName;
             entry.folderId = folderId;
@@ -2373,6 +2432,28 @@ function listAllSessionEntries() {
         if (aSessionIndex !== bSessionIndex) return aSessionIndex - bSessionIndex;
         return a.displayName.localeCompare(b.displayName);
     });
+}
+
+function listAllSessionEntries() {
+    return buildSessionEntries(listActiveSessions(), { includeStoredTerminalSessions: true });
+}
+
+async function listAllSessionEntriesRuntimeFirst() {
+    const runtime = await listActiveSessionsRuntimeFirst();
+    const entries = buildSessionEntries(runtime.sessions, { includeStoredTerminalSessions: false });
+    const activeDisplayNames = entries
+        .filter((entry) => entry && entry.type !== 'port')
+        .map((entry) => entry.displayName);
+    return { entries, runtimeAvailable: runtime.runtimeAvailable, activeDisplayNames };
+}
+
+async function runtimeTerminalSessionExists(sessionName) {
+    if (!sessionName) return false;
+    const runtime = await listActiveSessionsRuntimeFirst();
+    if (!runtime.runtimeAvailable) {
+        return false;
+    }
+    return runtime.sessions.some((entry) => entry && entry.name === sessionName);
 }
 
 // Light theme for hay terminal
@@ -2604,19 +2685,31 @@ function handleTerminalApiServerMessage(terminalId, parsed) {
     }
 }
 
-function attachExternalTerminalApiClient(sessionName, displayName, opts = {}) {
-    getOrCreateSession(sessionName, opts.cwd, displayName);
+async function attachExternalTerminalApiClient(sessionName, displayName, opts = {}) {
+    await ensureExternalRuntimeSession(sessionName, opts.cwd, displayName, {
+        shell: opts.shell,
+        env: opts.env,
+        cols: opts.cols,
+        rows: opts.rows,
+        startup: opts.startup,
+        autoStart: opts.autoStart,
+        createdBy: opts.createdBy,
+        agentPermitted: opts.agentPermitted,
+        workspaceName: opts.workspaceName
+    });
 
     const cols = Number.isInteger(opts.cols) ? opts.cols : 80;
     const rows = Number.isInteger(opts.rows) ? opts.rows : 24;
     const label = opts.label || 'agent';
     const terminalId = `t_${crypto.randomBytes(6).toString('hex')}`;
     const clientId = hay.generateClientId();
+    const sessionCwd = opts.cwd || (getSessionConfig(sessionName) || {}).cwd;
     const wsUrl = buildExternalHayWsUrl(sessionName, {
         name: label,
         cols,
         rows,
-        source: `terminal-api-${opts.actor || 'user'}`
+        source: `terminal-api-${opts.actor || 'user'}`,
+        cwd: sessionCwd
     });
     const ws = new WebSocket(wsUrl);
     let open = false;
@@ -2686,9 +2779,9 @@ function attachExternalTerminalApiClient(sessionName, displayName, opts = {}) {
     return sessionEntry;
 }
 
-function attachTerminalApiClient(sessionName, displayName, opts = {}) {
+async function attachTerminalApiClient(sessionName, displayName, opts = {}) {
     if (isExternalTerminalBackend()) {
-        return attachExternalTerminalApiClient(sessionName, displayName, opts);
+        return await attachExternalTerminalApiClient(sessionName, displayName, opts);
     }
     const session = activeSessions[sessionName] || getOrCreateSession(sessionName, opts.cwd, displayName);
     const room = session.room;
@@ -3196,16 +3289,199 @@ function readHayHostStateFile() {
 function writeHayHostStateFile(state) {
     if (!state) return;
     hayHostState = { pid: state.pid, port: state.port, startedAt: state.startedAt || Date.now() };
+    hayHostDiscoveryCache = { expiresAt: 0, hosts: [] };
     writePrivateFile(HAY_HOST_STATE_FILE, JSON.stringify(hayHostState));
 }
 
 function clearHayHostStateFile() {
     hayHostState = null;
+    hayHostDiscoveryCache = { expiresAt: 0, hosts: [] };
     try {
         if (fs.existsSync(HAY_HOST_STATE_FILE)) {
             fs.unlinkSync(HAY_HOST_STATE_FILE);
         }
     } catch (e) { }
+}
+
+function parseListeningPortForPid(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    try {
+        const output = execFileSync('lsof', [
+            '-nP',
+            '-a',
+            '-p', String(pid),
+            '-iTCP',
+            '-sTCP:LISTEN',
+            '-Fn'
+        ], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+        });
+        const lines = String(output || '').split(/\r?\n/);
+        for (const line of lines) {
+            if (!line.startsWith('n')) continue;
+            const match = line.match(/:(\d+)(?:->|$)/);
+            if (!match) continue;
+            const port = Number.parseInt(match[1], 10);
+            if (Number.isInteger(port) && port > 0 && port <= 65535) {
+                return port;
+            }
+        }
+    } catch (e) { }
+    return null;
+}
+
+function listDiscoveredHayHostCandidates(force = false) {
+    if (!isExternalTerminalBackend()) return [];
+    const now = Date.now();
+    if (!force && hayHostDiscoveryCache.expiresAt > now) {
+        return hayHostDiscoveryCache.hosts.map((host) => ({ ...host }));
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    const recorded = hayHostState || readHayHostStateFile();
+    const hostScript = path.join(__dirname, 'scripts', 'hay-host.js');
+
+    const remember = (candidate) => {
+        if (!candidate) return;
+        const pid = Number(candidate.pid);
+        const port = Number(candidate.port);
+        if (!Number.isInteger(pid) || pid <= 0) return;
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) return;
+        const key = `${pid}:${port}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push({
+            pid,
+            port,
+            startedAt: Number(candidate.startedAt) || 0
+        });
+    };
+
+    if (recorded && isProcessAlive(recorded.pid)) {
+        remember(recorded);
+    }
+
+    try {
+        const output = execFileSync('ps', ['-axo', 'pid=,command='], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+        });
+        const lines = String(output || '').split(/\r?\n/);
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            const match = trimmed.match(/^(\d+)\s+(.+)$/);
+            if (!match) continue;
+            const pid = Number.parseInt(match[1], 10);
+            const command = match[2] || '';
+            if (!Number.isInteger(pid) || pid <= 0) continue;
+            if (!command.includes(hostScript)) continue;
+            if (!isProcessAlive(pid)) continue;
+            const port = parseListeningPortForPid(pid);
+            if (!port) continue;
+            const startedAt = recorded && recorded.pid === pid && recorded.port === port
+                ? recorded.startedAt
+                : 0;
+            remember({ pid, port, startedAt });
+        }
+    } catch (e) { }
+
+    hayHostDiscoveryCache = {
+        expiresAt: now + HAY_HOST_DISCOVERY_CACHE_MS,
+        hosts: candidates
+    };
+    return candidates.map((host) => ({ ...host }));
+}
+
+async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
+    if (!isExternalTerminalBackend()) return null;
+    if (!hostState || !Number.isInteger(hostState.port) || hostState.port <= 0) return null;
+    return await new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+        };
+        const opts = {
+            hostname: '127.0.0.1',
+            port: hostState.port,
+            path: '/rooms',
+            method: 'GET'
+        };
+        const req = http.request(opts, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+                    finish(null);
+                    return;
+                }
+                try {
+                    const parsed = JSON.parse(data || '{}');
+                    const rawRooms = Array.isArray(parsed?.rooms) ? parsed.rooms : [];
+                    const rooms = rawRooms
+                        .map((room) => {
+                            const id = String(room?.id || '').trim();
+                            if (!id || !SESSION_NAME_RE.test(id)) return null;
+                            const cwd = typeof room?.cwd === 'string' && room.cwd.trim() ? room.cwd : undefined;
+                            const clientCountRaw = Number(room?.clientCount);
+                            const clientCount = Number.isFinite(clientCountRaw) && clientCountRaw >= 0
+                                ? Math.floor(clientCountRaw)
+                                : 0;
+                            return {
+                                id,
+                                cwd,
+                                clientCount,
+                                hostPid: hostState.pid,
+                                hostPort: hostState.port
+                            };
+                        })
+                        .filter(Boolean);
+                    finish(rooms);
+                } catch (e) {
+                    finish(null);
+                }
+            });
+        });
+        req.on('error', () => finish(null));
+        req.setTimeout(1200, () => {
+            req.destroy();
+            finish(null);
+        });
+        req.end();
+    });
+}
+
+function choosePreferredHayHost(inspectedHosts, preferredHost = null) {
+    if (!Array.isArray(inspectedHosts) || inspectedHosts.length === 0) return null;
+    const preferredPid = Number(preferredHost?.pid);
+    const preferredPort = Number(preferredHost?.port);
+    const ranked = [...inspectedHosts].sort((a, b) => {
+        const aRooms = Array.isArray(a.rooms) ? a.rooms.length : 0;
+        const bRooms = Array.isArray(b.rooms) ? b.rooms.length : 0;
+        if (aRooms !== bRooms) return bRooms - aRooms;
+        const aPreferred = a.host.pid === preferredPid && a.host.port === preferredPort ? 1 : 0;
+        const bPreferred = b.host.pid === preferredPid && b.host.port === preferredPort ? 1 : 0;
+        if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+        const aStarted = Number(a.host.startedAt) || 0;
+        const bStarted = Number(b.host.startedAt) || 0;
+        return bStarted - aStarted;
+    });
+    return ranked[0]?.host || null;
+}
+
+async function inspectExternalHayHosts(force = false) {
+    if (!isExternalTerminalBackend()) return [];
+    const candidates = listDiscoveredHayHostCandidates(force);
+    if (candidates.length === 0) return [];
+    const inspected = await Promise.all(candidates.map(async (host) => ({
+        host,
+        rooms: await fetchExternalHayRuntimeRoomsFromHost(host)
+    })));
+    return inspected.filter((entry) => Array.isArray(entry.rooms));
 }
 
 function getExternalHayHostStateOrThrow() {
@@ -3224,10 +3500,17 @@ async function ensureExternalHayHostReady() {
     if (!isExternalTerminalBackend()) return null;
 
     const existing = hayHostState || readHayHostStateFile();
+    const inspectedExisting = await inspectExternalHayHosts();
+    const preferredExisting = choosePreferredHayHost(inspectedExisting, existing);
+    if (preferredExisting) {
+        writeHayHostStateFile(preferredExisting);
+        return preferredExisting;
+    }
+
     if (existing && isProcessAlive(existing.pid)) {
         const ready = await waitForPort(existing.port, '127.0.0.1', 1200, 120);
         if (ready) {
-            hayHostState = existing;
+            writeHayHostStateFile(existing);
             return existing;
         }
     }
@@ -3326,6 +3609,164 @@ async function ensureExternalHayHostReady() {
     return started;
 }
 
+async function callExternalHayHostApi(apiPath, method = 'GET', body = null, timeoutMs = 2000) {
+    if (!isExternalTerminalBackend()) return null;
+    const state = await ensureExternalHayHostReady();
+    return await new Promise((resolve, reject) => {
+        const headers = {};
+        let payload = null;
+        if (body !== null && body !== undefined) {
+            payload = JSON.stringify(body);
+            headers['Content-Type'] = 'application/json';
+            headers['Content-Length'] = Buffer.byteLength(payload);
+        }
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: state.port,
+            path: apiPath,
+            method,
+            headers
+        }, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                let parsed = null;
+                try {
+                    parsed = data ? JSON.parse(data) : {};
+                } catch (e) {
+                    parsed = null;
+                }
+                resolve({
+                    status: res.statusCode || 500,
+                    data: parsed
+                });
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(timeoutMs, () => {
+            req.destroy(new Error('Hay host request timeout'));
+        });
+        if (payload) {
+            req.write(payload);
+        }
+        req.end();
+    });
+}
+
+function rememberExternalRuntimeSession(sessionName, hostPort = null) {
+    if (!sessionName) return null;
+    let resolvedHostPort = Number(hostPort);
+    if (!Number.isInteger(resolvedHostPort) || resolvedHostPort <= 0 || resolvedHostPort > 65535) {
+        const fallbackState = getExternalHayHostStateOrThrow();
+        resolvedHostPort = fallbackState.port;
+    }
+    activeSessions[sessionName] = {
+        backend: 'external',
+        hostPort: resolvedHostPort
+    };
+    return activeSessions[sessionName];
+}
+
+async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts = {}) {
+    if (!isExternalTerminalBackend()) {
+        return getOrCreateSession(sessionName, cwd, displayName);
+    }
+    if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
+        throw new Error('Invalid session name');
+    }
+
+    ensureTerminalSessionConfig(sessionName, cwd, displayName, opts.folderId, {
+        shell: opts.shell,
+        env: opts.env,
+        cols: opts.cols,
+        rows: opts.rows,
+        startup: opts.startup,
+        autoStart: opts.autoStart,
+        createdBy: opts.createdBy,
+        agentPermitted: opts.agentPermitted,
+        workspaceName: opts.workspaceName
+    });
+
+    const config = getSessionConfig(sessionName) || {};
+    const workspaceName = resolveSessionWorkspaceName(config, { workspaceName: opts.workspaceName });
+    const ptyRuntime = buildSessionPtyEnv(sessionName, config, workspaceName);
+    const response = await callExternalHayHostApi('/rooms', 'POST', {
+        id: sessionName,
+        cwd: cwd || config.cwd || process.cwd(),
+        cols: Number.isInteger(config.cols) ? config.cols : 80,
+        rows: Number.isInteger(config.rows) ? config.rows : 24,
+        shell: config.shell,
+        env: ptyRuntime.env
+    }, 2500);
+    if (!response || response.status < 200 || response.status >= 300 || !response.data?.ok) {
+        const reason = response?.data?.error || `status ${response?.status || 'unknown'}`;
+        throw new Error(`Failed to start external session "${displayName || sessionName}": ${reason}`);
+    }
+
+    const room = response.data.room || {};
+    ensureTerminalSessionConfig(
+        sessionName,
+        typeof room.cwd === 'string' && room.cwd ? room.cwd : (cwd || config.cwd),
+        displayName || config.displayName || sessionName,
+        config.folderId,
+        {
+            shell: config.shell,
+            env: config.env,
+            cols: Number.isInteger(config.cols) ? config.cols : undefined,
+            rows: Number.isInteger(config.rows) ? config.rows : undefined,
+            startup: config.startup,
+            autoStart: config.autoStart,
+            createdBy: config.createdBy,
+            agentPermitted: config.agentPermitted,
+            workspaceName: workspaceName
+        }
+    );
+
+    return rememberExternalRuntimeSession(sessionName, getExternalHayHostStateOrThrow().port);
+}
+
+async function reconcileExternalRuntimeSessions() {
+    if (!isExternalTerminalBackend()) return { rooms: [], runtimeAvailable: false };
+    await ensureExternalHayHostReady();
+    const rooms = await fetchExternalHayRuntimeRooms();
+    if (!Array.isArray(rooms)) {
+        return { rooms: [], runtimeAvailable: false };
+    }
+
+    const runtimeIds = new Set();
+    for (const room of rooms) {
+        if (!room || !room.id) continue;
+        runtimeIds.add(room.id);
+        const config = getSessionConfig(room.id);
+        ensureTerminalSessionConfig(
+            room.id,
+            room.cwd || config?.cwd,
+            config?.displayName || toDisplaySessionName(room.id) || room.id,
+            config?.folderId,
+            {
+                shell: config?.shell,
+                env: config?.env,
+                cols: Number.isInteger(config?.cols) ? config.cols : undefined,
+                rows: Number.isInteger(config?.rows) ? config.rows : undefined,
+                startup: config?.startup,
+                autoStart: config?.autoStart,
+                createdBy: config?.createdBy,
+                agentPermitted: config?.agentPermitted,
+                workspaceName: config?.workspaceName
+            }
+        );
+        rememberExternalRuntimeSession(room.id, room.hostPort);
+    }
+
+    for (const [name, session] of Object.entries(activeSessions)) {
+        if (session?.backend === 'external' && !runtimeIds.has(name)) {
+            delete activeSessions[name];
+        }
+    }
+
+    return { rooms, runtimeAvailable: true };
+}
+
 function buildExternalHayWsPath(parsedUrl, sessionName) {
     const params = new URLSearchParams();
     const query = parsedUrl?.query || {};
@@ -3342,18 +3783,36 @@ function buildExternalHayWsPath(parsedUrl, sessionName) {
         }
     }
     params.set('room', sessionName);
+    if (!params.has('cwd')) {
+        const sessionCwd = (getSessionConfig(sessionName) || {}).cwd;
+        if (sessionCwd) params.set('cwd', sessionCwd);
+    }
     return `/ws?${params.toString()}`;
 }
 
-function buildExternalHayWsUrl(sessionName, options = {}) {
+function getExternalHayHostPortForSession(sessionName, options = {}) {
+    const requestedPort = Number(options.hostPort);
+    if (Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort <= 65535) {
+        return requestedPort;
+    }
+    const sessionPort = Number(activeSessions[sessionName]?.hostPort);
+    if (Number.isInteger(sessionPort) && sessionPort > 0 && sessionPort <= 65535) {
+        return sessionPort;
+    }
     const state = getExternalHayHostStateOrThrow();
+    return state.port;
+}
+
+function buildExternalHayWsUrl(sessionName, options = {}) {
+    const port = getExternalHayHostPortForSession(sessionName, options);
     const params = new URLSearchParams();
     params.set('room', sessionName);
     if (options.name) params.set('name', String(options.name));
     if (Number.isFinite(options.cols)) params.set('cols', String(Math.floor(Number(options.cols))));
     if (Number.isFinite(options.rows)) params.set('rows', String(Math.floor(Number(options.rows))));
     if (options.source) params.set('source', String(options.source));
-    return `ws://127.0.0.1:${state.port}/ws?${params.toString()}`;
+    if (options.cwd) params.set('cwd', String(options.cwd));
+    return `ws://127.0.0.1:${port}/ws?${params.toString()}`;
 }
 
 function terminateExternalHaySession(sessionName) {
@@ -3473,7 +3932,7 @@ function recordAuth(authEmitter) {
 function startAuthProxy(authEmitter) {
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
-    const server = http.createServer((req, res) => {
+    const server = http.createServer(async (req, res) => {
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
         const ip = getClientIp(req);
@@ -3830,7 +4289,8 @@ function startAuthProxy(authEmitter) {
 
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
-            const sessions = listAllSessionEntries().map(s => ({
+            const snapshot = await listAllSessionEntriesRuntimeFirst();
+            const sessions = snapshot.entries.map(s => ({
                 name: s.displayName,
                 displayName: s.displayName,
                 internalName: s.internalName,
@@ -3838,6 +4298,7 @@ function startAuthProxy(authEmitter) {
                 attached: s.attached,
                 type: s.type,
                 port: s.port,
+                hostPort: s.hostPort,
                 folderId: s.folderId || null,
                 cwd: s.cwd,
                 shell: s.shell,
@@ -3851,7 +4312,7 @@ function startAuthProxy(authEmitter) {
                 hasLocalCli: !!s.hasLocalCli,
                 localCliCount: s.localCliCount || 0
             }));
-            const activeSessionNames = Object.keys(activeSessions).map(getSessionDisplayName);
+            const activeSessionNames = snapshot.activeDisplayNames;
             const startingSessionNames = Array.from(startingSessions).map(getSessionDisplayName);
             const folders = sessionStore.order.folders
                 .map((id) => sessionStore.folders[id])
@@ -3863,7 +4324,8 @@ function startAuthProxy(authEmitter) {
                 starting: startingSessionNames,
                 folders,
                 order: sessionStore.order,
-                aliases: sessionAliases
+                aliases: sessionAliases,
+                runtimeAvailable: snapshot.runtimeAvailable
             }));
             return;
         }
@@ -3872,7 +4334,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     let { name, type, port, cwd, folderId } = JSON.parse(body);
                     const displayName = name;
@@ -3906,7 +4368,7 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Invalid port' }));
                             return;
                         }
-                        if (hopSessionExists(internalName)) {
+                        if (await runtimeTerminalSessionExists(internalName)) {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
                             return;
@@ -3925,7 +4387,11 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Port session already exists with this name' }));
                             return;
                         }
-                        getOrCreateSession(internalName, cwd, displayName);
+                        if (isExternalTerminalBackend()) {
+                            await ensureExternalRuntimeSession(internalName, cwd, displayName);
+                        } else {
+                            getOrCreateSession(internalName, cwd, displayName);
+                        }
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, name: displayName, type }));
@@ -3941,7 +4407,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/api/folders' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     const { name } = JSON.parse(body);
                     const folder = createFolder(name);
@@ -3964,7 +4430,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/api/folders/rename' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     const { id, name } = JSON.parse(body);
                     const folder = renameFolder(id, name);
@@ -3987,7 +4453,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/api/folders/delete' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     const { id } = JSON.parse(body);
                     const ok = deleteFolder(id);
@@ -4255,7 +4721,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/api/terminals' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     const actor = resolveActor(req);
                     const payload = JSON.parse(body || '{}');
@@ -4270,6 +4736,10 @@ function startAuthProxy(authEmitter) {
                     const folderId = payload.folderId && sessionStore.folders[payload.folderId]
                         ? payload.folderId
                         : null;
+
+                    if (isExternalTerminalBackend()) {
+                        await ensureExternalHayHostReady();
+                    }
 
                     if (!SESSION_NAME_RE.test(displayName)) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -4304,7 +4774,7 @@ function startAuthProxy(authEmitter) {
                         agentPermitted: actor === 'agent'
                     });
 
-                    const entry = attachTerminalApiClient(internalName, displayName, {
+                    const entry = await attachTerminalApiClient(internalName, displayName, {
                         actor,
                         cols,
                         rows,
@@ -4335,7 +4805,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/api/terminals/attach' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     const actor = resolveActor(req);
                     const payload = JSON.parse(body || '{}');
@@ -4351,7 +4821,10 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Agent access not permitted' }));
                         return;
                     }
-                    const entry = attachTerminalApiClient(target, config?.displayName, {
+                    if (isExternalTerminalBackend()) {
+                        await ensureExternalHayHostReady();
+                    }
+                    const entry = await attachTerminalApiClient(target, config?.displayName, {
                         actor,
                         cols: payload.cols,
                         rows: payload.rows,
@@ -4595,7 +5068,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/api/workspaces/load' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     const { name, start } = JSON.parse(body);
                     const workspace = loadWorkspaceFile(name);
@@ -4604,7 +5077,7 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Workspace not found' }));
                         return;
                     }
-                    const result = applyWorkspace(workspace, {
+                    const result = await applyWorkspace(workspace, {
                         startSessions: start !== false,
                         workspaceName: name
                     });
@@ -4903,41 +5376,44 @@ function startAuthProxy(authEmitter) {
 
         // Get or create hay session
         if (isExternalTerminalBackend()) {
-            try {
-                getOrCreateSession(sessionName);
-            } catch (e) {
-                socket.write('HTTP/1.1 500 Server Error\r\n\r\n');
-                socket.destroy();
-                return;
-            }
+            (async () => {
+                try {
+                    await reconcileExternalRuntimeSessions();
+                    getOrCreateSession(sessionName);
+                } catch (e) {
+                    socket.write('HTTP/1.1 500 Server Error\r\n\r\n');
+                    socket.destroy();
+                    return;
+                }
 
-            const source = typeof parsedUrl.query.source === 'string' ? parsedUrl.query.source : '';
-            noteClientConnected(sessionName, source);
-            let disconnected = false;
-            const handleDisconnect = () => {
-                if (disconnected) return;
-                disconnected = true;
-                noteClientDisconnected(sessionName, source);
-            };
-            socket.once('close', handleDisconnect);
-            socket.once('error', handleDisconnect);
+                const source = typeof parsedUrl.query.source === 'string' ? parsedUrl.query.source : '';
+                noteClientConnected(sessionName, source);
+                let disconnected = false;
+                const handleDisconnect = () => {
+                    if (disconnected) return;
+                    disconnected = true;
+                    noteClientDisconnected(sessionName, source);
+                };
+                socket.once('close', handleDisconnect);
+                socket.once('error', handleDisconnect);
 
-            try {
-                const hostState = getExternalHayHostStateOrThrow();
-                const proxy = httpProxy.createProxyServer({ target: `ws://127.0.0.1:${hostState.port}`, ws: true });
-                proxy.once('error', () => {
+                try {
+                    const targetPort = getExternalHayHostPortForSession(sessionName);
+                    const proxy = httpProxy.createProxyServer({ target: `ws://127.0.0.1:${targetPort}`, ws: true });
+                    proxy.once('error', () => {
+                        handleDisconnect();
+                        try { socket.destroy(); } catch (e) { }
+                    });
+                    const originalUrl = req.url;
+                    req.url = buildExternalHayWsPath(parsedUrl, sessionName);
+                    proxy.ws(req, socket, head);
+                    req.url = originalUrl;
+                } catch (e) {
                     handleDisconnect();
-                    try { socket.destroy(); } catch (e) { }
-                });
-                const originalUrl = req.url;
-                req.url = buildExternalHayWsPath(parsedUrl, sessionName);
-                proxy.ws(req, socket, head);
-                req.url = originalUrl;
-            } catch (e) {
-                handleDisconnect();
-                socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-                socket.destroy();
-            }
+                    socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+                    socket.destroy();
+                }
+            })();
             return;
         }
 
@@ -4996,6 +5472,7 @@ let currentPublicUrl = null;
 let shuttingDown = false;  // Prevent restart during cleanup
 const tunnelEmitter = new EventEmitter();
 let CLIENT_TUNNEL_CONFIG = null; // { tunnelId, credentialsPath, hostname, configDir }
+const plannedTunnelShutdowns = new WeakSet();
 const tunnelStatus = {
     connected: false,
     lastEvent: null,
@@ -5008,6 +5485,21 @@ const tunnelStatus = {
 function updateTunnelStatus(update) {
     Object.assign(tunnelStatus, update);
     tunnelStatus.lastUpdateAt = Date.now();
+}
+
+function isPlannedTunnelShutdown(tunnel) {
+    return !!(tunnel && plannedTunnelShutdowns.has(tunnel));
+}
+
+function markPlannedTunnelShutdown(tunnel) {
+    if (!tunnel || typeof tunnel.kill !== 'function') return false;
+    plannedTunnelShutdowns.add(tunnel);
+    return true;
+}
+
+function clearPlannedTunnelShutdown(tunnel) {
+    if (!tunnel) return;
+    plannedTunnelShutdowns.delete(tunnel);
 }
 
 function startTunnel(isRestart = false) {
@@ -5054,11 +5546,14 @@ tunnel: ${domainConfig.tunnelName}
 
     tunnel.on('close', (code) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        const planned = isPlannedTunnelShutdown(tunnel);
+        clearPlannedTunnelShutdown(tunnel);
         updateTunnelStatus({
             connected: false,
-            lastEvent: 'closed',
-            lastError: `cloudflared exited (code ${code})`
+            lastEvent: planned ? 'planned_close' : 'closed',
+            lastError: planned ? null : `cloudflared exited (code ${code})`
         });
+        if (planned) return;
         log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -5067,11 +5562,14 @@ tunnel: ${domainConfig.tunnelName}
 
     tunnel.on('error', (err) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        const planned = isPlannedTunnelShutdown(tunnel);
+        clearPlannedTunnelShutdown(tunnel);
         updateTunnelStatus({
             connected: false,
-            lastEvent: 'error',
-            lastError: err.message
+            lastEvent: planned ? 'planned_error' : 'error',
+            lastError: planned ? null : err.message
         });
+        if (planned) return;
         log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -5199,11 +5697,14 @@ credentials-file: ${path.resolve(credentialsPath)}
 
     tunnel.on('close', (code) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        const planned = isPlannedTunnelShutdown(tunnel);
+        clearPlannedTunnelShutdown(tunnel);
         updateTunnelStatus({
             connected: false,
-            lastEvent: 'closed',
-            lastError: `cloudflared exited (code ${code})`
+            lastEvent: planned ? 'planned_close' : 'closed',
+            lastError: planned ? null : `cloudflared exited (code ${code})`
         });
+        if (planned) return;
         log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -5212,11 +5713,14 @@ credentials-file: ${path.resolve(credentialsPath)}
 
     tunnel.on('error', (err) => {
         if (shuttingDown) return;  // Don't restart during cleanup
+        const planned = isPlannedTunnelShutdown(tunnel);
+        clearPlannedTunnelShutdown(tunnel);
         updateTunnelStatus({
             connected: false,
-            lastEvent: 'error',
-            lastError: err.message
+            lastEvent: planned ? 'planned_error' : 'error',
+            lastError: planned ? null : err.message
         });
+        if (planned) return;
         log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
         setTimeout(() => {
             if (!shuttingDown) startTunnelWithRestart();
@@ -5290,6 +5794,33 @@ async function startTunnelWithRestart() {
             ? await startClientTunnel(true)
             : await startTunnel(true);
 
+        const verified = await waitForTunnelHealthy(publicUrl, {
+            timeoutMs: TUNNEL_RESTART_VERIFY_TIMEOUT,
+            intervalMs: TUNNEL_RESTART_VERIFY_INTERVAL
+        });
+        if (!verified.ok) {
+            const result = verified.result || {};
+            const reason = result.error || (result.status ? `HTTP ${result.status}` : 'Unknown error');
+            updateTunnelStatus({
+                connected: false,
+                lastEvent: 'restart_unhealthy',
+                lastError: `Public tunnel still unhealthy after restart: ${reason}`
+            });
+            if (tunnel && !tunnel.killed) {
+                markPlannedTunnelShutdown(tunnel);
+                try { tunnel.kill('SIGTERM'); } catch (e) { }
+            }
+            throw new Error(`Tunnel failed verification (${reason})`);
+        }
+
+        updateTunnelStatus({
+            connected: true,
+            lastEvent: 'healthy',
+            lastError: null,
+            lastConnectedAt: Date.now()
+        });
+        log(`[Tunnel] Verified healthy: ${publicUrl}`, GREEN);
+
         // Update state file
         if (fs.existsSync(STATE_FILE)) {
             try {
@@ -5318,6 +5849,72 @@ async function startTunnelWithRestart() {
 let tunnelHealthInterval = null;
 const TUNNEL_HEALTH_CHECK_INTERVAL = 30000; // Check every 30s
 const TUNNEL_HEALTH_TIMEOUT = 10000; // 10s timeout for health check
+const TUNNEL_RESTART_VERIFY_TIMEOUT = 25000;
+const TUNNEL_RESTART_VERIFY_INTERVAL = 1500;
+
+async function probeTunnelHealth(publicUrl, timeoutMs = TUNNEL_HEALTH_TIMEOUT) {
+    if (!publicUrl) {
+        return { ok: false, error: 'Missing tunnel URL', status: null, time: 0 };
+    }
+    const https = require('https');
+    const startedAt = Date.now();
+    return new Promise((resolve) => {
+        const req = https.get(publicUrl, { timeout: timeoutMs }, (res) => {
+            resolve({
+                ok: typeof res.statusCode === 'number' && res.statusCode < 500,
+                status: res.statusCode,
+                error: null,
+                time: Date.now() - startedAt
+            });
+        });
+        req.on('error', (err) => {
+            resolve({
+                ok: false,
+                status: null,
+                error: err.message,
+                time: Date.now() - startedAt
+            });
+        });
+        req.on('timeout', () => {
+            req.destroy();
+            resolve({
+                ok: false,
+                status: null,
+                error: `Timeout (${Math.ceil(timeoutMs / 1000)}s)`,
+                time: Date.now() - startedAt
+            });
+        });
+    });
+}
+
+async function waitForTunnelHealthy(publicUrl, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs)
+        ? Math.max(1, Math.floor(options.timeoutMs))
+        : TUNNEL_RESTART_VERIFY_TIMEOUT;
+    const intervalMs = Number.isFinite(options.intervalMs)
+        ? Math.max(100, Math.floor(options.intervalMs))
+        : TUNNEL_RESTART_VERIFY_INTERVAL;
+    const startedAt = Date.now();
+    let lastResult = { ok: false, error: 'No checks performed', status: null, time: 0 };
+
+    while ((Date.now() - startedAt) < timeoutMs) {
+        lastResult = await probeTunnelHealth(publicUrl, TUNNEL_HEALTH_TIMEOUT);
+        if (lastResult.ok) {
+            return {
+                ok: true,
+                result: lastResult,
+                waitedMs: Date.now() - startedAt
+            };
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+
+    return {
+        ok: false,
+        result: lastResult,
+        waitedMs: Date.now() - startedAt
+    };
+}
 
 function startTunnelHealthMonitor() {
     if (tunnelHealthInterval) return;
@@ -5325,27 +5922,15 @@ function startTunnelHealthMonitor() {
     tunnelHealthInterval = setInterval(async () => {
         if (shuttingDown || !currentPublicUrl) return;
 
-        try {
-            const https = require('https');
-            const healthCheck = new Promise((resolve, reject) => {
-                const req = https.get(currentPublicUrl, { timeout: TUNNEL_HEALTH_TIMEOUT }, (res) => {
-                    resolve(res.statusCode);
-                });
-                req.on('error', reject);
-                req.on('timeout', () => {
-                    req.destroy();
-                    reject(new Error('Timeout'));
-                });
+        const result = await probeTunnelHealth(currentPublicUrl, TUNNEL_HEALTH_TIMEOUT);
+        if (!result.ok) {
+            const reason = result.error || (result.status ? `HTTP ${result.status}` : 'Unknown error');
+            updateTunnelStatus({
+                connected: false,
+                lastEvent: 'unhealthy',
+                lastError: reason
             });
-
-            const statusCode = await healthCheck;
-            // Treat 5xx as unhealthy (Cloudflare couldn't reach origin)
-            if (typeof statusCode === 'number' && statusCode >= 500) {
-                throw new Error(`HTTP ${statusCode}`);
-            }
-            // Non-5xx responses (including 401) mean tunnel is working
-        } catch (e) {
-            log(`[Tunnel] Health check failed: ${e.message}. Restarting tunnel...`, YELLOW);
+            log(`[Tunnel] Health check failed: ${reason}. Restarting tunnel...`, YELLOW);
             if (currentTunnelProc && !currentTunnelProc.killed) {
                 try { currentTunnelProc.kill('SIGTERM'); } catch (err) { }
                 // The 'close' handler will trigger restart
@@ -5353,6 +5938,12 @@ function startTunnelHealthMonitor() {
                 // Cloudflared already dead, restart directly
                 startTunnelWithRestart();
             }
+        } else if (tunnelStatus.lastEvent !== 'healthy') {
+            updateTunnelStatus({
+                connected: true,
+                lastEvent: 'healthy',
+                lastError: null
+            });
         }
     }, TUNNEL_HEALTH_CHECK_INTERVAL);
 }
@@ -5621,21 +6212,11 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
         return new Promise((resolve) => {
             // Ensure session exists on server
             getOrCreateSession(defaultSessionName, sessionCwd);
-
-            // Spawn hay CLI to connect to the session
-            const hayCli = resolveHayCliPath();
-            const wsUrl = `ws://127.0.0.1:${BASE_PORT}/ws?token=${SESSION_SECRET}&source=local-cli`;
-
-            const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
-                stdio: 'inherit',
-                env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: publicUrl || '' }
-            });
-
-            cliProc.on('close', (code) => {
-                resolve(code);
-            });
-
-            cliProc.on('error', (err) => {
+            runHayCliAttach({
+                internalName: defaultSessionName,
+                displayName,
+                cwd: sessionCwd
+            }, publicUrl || '').then(resolve).catch((err) => {
                 log(`Failed to start hay CLI: ${err.message}`, RED);
                 resolve(1);
             });
@@ -5662,112 +6243,48 @@ async function attachToExistingTunnel(existingTunnel) {
     log(`Hop tunnel is already running!`, GREEN);
     log(`URL: ${existingTunnel.url}`, BOLD);
 
-    // Generate smart session name: dir-N
-    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-    let displayName = `${cwdName}-1`;
-    let sessionName = toInternalSessionName(displayName);
+    await ensureExternalHayHostReady();
 
-    log(`\nFinding next available session...`, RESET);
-
+    let sessionsRes = { sessions: [] };
     try {
-        // Get existing sessions first
-        const sessionsRes = await new Promise((resolve, reject) => {
-            const opts = {
-                hostname: '127.0.0.1',
-                port: existingTunnel.port,
-                path: '/api/sessions',
-                method: 'GET',
-                headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
-            };
-            http.get(opts, res => {
-                let data = '';
-                res.on('data', c => data += c);
-                res.on('end', () => resolve(JSON.parse(data)));
-            }).on('error', reject);
-        });
-
-        // Find next available number
-        if (sessionsRes && sessionsRes.sessions && sessionsRes.active) {
-            const allNames = new Set([...sessionsRes.active, ...sessionsRes.sessions.map(s => s.name)]);
-            const internalNames = new Set(sessionsRes.sessions.map(s => s.internalName).filter(Boolean));
-            let counter = 1;
-            while (
-                allNames.has(`${cwdName}-${counter}`) ||
-                internalNames.has(toInternalSessionName(`${cwdName}-${counter}`))
-            ) {
-                counter++;
-            }
-            displayName = `${cwdName}-${counter}`;
-            sessionName = toInternalSessionName(displayName);
-        }
-
-        log(`Creating new session: ${displayName}...`, RESET);
-
-        // Register session with local server
-        const res = await new Promise((resolve, reject) => {
-            const opts = {
-                hostname: '127.0.0.1',
-                port: existingTunnel.port,
-                path: '/api/sessions',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${existingTunnel.sessionSecret}`
-                }
-            };
-
-            const req = http.request(opts, (response) => {
-                let data = '';
-                response.on('data', c => data += c);
-                response.on('end', () => {
-                    try {
-                        resolve(JSON.parse(data));
-                    } catch (e) {
-                        // Server returned non-JSON (likely HTML login page)
-                        reject(new Error(`Server returned non-JSON (status ${response.statusCode})`));
-                    }
-                });
-            });
-
-            req.on('error', reject);
-            req.write(JSON.stringify({ name: displayName, cwd: process.cwd() }));
-            req.end();
-        });
-
-        if (!res.ok && !res.success) throw new Error(res.error || 'Failed to create session');
-
+        sessionsRes = await fetchSessionList(existingTunnel);
     } catch (e) {
-        log(`Note: Could not register session with server: ${e.message}`, YELLOW);
-        log(`Session will still work locally.`, RESET);
+        log(`Note: Could not query daemon sessions (${e.message}). Defaulting to create-new.`, YELLOW);
+    }
+    const sessions = Array.isArray(sessionsRes.sessions) ? sessionsRes.sessions : [];
+    const cwdName = getCwdSessionBaseName();
+    const cwdPath = process.cwd();
+    const selection = await chooseUnnamedSessionTarget(sessions, { cwdPath, cwdName });
+    const target = selection.target;
+
+    if (selection.createdNew) {
+        log(`Creating new session: ${target.displayName}...`, RESET);
+        try {
+            const created = await callLocalApi(existingTunnel, '/api/sessions', 'POST', {
+                name: target.displayName,
+                cwd: cwdPath
+            });
+            if (created.status < 200 || created.status >= 300 || !(created.data?.ok || created.data?.success)) {
+                const errText = typeof created.data === 'string'
+                    ? created.data
+                    : (created.data?.error || `status ${created.status}`);
+                throw new Error(errText);
+            }
+        } catch (e) {
+            log(`Note: Could not register session with daemon metadata: ${e.message}`, YELLOW);
+            log(`Continuing with local attach.`, RESET);
+        }
+    } else {
+        log(`Attaching to existing session: ${target.displayName}`, RESET);
     }
 
-    log(`Attaching to ${displayName}...`, RESET);
-
-    // Spawn hay CLI to connect to session
-    const hayCli = resolveHayCliPath();
-    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}&source=local-cli`;
-
-    const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', displayName, '-n', 'Local'], {
-        stdio: 'inherit',
-        env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: existingTunnel.url || '' }
-    });
-
-    cliProc.on('close', (code) => {
-        if (code === 10) {
-            log(`\nDetached from local session.`, YELLOW);
-            process.exit(0);
-        }
-        log(`\nSession disconnected.`, YELLOW);
-        process.exit(code || 0);
-    });
-
-    cliProc.on('error', (err) => {
-        log(`\nConnection error: ${err.message}`, RED);
-        process.exit(1);
-    });
-
-    // Wait indefinitely (process will exit when CLI closes)
-    await new Promise(() => {});
+    const code = await runHayCliAttach(target, existingTunnel.url || '');
+    if (code === 10) {
+        log(`\nDetached from local session.`, YELLOW);
+        process.exit(0);
+    }
+    log(`\nSession disconnected.`, YELLOW);
+    process.exit(code || 0);
 }
 
 async function fetchSessionList(existingTunnel) {
@@ -5828,6 +6345,88 @@ async function callLocalApi(existingTunnel, apiPath, method = 'GET', body = null
     });
 }
 
+async function fetchExternalHayRuntimeRooms() {
+    if (!isExternalTerminalBackend()) return null;
+    const preferredHost = hayHostState || readHayHostStateFile();
+    const inspectedHosts = await inspectExternalHayHosts();
+    if (inspectedHosts.length === 0) {
+        return null;
+    }
+
+    const canonicalHost = choosePreferredHayHost(inspectedHosts, preferredHost);
+    if (canonicalHost) {
+        writeHayHostStateFile(canonicalHost);
+    }
+
+    const roomsById = new Map();
+    for (const entry of inspectedHosts) {
+        const rooms = Array.isArray(entry.rooms) ? entry.rooms : [];
+        for (const room of rooms) {
+            const existing = roomsById.get(room.id);
+            if (!existing) {
+                roomsById.set(room.id, room);
+                continue;
+            }
+            const existingClients = Number(existing.clientCount) || 0;
+            const nextClients = Number(room.clientCount) || 0;
+            const existingPreferred = canonicalHost && existing.hostPort === canonicalHost.port;
+            const nextPreferred = canonicalHost && room.hostPort === canonicalHost.port;
+            if (nextClients > existingClients || (!existingPreferred && nextPreferred)) {
+                roomsById.set(room.id, room);
+            }
+        }
+    }
+
+    return Array.from(roomsById.values());
+}
+
+async function listLocalTerminalSelectionCandidates() {
+    const metadataSessions = listAllSessionEntries()
+        .filter((session) => session && session.type !== 'port' && typeof session.displayName === 'string');
+    const runtimeRooms = await fetchExternalHayRuntimeRooms();
+    if (!Array.isArray(runtimeRooms)) {
+        return {
+            sessions: [],
+            runtimeSessionNames: new Set(),
+            source: 'runtime-unavailable'
+        };
+    }
+
+    const metadataByInternalName = new Map();
+    for (const session of metadataSessions) {
+        const internalName = String(
+            session.internalName ||
+            toInternalSessionName(session.displayName || '')
+        ).trim();
+        if (!internalName) continue;
+        metadataByInternalName.set(internalName, session);
+    }
+
+    const runtimeSessions = runtimeRooms
+        .map((room) => {
+            const internalName = room.id;
+            const metadata = metadataByInternalName.get(internalName);
+            const config = getSessionConfig(internalName);
+            const displayName = metadata?.displayName || config?.displayName || internalName;
+            return {
+                type: 'terminal',
+                internalName,
+                displayName,
+                cwd: room.cwd || metadata?.cwd || config?.cwd,
+                hostPort: room.hostPort,
+                hasLocalCli: metadata?.hasLocalCli === true,
+                localCliCount: Number(metadata?.localCliCount) || 0
+            };
+        })
+        .filter((session) => !!session && typeof session.displayName === 'string' && session.displayName);
+
+    return {
+        sessions: runtimeSessions,
+        runtimeSessionNames: new Set(runtimeSessions.map((session) => session.internalName)),
+        source: 'runtime'
+    };
+}
+
 function pickSessionForDir(sessions, cwdName, opts = {}) {
     const prefix = `${cwdName}-`;
     const matches = sessions
@@ -5851,6 +6450,147 @@ function pickSessionForDir(sessions, cwdName, opts = {}) {
     return { target: scored[0].session, totalMatches: matches.length };
 }
 
+function getCwdSessionBaseName() {
+    return path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+}
+
+function buildNextSessionIdentity(existingSessions, cwdName, opts = {}) {
+    const sessionList = Array.isArray(existingSessions) ? existingSessions : [];
+    const includeStoredSessions = opts.includeStoredSessions !== false;
+    const existingInternalNames = new Set();
+    const existingDisplayNames = new Set();
+
+    if (includeStoredSessions) {
+        for (const [name, config] of Object.entries(sessionStore.sessions)) {
+            existingInternalNames.add(name);
+            existingDisplayNames.add(config?.displayName || toDisplaySessionName(name));
+        }
+    }
+
+    for (const session of sessionList) {
+        if (!session || session.type === 'port') continue;
+        if (typeof session.internalName === 'string' && session.internalName) {
+            existingInternalNames.add(session.internalName);
+        }
+        const displayName = typeof session.displayName === 'string'
+            ? session.displayName
+            : (typeof session.name === 'string' ? session.name : '');
+        if (displayName) {
+            existingDisplayNames.add(displayName);
+            const internalName = toInternalSessionName(displayName);
+            if (internalName) existingInternalNames.add(internalName);
+        }
+    }
+
+    let counter = 1;
+    let displayName = `${cwdName}-${counter}`;
+    let internalName = toInternalSessionName(displayName);
+    while (
+        !internalName ||
+        existingInternalNames.has(internalName) ||
+        existingDisplayNames.has(displayName)
+    ) {
+        counter += 1;
+        displayName = `${cwdName}-${counter}`;
+        internalName = toInternalSessionName(displayName);
+    }
+    return { internalName, displayName };
+}
+
+function pickSessionForCwd(sessions, cwdPath, cwdName) {
+    const terminalSessions = (Array.isArray(sessions) ? sessions : [])
+        .filter((session) => session && session.type !== 'port' && typeof session.displayName === 'string');
+    const exactCwdMatches = terminalSessions.filter((session) => (
+        typeof session.cwd === 'string' && session.cwd === cwdPath
+    ));
+    if (exactCwdMatches.length > 0) {
+        return pickSessionForDir(exactCwdMatches, cwdName).target;
+    }
+    return pickSessionForDir(terminalSessions, cwdName).target;
+}
+
+function shouldPromptForAttachChoice() {
+    return !!(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+async function promptAttachOrCreate(displayName) {
+    if (!shouldPromptForAttachChoice()) return 'create';
+    const readline = require('readline');
+    return await new Promise((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const message = `Found session "${displayName}" for this cwd. [a]ttach/[C]reate new: `;
+        rl.question(message, (answer) => {
+            rl.close();
+            const normalized = String(answer || '').trim().toLowerCase();
+            if (normalized === 'a' || normalized === 'attach') {
+                resolve('attach');
+                return;
+            }
+            resolve('create');
+        });
+    });
+}
+
+function buildAttachTargetFromSession(session) {
+    if (!session || typeof session !== 'object') return null;
+    const fallbackDisplay = typeof session.displayName === 'string' ? session.displayName : '';
+    const internalName = session.internalName || toInternalSessionName(fallbackDisplay);
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    const displayName = fallbackDisplay || internalName;
+    return {
+        internalName,
+        displayName,
+        cwd: session.cwd,
+        hostPort: session.hostPort
+    };
+}
+
+async function chooseUnnamedSessionTarget(existingSessions, opts = {}) {
+    const cwdPath = typeof opts.cwdPath === 'string' && opts.cwdPath.trim()
+        ? opts.cwdPath
+        : process.cwd();
+    const cwdName = typeof opts.cwdName === 'string' && opts.cwdName.trim()
+        ? opts.cwdName
+        : path.basename(cwdPath).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const matched = pickSessionForCwd(existingSessions, cwdPath, cwdName);
+
+    if (matched && shouldPromptForAttachChoice()) {
+        const choice = await promptAttachOrCreate(matched.displayName);
+        if (choice === 'attach') {
+            const attachTarget = buildAttachTargetFromSession(matched);
+            if (attachTarget) {
+                return { target: attachTarget, createdNew: false };
+            }
+        }
+    }
+
+    const next = buildNextSessionIdentity(existingSessions, cwdName, {
+        includeStoredSessions: opts.includeStoredSessions !== false
+    });
+    return {
+        target: {
+            internalName: next.internalName,
+            displayName: next.displayName,
+            cwd: cwdPath
+        },
+        createdNew: true
+    };
+}
+
+function resolveSessionTargetByDisplay(sessionsRes, displayName) {
+    const sessions = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : [];
+    let target = sessions.find((session) => (
+        session && session.type !== 'port' && session.displayName === displayName
+    ));
+    if (!target && sessionsRes?.aliases && sessionsRes.aliases[displayName]) {
+        const resolvedName = sessionsRes.aliases[displayName];
+        target = sessions.find((session) => (
+            session && session.type !== 'port' && session.displayName === resolvedName
+        ));
+    }
+    return target || null;
+}
+
 async function runHayCliConnect(wsUrl, roomName, shareUrl) {
     const hayCli = resolveHayCliPath();
     return new Promise((resolve) => {
@@ -5870,12 +6610,32 @@ async function runHayCliConnect(wsUrl, roomName, shareUrl) {
     });
 }
 
-async function runHayCliAttach(existingTunnel, displayName) {
-    const wsUrl = `ws://127.0.0.1:${existingTunnel.port}/ws?token=${existingTunnel.sessionSecret}&source=local-cli`;
-    return runHayCliConnect(wsUrl, displayName, existingTunnel.url || '');
+async function runHayCliAttach(target, shareUrl = '') {
+    if (!target || typeof target !== 'object') {
+        throw new Error('Missing session target');
+    }
+    const internalName = String(target.internalName || '').trim();
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) {
+        throw new Error('Invalid session target');
+    }
+    const displayName = String(target.displayName || getSessionDisplayName(internalName) || internalName).trim();
+    const sessionCwd = target.cwd || (getSessionConfig(internalName) || {}).cwd || process.cwd();
+
+    ensureTerminalSessionConfig(internalName, sessionCwd, displayName);
+    await ensureExternalHayHostReady();
+    await reconcileExternalRuntimeSessions();
+    const wsUrl = buildExternalHayWsUrl(internalName, {
+        name: 'Local',
+        source: 'local-cli',
+        cwd: sessionCwd,
+        hostPort: target.hostPort
+    });
+    return runHayCliConnect(wsUrl, internalName, shareUrl);
 }
 
-function resolveOrCreateLocalTerminalSession(nameArg) {
+function resolveOrCreateLocalTerminalSession(nameArg, opts = {}) {
+    const existingSessions = Array.isArray(opts.existingSessions) ? opts.existingSessions : [];
+    const runtimeSessionNames = opts.runtimeSessionNames instanceof Set ? opts.runtimeSessionNames : null;
     const requested = String(nameArg || '').trim();
 
     if (requested) {
@@ -5884,14 +6644,32 @@ function resolveOrCreateLocalTerminalSession(nameArg) {
             ? requested
             : findInternalSessionName(requestedDisplay);
 
-        if (existingInternal) {
+        if (existingInternal && (!runtimeSessionNames || runtimeSessionNames.has(existingInternal))) {
             const existingConfig = getSessionConfig(existingInternal);
             if (existingConfig?.type === 'port') {
                 throw new Error('Session is configured as a port proxy');
             }
+            const runtimeMatch = existingSessions.find((session) => session && session.internalName === existingInternal);
             return {
                 internalName: existingInternal,
-                displayName: getSessionDisplayName(existingInternal)
+                displayName: getSessionDisplayName(existingInternal),
+                cwd: runtimeMatch?.cwd || existingConfig?.cwd,
+                hostPort: runtimeMatch?.hostPort
+            };
+        }
+
+        const existingByList = existingSessions.find((session) => {
+            if (!session || session.type === 'port') return false;
+            if (session.displayName === requestedDisplay) return true;
+            if (session.internalName === requestedDisplay || session.internalName === requested) return true;
+            return false;
+        });
+        if (existingByList && existingByList.internalName) {
+            return {
+                internalName: existingByList.internalName,
+                displayName: existingByList.displayName || requestedDisplay,
+                cwd: existingByList.cwd,
+                hostPort: existingByList.hostPort
             };
         }
 
@@ -5909,58 +6687,11 @@ function resolveOrCreateLocalTerminalSession(nameArg) {
         return { internalName, displayName };
     }
 
-    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const cwdName = getCwdSessionBaseName();
     const cwdPath = process.cwd();
-    const prefix = `${cwdName}-`;
-    const reusableCandidates = Object.entries(sessionStore.sessions)
-        .filter(([internalName, config]) => {
-            if (!internalName || !config || config.type !== 'terminal') return false;
-            if ((config.createdBy || 'user') !== 'user') return false;
-            if (config.cwd && config.cwd !== cwdPath) return false;
-            const displayName = config.displayName || toDisplaySessionName(internalName);
-            if (displayName === cwdName) return true;
-            if (!displayName.startsWith(prefix)) return false;
-            const suffix = displayName.slice(prefix.length);
-            return /^\d+$/.test(suffix);
-        })
-        .map(([internalName, config]) => {
-            const displayName = config.displayName || toDisplaySessionName(internalName);
-            const score = displayName === cwdName ? 0 : Number.parseInt(displayName.slice(prefix.length), 10);
-            return { internalName, displayName, score: Number.isFinite(score) ? score : Number.MAX_SAFE_INTEGER };
-        })
-        .sort((a, b) => a.score - b.score || a.displayName.localeCompare(b.displayName));
+    const { internalName, displayName } = buildNextSessionIdentity(existingSessions, cwdName);
 
-    if (reusableCandidates.length > 0) {
-        const target = reusableCandidates[0];
-        ensureTerminalSessionConfig(target.internalName, cwdPath, target.displayName, null, {
-            createdBy: 'user',
-            agentPermitted: false
-        });
-        return {
-            internalName: target.internalName,
-            displayName: target.displayName
-        };
-    }
-
-    const existingInternalNames = new Set(Object.keys(sessionStore.sessions));
-    const existingDisplayNames = new Set(
-        Object.entries(sessionStore.sessions).map(([name, config]) => config?.displayName || toDisplaySessionName(name))
-    );
-
-    let counter = 1;
-    let displayName = `${cwdName}-${counter}`;
-    let internalName = toInternalSessionName(displayName);
-    while (
-        !internalName ||
-        existingInternalNames.has(internalName) ||
-        existingDisplayNames.has(displayName)
-    ) {
-        counter += 1;
-        displayName = `${cwdName}-${counter}`;
-        internalName = toInternalSessionName(displayName);
-    }
-
-    ensureTerminalSessionConfig(internalName, process.cwd(), displayName, null, {
+    ensureTerminalSessionConfig(internalName, cwdPath, displayName, null, {
         createdBy: 'user',
         agentPermitted: false
     });
@@ -5968,22 +6699,45 @@ function resolveOrCreateLocalTerminalSession(nameArg) {
 }
 
 async function runLocalOnlyTerminal(nameArg) {
-    if (!isExternalTerminalBackend()) {
-        log(`hop local requires HOP_TERMINAL_BACKEND=external.`, RED);
-        process.exit(1);
-    }
-
     await ensureHayLoaded();
-    const hostState = await ensureExternalHayHostReady();
-    if (!hostState || !Number.isInteger(hostState.port)) {
-        throw new Error('Local hay host is not ready');
+    await ensureExternalHayHostReady();
+
+    const {
+        sessions: existingSessions,
+        runtimeSessionNames,
+        source: selectionSource
+    } = await listLocalTerminalSelectionCandidates();
+
+    let target = null;
+    const requested = String(nameArg || '').trim();
+    if (requested) {
+        target = resolveOrCreateLocalTerminalSession(requested, {
+            existingSessions,
+            runtimeSessionNames
+        });
+    } else {
+        const cwdName = getCwdSessionBaseName();
+        const cwdPath = process.cwd();
+        const selection = await chooseUnnamedSessionTarget(existingSessions, {
+            cwdPath,
+            cwdName,
+            includeStoredSessions: selectionSource === 'metadata'
+        });
+        target = selection.target;
+
+        if (selection.createdNew) {
+            ensureTerminalSessionConfig(target.internalName, cwdPath, target.displayName, null, {
+                createdBy: 'user',
+                agentPermitted: false
+            });
+        } else {
+            log(`Attaching to existing session: ${target.displayName}`, RESET);
+        }
     }
 
-    const target = resolveOrCreateLocalTerminalSession(nameArg);
     log(`Launching local terminal: ${target.displayName}`, RESET);
 
-    const wsUrl = `ws://127.0.0.1:${hostState.port}/ws?source=local-cli`;
-    const code = await runHayCliConnect(wsUrl, target.internalName, '');
+    const code = await runHayCliAttach(target, '');
     if (code === 10) {
         log(`\nDetached from local session.`, YELLOW);
         process.exit(0);
@@ -5994,18 +6748,18 @@ async function runLocalOnlyTerminal(nameArg) {
 
 async function attachToNamedSession(existingTunnel, displayName) {
     const sessionsRes = await fetchSessionList(existingTunnel);
-    const sessions = sessionsRes.sessions || [];
-    let target = sessions.find(s => s.type !== 'port' && s.displayName === displayName);
-    if (!target && sessionsRes.aliases && sessionsRes.aliases[displayName]) {
-        const resolvedName = sessionsRes.aliases[displayName];
-        target = sessions.find(s => s.type !== 'port' && s.displayName === resolvedName);
-        displayName = resolvedName;
-    }
+    const target = resolveSessionTargetByDisplay(sessionsRes, displayName);
     if (!target) {
         throw new Error(`Session not found: ${displayName}`);
     }
-    log(`Attaching to ${displayName}...`, RESET);
-    const code = await runHayCliAttach(existingTunnel, displayName);
+    const targetDisplayName = target.displayName || displayName;
+    log(`Attaching to ${targetDisplayName}...`, RESET);
+    const code = await runHayCliAttach({
+        internalName: target.internalName || toInternalSessionName(targetDisplayName),
+        displayName: targetDisplayName,
+        cwd: target.cwd,
+        hostPort: target.hostPort
+    }, existingTunnel.url || '');
     if (code === 10) {
         log(`\nDetached from local session.`, YELLOW);
         process.exit(0);
@@ -6017,17 +6771,12 @@ async function attachToNamedSession(existingTunnel, displayName) {
 async function attachToSessionForDir(existingTunnel) {
     const sessionsRes = await fetchSessionList(existingTunnel);
     const sessions = sessionsRes.sessions || [];
-    const cwdName = path.basename(process.cwd()).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const result = pickSessionForDir(sessions, cwdName, { requireNoLocalCli: true });
-    if (!result.target) {
-        if (result.totalMatches > 0) {
-            log(`All sessions for "${cwdName}" already have a local CLI client attached.`, YELLOW);
-            log(`Specify a session name: hop attach <session>`, RESET);
-            process.exit(1);
-        }
+    const cwdName = getCwdSessionBaseName();
+    const target = pickSessionForCwd(sessions, process.cwd(), cwdName);
+    if (!target) {
         throw new Error(`No existing session for ${cwdName}`);
     }
-    return attachToNamedSession(existingTunnel, result.target.displayName);
+    return attachToNamedSession(existingTunnel, target.displayName);
 }
 
 async function attachToAllSessions(existingTunnel) {
@@ -6048,7 +6797,12 @@ async function attachToAllSessions(existingTunnel) {
     for (let i = 0; i < sessions.length; i++) {
         const s = sessions[i];
         log(`\n[${i + 1}/${sessions.length}] Attaching to ${s.displayName}...`, BOLD);
-        const code = await runHayCliAttach(existingTunnel, s.displayName);
+        const code = await runHayCliAttach({
+            internalName: s.internalName || toInternalSessionName(s.displayName),
+            displayName: s.displayName,
+            cwd: s.cwd,
+            hostPort: s.hostPort
+        }, existingTunnel.url || '');
         if (code === 10) {
             log(`Detached from ${s.displayName}.`, YELLOW);
             continue;
@@ -6214,7 +6968,8 @@ async function main() {
         await checkAndInstallDependencies();
         await ensureHayLoaded();
         await ensureExternalHayHostReady();
-        loadDefaultWorkspace(true);
+        await reconcileExternalRuntimeSessions();
+        await loadDefaultWorkspace(true);
         const authEmitter = new EventEmitter();
 
         const proxyServer = startAuthProxy(authEmitter);
@@ -6312,11 +7067,11 @@ async function main() {
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
-        log(`  hop                       Start tunnel (or attach to existing)`, RESET);
+        log(`  hop                       Start tunnel if needed, then launch local terminal`, RESET);
         log(`  hop start                 Start hop daemon and print QR codes`, RESET);
         log(`  hop attach [session]      Attach to an existing session`, RESET);
         log(`  hop attach all            Attach sequentially to all sessions`, RESET);
-        log(`  hop local [session]       Start/attach a daemonless local terminal`, RESET);
+        log(`  hop local [session]       Start daemonless local terminal ([session] attaches if present)`, RESET);
         log(`  hop stop                  Stop hop daemon`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');
@@ -6398,24 +7153,7 @@ async function main() {
 
         log(`\nChecking tunnel health...`, BOLD);
         log(`  URL: ${state.url}`, RESET);
-
-        const https = require('https');
-        const startTime = Date.now();
-
-        const checkHealth = () => new Promise((resolve) => {
-            const req = https.get(state.url, { timeout: 10000 }, (res) => {
-                // 5xx errors mean Cloudflare couldn't reach origin (tunnel broken)
-                const ok = res.statusCode < 500;
-                resolve({ ok, status: res.statusCode, time: Date.now() - startTime });
-            });
-            req.on('error', (e) => resolve({ ok: false, error: e.message, time: Date.now() - startTime }));
-            req.on('timeout', () => {
-                req.destroy();
-                resolve({ ok: false, error: 'Timeout (10s)', time: Date.now() - startTime });
-            });
-        });
-
-        const result = await checkHealth();
+        const result = await probeTunnelHealth(state.url, TUNNEL_HEALTH_TIMEOUT);
         let localStatus = null;
         try {
             const localRes = await callLocalApi(state, '/api/tunnel/status', 'GET');
@@ -6447,16 +7185,41 @@ async function main() {
                     const res = await callLocalApi(state, '/api/tunnel/restart', 'POST');
                     if (res && res.status >= 200 && res.status < 300) {
                         restarted = true;
-                        log(`Restart request sent. Check again in a few seconds.`, GREEN);
+                        log(`Restart request sent. Waiting for tunnel to become healthy...`, GREEN);
                     }
                 } catch (e) { }
                 if (!restarted) {
                     try {
                         process.kill(state.pid, 'SIGUSR1');  // Fallback to signal daemon to restart tunnel
-                        log(`Restart signal sent. Check again in a few seconds.`, GREEN);
+                        restarted = true;
+                        log(`Restart signal sent. Waiting for tunnel to become healthy...`, GREEN);
                     } catch (e) {
                         log(`Failed to signal daemon: ${e.message}`, RED);
                     }
+                }
+                if (restarted) {
+                    const waitStartedAt = Date.now();
+                    const waitTimeoutMs = TUNNEL_RESTART_VERIFY_TIMEOUT + 5000;
+                    let recovered = null;
+                    let activeUrl = state.url;
+
+                    while ((Date.now() - waitStartedAt) < waitTimeoutMs) {
+                        try {
+                            const freshLocal = await callLocalApi(state, '/api/tunnel/status', 'GET');
+                            if (freshLocal && freshLocal.status === 200 && freshLocal.data && freshLocal.data.url) {
+                                activeUrl = freshLocal.data.url;
+                            }
+                        } catch (e) { }
+
+                        recovered = await probeTunnelHealth(activeUrl, TUNNEL_HEALTH_TIMEOUT);
+                        if (recovered.ok) {
+                            log(`Tunnel healthy again: ${GREEN}${recovered.status}${RESET} after ${Date.now() - waitStartedAt}ms`, GREEN);
+                            process.exit(0);
+                        }
+                        await new Promise((resolve) => setTimeout(resolve, TUNNEL_RESTART_VERIFY_INTERVAL));
+                    }
+                    const reason = (recovered && (recovered.error || (recovered.status ? `HTTP ${recovered.status}` : null))) || 'Unknown error';
+                    log(`Tunnel restart did not recover within ${Math.ceil((Date.now() - waitStartedAt) / 1000)}s: ${reason}`, RED);
                 }
             } else {
                 log(`\nRun ${CYAN}hop health --restart${RESET} to force tunnel restart.`, RESET);
@@ -6711,7 +7474,7 @@ async function main() {
                     log(`Workspace not found: ${nameArg}`, RED);
                     process.exit(1);
                 }
-                applyWorkspace(workspace, { startSessions: false, workspaceName: nameArg });
+                await applyWorkspace(workspace, { startSessions: false, workspaceName: nameArg });
             }
             log(`Workspace "${nameArg}" loaded.`, GREEN);
             process.exit(0);
@@ -6758,7 +7521,8 @@ async function main() {
         const nameArg = process.argv[4];
 
         if (!subcommand || subcommand === 'list') {
-            const sessions = listAllSessionEntries();
+            const snapshot = await listAllSessionEntriesRuntimeFirst();
+            const sessions = snapshot.entries;
             if (sessions.length === 0) {
                 log(`No sessions configured.`, YELLOW);
                 process.exit(0);
@@ -6800,7 +7564,7 @@ async function main() {
                     log(`Invalid port. Use 1-65535.`, RED);
                     process.exit(1);
                 }
-                if (hopSessionExists(name)) {
+                if (await runtimeTerminalSessionExists(name)) {
                     log(`Terminal session already exists with this name.`, RED);
                     process.exit(1);
                 }
@@ -7033,7 +7797,8 @@ async function main() {
     await checkAndInstallDependencies();
     await ensureHayLoaded();
     await ensureExternalHayHostReady();
-    loadDefaultWorkspace(true);
+    await reconcileExternalRuntimeSessions();
+    await loadDefaultWorkspace(true);
     const authEmitter = new EventEmitter();
 
     const proxyServer = startAuthProxy(authEmitter);

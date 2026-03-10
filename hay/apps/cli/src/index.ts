@@ -171,6 +171,7 @@ const DETACH_EXIT_CODE = 10;
 const KILL_EXIT_CODE = 11;
 const TYPING_IDLE_MS = 1200;
 const NOTICE_MS = 3500;
+const HOP_DAEMON_POLL_MS = 5000;
 const PAN_STEP = 2;
 const PAN_FAST_STEP = 10;
 let cursorVisible = true;
@@ -199,6 +200,7 @@ let reconnectAttempt = 0;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let typingTimeout: NodeJS.Timeout | null = null;
 let noticeTimer: NodeJS.Timeout | null = null;
+let daemonPollTimer: NodeJS.Timeout | null = null;
 let exitCode = 0;
 let exitMessage: string | null = null;
 let shortcutsEnabledAt = 0;
@@ -223,6 +225,46 @@ let uiInitialized = false;
 let renderScheduled = false;
 let lastRenderCols = 0;
 let lastRenderRows = 0;
+
+const hopHomeDir = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
+const hopTunnelStateFile = path.join(hopHomeDir, ".tunnel-state");
+const explicitShareEnv = process.env.HAY_SHARE_URL || process.env.HOP_PUBLIC_URL || "";
+
+const normalizeUrlOrigin = (raw: string) => {
+  try {
+    const url = new URL(raw);
+    return url.origin;
+  } catch {
+    return raw;
+  }
+};
+
+const inferServerOrigin = () => {
+  try {
+    const wsUrl = new URL(config.server);
+    const protocol = wsUrl.protocol === "wss:" ? "https:" : "http:";
+    return normalizeUrlOrigin(`${protocol}//${wsUrl.host}`);
+  } catch {
+    return "";
+  }
+};
+
+const explicitShareUrl = explicitShareEnv ? normalizeUrlOrigin(explicitShareEnv) : "";
+const defaultShareUrl = explicitShareUrl || inferServerOrigin();
+
+const shouldTrackHopDaemon = (() => {
+  if (process.env.HAY_TRACK_HOP_DAEMON === "1") return true;
+  if (process.env.HAY_TRACK_HOP_DAEMON === "0") return false;
+  try {
+    const wsUrl = new URL(config.server);
+    return wsUrl.hostname === "127.0.0.1" || wsUrl.hostname === "localhost" || wsUrl.hostname === "::1";
+  } catch {
+    return false;
+  }
+})();
+
+let hopDaemonRunning = false;
+let hopDaemonShareUrl = "";
 
 const getLocalMetrics = () => {
   const cols = process.stdout.columns || 80;
@@ -551,29 +593,76 @@ const getUrl = () => {
   )}&cols=${localMetrics.viewportCols}&rows=${localMetrics.viewportRows}`;
 };
 
-const buildShareUrl = () => {
-  const explicit = process.env.HAY_SHARE_URL || process.env.HOP_PUBLIC_URL || "";
-
-  const normalize = (raw: string) => {
-    try {
-      const url = new URL(raw);
-      return url.origin;
-    } catch {
-      return raw;
-    }
-  };
-
-  if (explicit) {
-    return normalize(explicit);
-  }
-
+const isPidAlive = (pid: number) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    const wsUrl = new URL(config.server);
-    const protocol = wsUrl.protocol === "wss:" ? "https:" : "http:";
-    return normalize(`${protocol}//${wsUrl.host}`);
+    process.kill(pid, 0);
+    return true;
   } catch {
-    return "";
+    return false;
   }
+};
+
+const readHopDaemonRuntime = () => {
+  if (!shouldTrackHopDaemon) {
+    return { running: false, shareUrl: "" };
+  }
+  if (!fs.existsSync(hopTunnelStateFile)) {
+    return { running: false, shareUrl: "" };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(hopTunnelStateFile, "utf8"));
+    const pid = Number(parsed?.pid);
+    if (!isPidAlive(pid)) {
+      return { running: false, shareUrl: "" };
+    }
+    const shareUrlRaw = typeof parsed?.url === "string" ? parsed.url.trim() : "";
+    return {
+      running: true,
+      shareUrl: shareUrlRaw ? normalizeUrlOrigin(shareUrlRaw) : ""
+    };
+  } catch {
+    return { running: false, shareUrl: "" };
+  }
+};
+
+const refreshHopDaemonRuntime = () => {
+  if (!shouldTrackHopDaemon) return;
+  const next = readHopDaemonRuntime();
+  if (next.running !== hopDaemonRunning || next.shareUrl !== hopDaemonShareUrl) {
+    hopDaemonRunning = next.running;
+    hopDaemonShareUrl = next.shareUrl;
+    scheduleRender();
+  }
+};
+
+const startDaemonPolling = () => {
+  if (!shouldTrackHopDaemon || daemonPollTimer) return;
+  refreshHopDaemonRuntime();
+  daemonPollTimer = setInterval(() => {
+    refreshHopDaemonRuntime();
+  }, HOP_DAEMON_POLL_MS);
+  daemonPollTimer.unref?.();
+};
+
+const stopDaemonPolling = () => {
+  if (!daemonPollTimer) return;
+  clearInterval(daemonPollTimer);
+  daemonPollTimer = null;
+};
+
+const buildShareUrl = () => {
+  if (shouldTrackHopDaemon && hopDaemonShareUrl) {
+    return hopDaemonShareUrl;
+  }
+  return defaultShareUrl;
+};
+
+const buildHopDaemonLabel = () => {
+  if (!shouldTrackHopDaemon) return "";
+  if (!hopDaemonRunning) return "hop offline";
+  if (!hopDaemonShareUrl) return "hop starting";
+  return "hop online";
 };
 
 const setStatus = (nextStatus: typeof status) => {
@@ -947,17 +1036,26 @@ const render = () => {
   const presenceNames = presence.filter((client) => client.id !== clientId).map((client) => client.name);
   const statusLabel = status === "connected" ? "" : status;
   const shareUrl = buildShareUrl();
+  const hopDaemonLabel = buildHopDaemonLabel();
 
-  const statusOrUrl = statusLabel || shareUrl;
   const bottomLeft = `● ${sessionLabel}`;
   const autofitLabel = syncSize ? "autofit on" : "autofit off";
   const peerLabel = `peers ${presenceNames.length}`;
+  const rightSegments = [
+    statusLabel,
+    hopDaemonLabel,
+    statusLabel ? "" : shareUrl,
+    autofitLabel,
+    peerLabel
+  ].filter(Boolean);
+  const rightPriority = [peerLabel, autofitLabel, hopDaemonLabel, shareUrl].filter(Boolean);
   const rightPrimary = decorateBottom(
-    [statusOrUrl, autofitLabel, peerLabel].filter(Boolean).join(" | "),
-    statusLabel ? [peerLabel] : [shareUrl, peerLabel]
+    rightSegments.join(" | "),
+    rightPriority
   );
+  const topPriority = statusLabel ? [hopDaemonLabel].filter(Boolean) : [hopDaemonLabel, shareUrl].filter(Boolean);
   const bottomPrimary = renderBar(
-    decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), statusLabel ? [] : [shareUrl], [sessionLabel]),
+    decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), topPriority, [sessionLabel]),
     "bottom"
   );
 
@@ -1155,6 +1253,7 @@ const cleanupAndExit = () => {
   if (typingTimeout) {
     clearTimeout(typingTimeout);
   }
+  stopDaemonPolling();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
   }
@@ -1333,7 +1432,9 @@ process.on("SIGTERM", () => {
 });
 
 process.on("exit", () => {
+  stopDaemonPolling();
   restoreUi();
 });
 
+startDaemonPolling();
 connect();

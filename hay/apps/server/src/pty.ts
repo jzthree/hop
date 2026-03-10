@@ -5,7 +5,7 @@ import pty, { IPty } from "node-pty-prebuilt-multiarch";
 export type PtyFactoryOptions = {
   cols: number;
   rows: number;
-  cwd?: string;
+  cwd: string;
   env?: Record<string, string>;
   shell?: string;
 };
@@ -50,7 +50,7 @@ export const createPty: PtyFactory = ({ cols, rows, cwd, env: envOverrides, shel
     return pty.spawn(resolveShell(shell), [], {
       cols,
       rows,
-      cwd: cwd ?? process.cwd(),
+      cwd,
       env
     });
   } catch (error) {

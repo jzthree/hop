@@ -92,7 +92,7 @@ describe("Room", () => {
     manager.getRoom("opts", { cols: 80, rows: 24 }, {
       cwd: "/tmp/demo",
       env: { HISTFILE: "/tmp/.history" },
-      shell: "/bin/zsh"
+      shell: "/bin/zsh",
     });
 
     expect(capturedOptions?.cwd).toBe("/tmp/demo");
@@ -108,7 +108,7 @@ describe("Room", () => {
     };
 
     const manager = new RoomManager(factory);
-    const room = manager.getRoom("alpha", { cols: 80, rows: 24 });
+    const room = manager.getRoom("alpha", { cols: 80, rows: 24 }, "/tmp");
     const socketA = new FakeSocket();
     const socketB = new FakeSocket();
 
@@ -132,7 +132,7 @@ describe("Room", () => {
     };
 
     const manager = new RoomManager(factory);
-    const room = manager.getRoom("bravo", { cols: 80, rows: 24 });
+    const room = manager.getRoom("bravo", { cols: 80, rows: 24 }, "/tmp");
     const socketA = new FakeSocket();
     const socketB = new FakeSocket();
 
@@ -149,7 +149,7 @@ describe("Room", () => {
 
   it("updates presence on disconnect", () => {
     const manager = new RoomManager(() => new FakePty() as any);
-    const room = manager.getRoom("charlie", { cols: 80, rows: 24 });
+    const room = manager.getRoom("charlie", { cols: 80, rows: 24 }, "/tmp");
     const socketA = new FakeSocket();
     const socketB = new FakeSocket();
 
@@ -171,7 +171,7 @@ describe("Room", () => {
     };
 
     const manager = new RoomManager(factory);
-    const room = manager.getRoom("events", { cols: 80, rows: 24 });
+    const room = manager.getRoom("events", { cols: 80, rows: 24 }, "/tmp");
     const socket = new FakeSocket();
     room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socket);
 
@@ -211,7 +211,7 @@ describe("Room", () => {
     };
 
     const manager = new RoomManager(factory);
-    const room = manager.getRoom("system", { cols: 80, rows: 24 });
+    const room = manager.getRoom("system", { cols: 80, rows: 24 }, "/tmp");
     const inputs: any[] = [];
     room.on("pty_input", (payload) => inputs.push(payload));
 

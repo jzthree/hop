@@ -79,10 +79,10 @@ export type TermshareServerOptions = {
  * ```
  */
 export function attachTermshare(options: TermshareServerOptions) {
-  const { server, path = "/ws", ptyFactory = createPty, cwd, onConnect, onDisconnect } = options;
+  const { server, path = "/ws", ptyFactory = createPty, cwd = process.cwd(), onConnect, onDisconnect } = options;
 
   const wss = new WebSocketServer({ noServer: true });
-  const rooms = new RoomManager(ptyFactory, cwd);
+  const rooms = new RoomManager(ptyFactory);
 
   const toSocketAdapter = (ws: WebSocket): SocketAdapter => ({
     send: (data: string) => {
@@ -125,10 +125,11 @@ export function attachTermshare(options: TermshareServerOptions) {
     const clientId = randomUUID();
     const colorIndex = Math.floor(Math.random() * 1000);
 
+    const roomCwd = url.searchParams.get("cwd") || cwd;
     const room = rooms.getRoom(roomId, {
       cols: Number.isFinite(cols) ? cols : 80,
       rows: Number.isFinite(rows) ? rows : 24
-    });
+    }, roomCwd);
 
     room.attachClient(
       {

@@ -22,9 +22,15 @@ export type ClientInfo = {
 };
 
 export type RoomCreateOptions = {
-  cwd?: string;
+  cwd: string;
   env?: Record<string, string>;
   shell?: string;
+};
+
+export type RoomSummary = {
+  id: string;
+  cwd: string;
+  clientCount: number;
 };
 
 const MAX_BUFFER_SIZE = 200_000;
@@ -73,6 +79,7 @@ class ClientState {
 export class Room extends EventEmitter {
   id: string;
   private pty: IPty;
+  private readonly cwd: string;
   private clients = new Map<string, ClientState>();
   private collabMode = true;
   private controllerId: string | null = null;
@@ -86,15 +93,16 @@ export class Room extends EventEmitter {
   private cleanupTimer: NodeJS.Timeout | null = null;
   private ended = false;
 
-  constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, options?: RoomCreateOptions) {
+  constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, options: RoomCreateOptions) {
     super();
     this.id = id;
+    this.cwd = options.cwd;
     this.pty = ptyFactory({
       cols: initialSize.cols,
       rows: initialSize.rows,
-      cwd: options?.cwd,
-      env: options?.env,
-      shell: options?.shell
+      cwd: options.cwd,
+      env: options.env,
+      shell: options.shell
     });
     this.activeCols = initialSize.cols;
     this.activeRows = initialSize.rows;
@@ -422,28 +430,34 @@ export class Room extends EventEmitter {
     this.emit("session_end", { roomId: this.id, ...payload, timestamp: now() });
     this.emit("empty");
   }
+
+  getSummary(): RoomSummary {
+    return {
+      id: this.id,
+      cwd: this.cwd,
+      clientCount: this.clients.size
+    };
+  }
 }
 
 export class RoomManager {
   private rooms = new Map<string, Room>();
   private ptyFactory: PtyFactory;
-  private cwd?: string;
 
-  constructor(ptyFactory: PtyFactory, cwd?: string) {
+  constructor(ptyFactory: PtyFactory) {
     this.ptyFactory = ptyFactory;
-    this.cwd = cwd;
   }
 
-  getRoom(roomId: string, initialSize: { cols: number; rows: number }, cwdOrOptions?: string | RoomCreateOptions) {
+  getRoom(roomId: string, initialSize: { cols: number; rows: number }, cwdOrOptions: string | RoomCreateOptions) {
     const existing = this.rooms.get(roomId);
     if (existing) {
       return existing;
     }
     const options = typeof cwdOrOptions === "string"
       ? { cwd: cwdOrOptions }
-      : (cwdOrOptions ?? {});
-    if (!options.cwd && this.cwd) {
-      options.cwd = this.cwd;
+      : cwdOrOptions;
+    if (!options.cwd) {
+      throw new Error(`[RoomManager] cwd is required when creating room "${roomId}"`);
     }
     const room = new Room(roomId, this.ptyFactory, initialSize, options);
     room.on("empty", () => {
@@ -468,5 +482,9 @@ export class RoomManager {
     for (const roomId of this.rooms.keys()) {
       this.closeRoom(roomId);
     }
+  }
+
+  listRooms(): RoomSummary[] {
+    return Array.from(this.rooms.values()).map((room) => room.getSummary());
   }
 }

@@ -10,16 +10,86 @@ const { WebSocketServer } = require('ws');
 const HOST = '127.0.0.1';
 const portFromEnv = Number.parseInt(process.env.HAY_HOST_PORT || '', 10);
 const PORT = Number.isInteger(portFromEnv) && portFromEnv > 0 ? portFromEnv : 0;
-const CWD = process.env.HAY_HOST_CWD || process.cwd();
+const FALLBACK_CWD = process.env.HAY_HOST_CWD || process.cwd();
+
+function readJsonBody(req) {
+    return new Promise((resolve, reject) => {
+        let raw = '';
+        req.on('data', (chunk) => {
+            raw += chunk.toString();
+        });
+        req.on('end', () => {
+            if (!raw) {
+                resolve({});
+                return;
+            }
+            try {
+                resolve(JSON.parse(raw));
+            } catch (err) {
+                reject(err);
+            }
+        });
+        req.on('error', reject);
+    });
+}
+
+function normalizeEnv(rawEnv) {
+    if (!rawEnv || typeof rawEnv !== 'object' || Array.isArray(rawEnv)) return undefined;
+    const normalized = {};
+    for (const [key, value] of Object.entries(rawEnv)) {
+        if (!key || typeof key !== 'string') continue;
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+            normalized[key] = String(value);
+        }
+    }
+    return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
 
 async function main() {
     const libPath = path.join(__dirname, '..', 'hay', 'apps', 'server', 'dist', 'lib.js');
     const hay = await import(pathToFileURL(libPath));
-    const rooms = new hay.RoomManager(hay.createPty, CWD);
-    const server = http.createServer((req, res) => {
-        if (req.url === '/health') {
+    const rooms = new hay.RoomManager(hay.createPty);
+    const server = http.createServer(async (req, res) => {
+        const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+        if (reqUrl.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
+            return;
+        }
+        if (reqUrl.pathname === '/rooms' && req.method === 'GET') {
+            const listRooms = typeof rooms.listRooms === 'function' ? rooms.listRooms.bind(rooms) : null;
+            const roomSummaries = listRooms ? listRooms() : [];
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ rooms: roomSummaries }));
+            return;
+        }
+        if (reqUrl.pathname === '/rooms' && req.method === 'POST') {
+            try {
+                const body = await readJsonBody(req);
+                const roomId = hay.sanitizeRoom(body.id);
+                if (!roomId) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid room id' }));
+                    return;
+                }
+                const colsRaw = Number(body.cols || 80);
+                const rowsRaw = Number(body.rows || 24);
+                const cols = Number.isFinite(colsRaw) && colsRaw > 0 ? Math.floor(colsRaw) : 80;
+                const rows = Number.isFinite(rowsRaw) && rowsRaw > 0 ? Math.floor(rowsRaw) : 24;
+                const cwd = typeof body.cwd === 'string' && body.cwd.trim()
+                    ? body.cwd
+                    : FALLBACK_CWD;
+                const shell = typeof body.shell === 'string' && body.shell.trim()
+                    ? body.shell
+                    : undefined;
+                const env = normalizeEnv(body.env);
+                const room = rooms.getRoom(roomId, { cols, rows }, { cwd, shell, env });
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, room: room.getSummary() }));
+            } catch (err) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid room request' }));
+            }
             return;
         }
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -46,7 +116,11 @@ async function main() {
         const rowsRaw = Number(wsUrl.searchParams.get('rows') || 24);
         const cols = Number.isFinite(colsRaw) ? colsRaw : 80;
         const rows = Number.isFinite(rowsRaw) ? rowsRaw : 24;
-        const room = rooms.getRoom(roomId, { cols, rows });
+        const cwd = wsUrl.searchParams.get('cwd');
+        if (!cwd) {
+            console.error(`[hay-host] WARNING: no cwd query param for room "${roomId}", falling back to ${FALLBACK_CWD}`);
+        }
+        const room = rooms.getRoom(roomId, { cols, rows }, cwd || FALLBACK_CWD);
 
         room.attachClient(
             {

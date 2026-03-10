@@ -14,7 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 4001);
 const SERVE_WEB = process.env.SERVE_WEB === "true";
 const WEB_DIST_PATH = process.env.WEB_DIST_PATH;
-const CWD = process.env.CWD; // Working directory for PTY sessions
+const CWD = process.env.CWD || process.cwd(); // Working directory for PTY sessions
 
 const app = express();
 app.get("/health", (_req, res) => {
@@ -35,7 +35,7 @@ if (SERVE_WEB && WEB_DIST_PATH) {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-const rooms = new RoomManager(createPty, CWD);
+const rooms = new RoomManager(createPty);
 
 const toSocketAdapter = (ws: WebSocket) => {
   return {
@@ -81,10 +81,11 @@ wss.on("connection", (ws, req) => {
   const clientId = randomUUID();
   const colorIndex = Math.floor(Math.random() * 1000);
 
+  const cwd = url.searchParams.get("cwd") || CWD;
   const room = rooms.getRoom(roomId, {
     cols: Number.isFinite(cols) ? cols : 80,
     rows: Number.isFinite(rows) ? rows : 24
-  });
+  }, cwd);
 
   room.attachClient(
     {

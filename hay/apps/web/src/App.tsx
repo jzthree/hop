@@ -612,6 +612,7 @@ const App = () => {
         handleResize();
       }
     });
+    (terminal as any).__resizeObserver = resizeObserver;
 
     const scrollContainer = containerRef.current.closest(".terminal-scroll");
     if (scrollContainer) {
@@ -631,17 +632,6 @@ const App = () => {
       };
     }
 
-    return () => {
-      resizeObserver.disconnect();
-      // Clean up touch handlers
-      if ((terminal as any).__touchCleanup) {
-        (terminal as any).__touchCleanup();
-      }
-      terminal.dispose();
-      termRef.current = null;
-      fitRef.current = null;
-      setTerminalReady(false);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
@@ -973,6 +963,22 @@ const App = () => {
 
   useEffect(() => {
     return () => {
+      const terminal = termRef.current;
+      const resizeObserver = (terminal as any)?.__resizeObserver as ResizeObserver | undefined;
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+      if (terminal) {
+        // Clear any custom touch cleanup hooks from the momentum handler.
+        if ((terminal as any).__touchCleanup) {
+          (terminal as any).__touchCleanup();
+          (terminal as any).__touchCleanup = null;
+        }
+        terminal.dispose();
+        termRef.current = null;
+        fitRef.current = null;
+      }
+
       shouldReconnectRef.current = false;
       if (reconnectTimerRef.current) {
         window.clearTimeout(reconnectTimerRef.current);

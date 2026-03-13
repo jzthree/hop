@@ -106,6 +106,11 @@ type SessionInfo = {
   type?: "terminal" | "port";
   port?: number;
 };
+type PaneLayout = "vertical" | "horizontal";
+
+const clamp = (value: number, min: number, max: number) => {
+  return Math.max(min, Math.min(max, value));
+};
 
 // Check if embedded in Hop
 const getHopSession = () => (window as unknown as { __HOP_SESSION__?: { room?: string; wsUrl?: string } }).__HOP_SESSION__;
@@ -115,14 +120,15 @@ const App = () => {
   const params = new URLSearchParams(window.location.search);
   const hopSession = getHopSession();
   const initialRoom = hopSession?.room ?? getLocationRoom() ?? createRoomId();
+  const isMultipaneFrame = params.get("frame") === "1" || window.self !== window.top;
+  const shouldAutoStart = hopSession?.room != null || params.get("autojoin") === "1" || isMultipaneFrame;
 
   const [name, setName] = useState(() => {
     return params.get("name") ?? localStorage.getItem("hay_name") ?? "User";
   });
   const [room, setRoom] = useState(() => initialRoom);
-  // Auto-start session when embedded in Hop (skip join page)
   const [session, setSession] = useState<{ name: string; room: string } | null>(() => {
-    if (hopSession?.room) {
+    if (shouldAutoStart) {
       const userName = params.get("name") ?? localStorage.getItem("hay_name") ?? "User";
       return { name: userName, room: initialRoom };
     }
@@ -176,11 +182,28 @@ const App = () => {
     const saved = localStorage.getItem("hay_view_mode");
     return saved === "fit" ? "fit" : "full"; // Default to full
   });
+  const [multipaneEnabled, setMultipaneEnabled] = useState(() => {
+    if (isMultipaneFrame || isMobileDevice()) {
+      return false;
+    }
+    return localStorage.getItem("hay_multipane_enabled") === "true";
+  });
+  const [multipaneLayout, setMultipaneLayout] = useState<PaneLayout>(() => {
+    return localStorage.getItem("hay_multipane_layout") === "vertical" ? "vertical" : "horizontal";
+  });
+  const [multipaneSplit, setMultipaneSplit] = useState(() => {
+    const saved = localStorage.getItem("hay_multipane_split");
+    const parsed = saved ? parseFloat(saved) : 50;
+    return clamp(Number.isFinite(parsed) ? parsed : 50, 20, 80);
+  });
+  const [secondaryRoom, setSecondaryRoom] = useState(initialRoom);
 
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const multipaneHostRef = useRef<HTMLDivElement | null>(null);
+  const multipaneDragRef = useRef<{ startX: number; startY: number; startSplit: number } | null>(null);
   const optimisticEchoRef = useRef(createOptimisticEcho());
   const optimisticPrevRef = useRef(false);
   const typingTimeout = useRef<number | null>(null);
@@ -197,6 +220,15 @@ const App = () => {
   useEffect(() => {
     localStorage.setItem("hay_session_switch_mode", sessionSwitchMode);
   }, [sessionSwitchMode]);
+  useEffect(() => {
+    localStorage.setItem("hay_multipane_enabled", multipaneEnabled ? "true" : "false");
+  }, [multipaneEnabled]);
+  useEffect(() => {
+    localStorage.setItem("hay_multipane_layout", multipaneLayout);
+  }, [multipaneLayout]);
+  useEffect(() => {
+    localStorage.setItem("hay_multipane_split", String(multipaneSplit));
+  }, [multipaneSplit]);
 
   const typingActive = useRef(false);
   const noticeTimeout = useRef<number | null>(null);
@@ -232,6 +264,16 @@ const App = () => {
   }, [session, room, sessionLabel]);
 
   const sortedPresence = useMemo(() => sortPresence(presence, clientId), [presence, clientId]);
+  const canUseMultipane = !isMobile && !isMultipaneFrame;
+  const shouldUseMultipane = Boolean(multipaneEnabled && canUseMultipane && session);
+  const frameSessionUrl = useMemo(() => {
+    const url = new URL(window.location.origin);
+    url.pathname = buildSessionPath(secondaryRoom);
+    url.searchParams.set("name", name);
+    url.searchParams.set("frame", "1");
+    url.searchParams.set("autojoin", "1");
+    return url.toString();
+  }, [name, secondaryRoom]);
 
   const controllerName = useMemo(() => {
     if (!controllerId) {
@@ -253,6 +295,28 @@ const App = () => {
   useEffect(() => {
     autoFitOnTypeRef.current = autoFitOnType;
   }, [autoFitOnType]);
+
+  useEffect(() => {
+    if (!session) {
+      setMultipaneEnabled(false);
+      return;
+    }
+    if (isMultipaneFrame) {
+      setMultipaneEnabled(false);
+    }
+  }, [session, isMultipaneFrame]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+    setSecondaryRoom((current) => {
+      if (current) {
+        return current;
+      }
+      return session.room;
+    });
+  }, [session?.room]);
 
   useEffect(() => {
     viewModeRef.current = viewMode;
@@ -309,6 +373,55 @@ const App = () => {
       return;
     }
     sendMessage({ type: "resize", cols: termRef.current.cols, rows: termRef.current.rows });
+  };
+
+  const handleMultipanePointerMove = (clientX: number, clientY: number) => {
+    if (!multipaneDragRef.current || !multipaneHostRef.current) {
+      return;
+    }
+    const rect = multipaneHostRef.current.getBoundingClientRect();
+    const totalLength = multipaneLayout === "vertical" ? rect.width : rect.height;
+    if (totalLength <= 0) {
+      return;
+    }
+
+    const delta = multipaneLayout === "vertical"
+      ? clientX - multipaneDragRef.current.startX
+      : clientY - multipaneDragRef.current.startY;
+    const next = multipaneDragRef.current.startSplit + (delta / totalLength) * 100;
+    setMultipaneSplit(clamp(next, 20, 80));
+  };
+
+  const stopMultipaneDrag = () => {
+    if (!multipaneDragRef.current) {
+      return;
+    }
+    multipaneDragRef.current = null;
+    document.body.style.cursor = "";
+    window.removeEventListener("pointermove", handleMultipaneGlobalMove);
+    window.removeEventListener("pointerup", stopMultipaneDrag);
+    window.removeEventListener("pointercancel", stopMultipaneDrag);
+  };
+
+  const handleMultipaneGlobalMove = (event: PointerEvent) => {
+    handleMultipanePointerMove(event.clientX, event.clientY);
+  };
+
+  const handleMultipanePointerDown = (event: { clientX: number; clientY: number; preventDefault: () => void }) => {
+    if (!canUseMultipane) {
+      return;
+    }
+    multipaneHostRef.current?.focus();
+    multipaneDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startSplit: multipaneSplit
+    };
+    document.body.style.cursor = multipaneLayout === "vertical" ? "col-resize" : "row-resize";
+    window.addEventListener("pointermove", handleMultipaneGlobalMove);
+    window.addEventListener("pointerup", stopMultipaneDrag);
+    window.addEventListener("pointercancel", stopMultipaneDrag);
+    event.preventDefault();
   };
 
   // Fit based on the scroll container viewport rather than the terminal element itself.
@@ -984,6 +1097,9 @@ const App = () => {
         window.clearTimeout(reconnectTimerRef.current);
       }
       wsRef.current?.close();
+      window.removeEventListener("pointermove", handleMultipaneGlobalMove);
+      window.removeEventListener("pointerup", stopMultipaneDrag);
+      window.removeEventListener("pointercancel", stopMultipaneDrag);
     };
   }, []);
 
@@ -1124,6 +1240,11 @@ const App = () => {
     setDrawerOpen(false);
   };
 
+  const setSecondarySession = (roomName: string) => {
+    setSecondaryRoom(roomName);
+    setDrawerOpen(false);
+  };
+
   const handleJoin = (event: FormEvent) => {
     event.preventDefault();
     if (!name.trim() || !room.trim()) {
@@ -1206,9 +1327,32 @@ const App = () => {
     []
   );
 
+  const multipaneHostStyle = shouldUseMultipane
+    ? {
+        gridTemplateColumns:
+          multipaneLayout === "vertical" ? `${multipaneSplit}fr 8px ${100 - multipaneSplit}fr` : undefined,
+        gridTemplateRows:
+          multipaneLayout === "horizontal" ? `${multipaneSplit}fr 8px ${100 - multipaneSplit}fr` : undefined
+      }
+    : {};
+  const secondarySessionOptions = useMemo(() => {
+    const options = [...sessions];
+    const exists = options.some((item) => item.name === secondaryRoom);
+    if (!exists && secondaryRoom) {
+      options.push({
+        name: secondaryRoom,
+        displayName: secondaryRoom,
+        active: false,
+        starting: false
+      });
+    }
+    return options;
+  }, [sessions, secondaryRoom]);
+
   return (
-    <div className="app">
-      <header className="topbar">
+    <div className={`app${isMultipaneFrame ? " embedded-frame" : ""}`}>
+      {!isMultipaneFrame && (
+        <header className="topbar">
         <div className="brand">
           <span className="brand-mark">◎</span>
           <div>
@@ -1231,6 +1375,7 @@ const App = () => {
           {sortedPresence.length === 0 && <span className="presence-empty">No viewers yet</span>}
         </div>
       </header>
+      )}
 
       {!session ? (
         <main className="join">
@@ -1262,195 +1407,317 @@ const App = () => {
         </main>
       ) : (
         <main
-          className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}`}
+          className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}${
+            isMultipaneFrame ? " embedded-session" : ""
+          }`}
         >
-          <button
-            type="button"
-            className="drawer-toggle"
-            style={{ left: fabPosition.x, top: fabPosition.y, bottom: 'auto' }}
-            onMouseDown={(e) => handleFabDragStart(e.clientX, e.clientY)}
-            onMouseMove={(e) => handleFabDragMove(e.clientX, e.clientY)}
-            onMouseUp={handleFabDragEnd}
-            onMouseLeave={handleFabDragEnd}
-            onTouchStart={(e) => handleFabDragStart(e.touches[0].clientX, e.touches[0].clientY)}
-            onTouchMove={(e) => handleFabDragMove(e.touches[0].clientX, e.touches[0].clientY)}
-            onTouchEnd={handleFabDragEnd}
-          >
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
-            </svg>
-          </button>
-          {drawerOpen && (
-            <div className="drawer-overlay" onClick={() => setDrawerOpen(false)} />
+          {!isMultipaneFrame && (
+            <>
+              <button
+                type="button"
+                className="drawer-toggle"
+                style={{ left: fabPosition.x, top: fabPosition.y, bottom: 'auto' }}
+                onMouseDown={(e) => handleFabDragStart(e.clientX, e.clientY)}
+                onMouseMove={(e) => handleFabDragMove(e.clientX, e.clientY)}
+                onMouseUp={handleFabDragEnd}
+                onMouseLeave={handleFabDragEnd}
+                onTouchStart={(e) => handleFabDragStart(e.touches[0].clientX, e.touches[0].clientY)}
+                onTouchMove={(e) => handleFabDragMove(e.touches[0].clientX, e.touches[0].clientY)}
+                onTouchEnd={handleFabDragEnd}
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="3"/>
+                  <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+                </svg>
+              </button>
+              {drawerOpen && (
+                <div className="drawer-overlay" onClick={() => setDrawerOpen(false)} />
+              )}
+            </>
           )}
-          <section className={`controls ${drawerOpen ? "open" : ""}`}>
-            <button
-              type="button"
-              className="drawer-close"
-              onClick={() => setDrawerOpen(false)}
-            >
-              ✕
-            </button>
-            <div className="room-info">
-              <p className="room-label">Session</p>
-              <h2>{sessionLabel || session.room}</h2>
-              <p className="room-meta">
-                {status === "connected" ? "Live" : status === "connecting" ? "Connecting" : "Offline"}
-              </p>
-            </div>
-            <div className="control-actions">
-              {isMobile && (
-                <button type="button" onClick={() => { handleKeyboardToggle(); setDrawerOpen(false); }}>
-                  {keyboardVisible ? "Hide keyboard" : "Show keyboard"}
-                </button>
-              )}
-              <button type="button" onClick={handleCopyLink}>
-                Copy link
+          {!isMultipaneFrame && (
+            <section className={`controls ${drawerOpen ? "open" : ""}`}>
+              <button
+                type="button"
+                className="drawer-close"
+                onClick={() => setDrawerOpen(false)}
+              >
+                ✕
               </button>
-              <button type="button" onClick={() => { fitToViewport(); handleResize(); }}>
-                Fit to screen
-              </button>
-              {status === "disconnected" && (
-                <button type="button" onClick={() => setReconnectToken((value) => value + 1)}>
-                  Reconnect
-                </button>
-              )}
-            </div>
-            <div className="font-size-control">
-              <label>Font size</label>
-              <div className="font-size-buttons">
-                <button type="button" onClick={() => setFontSize((s) => Math.max(8, s - 1))}>−</button>
-                <span>{fontSize}px</span>
-                <button type="button" onClick={() => setFontSize((s) => Math.min(24, s + 1))}>+</button>
+              <div className="room-info">
+                <p className="room-label">Session</p>
+                <h2>{sessionLabel || session.room}</h2>
+                <p className="room-meta">
+                  {status === "connected" ? "Live" : status === "connecting" ? "Connecting" : "Offline"}
+                </p>
               </div>
-            </div>
-            <div className="view-mode-control">
-              <label>View mode</label>
-              <div className="view-mode-buttons">
-                <button
-                  type="button"
-                  className={viewMode === "fit" ? "active" : ""}
-                  onClick={() => setViewMode("fit")}
-                >
-                  Auto-fit
+              <div className="control-actions">
+                {isMobile && (
+                  <button type="button" onClick={() => { handleKeyboardToggle(); setDrawerOpen(false); }}>
+                    {keyboardVisible ? "Hide keyboard" : "Show keyboard"}
+                  </button>
+                )}
+                <button type="button" onClick={handleCopyLink}>
+                  Copy link
                 </button>
-                <button
-                  type="button"
-                  className={viewMode === "full" ? "active" : ""}
-                  onClick={() => setViewMode("full")}
-                >
-                  Manual
+                <button type="button" onClick={() => { fitToViewport(); handleResize(); }}>
+                  Fit to screen
                 </button>
+                {status === "disconnected" && (
+                  <button type="button" onClick={() => setReconnectToken((value) => value + 1)}>
+                    Reconnect
+                  </button>
+                )}
               </div>
-            </div>
-            <div className="view-mode-control">
-              <label>Session switch</label>
-              <div className="view-mode-buttons">
-                <button
-                  type="button"
-                  className={sessionSwitchMode === "page" ? "active" : ""}
-                  onClick={() => setSessionSwitchMode("page")}
-                >
-                  Page load
-                </button>
-                <button
-                  type="button"
-                  className={sessionSwitchMode === "instant" ? "active" : ""}
-                  onClick={() => setSessionSwitchMode("instant")}
-                >
-                  Instant
-                </button>
+              <div className="font-size-control">
+                <label>Font size</label>
+                <div className="font-size-buttons">
+                  <button type="button" onClick={() => setFontSize((s) => Math.max(8, s - 1))}>−</button>
+                  <span>{fontSize}px</span>
+                  <button type="button" onClick={() => setFontSize((s) => Math.min(24, s + 1))}>+</button>
+                </div>
               </div>
-            </div>
-            {isMobile && (
-              <div className="selection-mode-control">
-                <label>Selection mode</label>
+              <div className="view-mode-control">
+                <label>View mode</label>
                 <div className="view-mode-buttons">
                   <button
                     type="button"
-                    className={!selectionMode ? "active" : ""}
-                    onClick={() => setSelectionMode(false)}
+                    className={viewMode === "fit" ? "active" : ""}
+                    onClick={() => setViewMode("fit")}
                   >
-                    Scroll
+                    Auto-fit
                   </button>
                   <button
                     type="button"
-                    className={selectionMode ? "active" : ""}
-                    onClick={() => setSelectionMode(true)}
+                    className={viewMode === "full" ? "active" : ""}
+                    onClick={() => setViewMode("full")}
                   >
-                    Select
+                    Manual
                   </button>
                 </div>
               </div>
-            )}
-            {isMobile && (
-              <div className="haptics-control">
-                <label>Haptics</label>
+              <div className="view-mode-control">
+                <label>Session switch</label>
                 <div className="view-mode-buttons">
                   <button
                     type="button"
-                    className={hapticsEnabled ? "active" : ""}
-                    onClick={() => setHapticsEnabled(true)}
+                    className={sessionSwitchMode === "page" ? "active" : ""}
+                    onClick={() => setSessionSwitchMode("page")}
                   >
-                    On
+                    Page load
                   </button>
                   <button
                     type="button"
-                    className={!hapticsEnabled ? "active" : ""}
-                    onClick={() => setHapticsEnabled(false)}
+                    className={sessionSwitchMode === "instant" ? "active" : ""}
+                    onClick={() => setSessionSwitchMode("instant")}
                   >
-                    Off
+                    Instant
                   </button>
                 </div>
               </div>
-            )}
-            {notice && <p className="notice">{notice}</p>}
-            {(() => {
-              const currentSessionName = sessionLabel || session?.room;
-              const otherSessions = sessions.filter((s) => s.name !== currentSessionName);
-              return (
-                <div className="session-switcher">
-                  <p className="session-switcher-label">Switch session</p>
-                  {loadingSessions ? (
-                    <div className="session-list-loading">Loading...</div>
-                  ) : otherSessions.length === 0 ? (
-                    <div className="session-list-empty">No other sessions</div>
-                  ) : (
-                    <div className="session-list">
-                      {otherSessions.map((s) => (
-                        <button
-                          key={s.name}
-                          type="button"
-                          className={`session-list-item${s.active ? " active" : ""}${s.starting ? " starting" : ""}`}
-                          onClick={() => switchSession(s)}
-                        >
-                          <span className="session-list-name">{s.displayName}</span>
-                          {s.active && <span className="session-badge live">LIVE</span>}
-                          {s.starting && !s.active && <span className="session-badge starting">STARTING</span>}
-                          {s.type === "port" && <span className="session-badge port">PORT {s.port}</span>}
-                        </button>
-                      ))}
+              <div className="view-mode-control">
+                <label>Multipane</label>
+                <div className="view-mode-buttons">
+                  <button
+                    type="button"
+                    className={!multipaneEnabled ? "active" : ""}
+                    onClick={() => setMultipaneEnabled(false)}
+                  >
+                    Single
+                  </button>
+                  <button
+                    type="button"
+                    className={multipaneEnabled ? "active" : ""}
+                    onClick={() => setMultipaneEnabled(true)}
+                  >
+                    Split
+                  </button>
+                </div>
+              </div>
+              {multipaneEnabled && (
+                <>
+                  <div className="view-mode-control">
+                    <label>Split direction</label>
+                    <div className="view-mode-buttons">
+                      <button
+                        type="button"
+                        className={multipaneLayout === "vertical" ? "active" : ""}
+                        onClick={() => setMultipaneLayout("vertical")}
+                      >
+                        Vertical
+                      </button>
+                      <button
+                        type="button"
+                        className={multipaneLayout === "horizontal" ? "active" : ""}
+                        onClick={() => setMultipaneLayout("horizontal")}
+                      >
+                        Horizontal
+                      </button>
                     </div>
-                  )}
+                  </div>
+                  <div className="view-mode-control split-slider-control">
+                    <label>Split ratio {Math.round(multipaneSplit)}%</label>
+                    <input
+                      type="range"
+                      min={20}
+                      max={80}
+                      value={multipaneSplit}
+                      onChange={(event) => setMultipaneSplit(Number(event.target.value))}
+                      className="split-slider"
+                      aria-label="Split ratio"
+                    />
+                  </div>
+                  <div className="session-switcher">
+                    <p className="session-switcher-label">Pane 2 session</p>
+                    {loadingSessions ? (
+                      <div className="session-list-loading">Loading...</div>
+                    ) : secondarySessionOptions.length === 0 ? (
+                      <div className="session-list-empty">No sessions yet</div>
+                    ) : (
+                      <div className="session-list">
+                        {secondarySessionOptions.map((s) => (
+                          <button
+                            key={s.name}
+                            type="button"
+                            className={`session-list-item${s.name === secondaryRoom ? " active" : ""}${s.active ? " active" : ""}${
+                              s.starting ? " starting" : ""
+                            }`}
+                            onClick={() => setSecondarySession(s.name)}
+                          >
+                            <span className="session-list-name">{s.displayName}</span>
+                            {s.active && <span className="session-badge live">LIVE</span>}
+                            {s.starting && !s.active && <span className="session-badge starting">STARTING</span>}
+                            {s.type === "port" && <span className="session-badge port">PORT {s.port}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+              {isMobile && (
+                <div className="selection-mode-control">
+                  <label>Selection mode</label>
+                  <div className="view-mode-buttons">
+                    <button
+                      type="button"
+                      className={!selectionMode ? "active" : ""}
+                      onClick={() => setSelectionMode(false)}
+                    >
+                      Scroll
+                    </button>
+                    <button
+                      type="button"
+                      className={selectionMode ? "active" : ""}
+                      onClick={() => setSelectionMode(true)}
+                    >
+                      Select
+                    </button>
+                  </div>
                 </div>
-              );
-            })()}
-          </section>
-          <section className="terminal">
-            <div
-              className="terminal-frame"
-              onClick={() => {
-                // On mobile, don't focus terminal to prevent system keyboard
-                if (!isMobile) {
-                  termRef.current?.focus();
-                }
-              }}
-            >
-              <div className="terminal-scroll">
-                <div className="terminal-inner" ref={containerRef} />
+              )}
+              {isMobile && (
+                <div className="haptics-control">
+                  <label>Haptics</label>
+                  <div className="view-mode-buttons">
+                    <button
+                      type="button"
+                      className={hapticsEnabled ? "active" : ""}
+                      onClick={() => setHapticsEnabled(true)}
+                    >
+                      On
+                    </button>
+                    <button
+                      type="button"
+                      className={!hapticsEnabled ? "active" : ""}
+                      onClick={() => setHapticsEnabled(false)}
+                    >
+                      Off
+                    </button>
+                  </div>
+                </div>
+              )}
+              {notice && <p className="notice">{notice}</p>}
+              {(() => {
+                const currentSessionName = sessionLabel || session?.room;
+                const otherSessions = sessions.filter((s) => s.name !== currentSessionName);
+                return (
+                  <div className="session-switcher">
+                    <p className="session-switcher-label">Switch session</p>
+                    {loadingSessions ? (
+                      <div className="session-list-loading">Loading...</div>
+                    ) : otherSessions.length === 0 ? (
+                      <div className="session-list-empty">No other sessions</div>
+                    ) : (
+                      <div className="session-list">
+                        {otherSessions.map((s) => (
+                          <button
+                            key={s.name}
+                            type="button"
+                            className={`session-list-item${s.active ? " active" : ""}${s.starting ? " starting" : ""}`}
+                            onClick={() => switchSession(s)}
+                          >
+                            <span className="session-list-name">{s.displayName}</span>
+                            {s.active && <span className="session-badge live">LIVE</span>}
+                            {s.starting && !s.active && <span className="session-badge starting">STARTING</span>}
+                            {s.type === "port" && <span className="session-badge port">PORT {s.port}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </section>
+          )}
+          <section
+            className={`terminal ${shouldUseMultipane ? "terminal--multipane" : ""}`}
+            ref={shouldUseMultipane ? multipaneHostRef : null}
+          >
+            {!shouldUseMultipane ? (
+              <div
+                className="terminal-frame"
+                onClick={() => {
+                  // On mobile, don't focus terminal to prevent system keyboard
+                  if (!isMobile) {
+                    termRef.current?.focus();
+                  }
+                }}
+              >
+                <div className="terminal-scroll">
+                  <div className="terminal-inner" ref={containerRef} />
+                </div>
               </div>
-            </div>
+            ) : (
+              <div
+                className={`multipane-stage multipane-${multipaneLayout}`}
+                style={multipaneHostStyle}
+                aria-label="Multipane terminal stage"
+              >
+                <div
+                  className="terminal-frame"
+                  onClick={() => {
+                    if (!isMobile) {
+                      termRef.current?.focus();
+                    }
+                  }}
+                >
+                  <div className="terminal-scroll">
+                    <div className="terminal-inner" ref={containerRef} />
+                  </div>
+                </div>
+                <div
+                  className={`multipane-divider ${multipaneLayout === "horizontal" ? "multipane-divider-horizontal" : "multipane-divider-vertical"}`}
+                  onPointerDown={handleMultipanePointerDown}
+                />
+                <iframe
+                  className="multipane-frame"
+                  title={`Multipane secondary session ${secondarySessionOptions.find((s) => s.name === secondaryRoom)?.displayName ?? secondaryRoom}`}
+                  src={frameSessionUrl}
+                  loading="eager"
+                />
+              </div>
+            )}
             <div className="terminal-footer">
               <span>{status === "connected" ? "Live" : "Awaiting connection"}</span>
               <span>

@@ -1,14 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type DragEvent,
-  type FormEvent,
-  type MouseEvent as ReactMouseEvent,
-  type TouchEvent as ReactTouchEvent
-} from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type FormEvent } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
@@ -107,8 +97,6 @@ type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected";
 type SessionSwitchMode = "page" | "instant";
 const DEFAULT_SESSION_SWITCH_MODE: SessionSwitchMode = "instant";
 const SESSION_LIST_STALE_MS = 5000;
-const MIN_MULTIPANE_PANES = 2;
-const MAX_MULTIPANE_PANES = 4;
 
 type SessionInfo = {
   name: string;
@@ -180,16 +168,6 @@ const App = () => {
     }
     return DEFAULT_SESSION_SWITCH_MODE;
   });
-  const [multipanePaneCount, setMultipanePaneCount] = useState(() => {
-    const saved = localStorage.getItem("hay_multipane_count");
-    const parsed = saved ? parseInt(saved, 10) : MIN_MULTIPANE_PANES;
-    if (Number.isNaN(parsed)) {
-      return MIN_MULTIPANE_PANES;
-    }
-    return Math.min(MAX_MULTIPANE_PANES, Math.max(MIN_MULTIPANE_PANES, parsed));
-  });
-  const [multipanePaneRooms, setMultipanePaneRooms] = useState<string[]>([]);
-  const [dragOverPane, setDragOverPane] = useState<number | null>(null);
 
   useEffect(() => {
     if (session?.room) {
@@ -218,6 +196,7 @@ const App = () => {
     const parsed = saved ? parseFloat(saved) : 50;
     return clamp(Number.isFinite(parsed) ? parsed : 50, 20, 80);
   });
+  const [secondaryRoom, setSecondaryRoom] = useState(initialRoom);
 
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -250,9 +229,6 @@ const App = () => {
   useEffect(() => {
     localStorage.setItem("hay_multipane_split", String(multipaneSplit));
   }, [multipaneSplit]);
-  useEffect(() => {
-    localStorage.setItem("hay_multipane_count", String(multipanePaneCount));
-  }, [multipanePaneCount]);
 
   const typingActive = useRef(false);
   const noticeTimeout = useRef<number | null>(null);
@@ -290,26 +266,14 @@ const App = () => {
   const sortedPresence = useMemo(() => sortPresence(presence, clientId), [presence, clientId]);
   const canUseMultipane = !isMobile && !isMultipaneFrame;
   const shouldUseMultipane = Boolean(multipaneEnabled && canUseMultipane && session);
-  const paneCount = Math.max(MIN_MULTIPANE_PANES, multipanePaneCount);
-  const secondaryPaneCount = Math.max(0, paneCount - 1);
-  const allPaneSessions = useMemo(() => {
-    if (!session) {
-      return [];
-    }
-    const base = [session.room, ...multipanePaneRooms];
-    return base.slice(0, paneCount);
-  }, [session, multipanePaneRooms, paneCount]);
-  const getPaneDisplayName = useCallback((roomName: string) => {
-    return sessions.find((item) => item.name === roomName)?.displayName ?? roomName;
-  }, [sessions]);
-  const buildFrameSessionUrl = (roomName: string) => {
+  const frameSessionUrl = useMemo(() => {
     const url = new URL(window.location.origin);
-    url.pathname = buildSessionPath(roomName);
+    url.pathname = buildSessionPath(secondaryRoom);
     url.searchParams.set("name", name);
     url.searchParams.set("frame", "1");
     url.searchParams.set("autojoin", "1");
     return url.toString();
-  };
+  }, [name, secondaryRoom]);
 
   const controllerName = useMemo(() => {
     if (!controllerId) {
@@ -344,32 +308,15 @@ const App = () => {
 
   useEffect(() => {
     if (!session) {
-      setMultipanePaneRooms([]);
       return;
     }
-    if (multipanePaneRooms.length >= secondaryPaneCount) {
-      return;
-    }
-    setMultipanePaneRooms((current) => {
-      const next = [...current];
-      while (next.length < secondaryPaneCount) {
-        next.push(session.room);
+    setSecondaryRoom((current) => {
+      if (current) {
+        return current;
       }
-      return next;
+      return session.room;
     });
-  }, [session?.room, multipanePaneCount, secondaryPaneCount, session, multipanePaneRooms.length]);
-
-  useEffect(() => {
-    if (!session) {
-      return;
-    }
-    if (multipanePaneCount < MIN_MULTIPANE_PANES) {
-      return;
-    }
-    if (multipanePaneRooms.length > secondaryPaneCount) {
-      setMultipanePaneRooms((current) => current.slice(0, secondaryPaneCount));
-    }
-  }, [session?.room, multipanePaneCount, secondaryPaneCount, multipanePaneRooms.length]);
+  }, [session?.room]);
 
   useEffect(() => {
     viewModeRef.current = viewMode;
@@ -477,14 +424,14 @@ const App = () => {
     event.preventDefault();
   };
 
-  const handleMultipaneMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+  const handleMultipaneMouseDown = (event: { button: number; clientX: number; clientY: number; preventDefault: () => void }) => {
     if (event.button !== 0) {
       return;
     }
     handleMultipanePointerDown(event);
   };
 
-  const handleMultipaneTouchStart = (event: ReactTouchEvent<HTMLDivElement>) => {
+  const handleMultipaneTouchStart = (event: { touches: TouchList; preventDefault: () => void }) => {
     const touch = event.touches[0];
     if (!touch) {
       return;
@@ -1314,67 +1261,9 @@ const App = () => {
     setDrawerOpen(false);
   };
 
-  const switchSessionByName = (roomName: string) => {
-    const targetSession = sessions.find((item) => item.name === roomName);
-    const fallbackSession = {
-      name: roomName,
-      displayName: roomName,
-      active: false,
-      starting: false
-    };
-    switchSession(targetSession ?? fallbackSession);
-  };
-
-  const assignSessionToPane = (paneIndex: number, roomName: string) => {
-    const trimmed = roomName.trim();
-    if (!trimmed) {
-      return;
-    }
-    if (paneIndex === 0) {
-      switchSessionByName(trimmed);
-      return;
-    }
-    setMultipanePaneRooms((current) => {
-      const next = [...current];
-      const secondaryIndex = paneIndex - 1;
-      while (next.length <= secondaryIndex) {
-        next.push(trimmed);
-      }
-      next[secondaryIndex] = trimmed;
-      return next.slice(0, secondaryPaneCount);
-    });
+  const setSecondarySession = (roomName: string) => {
+    setSecondaryRoom(roomName);
     setDrawerOpen(false);
-  };
-
-  const handleSessionDragStart = (event: DragEvent<HTMLButtonElement>, roomName: string) => {
-    if (event.dataTransfer) {
-      event.dataTransfer.setData("text/plain", roomName);
-      event.dataTransfer.effectAllowed = "copyMove";
-    }
-  };
-
-  const handlePaneDragOver = (event: DragEvent<HTMLDivElement>, paneIndex: number) => {
-    event.preventDefault();
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "copy";
-    }
-    setDragOverPane(paneIndex);
-  };
-
-  const handlePaneDragLeave = (paneIndex: number) => {
-    setDragOverPane((current) => (current === paneIndex ? null : current));
-  };
-
-  const handlePaneDrop = (event: DragEvent<HTMLDivElement>, paneIndex: number) => {
-    event.preventDefault();
-    const roomName = event.dataTransfer.getData("text/plain");
-    setDragOverPane(null);
-    assignSessionToPane(paneIndex, roomName);
-  };
-
-  const setMultipaneCount = (nextCount: number) => {
-    const clamped = Math.min(MAX_MULTIPANE_PANES, Math.max(MIN_MULTIPANE_PANES, nextCount));
-    setMultipanePaneCount(clamped);
   };
 
   const handleJoin = (event: FormEvent) => {
@@ -1459,25 +1348,27 @@ const App = () => {
     []
   );
 
-  const paneCountForLayout = shouldUseMultipane ? paneCount : 1;
-  const isTwoPaneSplit = shouldUseMultipane && paneCountForLayout === 2;
-  const multipaneStageStyle = shouldUseMultipane
-    ? isTwoPaneSplit
-      ? {
-          gridTemplateColumns:
-            multipaneLayout === "vertical" ? `${multipaneSplit}fr 12px ${100 - multipaneSplit}fr` : "1fr 12px 1fr",
-          gridTemplateRows:
-            multipaneLayout === "horizontal" ? `${multipaneSplit}fr 12px ${100 - multipaneSplit}fr` : "1fr 12px 1fr"
-        }
-      : {
-          gridTemplateColumns:
-            multipaneLayout === "vertical" ? `repeat(${Math.min(2, paneCountForLayout)}, 1fr)` : "1fr",
-          gridTemplateRows:
-            multipaneLayout === "vertical"
-              ? `repeat(${Math.ceil(paneCountForLayout / Math.min(2, paneCountForLayout))}, minmax(0, 1fr))`
-              : `repeat(${paneCountForLayout}, minmax(0, 1fr))`
-        }
+  const multipaneHostStyle = shouldUseMultipane
+    ? {
+        gridTemplateColumns:
+          multipaneLayout === "vertical" ? `${multipaneSplit}fr 8px ${100 - multipaneSplit}fr` : undefined,
+        gridTemplateRows:
+          multipaneLayout === "horizontal" ? `${multipaneSplit}fr 8px ${100 - multipaneSplit}fr` : undefined
+      }
     : {};
+  const secondarySessionOptions = useMemo(() => {
+    const options = [...sessions];
+    const exists = options.some((item) => item.name === secondaryRoom);
+    if (!exists && secondaryRoom) {
+      options.push({
+        name: secondaryRoom,
+        displayName: secondaryRoom,
+        active: false,
+        starting: false
+      });
+    }
+    return options;
+  }, [sessions, secondaryRoom]);
 
   return (
     <div className={`app${isMultipaneFrame ? " embedded-frame" : ""}`}>
@@ -1667,21 +1558,6 @@ const App = () => {
               {multipaneEnabled && (
                 <>
                   <div className="view-mode-control">
-                    <label>Pane count</label>
-                    <div className="view-mode-buttons">
-                      {[2, 3, 4].map((count) => (
-                        <button
-                          type="button"
-                          key={count}
-                          className={paneCount === count ? "active" : ""}
-                          onClick={() => setMultipaneCount(count)}
-                        >
-                          {count}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="view-mode-control">
                     <label>Split direction</label>
                     <div className="view-mode-buttons">
                       <button
@@ -1700,51 +1576,41 @@ const App = () => {
                       </button>
                     </div>
                   </div>
-                  {paneCount === MIN_MULTIPANE_PANES && (
-                    <div className="view-mode-control split-slider-control">
-                      <label>Split ratio {Math.round(multipaneSplit)}%</label>
-                      <input
-                        type="range"
-                        min={20}
-                        max={80}
-                        value={multipaneSplit}
-                        onChange={(event) => setMultipaneSplit(Number(event.target.value))}
-                        className="split-slider"
-                        aria-label="Split ratio"
-                      />
-                    </div>
-                  )}
+                  <div className="view-mode-control split-slider-control">
+                    <label>Split ratio {Math.round(multipaneSplit)}%</label>
+                    <input
+                      type="range"
+                      min={20}
+                      max={80}
+                      value={multipaneSplit}
+                      onChange={(event) => setMultipaneSplit(Number(event.target.value))}
+                      className="split-slider"
+                      aria-label="Split ratio"
+                    />
+                  </div>
                   <div className="session-switcher">
-                    <p className="session-switcher-label">Pane assignments (drag to bind)</p>
+                    <p className="session-switcher-label">Pane 2 session</p>
                     {loadingSessions ? (
                       <div className="session-list-loading">Loading...</div>
-                    ) : sessions.length === 0 ? (
+                    ) : secondarySessionOptions.length === 0 ? (
                       <div className="session-list-empty">No sessions yet</div>
                     ) : (
                       <div className="session-list">
-                        {sessions.map((s) => {
-                          const assignedPanes = allPaneSessions
-                            .map((room, idx) => (room === s.name ? idx + 1 : null))
-                            .filter((idx): idx is number => idx !== null);
-                          return (
+                        {secondarySessionOptions.map((s) => (
                           <button
                             key={s.name}
                             type="button"
-                            className={`session-list-item${assignedPanes.length > 0 ? " active" : ""}${
-                              s.active ? " active" : ""
-                            }${s.starting ? " starting" : ""}`}
-                            draggable
-                            onDragStart={(event) => handleSessionDragStart(event, s.name)}
+                            className={`session-list-item${s.name === secondaryRoom ? " active" : ""}${s.active ? " active" : ""}${
+                              s.starting ? " starting" : ""
+                            }`}
+                            onClick={() => setSecondarySession(s.name)}
                           >
                             <span className="session-list-name">{s.displayName}</span>
-                            {assignedPanes.length > 0 ? (
-                              <span className="session-badge active">{`PANE ${assignedPanes.join(", ")}`}</span>
-                            ) : null}
                             {s.active && <span className="session-badge live">LIVE</span>}
                             {s.starting && !s.active && <span className="session-badge starting">STARTING</span>}
                             {s.type === "port" && <span className="session-badge port">PORT {s.port}</span>}
                           </button>
-                        );})}
+                        ))}
                       </div>
                     )}
                   </div>
@@ -1845,54 +1711,34 @@ const App = () => {
               </div>
             ) : (
               <div
-                className={`multipane-stage multipane-${multipaneLayout}${isTwoPaneSplit ? " multipane-two" : ""}`}
-                style={multipaneStageStyle}
+                className={`multipane-stage multipane-${multipaneLayout}`}
+                style={multipaneHostStyle}
                 aria-label="Multipane terminal stage"
               >
-                {allPaneSessions.map((paneRoom, paneIndex) => {
-                  const isPrimaryPane = paneIndex === 0;
-                  return (
-                    <div
-                      key={`${paneRoom}-${paneIndex}`}
-                      className={`multipane-pane multipane-pane-${paneIndex + 1}${
-                        dragOverPane === paneIndex ? " multipane-pane--drag-over" : ""
-                      }`}
-                      onDragOver={(event) => handlePaneDragOver(event, paneIndex)}
-                      onDragLeave={() => handlePaneDragLeave(paneIndex)}
-                      onDrop={(event) => handlePaneDrop(event, paneIndex)}
-                    >
-                      {isPrimaryPane ? (
-                        <div
-                          className="terminal-frame"
-                          onClick={() => {
-                            if (!isMobile) {
-                              termRef.current?.focus();
-                            }
-                          }}
-                        >
-                          <div className="terminal-scroll">
-                            <div className="terminal-inner" ref={containerRef} />
-                          </div>
-                        </div>
-                      ) : (
-                        <iframe
-                          className="multipane-frame"
-                          title={`Pane ${paneIndex + 1} session ${getPaneDisplayName(paneRoom)}`}
-                          src={buildFrameSessionUrl(paneRoom)}
-                          loading="eager"
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-                {isTwoPaneSplit ? (
-                  <div
-                    className={`multipane-divider ${multipaneLayout === "horizontal" ? "multipane-divider-horizontal" : "multipane-divider-vertical"}`}
-                    onPointerDown={handleMultipanePointerDown}
-                    onMouseDown={handleMultipaneMouseDown}
-                    onTouchStart={handleMultipaneTouchStart}
-                  />
-                ) : null}
+                <div
+                  className="terminal-frame"
+                  onClick={() => {
+                    if (!isMobile) {
+                      termRef.current?.focus();
+                    }
+                  }}
+                >
+                  <div className="terminal-scroll">
+                    <div className="terminal-inner" ref={containerRef} />
+                  </div>
+                </div>
+                <div
+                  className={`multipane-divider ${multipaneLayout === "horizontal" ? "multipane-divider-horizontal" : "multipane-divider-vertical"}`}
+                  onPointerDown={handleMultipanePointerDown}
+                  onMouseDown={handleMultipaneMouseDown}
+                  onTouchStart={handleMultipaneTouchStart}
+                />
+                <iframe
+                  className="multipane-frame"
+                  title={`Multipane secondary session ${secondarySessionOptions.find((s) => s.name === secondaryRoom)?.displayName ?? secondaryRoom}`}
+                  src={frameSessionUrl}
+                  loading="eager"
+                />
               </div>
             )}
             <div className="terminal-footer">

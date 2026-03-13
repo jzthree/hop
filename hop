@@ -6109,7 +6109,7 @@ function printStartupInfo(publicUrl, label) {
     showQrCode(label || 'Hop');
     log(`\n--------------------------------------------------`, RESET);
     log(`\n[READY]`, GREEN + BOLD);
-    log(`Daemon started. Run ${CYAN}hop${RESET} to attach a local session.`, RESET);
+    log(`Daemon started. Existing local sessions are reattached automatically. Run ${CYAN}hop${RESET} to open a new local session.`, RESET);
 }
 
 function waitForStartPolling(state, label) {

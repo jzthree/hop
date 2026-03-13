@@ -248,90 +248,6 @@ function condenseReadableWaitPayload(waitPayload) {
   };
 }
 
-/**
- * Strip token-heavy fields from a wait payload before returning to the agent.
- * Removes: startFrom, captureMode, waitedMs, originalEventCount, ok, matchedText,
- * status (when "matched"), eventCount/events (when empty), closed (when false),
- * error (when null), untilAgentDone (when false), agentDoneIdleMs (when null).
- * Optionally strips the echoed command line from wait.text.
- *
- * @param {object} waitPayload - raw wait payload from runWaitTerminal / condenseReadableWaitPayload
- * @param {string|null} sentData - the data string sent before the wait (for echo stripping), or null
- * @returns {object} slimmed wait payload
- */
-function slimWaitPayload(waitPayload, sentData) {
-  if (!waitPayload || typeof waitPayload !== 'object') return waitPayload;
-
-  const out = { ...waitPayload };
-
-  // Always remove these echo-of-input / timing / redundant fields
-  delete out.startFrom;
-  delete out.captureMode;
-  delete out.waitedMs;
-  delete out.originalEventCount;
-  delete out.cursorStart;   // only next_cursor is needed
-  delete out.cursorEnd;     // same value as next_cursor
-
-  // Remove 'ok' — redundant with top-level ok
-  delete out.ok;
-
-  // Remove matchedText — already visible as last line of text
-  delete out.matchedText;
-
-  // Remove status when "matched" (success case)
-  if (out.status === 'matched') {
-    delete out.status;
-  }
-
-  // Remove untilAgentDone when false
-  if (out.untilAgentDone === false) {
-    delete out.untilAgentDone;
-  }
-
-  // Remove agentDoneIdleMs when null
-  if (out.agentDoneIdleMs === null || out.agentDoneIdleMs === undefined) {
-    delete out.agentDoneIdleMs;
-  }
-
-  // Remove eventCount/events when empty
-  if (out.eventCount === 0 && Array.isArray(out.events) && out.events.length === 0) {
-    delete out.eventCount;
-    delete out.events;
-  }
-
-  // Remove closed when false
-  if (out.closed === false || out.closed === undefined) {
-    delete out.closed;
-  }
-
-  // Remove error when null/undefined
-  if (out.error === null || out.error === undefined) {
-    delete out.error;
-  }
-
-  // Strip echoed command from the start of text.
-  // The terminal echoes the typed command back before output. The echo may be:
-  //   - preceded by the shell prompt
-  //   - immediately followed by output with no newline separator
-  // Strategy: find the sent command string in the first ~512 chars of text,
-  // then strip everything up through the end of the command (plus one trailing \n if present).
-  if (typeof out.text === 'string' && typeof sentData === 'string' && sentData.length > 0) {
-    const text = out.text;
-    const searchWindow = text.slice(0, 512);
-    const idx = searchWindow.indexOf(sentData);
-    if (idx !== -1) {
-      const afterCmd = idx + sentData.length;
-      // Skip a trailing \n or \r\n if present right after the command
-      let skip = afterCmd;
-      if (text[skip] === '\r') skip++;
-      if (text[skip] === '\n') skip++;
-      out.text = text.slice(skip);
-    }
-  }
-
-  return out;
-}
-
 function extractUiBusyLine(uiPayload) {
   const ui = uiPayload && typeof uiPayload === 'object' ? uiPayload.ui : null;
   const lines = ui && Array.isArray(ui.lines) ? ui.lines : [];
@@ -3311,9 +3227,11 @@ class HopMCPServer {
       ok: job.done ? job.status !== 'error' : true,
       wait_id: job.waitId,
       done: !!job.done,
-      status: job.done ? job.status : 'pending'
+      status: job.done ? job.status : 'pending',
+      createdAt: new Date(job.createdAt).toISOString(),
+      updatedAt: new Date(job.updatedAt).toISOString()
     };
-    if (job.done && job.metadata && typeof job.metadata === 'object') {
+    if (job.metadata && typeof job.metadata === 'object') {
       payload.metadata = job.metadata;
     }
     return payload;
@@ -3328,7 +3246,10 @@ class HopMCPServer {
     }
 
     const job = this.startWaitJob(args);
-    return this.wrapJson(this.summarizeWaitJob(job));
+    return this.wrapJson({
+      ...this.summarizeWaitJob(job),
+      async: true
+    });
   }
 
   async handleWaitPoll(args) {
@@ -3357,7 +3278,7 @@ class HopMCPServer {
 
     const payload = this.summarizeWaitJob(job);
     if (job.done && job.result) {
-      payload.result = slimWaitPayload(job.result, null);
+      payload.result = job.result;
     }
     if (job.done && job.status === 'error') {
       payload.error = job.error || 'Unknown wait failure';
@@ -3446,19 +3367,22 @@ class HopMCPServer {
     const includeUiRawTail = metadata.includeUiRawTail === true;
     const selectedMode = typeof metadata.selected_mode === 'string' ? metadata.selected_mode : 'readable_raw';
     payload.helper = 'hopx_agent_turn';
+    payload.async = true;
+    payload.selected_mode = selectedMode;
     payload.terminal_id = metadata.terminal_id || options.terminal_id || null;
+    payload.sent = Array.isArray(metadata.sent) ? metadata.sent : [];
+    payload.waited = true;
 
     if (job.done && job.result) {
       const waitCaptureMode = job.result && typeof job.result.captureMode === 'string'
         ? String(job.result.captureMode).toLowerCase()
         : 'readable_raw';
-      const rawWait = (
+      payload.wait = (
         metadata.text_only === true
         && waitCaptureMode === 'readable_raw'
       )
         ? condenseReadableWaitPayload(job.result)
         : job.result;
-      payload.wait = slimWaitPayload(rawWait, null);
       if (selectedMode === 'ui' && payload.terminal_id) {
         const uiOutcome = await this.readHopxUiSnapshot(
           payload.terminal_id,
@@ -3677,8 +3601,10 @@ class HopMCPServer {
     }
     const readableTextOnly = resolveHopxTextOnly(args.text_only, selectedMode);
     const includeUiRawTail = args.includeRawTail === true ? true : DEFAULT_HOPX_UI_INCLUDE_RAW_TAIL;
+    const sent = [];
 
     let sendOnlyPayload = {
+      sent: [],
       cursorStart: this.streamManager.getLatestCursor(terminalId)
     };
     if (controlMode === 'interrupt' || controlMode === 'terminate') {
@@ -3688,6 +3614,7 @@ class HopMCPServer {
         1
       );
       if (interruptOutcome.errorResponse) return interruptOutcome.errorResponse;
+      sent.push(...interruptOutcome.payload.sent);
       if (controlMode === 'terminate' && typeof args.terminate_message === 'string' && args.terminate_message.length > 0) {
         const terminateSend = await this.handleSendAndWait({
           terminal_id: requestedTerminalId,
@@ -3700,6 +3627,7 @@ class HopMCPServer {
         if (!parsedTerminateSend.ok) {
           return { content: [{ type: 'text', text: `Error: ${parsedTerminateSend.error}` }], isError: true };
         }
+        sent.push(...(Array.isArray(parsedTerminateSend.payload.sent) ? parsedTerminateSend.payload.sent : []));
       }
     } else if (hasInputAction) {
       const sendOnly = await this.handleSendAndWait({
@@ -3717,6 +3645,7 @@ class HopMCPServer {
         return { content: [{ type: 'text', text: `Error: ${parsedSend.error}` }], isError: true };
       }
       sendOnlyPayload = parsedSend.payload;
+      sent.push(...(Array.isArray(parsedSend.payload.sent) ? parsedSend.payload.sent : []));
     }
 
     if (selectedMode === 'ui') {
@@ -3759,6 +3688,7 @@ class HopMCPServer {
             helper: 'hopx_agent_turn',
             terminal_id: requestedTerminalId,
             selected_mode: 'ui',
+            sent,
             text_only: false,
             uiMaxLines: args.uiMaxLines,
             rawTailMaxEvents: args.rawTailMaxEvents,
@@ -3767,12 +3697,16 @@ class HopMCPServer {
           return this.wrapJson({
             ...this.summarizeWaitJob(job),
             helper: 'hopx_agent_turn',
-            terminal_id: requestedTerminalId
+            terminal_id: requestedTerminalId,
+            selected_mode: 'ui',
+            sent,
+            waited: true,
+            async: true
           });
         }
         const waited = await this.runWaitTerminal(waitArgs);
         if (waited.errorResponse) return waited.errorResponse;
-        waitPayload = slimWaitPayload(waited.payload, null);
+        waitPayload = waited.payload;
       }
 
       let outputPayload = null;
@@ -3822,6 +3756,9 @@ class HopMCPServer {
         ok: true,
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
+        selected_mode: selectedMode,
+        sent,
+        waited: shouldWait,
         wait: waitPayload,
         output: outputPayload
       });
@@ -3862,12 +3799,17 @@ class HopMCPServer {
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
         selected_mode: selectedMode,
+        sent,
         text_only: readableTextOnly
       });
       return this.wrapJson({
         ...this.summarizeWaitJob(job),
         helper: 'hopx_agent_turn',
-        terminal_id: requestedTerminalId
+        terminal_id: requestedTerminalId,
+        selected_mode: selectedMode,
+        sent,
+        waited: true,
+        async: true
       });
     }
 
@@ -3876,6 +3818,9 @@ class HopMCPServer {
         ok: true,
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
+        selected_mode: selectedMode,
+        sent,
+        waited: false,
         next_cursor: this.streamManager.getLatestCursor(terminalId)
       });
     }
@@ -3936,6 +3881,7 @@ class HopMCPServer {
         const promotedPayload = {
           ...parsedSendAndWait.payload,
           helper: 'hopx_agent_turn',
+          selected_mode: 'ui',
           auto_switched_to_ui: true,
           output: outputPayload
         };
@@ -3992,8 +3938,12 @@ class HopMCPServer {
 
     const finalPayload = {
       ...parsedSendAndWait.payload,
-      helper: 'hopx_agent_turn'
+      helper: 'hopx_agent_turn',
+      selected_mode: selectedMode
     };
+    if (controlMode === 'interrupt' || controlMode === 'terminate') {
+      finalPayload.sent = sent;
+    }
 
     return this.wrapJson(finalPayload);
   }
@@ -4060,13 +4010,14 @@ class HopMCPServer {
     }
 
     if (!shouldWait) {
-      const cursorEnd = this.streamManager.getLatestCursor(terminalId);
       return this.wrapJson({
         ok: true,
         terminal_id: requestedTerminalId,
+        sent,
+        waited: false,
         cursorStart: cursorBeforeSend,
-        cursorEnd,
-        next_cursor: cursorEnd
+        cursorEnd: this.streamManager.getLatestCursor(terminalId),
+        next_cursor: this.streamManager.getLatestCursor(terminalId)
       });
     }
 
@@ -4092,14 +4043,16 @@ class HopMCPServer {
     if (resolveHopxTextOnly(args.text_only, waitCaptureMode)) {
       waitPayload = condenseReadableWaitPayload(waitPayload);
     }
-    // Slim the wait payload: strip echo-of-input fields and optionally strip echoed command line
-    const sentDataStr = (data && pressEnter) ? data : null;
-    waitPayload = slimWaitPayload(waitPayload, sentDataStr);
 
     return this.wrapJson({
       ok: true,
       terminal_id: requestedTerminalId,
-      wait: waitPayload
+      sent,
+      waited: true,
+      wait: waitPayload,
+      cursorStart: waitPayload.cursorStart,
+      cursorEnd: waitPayload.cursorEnd,
+      next_cursor: waitPayload.cursorEnd
     });
   }
 
@@ -4377,7 +4330,7 @@ class HopMCPServer {
   async handleWaitTerminal(args) {
     const outcome = await this.runWaitTerminal(args);
     if (outcome.errorResponse) return outcome.errorResponse;
-    return this.wrapJson(slimWaitPayload(outcome.payload, null));
+    return this.wrapJson(outcome.payload);
   }
 
   async handleReadTerminal(args) {
@@ -4450,7 +4403,8 @@ class HopMCPServer {
         ...result,
         cursorStart,
         cursorEnd,
-        next_cursor: cursorEnd
+        next_cursor: cursorEnd,
+        startFrom: startFromResolved
       });
     }
 
@@ -4486,16 +4440,19 @@ class HopMCPServer {
         coalesceMaxChars
       });
 
-      const readableRawPayload = {
+      return this.wrapJson({
+        mode: 'readable_raw',
         cursor: cursorEnd,
+        cursorStart,
+        cursorEnd,
         next_cursor: cursorEnd,
+        startFrom: startFromResolved,
         done: result.done,
+        closed: result.closed,
+        error: result.error,
         eventCount: events.length,
         events
-      };
-      if (result.closed) readableRawPayload.closed = result.closed;
-      if (result.error != null) readableRawPayload.error = result.error;
-      return this.wrapJson(readableRawPayload);
+      });
     }
 
     const includeRawTail = args.includeRawTail !== false;
@@ -4508,13 +4465,18 @@ class HopMCPServer {
 
     await this.streamManager.flushVirtualScreen(terminalId);
     const payload = {
+      mode: 'ui',
       cursor: cursorEnd,
+      cursorStart,
+      cursorEnd,
       next_cursor: cursorEnd,
+      startFrom: startFromResolved,
       done: result.done,
+      closed: result.closed,
+      error: result.error,
+      eventCount: result.events.length,
       ui: this.streamManager.getUiSnapshot(terminalId, { maxLines: uiMaxLines })
     };
-    if (result.closed) payload.closed = result.closed;
-    if (result.error != null) payload.error = result.error;
 
     if (includeRawTail) {
       payload.rawTail = rawTailMaxEvents > 0 ? result.events.slice(-rawTailMaxEvents) : [];

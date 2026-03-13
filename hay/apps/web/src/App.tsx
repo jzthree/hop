@@ -13,6 +13,28 @@ import { MobileKeyboard } from "./components/MobileKeyboard";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
+const parseSessionNameFromPath = (pathname: string) => {
+  const match = pathname.match(/^\/s\/([^/]+)\/?$/);
+  if (!match) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+};
+
+const getLocationRoom = () => {
+  const pathRoom = parseSessionNameFromPath(window.location.pathname);
+  if (pathRoom) {
+    return pathRoom;
+  }
+  return new URLSearchParams(window.location.search).get("room");
+};
+
+const buildSessionPath = (sessionName: string) => `/s/${encodeURIComponent(sessionName)}/`;
+
 const resolveWsUrl = () => {
   // Check for hop session config (when embedded in hop)
   const hopSession = (window as unknown as { __HOP_SESSION__?: { wsUrl?: string } }).__HOP_SESSION__;
@@ -72,6 +94,9 @@ const isMobileDevice = () => {
 };
 
 type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected";
+type SessionSwitchMode = "page" | "instant";
+const DEFAULT_SESSION_SWITCH_MODE: SessionSwitchMode = "instant";
+const SESSION_LIST_STALE_MS = 5000;
 
 type SessionInfo = {
   name: string;
@@ -89,7 +114,7 @@ const isEmbeddedInHop = () => !!getHopSession()?.room;
 const App = () => {
   const params = new URLSearchParams(window.location.search);
   const hopSession = getHopSession();
-  const initialRoom = hopSession?.room ?? params.get("room") ?? createRoomId();
+  const initialRoom = hopSession?.room ?? getLocationRoom() ?? createRoomId();
 
   const [name, setName] = useState(() => {
     return params.get("name") ?? localStorage.getItem("hay_name") ?? "User";
@@ -129,6 +154,14 @@ const App = () => {
   });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
+    const saved = localStorage.getItem("hay_session_switch_mode");
+    // Keep "page" as a legacy fallback while we validate instant mode end-to-end.
+    if (saved === "page") {
+      return "page";
+    }
+    return DEFAULT_SESSION_SWITCH_MODE;
+  });
 
   useEffect(() => {
     if (session?.room) {
@@ -161,6 +194,9 @@ const App = () => {
   useEffect(() => {
     localStorage.setItem("hay_haptics_enabled", hapticsEnabled ? "true" : "false");
   }, [hapticsEnabled]);
+  useEffect(() => {
+    localStorage.setItem("hay_session_switch_mode", sessionSwitchMode);
+  }, [sessionSwitchMode]);
 
   const typingActive = useRef(false);
   const noticeTimeout = useRef<number | null>(null);
@@ -169,6 +205,10 @@ const App = () => {
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(true);
+  const connectNonceRef = useRef(0);
+  const activeSessionRoomRef = useRef<string | null>(null);
+  const sessionListLoadedRef = useRef(false);
+  const sessionListFetchedAtRef = useRef(0);
 
   const pushNotice = (message: string) => {
     setNotice(message);
@@ -179,6 +219,10 @@ const App = () => {
       setNotice(null);
     }, 3000);
   };
+
+  useEffect(() => {
+    activeSessionRoomRef.current = session?.room ?? null;
+  }, [session?.room]);
 
   const shareUrl = useMemo(() => {
     if (session) {
@@ -339,11 +383,14 @@ const App = () => {
   };
 
   const connect = (nextSession: { name: string; room: string }) => {
+    const targetRoom = nextSession.room;
     // Clear any pending reconnect
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+
+    const connectionNonce = ++connectNonceRef.current;
 
     const wsUrl = resolveWsUrl();
     const cols = termRef.current?.cols ?? 80;
@@ -360,6 +407,10 @@ const App = () => {
     wsRef.current = ws;
 
     ws.addEventListener("open", () => {
+      if (connectionNonce !== connectNonceRef.current || activeSessionRoomRef.current !== targetRoom) {
+        ws.close();
+        return;
+      }
       setStatus("connected");
       reconnectAttemptRef.current = 0; // Reset backoff on successful connection
       handleResize();
@@ -438,12 +489,27 @@ const App = () => {
     });
 
     ws.addEventListener("close", () => {
+      if (connectionNonce !== connectNonceRef.current) {
+        return;
+      }
+      if (activeSessionRoomRef.current !== targetRoom) {
+        return;
+      }
+      if (!shouldReconnectRef.current) {
+        return;
+      }
       optimisticEchoRef.current.reset();
       setStatus("disconnected");
       scheduleReconnect(nextSession);
     });
 
     ws.addEventListener("error", () => {
+      if (connectionNonce !== connectNonceRef.current) {
+        return;
+      }
+      if (activeSessionRoomRef.current !== targetRoom || !shouldReconnectRef.current) {
+        return;
+      }
       optimisticEchoRef.current.reset();
       setStatus("disconnected");
       // Error is usually followed by close, so don't double-schedule
@@ -903,6 +969,9 @@ const App = () => {
       optimisticEchoRef.current.reset();
       reconnectAttemptRef.current = 0;
     }
+  }, [session]);
+
+  useEffect(() => {
     return () => {
       shouldReconnectRef.current = false;
       if (reconnectTimerRef.current) {
@@ -910,10 +979,42 @@ const App = () => {
       }
       wsRef.current?.close();
     };
-  }, [session]);
+  }, []);
 
-  const fetchSessions = useCallback(async () => {
-    setLoadingSessions(true);
+  useEffect(() => {
+    const handlePopState = () => {
+      const nextRoom = getLocationRoom();
+      const nextName =
+        new URLSearchParams(window.location.search).get("name") ??
+        localStorage.getItem("hay_name") ??
+        name;
+      if (!nextRoom) {
+        if (!isEmbeddedInHop()) {
+          setSession(null);
+        }
+        return;
+      }
+      setRoom(nextRoom);
+      setSession((current) => {
+        const resolvedName = current?.name ?? nextName ?? "User";
+        if (current?.room === nextRoom && current.name === resolvedName) {
+          return current;
+        }
+        return { name: resolvedName, room: nextRoom };
+      });
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [name]);
+
+  const fetchSessions = useCallback(async (options: { showLoading?: boolean } = {}) => {
+    const { showLoading = true } = options;
+    if (showLoading) {
+      setLoadingSessions(true);
+    }
     try {
       const res = await fetch("/api/sessions");
       const data = await res.json();
@@ -944,25 +1045,34 @@ const App = () => {
       }
 
       setSessions(Array.from(sessionMap.values()));
+      sessionListLoadedRef.current = true;
+      sessionListFetchedAtRef.current = Date.now();
     } catch (err) {
       console.error("Failed to fetch sessions:", err);
     } finally {
-      setLoadingSessions(false);
+      if (showLoading) {
+        setLoadingSessions(false);
+      }
     }
   }, []);
 
   // Fetch sessions when drawer opens
   useEffect(() => {
     if (drawerOpen) {
-      fetchSessions();
+      const isFreshEnough = Date.now() - sessionListFetchedAtRef.current <= SESSION_LIST_STALE_MS;
+      const shouldRefresh = !sessionListLoadedRef.current || !isFreshEnough;
+      if (shouldRefresh) {
+        fetchSessions({
+          showLoading: !sessionListLoadedRef.current
+        });
+      }
     }
   }, [drawerOpen, fetchSessions]);
 
-  // Fetch sessions on desktop (no drawer)
+  // Fetch sessions once on mount; mobile keeps list warm for instant drawer open.
   useEffect(() => {
-    if (isMobile) return;
     fetchSessions();
-  }, [fetchSessions, isMobile]);
+  }, [fetchSessions]);
 
   // Update terminal font size when it changes
   useEffect(() => {
@@ -978,9 +1088,34 @@ const App = () => {
     localStorage.setItem("hay_font_size", String(fontSize));
   }, [fontSize]);
 
-  const switchSession = (sessionName: string) => {
-    // Navigate to the new session
-    window.location.href = `/s/${encodeURIComponent(sessionName)}/`;
+  const switchSession = (nextSession: SessionInfo) => {
+    const nextPath = buildSessionPath(nextSession.name);
+    const currentRoom = session?.room ?? sessionLabel;
+    const canSwitchInPlace = sessionSwitchMode === "instant" && nextSession.type !== "port";
+
+    if (!canSwitchInPlace) {
+      window.location.href = nextPath;
+      return;
+    }
+
+    if (currentRoom === nextSession.name) {
+      setDrawerOpen(false);
+      return;
+    }
+
+    optimisticEchoRef.current.reset();
+    setPresence([]);
+    setControllerId(null);
+    setClientId(null);
+    setStatus("connecting");
+    setRoom(nextSession.name);
+    setSessionLabel(nextSession.displayName || nextSession.name);
+    setSession((current) => ({
+      name: current?.name ?? name.trim() ?? "User",
+      room: nextSession.name
+    }));
+    window.history.pushState({}, "", nextPath);
+    setDrawerOpen(false);
   };
 
   const handleJoin = (event: FormEvent) => {
@@ -1203,6 +1338,25 @@ const App = () => {
                 </button>
               </div>
             </div>
+            <div className="view-mode-control">
+              <label>Session switch</label>
+              <div className="view-mode-buttons">
+                <button
+                  type="button"
+                  className={sessionSwitchMode === "page" ? "active" : ""}
+                  onClick={() => setSessionSwitchMode("page")}
+                >
+                  Page load
+                </button>
+                <button
+                  type="button"
+                  className={sessionSwitchMode === "instant" ? "active" : ""}
+                  onClick={() => setSessionSwitchMode("instant")}
+                >
+                  Instant
+                </button>
+              </div>
+            </div>
             {isMobile && (
               <div className="selection-mode-control">
                 <label>Selection mode</label>
@@ -1263,7 +1417,7 @@ const App = () => {
                           key={s.name}
                           type="button"
                           className={`session-list-item${s.active ? " active" : ""}${s.starting ? " starting" : ""}`}
-                          onClick={() => switchSession(s.name)}
+                          onClick={() => switchSession(s)}
                         >
                           <span className="session-list-name">{s.displayName}</span>
                           {s.active && <span className="session-badge live">LIVE</span>}

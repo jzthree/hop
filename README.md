@@ -95,6 +95,7 @@ You can also create **Port Sessions** that proxy to a local HTTP/WS service on y
 Use the Session Picker or:
 ```bash
 hop session add myapp --port 3000
+hop session add workspace-shell --cwd ~/src/my-project
 ```
 
 ## 🧾 Session History & Audit Logs
@@ -206,12 +207,13 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | `hop user add <name>` | Add user + subdomain |
 | `hop user remove <name>` | Remove user |
 | `hop user export <name>` | Export user credentials |
-| `hop session list` | List sessions |
-| `hop session add <name>` | Create a terminal session |
+| `hop session list` | List sessions with `LIVE` vs `SAVED` terminal status |
+| `hop session add <name> [--cwd P]` | Create a terminal session |
 | `hop session add <name> --port N` | Create a port session (proxy) |
+| `hop session rename <old> <new>` | Rename a session |
 | `hop session remove <name>` | Remove a session |
 | `hop client <credentials>` | Run hop with exported credentials |
-| `hop wipe` | Remove all hop sessions |
+| `hop wipe [--all]` | Remove saved sessions (`--all` also kills live sessions) |
 | `quit` | Type at exit prompt to shutdown tunnel |
 
 Startup behavior:
@@ -244,6 +246,7 @@ Node.js packages:
 - **Password + TOTP** — Password optional, but required for custom domains
 - **Rate Limiting** — Exponential backoff on failed attempts
 - **Secure Cookies** — `httpOnly`, `secure`, `sameSite=lax`
+- **Session persistence** — Login cookies are signed with a stable session secret by default, so browser sessions can survive `hop stop/start` without reauth.
 - **Random URL** — Unguessable tunnel URL for quick tunnels
 - **Fixed URL** — Custom domains keep a stable URL
 - **Local Binding** — Server only listens on 127.0.0.1
@@ -252,6 +255,7 @@ Node.js packages:
 **Passwords:** Recommended for any public URL; required for custom domains.
 
 **Secrets:** Stored in `~/.hop2/` (treat like `~/.ssh/`)
+Set `HOP_PERSIST_SESSION_SECRET=0` to force a fresh login cookie secret every daemon restart.
 
 ## 🛠 Development (Hay)
 

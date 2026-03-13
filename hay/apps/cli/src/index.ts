@@ -776,6 +776,42 @@ const padOrTrim = (text: string, cols: number) => {
   return text;
 };
 
+type BarSegment = {
+  text: string;
+  secondary?: boolean;
+  dropPriority?: number;
+};
+
+const joinBarSegments = (segments: BarSegment[]) => segments.map((segment) => segment.text).join(" | ");
+
+const fitBarSegments = (left: string, segments: BarSegment[], cols: number) => {
+  const active = segments.filter((segment) => segment.text);
+  while (active.length > 0) {
+    const right = joinBarSegments(active);
+    const rightLen = visibleLength(right);
+    const availableLeft = right ? Math.max(0, cols - rightLen - 1) : cols;
+    if (rightLen < cols && visibleLength(left) <= availableLeft) {
+      break;
+    }
+
+    let optionalIndex = -1;
+    let optionalPriority = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < active.length; i += 1) {
+      const priority = active[i].dropPriority;
+      if (priority === undefined) continue;
+      if (priority < optionalPriority) {
+        optionalPriority = priority;
+        optionalIndex = i;
+      }
+    }
+    if (optionalIndex === -1) {
+      break;
+    }
+    active.splice(optionalIndex, 1);
+  }
+  return active;
+};
+
 const composeBar = (left: string, right: string, cols: number) => {
   if (!right) {
     return padOrTrim(left, cols);
@@ -1041,19 +1077,27 @@ const render = () => {
   const bottomLeft = `● ${sessionLabel}`;
   const autofitLabel = syncSize ? "autofit on" : "autofit off";
   const peerLabel = `peers ${presenceNames.length}`;
-  const rightSegments = [
-    statusLabel,
-    hopDaemonLabel,
-    statusLabel ? "" : shareUrl,
-    autofitLabel,
-    peerLabel
-  ].filter(Boolean);
-  const rightPriority = [peerLabel, autofitLabel, hopDaemonLabel, shareUrl].filter(Boolean);
+  const rightSegments = fitBarSegments(
+    bottomLeft,
+    [
+      statusLabel ? { text: statusLabel } : null,
+      hopDaemonLabel ? { text: hopDaemonLabel, secondary: true, dropPriority: 1 } : null,
+      !statusLabel && shareUrl ? { text: shareUrl, secondary: true, dropPriority: 0 } : null,
+      { text: autofitLabel, secondary: true, dropPriority: 2 },
+      { text: peerLabel, secondary: true, dropPriority: 3 }
+    ].filter((segment): segment is BarSegment => !!segment),
+    localMetrics.cols
+  );
+  const rightPriority = rightSegments
+    .filter((segment) => segment.secondary)
+    .map((segment) => segment.text);
   const rightPrimary = decorateBottom(
-    rightSegments.join(" | "),
+    joinBarSegments(rightSegments),
     rightPriority
   );
-  const topPriority = statusLabel ? [hopDaemonLabel].filter(Boolean) : [hopDaemonLabel, shareUrl].filter(Boolean);
+  const topPriority = rightSegments
+    .filter((segment) => segment.text === hopDaemonLabel || segment.text === shareUrl)
+    .map((segment) => segment.text);
   const bottomPrimary = renderBar(
     decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), topPriority, [sessionLabel]),
     "bottom"

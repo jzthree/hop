@@ -37,6 +37,7 @@
             .session-name { font-weight: 500; font-size: 1rem; }
             .active-badge { background: #22c55e; color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .starting-badge { background: #f59e0b; color: #111827; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
+            .saved-badge { background: #e4e4e7; color: #3f3f46; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .session-meta { color: #71717a; font-size: 0.8rem; margin-top: 0.25rem; }
             .agent-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; }
             .agent-label { font-size: 0.7rem; color: #52525b; text-transform: uppercase; letter-spacing: 0.08em; }
@@ -175,10 +176,25 @@
                     const isActive = (data.active || []).includes(displayName);
                     const isStarting = (data.starting || []).includes(displayName);
                     const isPort = s.type === 'port';
+                    const isLive = s.live === true || isActive;
                     const portLabel = isPort ? `PORT ${s.port || ''}`.trim() : '';
                     const createdBy = s.createdBy || 'user';
                     const agentPermitted = s.agentPermitted === true;
                     const agentBadge = createdBy === 'agent' ? '<span class="agent-badge">AGENT</span>' : '';
+                    const stateBadge = isActive
+                        ? '<span class="active-badge">LIVE</span>'
+                        : (isStarting
+                            ? '<span class="starting-badge">STARTING</span>'
+                            : (isPort
+                                ? `<span class="port-badge">${portLabel}</span>`
+                                : '<span class="saved-badge">SAVED</span>'));
+                    const metaText = isPort
+                        ? `Proxy to localhost:${s.port || ''}`
+                        : (isStarting
+                            ? 'Starting...'
+                            : (isLive
+                                ? (s.windows ? s.windows + ' window(s)' : 'Live session')
+                                : 'Saved session. Join starts a fresh shell.'));
                     const agentToggle = !isPort ? `
                         <div class="agent-row">
                             <span class="agent-label">Agent access</span>
@@ -196,9 +212,9 @@
                                     <div class="session-header">
                                         <span class="session-name">${displayName}</span>
                                         ${agentBadge}
-                                        ${isActive ? '<span class="active-badge">LIVE</span>' : (isStarting ? '<span class="starting-badge">STARTING</span>' : (isPort ? `<span class="port-badge">${portLabel}</span>` : ''))}
+                                        ${stateBadge}
                                     </div>
-                                    <div class="session-meta">${isPort ? `Proxy to localhost:${s.port || ''}` : (s.windows ? s.windows + ' window(s)' : (isStarting ? 'Starting...' : 'Not started'))}</div>
+                                    <div class="session-meta">${metaText}</div>
                                     ${agentToggle}
                                 </div>
                                 <a href="/s/${encodeURIComponent(displayName)}/" class="btn btn-primary" onclick="showLoading()">Join</a>

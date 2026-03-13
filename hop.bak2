@@ -169,7 +169,6 @@ function validateConfigDir() {
 validateConfigDir();
 
 const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
-const SESSION_SECRET_FILE = path.join(HOME_DIR, '.session_secret');
 const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
 const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
@@ -184,7 +183,6 @@ const SESSION_AUDIT_INLINE_MAX_BYTES = parsePositiveIntEnv('HOP_SESSION_AUDIT_IN
 const SESSION_TUI_KEYFRAME_INTERVAL_MS = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS', 750);
 const SESSION_TUI_KEYFRAME_TAIL_CHARS = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS', 20000);
 const SESSION_TUI_KEYFRAME_MAX_LINES = parsePositiveIntEnv('HOP_SESSION_TUI_KEYFRAME_MAX_LINES', 80);
-const ENABLE_PERSIST_SESSION_SECRET = process.env.HOP_PERSIST_SESSION_SECRET !== '0';
 const ENABLE_AGENT_HISTORY_ISOLATION = process.env.HOP_AGENT_HISTORY_ISOLATION !== '0';
 const ENABLE_USER_HISTORY_ISOLATION = process.env.HOP_USER_HISTORY_ISOLATION === '1';
 const ENABLE_AGENT_POST_START_HISTORY_INIT = process.env.HOP_AGENT_POST_START_HISTORY_INIT !== '0';
@@ -2054,42 +2052,14 @@ function isServerRunning() {
     }
 }
 
-function isValidSessionSecret(secret) {
-    if (typeof secret !== 'string') return false;
-    const trimmed = secret.trim();
-    return /^[0-9a-f]{64}$/i.test(trimmed);
-}
-
-function loadSessionSecret(existingState) {
-    if (existingState && isValidSessionSecret(existingState.sessionSecret)) {
-        return existingState.sessionSecret;
-    }
-
-    if (!ENABLE_PERSIST_SESSION_SECRET) {
-        return crypto.randomBytes(32).toString('hex');
-    }
-
-    if (fs.existsSync(SESSION_SECRET_FILE)) {
-        try {
-            const raw = fs.readFileSync(SESSION_SECRET_FILE, 'utf8');
-            const trimmed = raw.trim();
-            if (isValidSessionSecret(trimmed)) {
-                ensurePrivateFile(SESSION_SECRET_FILE);
-                return trimmed;
-            }
-        } catch (e) {
-            // Fall through to regeneration below.
-        }
-    }
-
-    const generated = crypto.randomBytes(32).toString('hex');
-    writePrivateFile(SESSION_SECRET_FILE, generated);
-    return generated;
-}
-
 // Generate or load session secret
+let SESSION_SECRET;
 const existingState = isServerRunning();
-const SESSION_SECRET = loadSessionSecret(existingState);
+if (existingState) {
+    SESSION_SECRET = existingState.sessionSecret;
+} else {
+    SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+}
 
 // Persistence for Stable QR Code
 let AUTH_SECRET;
@@ -7212,7 +7182,6 @@ async function main() {
         log('');
         log(`${BOLD}Maintenance:${RESET}`, RESET);
         log(`  hop wipe [--all]          Remove saved sessions (use --all to kill live)`, RESET);
-        log(`  hop wipe --agent          Close all agent-created terminal API sessions`, RESET);
         log('');
         process.exit(0);
     }
@@ -7869,65 +7838,7 @@ async function main() {
     // Handle `hop wipe` command - removes saved sessions by default
     if (process.argv[2] === 'wipe') {
         const wipeAll = process.argv.includes('--all');
-        const wipeAgent = process.argv.includes('--agent');
         const existingTunnel = isServerRunning();
-
-        // hop wipe --agent: close all agent-created terminal API sessions
-        if (wipeAgent) {
-            if (!existingTunnel) {
-                log(`Hop server is not running. Start hop first.`, YELLOW);
-                process.exit(1);
-            }
-            const http = require('http');
-            const terminalsRes = await new Promise((resolve, reject) => {
-                const opts = {
-                    hostname: '127.0.0.1',
-                    port: existingTunnel.port,
-                    path: '/api/terminals',
-                    method: 'GET',
-                    headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
-                };
-                const req = http.request(opts, res => {
-                    let data = '';
-                    res.on('data', chunk => data += chunk);
-                    res.on('end', () => resolve({ status: res.statusCode, data }));
-                });
-                req.on('error', reject);
-                req.end();
-            });
-            const terminalsData = JSON.parse(terminalsRes.data);
-            const agentTerminals = (terminalsData.terminals || []).filter(t => t && t.actor === 'agent');
-            if (agentTerminals.length === 0) {
-                log(`No agent terminal sessions to clean up.`, GREEN);
-                process.exit(0);
-            }
-            log(`Closing ${agentTerminals.length} agent terminal session(s)...`, YELLOW);
-            for (const t of agentTerminals) {
-                try {
-                    await new Promise((resolve, reject) => {
-                        const opts = {
-                            hostname: '127.0.0.1',
-                            port: existingTunnel.port,
-                            path: `/api/terminals/${encodeURIComponent(t.id)}`,
-                            method: 'DELETE',
-                            headers: { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` }
-                        };
-                        const req = http.request(opts, res => {
-                            let data = '';
-                            res.on('data', chunk => data += chunk);
-                            res.on('end', () => resolve({ status: res.statusCode, data }));
-                        });
-                        req.on('error', reject);
-                        req.end();
-                    });
-                    log(`  - ${t.displayName || t.sessionName || t.id}`, RESET);
-                } catch (e) {
-                    log(`  - ${t.displayName || t.sessionName || t.id} (failed)`, YELLOW);
-                }
-            }
-            log(`Done.`, GREEN);
-            process.exit(0);
-        }
 
         if (existingTunnel) {
             // Server is running - call API to delete sessions

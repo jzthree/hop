@@ -92,6 +92,20 @@ async function main() {
             }
             return;
         }
+        const deleteRoomMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)$/);
+        if (deleteRoomMatch && req.method === 'DELETE') {
+            const roomId = hay.sanitizeRoom(decodeURIComponent(deleteRoomMatch[1]));
+            if (!roomId) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid room id' }));
+                return;
+            }
+            const exists = typeof rooms.hasRoom === 'function' ? rooms.hasRoom(roomId) : false;
+            rooms.closeRoom(roomId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, existed: exists }));
+            return;
+        }
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
     });

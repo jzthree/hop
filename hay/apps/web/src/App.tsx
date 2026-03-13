@@ -424,27 +424,6 @@ const App = () => {
     event.preventDefault();
   };
 
-  const handleMultipaneMouseDown = (event: { button: number; clientX: number; clientY: number; preventDefault: () => void }) => {
-    if (event.button !== 0) {
-      return;
-    }
-    handleMultipanePointerDown(event);
-  };
-
-  const handleMultipaneTouchStart = (event: { touches: TouchList; preventDefault: () => void }) => {
-    const touch = event.touches[0];
-    if (!touch) {
-      return;
-    }
-    handleMultipanePointerDown({
-      clientX: touch.clientX,
-      clientY: touch.clientY,
-      preventDefault: () => {
-        event.preventDefault();
-      }
-    });
-  };
-
   // Fit based on the scroll container viewport rather than the terminal element itself.
   // This ensures correct sizing across desktop padding and mobile full-bleed layouts.
   const fitToViewport = () => {
@@ -1730,8 +1709,6 @@ const App = () => {
                 <div
                   className={`multipane-divider ${multipaneLayout === "horizontal" ? "multipane-divider-horizontal" : "multipane-divider-vertical"}`}
                   onPointerDown={handleMultipanePointerDown}
-                  onMouseDown={handleMultipaneMouseDown}
-                  onTouchStart={handleMultipaneTouchStart}
                 />
                 <iframe
                   className="multipane-frame"

@@ -483,9 +483,6 @@ button.primary {
 
 .terminal--multipane {
   gap: 0;
-  height: calc(100vh - 250px);
-  height: calc(100dvh - 250px);
-  min-height: 0;
 }
 
 .multipane-stage {
@@ -495,20 +492,6 @@ button.primary {
   height: 100%;
   width: 100%;
   overflow: hidden;
-}
-
-.terminal--multipane .terminal-footer {
-  display: none;
-}
-
-.terminal--multipane .terminal-frame,
-.terminal--multipane .multipane-frame {
-  min-height: 0;
-}
-
-.terminal--multipane .terminal-frame {
-  height: 100%;
-  border-radius: 0;
 }
 
 .multipane-vertical .multipane-divider {
@@ -554,44 +537,18 @@ button.primary {
   background: #0f172a;
   touch-action: none;
   user-select: none;
-  position: relative;
-  z-index: 20;
-}
-
-.multipane-divider::after {
-  content: "";
-  position: absolute;
-  inset: auto;
-  background: rgba(148, 163, 184, 0.3);
-  border-radius: 999px;
-}
-
-.multipane-vertical .multipane-divider::after {
-  width: 2px;
-  height: 56px;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-}
-
-.multipane-horizontal .multipane-divider::after {
-  width: 56px;
-  height: 2px;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
 }
 
 .multipane-divider-vertical {
   cursor: col-resize;
-  width: 12px;
+  width: 8px;
   grid-column: 2 / 3;
   grid-row: 1 / 3;
 }
 
 .multipane-divider-horizontal {
   cursor: row-resize;
-  height: 12px;
+  height: 8px;
   grid-column: 1 / -1;
   grid-row: 2 / 3;
 }

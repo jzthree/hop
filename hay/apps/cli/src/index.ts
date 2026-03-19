@@ -214,6 +214,7 @@ let syncSize = true;
 let mouseCapture = true;
 let viewX = 0;
 let viewY = 0;
+let userPannedAway = false;
 let showHints = true;
 let scrollOff = DEFAULT_SCROLL_OFF;
 
@@ -323,6 +324,7 @@ const stripMouseSequences = (data: string) => {
       // In normal shell mode, wheel should pan local viewport scrollback.
       viewY += direction * SCROLL_STEP;
       clampView();
+      userPannedAway = viewY < getMaxViewY();
       scheduleRender();
       return "";
     }
@@ -1197,19 +1199,16 @@ const connect = () => {
           trackOscColors(message.data);
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
-          // Follow output if cursor was visible (standard terminal behavior)
-          const buffer = terminal.buffer.active;
-          const cursorRowBefore = buffer.baseY + buffer.cursorY;
-          const cursorWasVisible = cursorRowBefore >= viewY && cursorRowBefore < viewY + localMetrics.viewportRows;
           terminal.write(filtered, () => {
-            if (cursorWasVisible) {
-              // Only scroll if cursor moved outside viewport (with scrollOff margin)
-              const cursorRowAfter = buffer.baseY + buffer.cursorY;
+            if (!userPannedAway) {
+              // Follow cursor: keep it visible with scrollOff margin
+              const buffer = terminal.buffer.active;
+              const cursorRow = buffer.baseY + buffer.cursorY;
               const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
-              if (cursorRowAfter < viewY + margin) {
-                viewY = Math.max(0, cursorRowAfter - margin);
-              } else if (cursorRowAfter >= viewY + localMetrics.viewportRows - margin) {
-                viewY = cursorRowAfter - localMetrics.viewportRows + margin + 1;
+              if (cursorRow < viewY + margin) {
+                viewY = Math.max(0, cursorRow - margin);
+              } else if (cursorRow >= viewY + localMetrics.viewportRows - margin) {
+                viewY = cursorRow - localMetrics.viewportRows + margin + 1;
               }
               clampView();
             }
@@ -1225,10 +1224,11 @@ const connect = () => {
           }
           trackOscColors(message.data);
           terminal.clear();
+          userPannedAway = false;
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
-            // On snapshot, only scroll if cursor is outside viewport (with scrollOff margin)
+            // Always follow cursor on snapshot load
             const buffer = terminal.buffer.active;
             const cursorRow = buffer.baseY + buffer.cursorY;
             const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
@@ -1389,6 +1389,7 @@ const handleLocalShortcut = (input: string) => {
     const step = altKey("K") ? PAN_FAST_STEP : PAN_STEP;
     viewY -= step;
     clampView();
+    userPannedAway = viewY < getMaxViewY();
     scheduleRender();
     return true;
   }
@@ -1396,6 +1397,7 @@ const handleLocalShortcut = (input: string) => {
     const step = altKey("J") ? PAN_FAST_STEP : PAN_STEP;
     viewY += step;
     clampView();
+    userPannedAway = viewY < getMaxViewY();
     scheduleRender();
     return true;
   }
@@ -1445,6 +1447,7 @@ process.stdin.on("data", (data) => {
     applySyncSize();
   }
 
+  userPannedAway = false;
   sendMessage({ type: "input", data: sanitized });
   handleTyping();
 });

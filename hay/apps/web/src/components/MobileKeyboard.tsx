@@ -12,6 +12,7 @@ interface MobileKeyboardProps {
   onInput: (data: string) => void;
   visible: boolean;
   onToggle: () => void;
+  onHeightChange?: (height: number) => void;
   hapticsEnabled?: boolean;
 }
 
@@ -91,7 +92,13 @@ const PasteIcon = () => (
   </svg>
 );
 
-export const MobileKeyboard = ({ onInput, visible, onToggle, hapticsEnabled = true }: MobileKeyboardProps) => {
+export const MobileKeyboard = ({
+  onInput,
+  visible,
+  onToggle,
+  onHeightChange,
+  hapticsEnabled = true
+}: MobileKeyboardProps) => {
   const [view, setView] = useState<KeyboardView>("abc");
   const [shift, setShift] = useState(false);
   const [caps, setCaps] = useState(false);
@@ -107,6 +114,7 @@ export const MobileKeyboard = ({ onInput, visible, onToggle, hapticsEnabled = tr
   const bkspInterval = useRef<number | null>(null);
   const sysInputRef = useRef<HTMLTextAreaElement>(null);
   const hapticLabelRef = useRef<HTMLLabelElement | null>(null);
+  const keyboardRef = useRef<HTMLDivElement>(null);
 
   // Use refs to avoid stale closures in rapid key presses
   const onInputRef = useRef(onInput);
@@ -295,6 +303,39 @@ export const MobileKeyboard = ({ onInput, visible, onToggle, hapticsEnabled = tr
     if (!sysKbOpen) return;
     resizeSysTextarea();
   }, [sysKbDraft, sysKbOpen, resizeSysTextarea]);
+
+  useEffect(() => {
+    if (!visible) {
+      onHeightChange?.(0);
+      return;
+    }
+
+    const el = keyboardRef.current;
+    if (!el) {
+      return;
+    }
+
+    const reportHeight = () => {
+      onHeightChange?.(Math.ceil(el.getBoundingClientRect().height));
+    };
+
+    reportHeight();
+    window.addEventListener("resize", reportHeight);
+
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        window.removeEventListener("resize", reportHeight);
+      };
+    }
+
+    const observer = new ResizeObserver(reportHeight);
+    observer.observe(el);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", reportHeight);
+    };
+  }, [visible, onHeightChange]);
 
   const handleShift = useCallback(() => {
     const now = Date.now();
@@ -591,7 +632,7 @@ export const MobileKeyboard = ({ onInput, visible, onToggle, hapticsEnabled = tr
         </div>
       )}
 
-      <div className="mobile-keyboard">
+      <div ref={keyboardRef} className="mobile-keyboard">
         {/* Accessory row - Esc, Tab, Ctrl, Alt, arrows, system keyboard */}
         <div className="kb-acc-row">
           {ACC_KEYS.map((k, i) => {

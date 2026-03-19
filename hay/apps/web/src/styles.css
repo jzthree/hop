@@ -564,6 +564,7 @@ button.primary {
     flex-direction: column;
     overflow: hidden;
     background: #0b1117;
+    --mobile-keyboard-height: 0px;
   }
 
   .session .terminal {
@@ -780,14 +781,20 @@ button.primary {
 }
 
 .mobile-keyboard {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
   background: #d1d3d9;
-  padding: 2px max(2px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom, 0px)) max(2px, env(safe-area-inset-left));
+  padding: 2px max(2px, env(safe-area-inset-right)) env(safe-area-inset-bottom, 0px) max(2px, env(safe-area-inset-left));
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
   box-sizing: border-box;
   overflow-x: hidden;
   -webkit-user-select: none;
   user-select: none;
   flex-shrink: 0;
+  z-index: 150;
 }
 
 .kb-acc-row {
@@ -1065,7 +1072,7 @@ button.primary {
 
 /* Keyboard visibility state - when keyboard is shown, maximize terminal space */
 .session.has-keyboard {
-  padding-bottom: 0;
+  padding-bottom: var(--mobile-keyboard-height, 0px);
   padding-top: 8px;
 }
 

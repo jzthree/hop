@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
@@ -144,6 +144,7 @@ const App = () => {
   const fabDragRef = useRef<{ dragging: boolean; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
   const [isMobile] = useState(() => isMobileDevice());
   const [keyboardVisible, setKeyboardVisible] = useState(() => isMobileDevice());
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [selectionMode, setSelectionMode] = useState(() => {
     const saved = localStorage.getItem("hay_selection_mode");
     return saved === "true";
@@ -206,6 +207,7 @@ const App = () => {
   const reconnectTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
+  const userScrolledUpRef = useRef(false);
   const activeSessionRoomRef = useRef<string | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
@@ -349,17 +351,12 @@ const App = () => {
     if (!termRef.current) {
       return;
     }
-    // Check if currently at bottom before writing (standard terminal follow behavior)
-    const viewport = containerRef.current?.querySelector('.xterm-viewport');
-    const wasAtBottom = viewport
-      ? viewport.scrollTop >= viewport.scrollHeight - viewport.clientHeight - 5
-      : true;
 
     // Filter focus reporting sequences that can leak as visible text
     const filtered = data.replace(/\x1b\[I/g, '').replace(/\x1b\[O/g, '');
     termRef.current.write(filtered, () => {
-      // Only scroll to bottom if we were already at bottom (follow output behavior)
-      if (wasAtBottom) {
+      // Auto-scroll to bottom unless the user has explicitly scrolled up
+      if (!userScrolledUpRef.current) {
         termRef.current?.scrollToBottom();
       }
     });
@@ -440,6 +437,7 @@ const App = () => {
           break;
         case "snapshot":
           optimisticEchoRef.current.reset();
+          userScrolledUpRef.current = false;
           if (termRef.current) {
             termRef.current.clear();
           }
@@ -452,6 +450,14 @@ const App = () => {
               // Fallback for older servers: alternate screen apps generally hide the cursor.
               termRef.current.write('\x1b[?25l');
             }
+          }
+          // Auto-fit and scroll to end once after snapshot load
+          if (viewModeRef.current === "fit") {
+            setTimeout(() => {
+              fitToViewport();
+              handleResize();
+              termRef.current?.scrollToBottom();
+            }, 0);
           }
           break;
         case "collab":
@@ -617,6 +623,17 @@ const App = () => {
     const scrollContainer = containerRef.current.closest(".terminal-scroll");
     if (scrollContainer) {
       resizeObserver.observe(scrollContainer);
+    }
+
+    // Track user scroll to implement follow-mode:
+    // Auto-scroll stays on until the user scrolls up, and resumes when they scroll back to bottom.
+    const xtermViewport = containerRef.current.querySelector('.xterm-viewport');
+    if (xtermViewport) {
+      xtermViewport.addEventListener('scroll', () => {
+        const el = xtermViewport as HTMLElement;
+        const atBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 5;
+        userScrolledUpRef.current = !atBottom;
+      });
     }
 
     if (import.meta.env.VITE_E2E === "true") {
@@ -1094,6 +1111,23 @@ const App = () => {
     localStorage.setItem("hay_font_size", String(fontSize));
   }, [fontSize]);
 
+  useEffect(() => {
+    if (!isMobile || !terminalReady || !keyboardVisible || keyboardHeight <= 0) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      if (viewModeRef.current === "fit") {
+        fitToViewport();
+        handleResize();
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [isMobile, terminalReady, keyboardVisible, keyboardHeight]);
+
   const switchSession = (nextSession: SessionInfo) => {
     const nextPath = buildSessionPath(nextSession.name);
     const currentRoom = session?.room ?? sessionLabel;
@@ -1206,6 +1240,10 @@ const App = () => {
     []
   );
 
+  const sessionStyle = isMobile
+    ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)
+    : undefined;
+
   return (
     <div className="app">
       <header className="topbar">
@@ -1263,6 +1301,7 @@ const App = () => {
       ) : (
         <main
           className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}`}
+          style={sessionStyle}
         >
           <button
             type="button"
@@ -1463,6 +1502,7 @@ const App = () => {
               onInput={handleKeyboardInput}
               visible={keyboardVisible}
               onToggle={handleKeyboardToggle}
+              onHeightChange={setKeyboardHeight}
               hapticsEnabled={hapticsEnabled}
             />
           )}

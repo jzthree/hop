@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Bug Fixes
+
+- Fixed the mobile terminal layout so the virtual keyboard anchors to the viewport bottom and no longer leaves a large gap above the screen edge.
+
 ## [0.8.0] - 2025-01-25
 
 ### Major Changes

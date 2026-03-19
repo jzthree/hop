@@ -4,6 +4,8 @@
 
 Access your Mac's terminal from your phone, tablet, or any browser — secured with password + 2FA, tunneled through Cloudflare.
 
+Hop also ships with a built-in MCP server, so Claude Code, Codex, Gemini, Cursor, and other MCP clients can create terminals, stream output, and drive agent sessions through Hop.
+
 > **🍎 macOS/Linux** — Requires cloudflared for tunneling
 
 ```
@@ -16,6 +18,7 @@ Access your Mac's terminal from your phone, tablet, or any browser — secured w
 
 - 🔐 **Password + 2FA** — Optional password plus TOTP (required for custom domains)
 - 🌍 **Access Anywhere** — Cloudflare tunnel, no port forwarding
+- 🤖 **Built-in MCP Server** — Turn Hop into an agent-facing terminal platform for Claude Code, Codex, Gemini, Cursor, and more
 - 🌐 **Custom Domains + Multi‑User** — Share subdomains with per‑user credentials
 - 📱 **Mobile Virtual Keyboard** — Custom keyboard with Esc, Ctrl, Alt, arrows, and more
 - ⌨️ **Native Keyboard Support** — Tap the blue button for dictation, spellcheck & autocomplete
@@ -32,6 +35,11 @@ Access your Mac's terminal from your phone, tablet, or any browser — secured w
 ```bash
 npm install -g hop2
 ```
+
+This installs:
+- `hop` — main CLI / daemon / browser terminal entrypoint
+- `hop-mcp` — MCP server exposing Hop terminals and sessions
+- `hop-mcp-setup` — MCP client auto-config helper
 
 Then just run:
 ```bash
@@ -82,6 +90,27 @@ hop
 2. Enter your password (if enabled) and 6‑digit code
 3. Pick or create a session
 4. 🐰 You're in! Use the virtual keyboard for terminal keys, or tap the blue button for native input
+
+## 🤖 Hop MCP
+
+Hop is not just a browser terminal. It also exposes terminals and sessions over MCP so agents can safely operate through the same platform.
+
+Use cases:
+- Launch a dedicated Claude Code / Codex / Gemini terminal and drive it over multiple turns
+- Create isolated agent sessions with per-session history and audit logs
+- Read terminal output incrementally instead of screen-scraping a browser
+- Build higher-level agent workflows on top of stable terminal/session primitives
+
+Quick start:
+
+```bash
+hop
+hop-mcp-setup
+```
+
+Then restart your MCP client. `hop-mcp-setup` auto-detects and configures supported clients such as Claude Code, Claude Desktop, Cursor, Gemini CLI, Codex CLI, VS Code / Copilot, and Antigravity.
+
+For full MCP usage, tools, and subagent workflows, see [README-MCP.md](./README-MCP.md).
 
 ## 🪟 Sessions
 
@@ -215,6 +244,10 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | `hop client <credentials>` | Run hop with exported credentials |
 | `hop wipe [--all]` | Remove saved sessions (`--all` also kills live sessions) |
 | `quit` | Type at exit prompt to shutdown tunnel |
+
+Additional installed binaries:
+- `hop-mcp` — Start the Hop MCP server directly
+- `hop-mcp-setup` — Auto-configure supported MCP clients
 
 Startup behavior:
 - Hop reconciles already-running external Hay sessions first, then applies the default workspace as additional startup state.

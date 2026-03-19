@@ -100,10 +100,16 @@ async function main() {
                 res.end(JSON.stringify({ error: 'Invalid room id' }));
                 return;
             }
-            const exists = typeof rooms.hasRoom === 'function' ? rooms.hasRoom(roomId) : false;
-            rooms.closeRoom(roomId);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, existed: exists }));
+            try {
+                const exists = typeof rooms.hasRoom === 'function' ? rooms.hasRoom(roomId) : false;
+                rooms.closeRoom(roomId);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, existed: exists }));
+            } catch (err) {
+                console.error(`[hay-host] Error closing room "${roomId}":`, err);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Failed to close room' }));
+            }
             return;
         }
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -168,6 +174,14 @@ async function main() {
         process.stdout.write(`${JSON.stringify({ pid: process.pid, port: listeningPort })}\n`);
     });
 }
+
+process.on('uncaughtException', (err) => {
+    console.error('[hay-host] uncaughtException (kept alive):', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error('[hay-host] unhandledRejection (kept alive):', reason);
+});
 
 main().catch((err) => {
     console.error(`[hay-host] ${err && err.message ? err.message : String(err)}`);

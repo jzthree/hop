@@ -297,7 +297,11 @@ export class Room extends EventEmitter {
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
     }
-    this.pty.kill();
+    try {
+      this.pty.kill();
+    } catch (e) {
+      /* swallow – PTY may already be dead */
+    }
     this.endSession({ exitCode: null, signal: null, message: "Session terminated" });
   }
 
@@ -421,10 +425,14 @@ export class Room extends EventEmitter {
     }
     const message = JSON.stringify({ type: "session_ended", ...payload } satisfies ServerMessage);
     for (const client of this.clients.values()) {
-      if (client.socket.isOpen()) {
-        client.socket.send(message);
+      try {
+        if (client.socket.isOpen()) {
+          client.socket.send(message);
+        }
+        client.socket.close();
+      } catch (e) {
+        /* swallow – don't let one bad socket kill the loop */
       }
-      client.socket.close();
     }
     this.clients.clear();
     this.emit("session_end", { roomId: this.id, ...payload, timestamp: now() });
@@ -474,7 +482,11 @@ export class RoomManager {
   closeRoom(roomId: string) {
     const room = this.rooms.get(roomId);
     if (!room) return;
-    room.kill();
+    try {
+      room.kill();
+    } catch (e) {
+      /* swallow – ensure we still remove the room from the map */
+    }
     this.rooms.delete(roomId);
   }
 

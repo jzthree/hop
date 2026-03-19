@@ -6068,7 +6068,7 @@ function waitForStart(authEmitter, publicUrl, label) {
         log(`\n--------------------------------------------------`, RESET);
 
         // Standardized TOTP QR Code using the helper function
-        showQrCode(label || 'Hop');
+        showAuthQrCode(label || 'Hop');
 
         log(`\n--------------------------------------------------`, RESET);
 
@@ -6106,7 +6106,7 @@ function printStartupInfo(publicUrl, label) {
     qrcode.generate(publicUrl, { small: true });
 
     log(`\n--------------------------------------------------`, RESET);
-    showQrCode(label || 'Hop');
+    showAuthQrCode(label || 'Hop');
     log(`\n--------------------------------------------------`, RESET);
     log(`\n[READY]`, GREEN + BOLD);
     log(`Daemon started. Existing local sessions are reattached automatically. Run ${CYAN}hop${RESET} to open a new local session.`, RESET);
@@ -6125,7 +6125,7 @@ function waitForStartPolling(state, label) {
         qrcode.generate(state.url, { small: true });
 
         log(`\n--------------------------------------------------`, RESET);
-        showQrCode(label || 'Hop');
+        showAuthQrCode(label || 'Hop');
         log(`\n--------------------------------------------------`, RESET);
 
         const readline = require('readline');
@@ -6180,8 +6180,21 @@ function waitForStartPolling(state, label) {
     });
 }
 
-// Generate QR code and prompt for verification
-function showQrCode(label = 'Hop') {
+function getAuthQrLabel() {
+    const state = isServerRunning();
+    if (state?.url) {
+        try {
+            const hostname = new url.URL(state.url).hostname;
+            if (hostname) {
+                return `Hop-${hostname}`;
+            }
+        } catch (e) { }
+    }
+    return 'Hop';
+}
+
+// Generate QR code and prompt for authenticator setup
+function showAuthQrCode(label = 'Hop') {
     log(`[3/4] Setup Authenticator...`, BOLD);
 
     // Manually construct URL for minimalist "Hop" label without username
@@ -7054,7 +7067,7 @@ async function main() {
                 loadAuthSecret();
                 log(`\n${BOLD}Scan this QR code with your authenticator app:${RESET}\n`, CYAN);
                 const label = hostname ? `Hop-${hostname}` : `Hop-${tunnelId.slice(0, 8)}`;
-                showQrCode(label);
+                showAuthQrCode(label);
             }
 
             log(`\n${GREEN}✓ Setup complete!${RESET}\n`, GREEN);
@@ -7174,7 +7187,8 @@ async function main() {
         log('');
         log(`${BOLD}URL & QR:${RESET}`, RESET);
         log(`  hop url                   Print current tunnel URL`, RESET);
-        log(`  hop qr                    Show URL as QR code`, RESET);
+        log(`  hop qr                    Show tunnel URL as QR code`, RESET);
+        log(`  hop qr auth               Show authenticator setup QR code`, RESET);
         log('');
         log(`${BOLD}Custom Domain:${RESET}`, RESET);
         log(`  hop domain                Show current domain config`, RESET);
@@ -7229,8 +7243,29 @@ async function main() {
         process.exit(0);
     }
 
-    // Handle `hop qr` command - shows QR code for current URL
+    // Handle `hop qr` command - shows either the tunnel URL QR or authenticator QR
     if (process.argv[2] === 'qr') {
+        const qrTarget = process.argv[3];
+
+        if (qrTarget === 'auth') {
+            if (!fs.existsSync(SECRET_FILE_PATH)) {
+                log(`No authenticator secret is configured yet.`, RED);
+                log(`Start hop once to complete setup, or reset by deleting ${SECRET_FILE_PATH}.`, RESET);
+                process.exit(1);
+            }
+            loadAuthSecret();
+            log(`\nAuthenticator setup QR:`, BOLD);
+            log(`Scan this with Duo/Authy/1Password, not with your camera app.\n`, CYAN);
+            showAuthQrCode(getAuthQrLabel());
+            process.exit(0);
+        }
+
+        if (qrTarget && qrTarget !== 'url') {
+            log(`Unknown qr target: ${qrTarget}`, RED);
+            log(`Use ${CYAN}hop qr${RESET} for the tunnel URL or ${CYAN}hop qr auth${RESET} for the authenticator QR.`, RESET);
+            process.exit(1);
+        }
+
         const state = isServerRunning();
         if (!state) {
             log(`Hop is not running.`, RED);
@@ -7238,6 +7273,8 @@ async function main() {
         }
         log(`\nCurrent tunnel URL:`, BOLD);
         log(`${state.url}\n`, GREEN);
+        log(`This QR opens your Hop URL. It is not the authenticator setup QR.`, YELLOW);
+        log(`Use ${CYAN}hop qr auth${RESET} for Duo/Authy/1Password.\n`, RESET);
         qrcode.generate(state.url, { small: true });
         process.exit(0);
     }

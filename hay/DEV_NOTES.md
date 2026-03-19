@@ -1,5 +1,30 @@
 # Dev Notes
 
+## Mobile keyboard anchoring
+
+The mobile keyboard is intentionally fixed to the viewport bottom, and the
+session container reserves space with `--mobile-keyboard-height`.
+
+Implementation split:
+
+- `hay/apps/web/src/components/MobileKeyboard.tsx`
+  - measures rendered keyboard height with `ResizeObserver`
+  - reports height upward through `onHeightChange`
+- `hay/apps/web/src/App.tsx`
+  - stores `keyboardHeight`
+  - exposes `--mobile-keyboard-height` on the session container
+  - triggers a fit/resize pass when the visible keyboard height changes
+- `hay/apps/web/src/styles.css`
+  - pins `.mobile-keyboard` to `bottom: 0`
+  - uses `padding-bottom: var(--mobile-keyboard-height)` on `.session.has-keyboard`
+
+If the mobile layout regresses, verify:
+
+1. `onHeightChange` still fires when the keyboard is shown.
+2. The session container still receives `--mobile-keyboard-height`.
+3. `.mobile-keyboard` is still `position: fixed`.
+4. The terminal fit pass still runs after keyboard-height changes.
+
 ## Mobile touch scrolling + selection mode (iOS Safari)
 
 We intentionally disable native touch handling on the xterm DOM so we can

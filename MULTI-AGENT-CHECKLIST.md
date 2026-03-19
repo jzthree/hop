@@ -12,19 +12,26 @@ Ensure concurrent agent sessions stay isolated, time-bounded, and recoverable.
 ## Execution Loop
 
 1. **Create session** — one `hop_create_terminal` per agent.
-2. **Validate prompt** — call `hop_wait_terminal(until_prompt=true)` to confirm the shell is ready before sending any command.
-3. **Send command** — write via `hop_write_terminal`; never blind-write into mid-execution output.
-4. **Await result** — use `until_regex` or `until_prompt` with `max_wait_ms` to capture output and detect completion.
-5. **Assert state** — verify exit code / expected output before proceeding.
-6. **Repeat** steps 2–5 for each command in the plan.
+2. **Validate prompt** — use `hop_wait_terminal(until_prompt=true, start_from="latest")` before the first command.
+3. **Preferred turn helper** — use `hopx_agent_turn` or `hopx_send_and_wait` for normal multi-turn work.
+4. **Manual fallback** — drop to `hop_write_terminal` + `hop_wait_terminal` only when you need custom wait conditions or lower-level control.
+5. **Assert state** — verify expected output before continuing.
+6. **Repeat** the loop; never write into a terminal that is still busy.
+
+Recommended defaults:
+
+- `capture="readable_raw"`
+- `start_from="latest"` for prompt waits, `start_from="cursor"` for deltas
+- explicit `max_wait_ms`
+- explicit `idle_ms` when using raw wait conditions
 
 ## Recovery
 
 | Step | Action |
 |------|--------|
-| 1 | Send `ctrl_c` via `hop_send_key` |
-| 2 | If unresponsive after 5 s → `hop_close_terminal(killSession=true)` |
-| 3 | On orchestrator crash → kill **all** child terminals (kill switch) |
-| 4 | Verify zero orphaned processes before declaring shutdown complete |
+| 1 | Send `ctrl_c` via `hop_send_key` or `control="interrupt"` via `hopx_agent_turn` |
+| 2 | If still running, continue waiting or poll an async wait job instead of blind-resending |
+| 3 | If unresponsive after deadline, `hop_close_terminal(killSession=true)` |
+| 4 | On orchestrator crash, close all child terminals and verify there are no orphaned sessions |
 
 **Rule:** Never skip escalation. Always tear down — never leave orphaned sessions.

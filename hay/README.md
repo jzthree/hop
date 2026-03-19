@@ -1,67 +1,74 @@
-# Termshare
+# Hay
 
-> **Looking for a complete remote terminal solution?** Check out [hop](https://github.com/jzthree/hop) - secure terminal access from anywhere with authentication, Cloudflare tunneling, and session management built-in.
+> Looking for the full remote-terminal product? See [hop](https://github.com/jzthree/hop).
 
-A terminal sharing library designed as a **building block** for applications that need shared terminal access. Multiple clients (same user on different devices, or different users) can connect to the same terminal session with real-time synchronization.
+Hay is the terminal-sharing stack that powers Hop. It provides the local room
+manager, browser client, CLI client, and shared protocol layer used for
+multi-client terminal sessions.
 
-**This is not a complete solution** - it provides the core terminal sharing functionality without authentication, tunneling, or session persistence. These are intentionally left to the embedding application.
+This workspace is primarily internal to the Hop repo. It is useful on its own
+for development and architecture work, but it is not documented here as a
+published standalone npm product.
 
-## Features
+## What Hay Provides
 
-**What it provides:**
-- **Multi-client terminal** - Multiple clients share the same PTY session
-- **Presence indicators** - See who's connected, who's typing, who's active
-- **Control modes** - Collaborative (all can type) or locked (single controller)
-- **Web and CLI clients** - Connect via browser or real terminal
-- **Embeddable library** - `attachTermshare()` to add to any HTTP server
-- **Auto-fit** - Terminal resizes to active client's screen
-- **Mobile-ready** - Responsive web UI with slide-out drawer and haptic feedback
+- Shared PTY-backed terminal rooms
+- Browser and local CLI clients
+- Presence and collaboration state
+- Mobile-oriented web terminal UI
+- A reusable WebSocket + PTY server layer for embedding
 
-**What it doesn't provide (by design):**
-- Authentication - bring your own (see hop for example)
-- Tunneling/remote access - bring your own (Cloudflare, ngrok, etc.)
-- User management - clients are identified by name parameter only
+Hay intentionally does not provide:
 
-## Comparison with ttyd
+- Authentication
+- Tunneling / remote exposure
+- User management
+- Hop session/workspace metadata
 
-| Feature | Termshare | ttyd |
-|---------|-----------|------|
-| Web terminal | Yes | Yes |
-| Multiple viewers | Yes | Yes |
-| Real-time presence | Yes | No |
-| Typing indicators | Yes | No |
-| Control lock/collab modes | Yes | No |
-| CLI client | Yes | No |
-| Embeddable library | Yes | No |
-| External dependencies | node-pty | libwebsockets |
+Those concerns live at the Hop layer.
 
-## Quick Start
+## Workspace Layout
 
-### Standalone
+```text
+hay/
+├── apps/
+│   ├── server/     # Room manager, PTY lifecycle, websocket integration
+│   ├── web/        # React + xterm.js browser client
+│   └── cli/        # Local terminal client
+└── packages/
+    └── shared/     # Shared protocol types and utilities
+```
+
+## Development
+
+From `hay/`:
 
 ```bash
-# Install dependencies
 npm install
-
-# Start development server
 npm run dev
 ```
 
-Open http://localhost:5173 and share the room link with collaborators.
+Useful commands:
 
-### CLI Client
+- `npm run build`
+- `npm run test`
+- `npm -w apps/web run test:e2e`
+
+## CLI Client
+
+Run the local CLI client from the workspace:
 
 ```bash
-# Connect to a room from your terminal
-npm -w @termshare/cli run dev -- -r my-room -n alice
-
-# Or after building
-npx termshare -r my-room -n alice
+npm -w apps/cli run dev -- -r my-room -n alice
 ```
 
-#### Keyboard Shortcuts
+After building:
 
-The CLI client provides keyboard shortcuts for navigation and control:
+```bash
+node apps/cli/dist/index.js -r my-room -n alice
+```
+
+### Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
@@ -73,16 +80,17 @@ The CLI client provides keyboard shortcuts for navigation and control:
 | `Ctrl+G` | Detach from session |
 | `Ctrl+Q` | Kill session |
 
-#### Configuration
+### Configuration
 
-The CLI client reads configuration from these locations (first found wins):
+The CLI reads configuration from these locations, first found wins:
 
 1. `.hay-cli.json` (local, legacy)
-2. `.hop.json` → `hay-cli` key (local)
+2. `.hop.json` under `hay-cli` (local)
 3. `~/.hay-cli.json` (global, legacy)
-4. `~/.hop.json` → `hay-cli` key (global)
+4. `~/.hop.json` under `hay-cli` (global)
 
-**Example `.hop.json`:**
+Example `.hop.json`:
+
 ```json
 {
   "hay-cli": {
@@ -92,198 +100,123 @@ The CLI client reads configuration from these locations (first found wins):
 }
 ```
 
-**Options:**
+Configuration options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `showHints` | `true` | Show keyboard shortcut hints at bottom |
-| `scrollOff` | `3` | Lines of context to keep above/below cursor when scrolling (vim-like) |
+| `showHints` | `true` | Show keyboard shortcut hints at the bottom |
+| `scrollOff` | `3` | Lines of context to keep above/below the cursor |
 
-### Web Client
+## Web Client
 
-The web client provides a browser-based terminal interface with:
+The web client provides:
 
-- **Touch-friendly keyboard** - Virtual keyboard with common terminal keys
-- **Haptic feedback** - Tactile feedback on iOS (via switch element trick) and Android (Vibration API)
-- **Slide-out drawer** - Access presence indicators and controls on mobile
-- **Responsive layout** - Adapts to screen size
+- xterm-based terminal rendering
+- mobile virtual keyboard support
+- touch scrolling and selection mode
+- session presence and collaboration controls
 
-### Embedding in Your App
-
-```typescript
-import http from "http";
-import { attachTermshare } from "@termshare/server";
-
-const server = http.createServer((req, res) => {
-  res.end("Hello");
-});
-
-const termshare = attachTermshare({
-  server,
-  path: "/ws",  // WebSocket endpoint
-  onConnect: (clientId, roomId, name) => {
-    console.log(`${name} joined ${roomId}`);
-  },
-  onDisconnect: (clientId, roomId) => {
-    console.log(`${clientId} left ${roomId}`);
-  }
-});
-
-server.listen(4001);
-```
-
-Connect clients to `ws://localhost:4001/ws?room=ROOM&name=NAME&cols=80&rows=24`
+During local development, the web client is built from `apps/web/` and later
+synced into Hop’s served `hay-web/` bundle at the repo root.
 
 ## Architecture
 
-```
+```text
 ┌─────────────────┐
 │   Web Client    │──┐
 │   (xterm.js)    │  │
-└─────────────────┘  │     WebSocket        ┌─────────────────┐
-                     ├────────────────────▶│   Termshare     │
-┌─────────────────┐  │   ?room=X&name=Y    │   Server        │──── node-pty ──── shell
-│   CLI Client    │──┘                     │   (rooms.ts)    │
-│   (raw term)    │                        └─────────────────┘
-└─────────────────┘                               │
-                                                  ▼
-                                           ┌─────────────┐
-                                           │    Room     │
-                                           │  - clients  │
-                                           │  - pty      │
-                                           │  - collab   │
-                                           └─────────────┘
+└─────────────────┘  │     WebSocket       ┌─────────────────┐
+                     ├────────────────────▶│   Hay Server    │──── node-pty ──── shell
+┌─────────────────┐  │   ?room=X&name=Y    │   (rooms.ts)    │
+│    CLI Client   │──┘                     └─────────────────┘
+└─────────────────┘                              │
+                                                 ▼
+                                          ┌─────────────┐
+                                          │    Room     │
+                                          │  - clients  │
+                                          │  - pty      │
+                                          │  - collab   │
+                                          └─────────────┘
 ```
 
-### Protocol
+## Embedding Notes
 
-Clients connect via WebSocket with query parameters:
-- `room` - Room/session identifier
-- `name` - Display name
-- `cols` - Terminal columns
-- `rows` - Terminal rows
+The server library still exposes some legacy termshare-flavored API names such
+as `attachTermshare` and `TermshareServerOptions`. Those names reflect the
+history of the codebase; the workspace and packages in this repo are now named
+Hay.
 
-#### Client → Server Messages
+Example:
 
-```typescript
-{ type: "input", data: string }           // Terminal input
-{ type: "resize", cols: number, rows: number }  // Terminal resize
-{ type: "typing", active: boolean }       // Typing indicator
-{ type: "toggle_collab", enabled: boolean }  // Toggle collab mode
-{ type: "take_control" }                  // Request control (locked mode)
-{ type: "release_control" }               // Release control
+```ts
+import http from "node:http";
+import { attachTermshare } from "../apps/server/dist/lib.js";
+
+const server = http.createServer();
+const hay = attachTermshare({ server });
+
+server.listen(4001, () => {
+  console.log("Server running on http://localhost:4001");
+});
 ```
 
-#### Server → Client Messages
+WebSocket clients connect with:
 
-```typescript
+- `room`
+- `name`
+- `cols`
+- `rows`
+
+## Protocol Summary
+
+Client to server:
+
+```ts
+{ type: "input", data: string }
+{ type: "resize", cols: number, rows: number }
+{ type: "typing", active: boolean }
+{ type: "toggle_collab", enabled: boolean }
+{ type: "take_control" }
+{ type: "release_control" }
+```
+
+Server to client:
+
+```ts
 { type: "hello", clientId, roomId, color, collabMode, controllerId }
-{ type: "output", data: string }          // Terminal output
-{ type: "snapshot", data: string }        // Full terminal buffer
-{ type: "presence", clients: [...] }      // Connected users
-{ type: "collab", enabled, controllerId } // Mode change
-{ type: "input_rejected", reason: string } // Input denied
-```
-
-## Project Structure
-
-```
-termshare/
-├── apps/
-│   ├── server/     # WebSocket + PTY server (library + standalone)
-│   ├── web/        # React + xterm.js web client
-│   └── cli/        # Terminal client
-└── packages/
-    └── shared/     # Protocol types and utilities
-```
-
-## API Reference
-
-### `attachTermshare(options)`
-
-Attach termshare to an existing HTTP server.
-
-```typescript
-type TermshareServerOptions = {
-  server: http.Server;      // HTTP server to attach to
-  path?: string;            // WebSocket path (default: "/ws")
-  ptyFactory?: PtyFactory;  // Custom PTY factory
-  onConnect?: (clientId, roomId, name) => void;
-  onDisconnect?: (clientId, roomId) => void;
-};
-
-const termshare = attachTermshare(options);
-
-// Returns:
-{
-  wss: WebSocketServer;     // WebSocket server instance
-  rooms: RoomManager;       // Room manager instance
-  close: () => void;        // Cleanup function
-}
-```
-
-### `RoomManager`
-
-Manages terminal rooms/sessions.
-
-```typescript
-const rooms = new RoomManager(ptyFactory);
-const room = rooms.getRoom(roomId, { cols: 80, rows: 24 });
-```
-
-### `Room`
-
-A single terminal session with connected clients.
-
-```typescript
-room.attachClient(clientInfo, socketAdapter);
-// Events: "empty" - emitted when last client leaves
-```
-
-### Custom PTY Factory
-
-Provide your own PTY implementation:
-
-```typescript
-const customPtyFactory = ({ cols, rows, cwd }) => {
-  // Return an object implementing IPty interface:
-  // - onData(handler): Subscribe to output
-  // - write(data): Send input
-  // - resize(cols, rows): Resize terminal
-  // - kill(): Terminate
-};
-
-attachTermshare({ server, ptyFactory: customPtyFactory });
+{ type: "output", data: string }
+{ type: "snapshot", data: string }
+{ type: "presence", clients: [...] }
+{ type: "collab", enabled, controllerId }
+{ type: "input_rejected", reason: string }
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | 4001 | Server port |
-| `PTY_MODE` | native | `native`, `auto`, or `mock` |
-| `SERVE_WEB` | false | Serve web client from server |
-| `WEB_DIST_PATH` | - | Path to web client dist |
+| `PORT` | `4001` | Standalone server port |
+| `PTY_MODE` | `native` | PTY backend mode: `native`, `auto`, or `mock` |
+| `SERVE_WEB` | `false` | Serve the built web client from the standalone server |
+| `WEB_DIST_PATH` | unset | Path to web client dist when `SERVE_WEB=true` |
+| `CWD` | current directory | Default working directory for new PTY sessions |
 
 ## Production Build
 
 ```bash
-# Build all packages
 npm run build
-
-# Run standalone server with embedded web client
 PORT=4001 SERVE_WEB=true WEB_DIST_PATH=./apps/web/dist node apps/server/dist/index.js
 ```
 
 ## Testing
 
 ```bash
-npm test                 # Run all tests
-npm run test:unit       # Unit tests only
-npm run test:e2e        # E2E tests (requires build)
+npm test
+npm run test:unit
+npm run test:e2e
 ```
 
-Set `PTY_MODE=mock` for CI environments that can't spawn PTYs.
+Set `PTY_MODE=mock` for CI environments that cannot spawn PTYs.
 
 ## License
 

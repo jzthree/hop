@@ -1,12 +1,14 @@
 # Hop MCP Server
 
-The Hop MCP server exposes hop’s terminal/session APIs over the Model Context Protocol (MCP), so agents can create terminals, stream output, and send input through Hop.
+The Hop MCP server exposes Hop terminal and session APIs over MCP so agents can
+create terminals, stream output, send input, and recover cleanly across daemon
+restarts.
 
 ## Quick Start
 
-1) Ensure Hop daemon is running locally (creates `~/.hop2/.tunnel-state`).
+1. Ensure the Hop daemon is running locally.
 
-2) Auto-configure supported MCP clients:
+2. Auto-configure supported MCP clients:
 
 ```bash
 hop-mcp-setup
@@ -27,7 +29,7 @@ Supported auto-detected clients:
 - VS Code / GitHub Copilot (workspace via `.vscode/mcp.json`)
 - Antigravity
 
-3) Or configure your MCP client manually:
+3. Or configure your MCP client manually:
 
 ```json
 {
@@ -39,21 +41,21 @@ Supported auto-detected clients:
 }
 ```
 
-4) Restart your MCP client.
+4. Restart your MCP client.
 
 The server auto-connects to the local Hop daemon via `~/.hop2/.tunnel-state`.
 
-## One Subagent Terminal (Claude/Codex)
+## Recommended Flow: One Agent Terminal
 
-Recommended flow for driving one agent CLI safely:
+Recommended flow for driving one Claude/Codex/Gemini terminal safely:
 
-1) Launch a dedicated terminal:
+1. Launch a dedicated terminal:
 
 ```
 hop_create_terminal(name="subagent", cwd="/path/to/repo")
 ```
 
-2) Start the agent CLI:
+2. Start the agent CLI:
 
 ```
 hop_write_terminal(data="claude\n")
@@ -61,22 +63,21 @@ hop_write_terminal(data="claude\n")
 hop_write_terminal(data="codex\n")
 ```
 
-3) Wait for a prompt before sending work:
+3. Wait for a prompt before sending work:
 
 ```
 hop_wait_terminal(until_prompt=true, start_from="latest")
 ```
 
-4) Run a multi-turn loop:
-- preferred: `hopx_send_and_wait(data="<task>", press_enter=true, capture="readable_raw")`
-- helper alternative: `hopx_agent_turn(data="<task>", mode="auto")`
-- manual split (if needed):
-- send one instruction with `hop_write_terminal(data="<task>\n")`
-- wait for output with `hop_wait_terminal(capture="readable_raw")` (defaults to `until_agent_done`)
-- continue with cursor-deltas via `hop_read_terminal(start_from="cursor", cursor=...)`
-- send the next instruction only after output is captured
+4. Run a multi-turn loop:
+- Preferred: `hopx_agent_turn(data="<task>", mode="auto")`
+- Good lower-level helper: `hopx_send_and_wait(data="<task>", press_enter=true, capture="readable_raw")`
+- Manual split only when needed:
+- send with `hop_write_terminal(data="<task>\n")`
+- wait with `hop_wait_terminal(capture="readable_raw")`
+- continue via cursor deltas from `hop_read_terminal(start_from="cursor", cursor=...)`
 
-5) Stop/cleanup:
+5. Stop or clean up:
 - interrupt with `hop_send_key(key="ctrl_c")`
 - close with `hop_close_terminal(killSession=false)`
 
@@ -143,6 +144,13 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 - `terminal_id` is an ephemeral daemon attachment handle; underlying hop `sessionName` is the stable identity.
 - On daemon restart, terminal-scoped tools auto-reattach once using stored session identity and retry transparently when possible.
 - `hop_read_terminal` returns a cursor for incremental polling.
+- Default fallback terminal size is `140x40` when no explicit `cols`/`rows` are provided.
+- `hop_create_terminal` and `hop_attach_terminal` do a short output warmup before returning, reducing first-command races.
+- Hop isolates shell history per session and writes per-session NDJSON audit logs under `~/.hop2/workspaces/<workspace>/logs/<session>/audit.ndjson`.
+- Audit logging automatically switches to diff-suppressed `tui_keyframe` snapshots for alternate-screen/TUI apps while still capturing all input.
+
+### `hop_read_terminal`
+
 - `hop_read_terminal` supports `mode: "ui"` for structured terminal snapshots:
   - `ui.lines`: visible screen lines
   - `ui.cursor`: cursor position
@@ -166,6 +174,9 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
   - parses incrementally across chunk boundaries to avoid split ANSI artifacts
   - reconstructs common inline edits (backspace/cursor rewrites) so text is cleaner for agent parsing
   - avoids full ANSI noise while retaining interaction structure
+
+### `hop_wait_terminal`
+
 - `hop_send_key` sends normalized named keys (for example `enter`, `esc`, `up`, `ctrl_c`) to improve interactive TUI control without raw escape-string handling.
 - `hop_wait_terminal` blocks on output conditions without client polling loops:
   - `start_from` controls where matching begins:
@@ -180,15 +191,24 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
   - quiet-period detection via `idle_ms`
   - bounded event capture in `raw` or `readable_raw`
   - for `capture="readable_raw"`, supports `control_level`, `noise_filter`, `coalesce_ms`, `coalesce_max_chars`, and optional `includeMetaEvents`
+
+### Async wait helpers
+
 - `hop_wait_start` / `hop_wait_poll` provide explicit async wait orchestration for long-running conditions:
   - start with `hop_wait_start(...)` and poll with `hop_wait_poll(wait_id=..., wait=true)`
   - use `consume=true` on poll to remove completed jobs
+
+### `hopx_send_and_wait`
+
 - `hopx_send_and_wait` combines input send + optional enter/key + wait, and defaults to cursor-based delta capture from just before send.
   - helper defaults are token-thrifty for interactive loops: `capture_max_events=60`, `control_level=none`, `noise_filter=balanced`, `coalesce_ms=350` (unless overridden)
   - for `capture="readable_raw"`, `text_only` defaults to `true`; this condenses wait payloads by returning joined `wait.text`, setting `wait.events=[]`, `wait.eventCount=0`, and preserving prior count in `wait.originalEventCount` (set `text_only=false` to keep full events)
 - `hop_read_terminal` supports deterministic delta reads:
   - `start_from`: `beginning` (default), `cursor`, or `latest`
   - response includes `cursorStart`, `cursorEnd`, and `next_cursor`
+
+### `hopx_agent_turn`
+
 - `hopx_agent_turn` is a helper wrapper (not a core primitive):
   - default `mode="auto"` chooses `ui` when terminal is in alternate-screen, otherwise `readable_raw`
   - in `mode="auto"`, if alternate-screen starts during the same turn, it auto-promotes to `ui` for that response
@@ -202,12 +222,11 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
   - `mode="ui"` defaults wait capture to `capture_max_events=0` (override when you need readable wait-event diagnostics)
   - when using default `until_agent_done` semantics in `mode="ui"`, hopx applies a short UI busy-guard pass to avoid returning while status lines still indicate active work (`esc to interrupt`, `working`, `waiting for process`, etc.)
   - `mode="readable_raw"` / `mode="raw"` returns the same wait payload shape as `hopx_send_and_wait`
+
+### Error model
+
 - Tool calls that fail at the Hop API layer now return MCP errors (`isError: true`) with normalized fields:
   - `ok`
   - `status`
   - `endpoint`
   - `error`
-- Hop now isolates shell history per session and writes per-session NDJSON audit logs under `~/.hop2/workspaces/<workspace>/logs/<session>/audit.ndjson` with truncation metadata for large chunks.
-- Audit logging auto-switches to diff-suppressed `tui_keyframe` snapshots when alternate-screen apps (vim/htop/agent TUIs) are detected, while still capturing all input events.
-- Default fallback terminal size is `140x40` when no explicit `cols`/`rows` are provided.
-- `hop_create_terminal` / `hop_attach_terminal` now do a short output warmup before returning, reducing first-command races in interactive shells.

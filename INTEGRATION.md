@@ -1,92 +1,84 @@
-# Hop + Termshare Integration Plan
+# Hop + Hay Architecture
 
-This branch integrates [termshare](https://github.com/jzthree/termshare) to replace ttyd/tmux.
+This document describes the current Hop terminal architecture.
 
-## Benefits
+The historical `ttyd`/`tmux` backend has been removed from the active runtime.
+Hop now uses Hay, a local terminal-sharing stack built on WebSocket plus
+`node-pty`, with browser, CLI, and MCP clients all operating on the same
+session model.
 
-- **No ttyd/tmux dependencies** - Pure Node.js solution
-- **Built-in presence** - See who's connected, typing indicators
-- **Control modes** - Collaborative or locked single-controller
-- **No injection hacks** - Direct control over web UI
-- **Mobile-ready** - Responsive design with iOS-style keyboard built-in
-- **CLI client** - Connect from real terminals too
+## Current Stack
 
-## Architecture Change
-
-### Before (ttyd)
 ```
-Browser → Hop Auth Proxy → ttyd (per session) → tmux → shell
-                ↓
-        HTML/WebSocket injection for mobile keyboard
+Browser / Hay CLI / Hop MCP
+            |
+            v
+        Hop daemon
+            |
+            v
+     local hay-host process
+            |
+            v
+      Hay room manager
+            |
+            v
+         node-pty
+            |
+            v
+           shell
 ```
 
-### After (termshare)
-```
-Browser → Hop Auth Proxy → Termshare WebSocket → node-pty → shell
-                ↓
-        Native termshare web UI (mobile keyboard built-in)
-```
+Key properties:
 
-## Implementation Steps
+- No `ttyd` dependency
+- No `tmux` dependency
+- Shared session model across browser, CLI, and MCP
+- Session-aware audit logging and history isolation
+- Native mobile UI and virtual keyboard support
+- Local host process survives hop daemon restarts
 
-### 1. Add Dependencies
-- [x] `node-pty-prebuilt-multiarch` - PTY handling
-- [x] `ws` - WebSocket server
-- [x] Copy termshare room/pty logic into hop (`termshare.js`)
+## Main Components
 
-### 2. Remove ttyd/tmux Code
-- [x] Remove `spawn('ttyd', [...])` in `getOrCreateSession()`
-- [ ] Remove `HOP_TMUX_CONF`, `HOP_TMUX_WRAPPER` generation (still present but unused)
-- [ ] Remove `listTmuxSessions()`, `waitForTmuxSessionReady()` (still present but unused)
-- [ ] Remove ttyd dependency check (still present but unused)
-- [x] Remove keyboard HTML injection code (now using termshare's built-in)
-- [x] Remove `getIOSKeyboardInjection()` WebSocket patching (still present but unused)
+- `hop`
+  - user-facing CLI and daemon
+  - auth, Cloudflare tunnel management, session metadata, workspace handling
+  - serves the built Hay web client from `hay-web/`
+- `scripts/hay-host.js`
+  - persistent local host process for active Hay rooms
+  - isolates PTY/runtime ownership from the daemon lifecycle
+- `hay/apps/server`
+  - room manager, PTY lifecycle, websocket protocol handling
+- `hay/apps/web`
+  - browser terminal client
+- `hay/apps/cli`
+  - local terminal client used by Hop for direct attach flows
+- `mcp/hop-mcp.js`
+  - MCP server exposing Hop terminal/session primitives
 
-### 3. Add Termshare Integration
-- [x] Port `Room` and `RoomManager` classes from termshare
-- [x] Port `createPty` function
-- [x] Create termshare WebSocket handler at `/ws` endpoint
-- [x] Map hop sessions to termshare rooms
+## Session Model
 
-### 4. Update Session Management
-```javascript
-// Before: activeSessions[name] = { ttyd: Process, port: number }
-// After:  activeSessions[name] = { room: Room }
-```
-✅ Completed
+- Terminal sessions are identified by stable Hop session names.
+- MCP attaches to daemon-scoped terminal handles, but can recover across daemon
+  restart by reattaching through the stable session identity.
+- Active PTYs live in Hay rooms managed by the host process.
+- Browser users, local CLI attaches, and agents all talk to the same underlying
+  room runtime.
 
-### 5. Serve Termshare Web UI
-- [x] Build termshare web client (with mobile keyboard)
-- [x] Serve static files from hop (`termshare-web/` directory)
-- [x] Inject room parameter for session routing
+## Build Outputs
 
-### 6. Keep Hop Features
-- [x] Authentication (TOTP + cookies)
-- [x] Cloudflare tunneling
-- [x] Session URL routing (`/s/<name>/`)
-- [x] Multi-user support
+- `hay/apps/web/dist/` is the source web build output.
+- `hay-web/` is the synced bundle served by `hop`.
+- `npm run build` from the repo root rebuilds Hay and syncs `hay-web/`.
 
-## Key Files Changed
+## Operational Notes
 
-- `hop` - Main server, updated `getOrCreateSession()` and WebSocket handler
-- `termshare.js` - New module with Room, RoomManager, createPty
-- `termshare-web/` - Built termshare web client with mobile keyboard
+- Hop always uses the external Hay host runtime.
+- `HOP_TERMINAL_BACKEND` is accepted only for compatibility and ignored.
+- Session history and audit logging are per-session and workspace-aware.
+- Alternate-screen/TUI applications are captured with TUI-aware audit behavior.
 
-## Testing
+## Legacy Notes
 
-1. Start hop: `node hop`
-2. Open browser to tunnel URL
-3. Verify:
-   - [ ] Login with TOTP works
-   - [ ] Terminal session works
-   - [ ] Multiple clients see same session
-   - [ ] Presence indicators show
-   - [ ] Control modes work
-   - [ ] Mobile UI works without injection
-
-## Migration Notes
-
-- Sessions are not persistent (by design) - shell exits when all clients disconnect
-- tmux scrollback replaced by termshare's output buffer (200KB)
-- iOS keyboard injection replaced by termshare's built-in mobile keyboard
-- The old ttyd/tmux code paths are still present but no longer used; can be removed in a cleanup pass
+The earlier `ttyd`/`tmux` approach is now only historical context.
+If you see older references in commit history or archived notes, treat them as
+obsolete unless the current code still uses them explicitly.

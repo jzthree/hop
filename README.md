@@ -4,7 +4,7 @@
 
 Hop gives you secure browser access to local terminals and a built-in MCP server for creating, driving, and auditing agent sessions over the same runtime.
 
-> **🍎 macOS/Linux** — Requires cloudflared for tunneling
+> **macOS/Linux** — Requires cloudflared for tunneling
 
 ```
            (\(\ 
@@ -22,6 +22,8 @@ Hop gives you secure browser access to local terminals and a built-in MCP server
 - **Security when you need it** — Password + 2FA, custom domains, and multi-user support
 
 ## 🚀 Quick Install
+
+Most users only need the npm install. Source install is mainly for development or local hacking.
 
 ### From npm (easiest)
 
@@ -45,7 +47,7 @@ If you want agent access too:
 hop-mcp-setup
 ```
 
-### One-liner from source
+### From source (one-liner)
 
 ```bash
 git clone https://github.com/jzthree/hop.git ~/.hop && \
@@ -53,7 +55,7 @@ cd ~/.hop && npm install && \
 sudo ln -sf ~/.hop/hop /usr/local/bin/hop
 ```
 
-### Manual Install from source
+### From source (manual)
 
 ```bash
 # Clone the repo
@@ -73,24 +75,20 @@ source ~/.zshrc
 
 ## Quick Start
 
-### Browser terminal
+### Browser access
 ```bash
 hop
 ```
 
-First time:
-1. (Optional) Set a password: `hop password set`
-2. Scan the QR code with your authenticator app (Google Authenticator, Authy, 1Password, etc.)
-3. Note the URL displayed
-4. Press Enter to start your local session
+First run:
+1. Optionally set a password with `hop password set`
+2. Scan the authenticator QR code
+3. Note the URL
+4. Press Enter to start your first local terminal
 
-From your phone:
-1. Open the URL in your browser
-2. Enter your password (if enabled) and 6‑digit code
-3. Pick or create a session
-4. Use the virtual keyboard for terminal keys, or tap the blue button for native input
+Then open the URL from another device, sign in, and pick or create a session.
 
-### MCP / agents
+### MCP access
 
 ```bash
 hop
@@ -107,114 +105,151 @@ Typical use cases:
 
 For full MCP usage, tools, and subagent workflows, see [README-MCP.md](./README-MCP.md).
 
-## 🪟 Sessions
+## Everyday Workflows
+
+### Create and Reuse Sessions
 
 Create multiple independent terminal sessions from the Session Picker (`/sessions`):
 
-- **Create**: Type a name and click Create
-- **Join**: Click Join on any existing session
-- **Sessions are shared**: Multiple devices can view the same session
+- Create a new named shell session
+- Join any existing session
+- Share a live session between multiple devices
 
-You can also create **Port Sessions** that proxy to a local HTTP/WS service on your machine.
-Use the Session Picker or:
+You can also create sessions from the CLI:
+
+```bash
+hop session add workspace-shell --cwd ~/src/my-project
+hop session add myapp --port 3000
+```
+
+Use a regular terminal session for shell work and a port session when you want Hop to proxy a local service.
+
+### Drive a Subagent Over MCP
+
+Use one dedicated terminal per subagent.
+
+1. Create a terminal with `hop_create_terminal` and set `name` / `cwd`.
+2. Start the agent CLI with `hop_write_terminal`.
+3. Wait for readiness with `hop_wait_terminal(until_prompt=true)`.
+4. Prefer `hopx_agent_turn(mode="auto")` or `hopx_send_and_wait(...)` for one turn at a time.
+5. For long waits, use `hopx_agent_turn(async=true, ...)` or the lower-level `hop_wait_start(...)` / `hop_wait_poll(...)`.
+6. Interrupt with `hop_send_key(key="ctrl_c")` and close with `hop_close_terminal`.
+
+Safety tips:
+
+- Keep one subagent per terminal.
+- Do not queue a second instruction before reading the first response.
+- For attached user sessions, confirm `agentPermitted` before sending input.
+
+### Share a Local Web App
+
+Expose a local HTTP or WebSocket service through your Hop tunnel:
+
 ```bash
 hop session add myapp --port 3000
-hop session add workspace-shell --cwd ~/src/my-project
 ```
 
-## 🧾 Session History & Audit Logs
+Result:
 
-Hop always writes per-session audit logs.
-Shell history isolation is role-based by default:
+- local service stays on localhost
+- Hop exposes it at `https://your-tunnel-url/s/myapp/`
+- WebSocket apps work too
 
-- Agent-created terminal sessions: isolated history file per session
-- User-created terminal sessions: keep your shell default history file (opt-in isolation available)
+### Reattach Locally
 
-- Isolated history file path: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
-- Audit log (NDJSON): `~/.hop2/workspaces/<workspace>/logs/<internal-session>/audit.ndjson`
-- Audit events include `session_start`, `input`, `resize`, `session_end`, plus:
-- `audit_mode` / `pty_state` transitions (auto-switches between `stream` and `tui_keyframe`)
-- `tui_keyframe` snapshots (diff-suppressed; emitted only when content changes)
-- `command_launch` metadata (captures launched command token and detected agent CLI type)
-- Large input/output chunks are truncated with metadata (`bytes`, `omittedBytes`, `dataHead`, `dataTail`)
-
-Tunable defaults:
-
-- `HOP_SESSION_HISTORY_SIZE` (default `5000`)
-- `HOP_AGENT_HISTORY_ISOLATION` (default `1`)
-- `HOP_USER_HISTORY_ISOLATION` (default `0`)
-- `HOP_AGENT_POST_START_HISTORY_INIT` (default `1`)
-- `HOP_POST_START_HISTORY_INIT` (default `0`, forces post-start history init for all sessions)
-- `HOP_SESSION_AUDIT_INLINE_MAX_BYTES` (default `4096`)
-- `HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS` (default `750`)
-- `HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS` (default `20000`)
-- `HOP_SESSION_TUI_KEYFRAME_MAX_LINES` (default `80`)
-
-## 🌐 Custom Domains & Multi‑User
-
-### Admin (your machine)
-1. Set a password (required for custom domains):
-   ```bash
-   hop password set
-   ```
-2. Configure your domain:
-   ```bash
-   hop domain hop.yourdomain.com
-   ```
-3. Add a user + export credentials:
-   ```bash
-   hop user add alice
-   hop user export alice
-   ```
-4. Send the exported folder to the user.
-
-### User (their machine)
-```bash
-npm install -g hop2
-hop client ./credentials.json
-```
-First run prompts them to set a password + scan a TOTP QR code.  
-They then log in at their URL, e.g. `https://alice.hop.yourdomain.com`.
-
-## 📱 Mobile Keyboard
-
-On mobile devices, Hop provides a custom virtual keyboard designed for terminal use:
-
-**Accessory Row:**
-- `Esc` `Tab` `Ctrl` `Alt` — Essential terminal keys
-- `← ↓ ↑ →` — Arrow keys for navigation
-- 🔵 **Blue keyboard button** — Opens native iOS keyboard for dictation, spellcheck & autocomplete
-
-**Floating Menu (top-right button):**
-- **Toggle Keyboard** — Show/hide the virtual keyboard
-- **Session List** — Quick-switch between sessions
-- **All Sessions** — Return to session picker
-
-**Tips:**
-- The floating button is draggable — move it anywhere
-- First-time users will see a tooltip pointing to the native keyboard button
-- Use the native keyboard for longer text input with autocomplete
-
-## 🖥️ Local Attach
+Attach your local terminal client to an existing terminal session:
 
 ```bash
 hop attach <session>
 ```
 
-Attach your local terminal client to an existing hop terminal session.
+This is useful when you want a browser, an MCP client, and a local shell to converge on the same named session.
 
-## 🔌 Port Sessions
+### Use Hop on Mobile
 
-Expose local HTTP/WebSocket services through your tunnel:
+Hop’s mobile UI includes:
+
+- a terminal-oriented accessory row with `Esc`, `Tab`, `Ctrl`, `Alt`, and arrows
+- a native keyboard button for dictation, spellcheck, and autocomplete
+- a floating menu for keyboard toggle and session switching
+- draggable controls designed for one-handed use
+
+## Operations
+
+### Logging and History
+
+Hop always writes per-session audit logs.
+
+Default behavior:
+
+- agent-created sessions get isolated shell history files
+- user-created sessions keep normal shell history unless you opt into isolation
+- TUI apps switch to diff-suppressed keyframe capture automatically
+
+Paths:
+
+- history: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
+- audit log: `~/.hop2/workspaces/<workspace>/logs/<internal-session>/audit.ndjson`
+
+Key tunables:
+
+- `HOP_SESSION_HISTORY_SIZE`
+- `HOP_AGENT_HISTORY_ISOLATION`
+- `HOP_USER_HISTORY_ISOLATION`
+- `HOP_AGENT_POST_START_HISTORY_INIT`
+- `HOP_POST_START_HISTORY_INIT`
+- `HOP_SESSION_AUDIT_INLINE_MAX_BYTES`
+- `HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS`
+- `HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS`
+- `HOP_SESSION_TUI_KEYFRAME_MAX_LINES`
+
+### Users, Domains, and Sharing
+
+Admin flow:
+
+1. Set a password with `hop password set`.
+2. Configure a hostname with `hop domain hop.yourdomain.com`.
+3. Add a user with `hop user add alice`.
+4. Export credentials with `hop user export alice`.
+
+User flow:
 
 ```bash
-hop session add myapp --port 3000
-# Access at: https://your-tunnel-url/s/myapp/
+npm install -g hop2
+hop client ./credentials.json
 ```
 
-Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSocket.
+First run prompts for password setup and TOTP enrollment, then the user logs in at their assigned URL such as `https://alice.hop.yourdomain.com`.
 
-## 🔧 Commands
+### Security
+
+- Password + TOTP is supported; password is required for custom domains
+- Login cookies are `httpOnly`, `secure`, and `sameSite=lax`
+- Browser sessions persist across `hop stop/start` by default through a stable session secret
+- The local server binds only to `127.0.0.1`
+- Cloudflare Tunnel provides end-to-end TLS
+
+Secrets are stored in `~/.hop2/`. Set `HOP_PERSIST_SESSION_SECRET=0` if you want login cookies invalidated on every daemon restart.
+
+### Runtime and Recovery
+
+Hop uses the external Hay host runtime for PTY hosting and session recovery.
+
+- active PTYs live in a separate local hay-host process
+- the host survives daemon restarts
+- host state is tracked in `~/.hop2/.hay-host-state`
+- startup reconciles already-running Hay sessions before applying workspace state
+- `HOP_TERMINAL_BACKEND` is accepted only for compatibility and ignored
+
+## Reference
+
+### Related Docs
+
+- [README-MCP.md](./README-MCP.md) for MCP tools, helper wrappers, and agent-driving patterns
+- [INTEGRATION.md](./INTEGRATION.md) for the current Hop/Hay architecture
+- [hay/README.md](./hay/README.md) for the vendored Hay workspace
+
+### Commands
 
 | Command | Description |
 |---------|-------------|
@@ -234,122 +269,37 @@ Works with dev servers, Jupyter, APIs — anything on localhost. Supports WebSoc
 | `hop user export <name>` | Export user credentials |
 | `hop session list` | List sessions with `LIVE` vs `SAVED` terminal status |
 | `hop session add <name> [--cwd P]` | Create a terminal session |
-| `hop session add <name> --port N` | Create a port session (proxy) |
+| `hop session add <name> --port N` | Create a port session |
 | `hop session rename <old> <new>` | Rename a session |
 | `hop session remove <name>` | Remove a session |
 | `hop client <credentials>` | Run hop with exported credentials |
 | `hop wipe [--all]` | Remove saved sessions (`--all` also kills live sessions) |
-| `quit` | Type at exit prompt to shutdown tunnel |
+| `quit` | Type at exit prompt to shut down the tunnel |
 
-Additional installed binaries:
-- `hop-mcp` — Start the Hop MCP server directly
-- `hop-mcp-setup` — Auto-configure supported MCP clients
+### Development
 
-Startup behavior:
-- Hop reconciles already-running external Hay sessions first, then applies the default workspace as additional startup state.
-
-## 🧪 Terminal Backend
-
-Hop always uses the `external` terminal runtime (PTYs in a separate local hay host process).
-
-- The host persists across hop daemon restarts.
-- Host state is tracked in `~/.hop2/.hay-host-state`.
-- On startup and session listing, Hop discovers live hay-host processes and adopts the one(s) that still own runtime rooms if the state file is stale.
-- Local CLI transport is direct to hay-host; daemon restarts do not terminate local terminal sessions.
-- Bare `hop` prompts on cwd match (`Attach existing` vs `Create new`, default `Create new`); non-interactive runs always create new.
-- `HOP_TERMINAL_BACKEND` is accepted for compatibility but ignored.
-
-## 📦 Dependencies
-
-Installed automatically via Homebrew:
-- `cloudflared` — Cloudflare tunnel
-
-Node.js packages:
-- `http-proxy` — Request proxying
-- `otplib` — TOTP authentication
-- `qrcode-terminal` — QR code display
-- `cookie` — Session cookies
-
-## 🛡️ Security
-
-- **Password + TOTP** — Password optional, but required for custom domains
-- **Rate Limiting** — Exponential backoff on failed attempts
-- **Secure Cookies** — `httpOnly`, `secure`, `sameSite=lax`
-- **Session persistence** — Login cookies are signed with a stable session secret by default, so browser sessions can survive `hop stop/start` without reauth.
-- **Random URL** — Unguessable tunnel URL for quick tunnels
-- **Fixed URL** — Custom domains keep a stable URL
-- **Local Binding** — Server only listens on 127.0.0.1
-- **End-to-End TLS** — Cloudflare Tunnel encryption
-
-**Passwords:** Recommended for any public URL; required for custom domains.
-
-**Secrets:** Stored in `~/.hop2/` (treat like `~/.ssh/`)
-Set `HOP_PERSIST_SESSION_SECRET=0` to force a fresh login cookie secret every daemon restart.
-
-## 🛠 Development (Hay)
-
-The hay source is vendored in `./hay`. Hop will serve `hay/apps/web/dist` when present.
+The Hay source is vendored in `./hay`. Hop serves `hay/apps/web/dist` when present.
 
 ```bash
 npm run build
+npm test
 ```
 
-This builds hay (web + cli) and syncs `hay/apps/web/dist` into `hay-web/` for Hop to serve.
-If `./hay` exists and the dist folder is missing, `hop` will auto-build hay on startup.
+This rebuilds Hay and syncs `hay/apps/web/dist` into `hay-web/`. `npm test` runs a basic syntax sanity check on the main `hop` entrypoint. If `./hay` exists and the dist folder is missing, `hop` auto-builds Hay on startup.
 
-## 🤖 Hop MCP (One Subagent Terminal)
+## Troubleshooting
 
-Use one dedicated terminal when driving a subagent CLI through Hop MCP.
+- Authenticator QR again: run `hop qr auth`
+- Reset TOTP entirely: delete `.auth_secret` and restart Hop
+- Reset a client install: delete `~/.hop2/clients/<tunnel-id>/` and run `hop client` again
+- Tunnel not starting: install `cloudflared` with `brew install cloudflared`
+- Tunnel returning `502` after a network change: run `hop health --restart`
+- Stuck tunnel processes:
 
-1. Create a terminal with `hop_create_terminal` (set `name` and `cwd`).
-2. Start the agent CLI with `hop_write_terminal` (`claude` or `codex`).
-3. Wait for readiness with `hop_wait_terminal(until_prompt=true)`.
-4. Send one instruction at a time via `hopx_send_and_wait` (or `hop_write_terminal` + `hop_wait_terminal`).
-5. Optional helper path: use `hopx_agent_turn(mode="auto")` for a single send+wait turn with mode-aware output (`ui` for TUI screens, `readable_raw` otherwise); it auto-promotes to `ui` if alternate-screen starts mid-turn and uses lean capture defaults (`capture_max_events=60` for readable modes, `0` for `ui` unless overridden, plus `text_only=true` by default for readable waits).
-6. For long waits, prefer `hopx_agent_turn(async=true, ...)` and continue with `hopx_agent_turn(wait_id=..., wait=true, control="wait")`; fall back to `hop_wait_start(...)` / `hop_wait_poll(...)` when you want the lower-level primitives directly.
-7. After each turn, collect output with `hop_wait_terminal` or incremental `hop_read_terminal` cursor reads.
-8. Interrupt with `hop_send_key(key="ctrl_c")` and close using `hop_close_terminal`.
-
-Safety tips:
-- Keep one subagent per terminal.
-- Do not queue a second instruction before reading the first response.
-- For attached user sessions, confirm `agentPermitted` before sending input.
-
-## 🐛 Troubleshooting
-
-**Authenticator QR code needed again?**
-Run `hop qr auth` to re-show the current TOTP setup QR for Duo/Authy/1Password.
-
-**Need to reset TOTP entirely?**
-Delete `.auth_secret` and restart hop to generate a new authenticator secret and QR code.
-
-**Client reset (user mode)?**
-Delete `~/.hop2/clients/<tunnel-id>/` and run `hop client` again.
-
-**Tunnel not starting?**
-Make sure `cloudflared` is installed: `brew install cloudflared`
-
-**Tunnel returns 502 or died after network changes?**
-Run `hop health --restart`. Hop now waits for the public URL to become healthy again instead of only sending a fire-and-forget restart request.
-
-**Stuck processes?**
 ```bash
 pkill cloudflared
 ```
 
-## 📝 License
+## License
 
 MIT
-
----
-
-Made with 🐰 for hopping around
-
-```
-   ____
-  /    \
- | ^  ^ |     hop hop hop
- |  ..  |
-  \ -- /
-   ||||
-```

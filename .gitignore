@@ -21,4 +21,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+*.bak
+*.bak2
 .webauthn_credentials.json

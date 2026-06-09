@@ -324,9 +324,16 @@ const terminal = new Terminal({
   allowProposedApi: true
 });
 
+// True while replaying a snapshot's historical output into the terminal.
+// Snapshots are raw PTY history that can contain DSR/DA/CPR/OSC queries; xterm
+// answers them via onData, and forwarding those stale answers to the live PTY
+// injects junk (e.g. "^[[1;9R") at the remote prompt on every reconnect.
+let replayingSnapshot = false;
+
 // Forward terminal-generated responses (eg. DSR cursor reports) back to the PTY.
 terminal.onData((data) => {
   if (!data) return;
+  if (replayingSnapshot) return;
   sendMessage({ type: "input", data });
 });
 
@@ -414,15 +421,17 @@ const getSelectedText = (): string => {
   for (let row = sel.start.row; row <= sel.end.row; row++) {
     const line = buffer.getLine(row);
     if (!line) { lines.push(""); continue; }
-    const text = line.translateToString(true);
+    // Slice by buffer columns via translateToString's range args, not by JS
+    // string index — wide chars (CJK/emoji) span 2 columns but 1 code unit, so
+    // a column index into the collapsed string copies the wrong span.
     if (row === sel.start.row && row === sel.end.row) {
-      lines.push(text.slice(sel.start.col, sel.end.col + 1));
+      lines.push(line.translateToString(true, sel.start.col, sel.end.col + 1));
     } else if (row === sel.start.row) {
-      lines.push(text.slice(sel.start.col));
+      lines.push(line.translateToString(true, sel.start.col));
     } else if (row === sel.end.row) {
-      lines.push(text.slice(0, sel.end.col + 1));
+      lines.push(line.translateToString(true, 0, sel.end.col + 1));
     } else {
-      lines.push(text);
+      lines.push(line.translateToString(true));
     }
   }
   return lines.map(l => l.trimEnd()).join("\n");
@@ -791,6 +800,8 @@ const sendMessage = (message: ClientMessage) => {
 
 const sendOscResponse = (id: number, color: RgbColor | null) => {
   if (!color) return;
+  // Don't answer color queries that surface while replaying snapshot history.
+  if (replayingSnapshot) return;
   const toHex4 = (value: number) => Math.round(value * 257).toString(16).padStart(4, "0");
   const payload = `\x1b]${id};rgb:${toHex4(color.r)}/${toHex4(color.g)}/${toHex4(color.b)}\x1b\\`;
   sendMessage({ type: "input", data: payload });
@@ -1437,6 +1448,8 @@ const connect = () => {
     remoteAlternateScreen = false;
     remoteApplicationCursor = false;
     pendingPrivateMode = "";
+    pendingOsc = "";
+    replayingSnapshot = false;
     shortcutsEnabledAt = Date.now() + 400;
     reconnectAttempt = 0;
     setStatus("connected");
@@ -1497,12 +1510,16 @@ const connect = () => {
             remoteAlternateScreen = message.alternateScreen;
           }
           trackOscColors(message.data);
-          terminal.clear();
+          // reset() (not clear()) so the stale cursor position, SGR attrs, and
+          // mode state from the previous connection don't bleed into the replay.
+          terminal.reset();
           releaseScrollAnchor();
           followOutput = true;
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
+          replayingSnapshot = true;
           terminal.write(filtered, () => {
+            replayingSnapshot = false;
             if (followOutput) {
               followCursorWithMargin();
             } else {
@@ -1605,8 +1622,9 @@ const handleLocalShortcut = (input: string) => {
     clearSelection();
   }
 
-  const shouldExitImmediately =
-    !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+  // Anything other than an OPEN socket (CONNECTING included) means we can't
+  // round-trip through the server, so the Ctrl+Q/Ctrl+G handlers below exit
+  // locally rather than poisoning state and waiting on a close that never comes.
   const ctrlShortcutsReady = Date.now() >= shortcutsEnabledAt;
 
   // Ctrl+Q to kill session
@@ -1619,7 +1637,8 @@ const handleLocalShortcut = (input: string) => {
     if (ws?.readyState === WebSocket.OPEN) {
       sendMessage({ type: "kill_session" });
       setTimeout(() => ws?.close(), 100);
-    } else if (shouldExitImmediately) {
+    } else {
+      try { ws?.close(); } catch (e) { /* connecting socket */ }
       cleanupAndExit();
     }
     return true;
@@ -1634,7 +1653,8 @@ const handleLocalShortcut = (input: string) => {
     }
     if (ws?.readyState === WebSocket.OPEN) {
       ws.close();
-    } else if (shouldExitImmediately) {
+    } else {
+      try { ws?.close(); } catch (e) { /* connecting socket */ }
       cleanupAndExit();
     }
     return true;
@@ -1764,21 +1784,25 @@ process.stdout.on("resize", () => {
   scheduleRender();
 });
 
-process.on("SIGINT", () => {
+const handleSignalExit = () => {
   shouldReconnect = false;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   }
-  ws?.close();
-});
+  // If the socket is OPEN, let its close event drive cleanup; otherwise (closed,
+  // connecting, or mid-reconnect backoff) close() is a no-op that fires no event,
+  // so exit directly — else the process hangs in the alternate screen forever.
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  } else {
+    try { ws?.close(); } catch (e) { /* ignore */ }
+    cleanupAndExit();
+  }
+};
 
-process.on("SIGTERM", () => {
-  shouldReconnect = false;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-  }
-  ws?.close();
-});
+process.on("SIGINT", handleSignalExit);
+process.on("SIGTERM", handleSignalExit);
 
 process.on("exit", () => {
   stopDaemonPolling();

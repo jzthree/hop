@@ -579,7 +579,10 @@ const App = () => {
           optimisticEchoRef.current.reset();
           userScrolledUpRef.current = false;
           if (termRef.current) {
-            termRef.current.clear();
+            // reset() (not clear()) so a stale cursor column, SGR attrs, or
+            // leftover alt-screen/mouse-reporting mode from the previous
+            // connection don't bleed into the freshly replayed snapshot.
+            termRef.current.reset();
           }
           writeToTerminal(message.data);
           if (termRef.current) {
@@ -888,6 +891,7 @@ const App = () => {
         lastTouchY = touch.clientY;
         const cell = touchToCell(touch);
         if (!cell) return;
+        const endCol = cell.col;
 
         updateSelection(selAnchor.row, selAnchor.col, cell.row, cell.col);
 
@@ -898,18 +902,22 @@ const App = () => {
 
         stopSelScroll();
         if (touch.clientY < rect.top + edgeZone) {
-          // Near top — scroll up
+          // Near top — scroll up, extending the selection to the top visible row.
           selScrollTimer = window.setInterval(() => {
             terminal.scrollLines(-1);
-            if (selAnchor) selAnchor.row += 1; // anchor moves relative to viewport
-            scheduleRender();
+            if (selAnchor) {
+              selAnchor.row += 1; // anchor moves relative to viewport
+              updateSelection(selAnchor.row, selAnchor.col, 0, endCol);
+            }
           }, 60);
         } else if (touch.clientY > rect.bottom - edgeZone) {
-          // Near bottom — scroll down
+          // Near bottom — scroll down, extending to the bottom visible row.
           selScrollTimer = window.setInterval(() => {
             terminal.scrollLines(1);
-            if (selAnchor) selAnchor.row -= 1;
-            scheduleRender();
+            if (selAnchor) {
+              selAnchor.row -= 1;
+              updateSelection(selAnchor.row, selAnchor.col, terminal.rows - 1, endCol);
+            }
           }, 60);
         }
       };

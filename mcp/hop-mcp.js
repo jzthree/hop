@@ -46,6 +46,7 @@ const READABLE_PROMPT_PADDING_COMPLEX_RE = /^\s{4,}(?:\([^)\r\n]{0,24}\)\s*)?[^\
 const WAIT_START_MODES = ['latest', 'cursor', 'beginning'];
 const MAX_BUFFER_EVENTS = 2000;
 const STREAM_CONNECT_TIMEOUT_MS = 800;
+const REQUEST_JSON_TIMEOUT_MS = 30000;
 const CREATE_TERMINAL_OUTPUT_WARMUP_MS = 1200;
 const DEFAULT_TERMINAL_COLS = 140;
 const DEFAULT_TERMINAL_ROWS = 40;
@@ -1452,6 +1453,11 @@ function requestJson(method, baseUrl, endpoint, token, actor, body) {
       });
     });
     req.on('error', reject);
+    // Without a timeout a wedged daemon (or half-open TCP through the tunnel)
+    // leaves every tool call awaiting forever and the MCP server looks dead.
+    req.setTimeout(REQUEST_JSON_TIMEOUT_MS, () => {
+      req.destroy(new Error(`request to ${endpoint} timed out after ${REQUEST_JSON_TIMEOUT_MS}ms`));
+    });
     if (payload) req.write(payload);
     req.end();
   });

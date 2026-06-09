@@ -6006,6 +6006,17 @@ function startAuthProxy(authEmitter) {
             filePath = path.join(HAY_WEB_DIR, 'index.html');
         }
 
+        // Containment check: prevent path traversal (e.g. /assets/../../secret)
+        // from escaping the web asset directory via raw ".." segments.
+        const resolvedFilePath = path.resolve(filePath);
+        const webDirRoot = path.resolve(HAY_WEB_DIR);
+        if (resolvedFilePath !== webDirRoot && !resolvedFilePath.startsWith(webDirRoot + path.sep)) {
+            res.writeHead(403);
+            res.end('Forbidden');
+            return;
+        }
+        filePath = resolvedFilePath;
+
         // Check if file exists
         if (!fs.existsSync(filePath)) {
             res.writeHead(404);
@@ -6119,6 +6130,9 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${targetPort}`, ws: true });
+            proxy.once('error', () => {
+                try { socket.destroy(); } catch (e) { }
+            });
             const originalUrl = req.url;
             req.url = sessionInfo ? sessionInfo.strippedUrl : req.url;
             proxy.ws(req, socket, head);

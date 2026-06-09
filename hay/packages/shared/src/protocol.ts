@@ -54,6 +54,10 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("session_renamed"),
     displayName: z.string()
   }),
+  z.object({
+    type: z.literal("cwd_changed"),
+    cwd: z.string()
+  }),
   z.object({ type: z.literal("pong"), t: z.number() }),
   // Broadcast when active user's terminal size should be followed
   z.object({ type: z.literal("active_size"), clientId: z.string(), cols: z.number().int(), rows: z.number().int() })

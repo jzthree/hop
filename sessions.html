@@ -74,6 +74,20 @@
             .menu-item:hover { background: #fafafa; }
             .menu-item:active { background: #f4f4f5; }
             .menu-help { padding: 0.5rem 0.75rem 0.35rem; font-size: 0.75rem; color: #71717a; }
+            dialog { border: none; border-radius: 16px; padding: 0; width: min(520px, calc(100vw - 2rem)); box-shadow: 0 24px 60px rgba(24, 24, 27, 0.18); }
+            dialog::backdrop { background: rgba(24, 24, 27, 0.35); }
+            .dialog-card { padding: 1rem; }
+            .dialog-title { font-size: 1rem; font-weight: 600; margin: 0 0 0.35rem; }
+            .dialog-subtitle { font-size: 0.85rem; color: #71717a; margin: 0 0 1rem; }
+            .dialog-field { width: 100%; padding: 0.75rem 0.9rem; border: 1px solid #e4e4e7; border-radius: 10px; font-size: 0.95rem; margin-bottom: 0.85rem; }
+            .dialog-list { border: 1px solid #e4e4e7; border-radius: 12px; max-height: 280px; overflow: auto; margin-bottom: 0.85rem; }
+            .dialog-empty { padding: 1rem; color: #71717a; font-size: 0.9rem; }
+            .dialog-option { display: flex; gap: 0.75rem; align-items: flex-start; padding: 0.85rem 0.9rem; border-bottom: 1px solid #e4e4e7; }
+            .dialog-option:last-child { border-bottom: none; }
+            .dialog-option input { margin-top: 0.2rem; }
+            .dialog-option-name { font-weight: 500; font-size: 0.95rem; color: #18181b; }
+            .dialog-option-meta { font-size: 0.8rem; color: #71717a; margin-top: 0.15rem; word-break: break-all; }
+            .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
             @media (max-width: 480px) {
                 body { padding: 1rem; }
                 .new-session { flex-direction: column; }
@@ -82,6 +96,8 @@
                 .new-session .btn { width: 100%; }
                 .toolbar { grid-template-columns: 1fr; }
                 .menu-panel { position: static; margin-top: 0.5rem; box-shadow: none; }
+                .dialog-actions { flex-direction: column-reverse; }
+                .dialog-actions .btn { width: 100%; }
             }
         </style>
     </head>
@@ -107,10 +123,10 @@
                 <details class="menu" id="workspaceMenu">
                     <summary class="btn btn-secondary">Workspace</summary>
                     <div class="menu-panel">
-                        <div class="menu-help">Workspaces save and restore sets of sessions.</div>
+                        <div class="menu-help">Create empty workspaces, snapshot live sessions, and load saved sets.</div>
+                        <button class="menu-item" onclick="closeMenus(); createWorkspacePrompt()">Create workspace...</button>
                         <button class="menu-item" onclick="closeMenus(); saveWorkspacePrompt()">Save workspace...</button>
                         <button class="menu-item" onclick="closeMenus(); loadWorkspacePrompt()">Load workspace...</button>
-                        <button class="menu-item" onclick="closeMenus(); useWorkspacePrompt()">Set default workspace...</button>
                     </div>
                 </details>
             </div>
@@ -118,16 +134,30 @@
                 <div class="empty">Loading sessions...</div>
             </div>
         </div>
+        <dialog id="workspaceSaveDialog">
+            <form method="dialog" class="dialog-card" onsubmit="event.preventDefault(); submitWorkspaceSave()">
+                <p class="dialog-title">Save Workspace</p>
+                <p class="dialog-subtitle">Choose which live terminal sessions should be saved into this workspace.</p>
+                <input class="dialog-field" id="workspaceSaveName" placeholder="Workspace name..." pattern="[a-zA-Z0-9_-]+">
+                <div class="dialog-list" id="workspaceSaveOptions"></div>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeWorkspaceSaveDialog()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save workspace</button>
+                </div>
+            </form>
+        </dialog>
         <script>
             function showLoading() {
                 document.getElementById('loading').classList.add('show');
             }
 
             let dragSessionId = null;
+            let latestSessionsData = { sessions: [], active: [], starting: [] };
 
             async function loadSessions() {
                 const res = await fetch('/api/sessions');
                 const data = await res.json();
+                latestSessionsData = data;
                 const list = document.getElementById('sessionList');
                 const sessions = data.sessions || [];
                 const active = data.active || [];
@@ -187,14 +217,14 @@
                             ? '<span class="starting-badge">STARTING</span>'
                             : (isPort
                                 ? `<span class="port-badge">${portLabel}</span>`
-                                : '<span class="saved-badge">SAVED</span>'));
+                                : '<span class="saved-badge">WORKSPACE</span>'));
                     const metaText = isPort
                         ? `Proxy to localhost:${s.port || ''}`
                         : (isStarting
                             ? 'Starting...'
                             : (isLive
                                 ? (s.windows ? s.windows + ' window(s)' : 'Live session')
-                                : 'Saved session. Join starts a fresh shell.'));
+                                : 'Workspace session. Join starts a fresh shell.'));
                     const agentToggle = !isPort ? `
                         <div class="agent-row">
                             <span class="agent-label">Agent access</span>
@@ -350,18 +380,42 @@
                 document.querySelectorAll('details.menu[open]').forEach(d => { d.open = false; });
             }
 
-            async function saveWorkspacePrompt() {
-                const name = prompt('Save workspace as:');
+            async function createWorkspacePrompt() {
+                const name = prompt('Create workspace:');
                 if (!name) return;
                 if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
-                const res = await fetch('/api/workspaces/save', {
+                const res = await fetch('/api/workspaces/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name })
                 });
                 if (!res.ok) {
-                    alert('Failed to save workspace.');
+                    const data = await res.json().catch(() => ({}));
+                    alert(data.error || 'Failed to create workspace.');
                 }
+            }
+
+            async function saveWorkspacePrompt() {
+                const liveSessions = (latestSessionsData.sessions || [])
+                    .filter((entry) => entry && entry.type === 'terminal' && entry.live === true);
+                const options = document.getElementById('workspaceSaveOptions');
+                const nameInput = document.getElementById('workspaceSaveName');
+                if (liveSessions.length === 0) {
+                    alert('No live terminal sessions to save.');
+                    return;
+                }
+                options.innerHTML = liveSessions.map((entry, index) => `
+                    <label class="dialog-option">
+                        <input type="checkbox" value="${entry.internalName}" ${index === 0 ? 'checked' : ''}>
+                        <span>
+                            <div class="dialog-option-name">${entry.displayName || entry.name}</div>
+                            <div class="dialog-option-meta">${entry.cwd || 'Live terminal session'}</div>
+                        </span>
+                    </label>
+                `).join('');
+                nameInput.value = '';
+                document.getElementById('workspaceSaveDialog').showModal();
+                nameInput.focus();
             }
 
             async function loadWorkspacePrompt() {
@@ -379,18 +433,28 @@
                 loadSessions();
             }
 
-            async function useWorkspacePrompt() {
-                const name = prompt('Set default workspace:');
-                if (!name) return;
+            function closeWorkspaceSaveDialog() {
+                document.getElementById('workspaceSaveDialog').close();
+            }
+
+            async function submitWorkspaceSave() {
+                const name = document.getElementById('workspaceSaveName').value.trim();
+                if (!name) return alert('Enter a workspace name.');
                 if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
-                const res = await fetch('/api/workspaces/use', {
+                const sessionNames = Array.from(document.querySelectorAll('#workspaceSaveOptions input:checked'))
+                    .map((input) => input.value);
+                if (sessionNames.length === 0) return alert('Select at least one live session.');
+                const res = await fetch('/api/workspaces/save', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name })
+                    body: JSON.stringify({ name, sessionNames })
                 });
                 if (!res.ok) {
-                    alert('Failed to set default workspace.');
+                    const data = await res.json().catch(() => ({}));
+                    alert(data.error || 'Failed to save workspace.');
+                    return;
                 }
+                closeWorkspaceSaveDialog();
             }
 
             async function moveSession(internalName, folderId, index) {

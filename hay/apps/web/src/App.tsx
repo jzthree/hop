@@ -72,25 +72,87 @@ const createShareLink = (room: string) => {
   return url.toString();
 };
 
-const terminalTheme = {
-  background: "#0b1117",
+const darkTerminalTheme = {
+  background: "#0d1117",
   foreground: "#e6edf3",
-  cursor: "#f97316",
-  selection: "#1f2937",
-  black: "#0b1117",
-  red: "#ef4444",
-  green: "#22c55e",
-  yellow: "#f59e0b",
-  blue: "#3b82f6",
-  magenta: "#d946ef",
-  cyan: "#14b8a6",
-  white: "#e5e7eb"
+  cursor: "#60a5fa",
+  cursorAccent: "#0d1117",
+  selectionBackground: "#264f78",
+  selectionForeground: "#e6edf3",
+  black: "#0d1117",
+  red: "#f87171",
+  green: "#4ade80",
+  yellow: "#facc15",
+  blue: "#60a5fa",
+  magenta: "#c084fc",
+  cyan: "#22d3ee",
+  white: "#e5e7eb",
+  brightBlack: "#6b7280",
+  brightRed: "#fca5a5",
+  brightGreen: "#86efac",
+  brightYellow: "#fde68a",
+  brightBlue: "#93c5fd",
+  brightMagenta: "#d8b4fe",
+  brightCyan: "#67e8f9",
+  brightWhite: "#f9fafb"
+};
+
+// Light theme modeled on iTerm2's "Light Background" profile
+const lightTerminalTheme = {
+  background: "#ffffff",
+  foreground: "#000000",
+  cursor: "#000000",
+  cursorAccent: "#ffffff",
+  selectionBackground: "#b5d5ff",
+  selectionForeground: "#000000",
+  selectionInactiveBackground: "#d0d0d0",
+  black: "#000000",
+  red: "#c91b00",
+  green: "#00a600",
+  yellow: "#c7c400",
+  blue: "#0225c7",
+  magenta: "#c930c7",
+  cyan: "#00a6b2",
+  white: "#c7c7c7",
+  brightBlack: "#676767",
+  brightRed: "#ff6d67",
+  brightGreen: "#5ff967",
+  brightYellow: "#fefb67",
+  brightBlue: "#6871ff",
+  brightMagenta: "#ff76ff",
+  brightCyan: "#5ffdff",
+  brightWhite: "#feffff"
+};
+
+const resolveTerminalTheme = (mode: string) => {
+  if (mode === "dark") return darkTerminalTheme;
+  if (mode === "light") return lightTerminalTheme;
+  // "system" — check media query
+  if (typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+    return darkTerminalTheme;
+  }
+  return lightTerminalTheme;
 };
 
 const isMobileDevice = () => {
   if (typeof window === "undefined") return false;
   const ua = navigator.userAgent || "";
   return /iPhone|iPad|iPod|Android/i.test(ua) || window.innerWidth < 768;
+};
+
+/** Shorten a path for display: replace home dir with ~ and truncate long paths. */
+const shortenPath = (cwdPath: string) => {
+  if (!cwdPath) return "";
+  let display = cwdPath;
+  const homeMatch = cwdPath.match(/^(\/(?:Users|home)\/[^/]+)(\/.*)?$/);
+  if (homeMatch) {
+    display = "~" + (homeMatch[2] || "");
+  } else if (cwdPath === "/root") {
+    display = "~";
+  } else if (cwdPath.startsWith("/root/")) {
+    display = "~" + cwdPath.slice(5);
+  }
+  return display;
 };
 
 type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected";
@@ -105,6 +167,7 @@ type SessionInfo = {
   starting: boolean;
   type?: "terminal" | "port";
   port?: number;
+  cwd?: string;
 };
 
 // Check if embedded in Hop
@@ -129,12 +192,15 @@ const App = () => {
     return null;
   });
   const [sessionLabel, setSessionLabel] = useState(() => initialRoom);
+  const [liveCwd, setLiveCwd] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [presence, setPresence] = useState<PresenceClient[]>([]);
   const [collabMode, setCollabMode] = useState(true);
   const [controllerId, setControllerId] = useState<string | null>(null);
   const [clientId, setClientId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimeout = useRef<number | null>(null);
   const [latencyComp, setLatencyComp] = useState(true);
   const [autoFitOnType, setAutoFitOnType] = useState(true);
   const [terminalReady, setTerminalReady] = useState(false);
@@ -152,6 +218,10 @@ const App = () => {
   const [hapticsEnabled, setHapticsEnabled] = useState(() => {
     const saved = localStorage.getItem("hay_haptics_enabled");
     return saved !== "false";
+  });
+  type ThemeMode = "system" | "light" | "dark";
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    return (localStorage.getItem("hay_theme") as ThemeMode) || "system";
   });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
@@ -196,6 +266,31 @@ const App = () => {
     localStorage.setItem("hay_haptics_enabled", hapticsEnabled ? "true" : "false");
   }, [hapticsEnabled]);
   useEffect(() => {
+    localStorage.setItem("hay_theme", themeMode);
+    const root = document.documentElement;
+    if (themeMode === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", themeMode);
+    }
+    // Update terminal theme live
+    if (termRef.current) {
+      const t = termRef.current;
+      const newTheme = resolveTerminalTheme(themeMode);
+      t.options.theme = newTheme;
+      // xterm sets background-color inline on the viewport element — update it
+      const viewport = containerRef.current?.querySelector('.xterm-viewport') as HTMLElement | null;
+      if (viewport) {
+        viewport.style.backgroundColor = newTheme.background ?? '';
+      }
+      // Force canvas re-render: clear the texture atlas and refresh all rows
+      if (typeof (t as any).clearTextureAtlas === 'function') {
+        (t as any).clearTextureAtlas();
+      }
+      t.refresh(0, t.rows - 1);
+    }
+  }, [themeMode]);
+  useEffect(() => {
     localStorage.setItem("hay_session_switch_mode", sessionSwitchMode);
   }, [sessionSwitchMode]);
 
@@ -220,6 +315,51 @@ const App = () => {
     noticeTimeout.current = window.setTimeout(() => {
       setNotice(null);
     }, 3000);
+  };
+
+  const showToast = (message: string, durationMs = 2000) => {
+    setToast(message);
+    if (toastTimeout.current) {
+      window.clearTimeout(toastTimeout.current);
+    }
+    toastTimeout.current = window.setTimeout(() => {
+      setToast(null);
+    }, durationMs);
+  };
+
+  const getVisibleText = () => {
+    const terminal = termRef.current;
+    if (!terminal) return "";
+    const buffer = terminal.buffer.active;
+    const start = buffer.viewportY;
+    const end = Math.min(start + terminal.rows, buffer.length);
+    const lines: string[] = [];
+    for (let i = start; i < end; i++) {
+      lines.push(buffer.getLine(i)?.translateToString(true) ?? "");
+    }
+    return lines.join("\n").trimEnd();
+  };
+
+  const getBufferText = (maxLines = 0) => {
+    const terminal = termRef.current;
+    if (!terminal) return "";
+    const buffer = terminal.buffer.active;
+    const total = buffer.length;
+    const start = maxLines > 0 ? Math.max(0, total - maxLines) : 0;
+    const lines: string[] = [];
+    for (let i = start; i < total; i++) {
+      lines.push(buffer.getLine(i)?.translateToString(true) ?? "");
+    }
+    return lines.join("\n").trimEnd();
+  };
+
+  const copyToClipboard = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      pushNotice(`${label} copied (${text.split("\n").length} lines)`);
+    } catch {
+      pushNotice("Copy failed");
+    }
   };
 
   useEffect(() => {
@@ -489,6 +629,9 @@ const App = () => {
           setSessionLabel(message.displayName);
           pushNotice(`Session renamed to ${message.displayName}`);
           break;
+        case "cwd_changed":
+          setLiveCwd(message.cwd);
+          break;
         default:
           break;
       }
@@ -540,7 +683,7 @@ const App = () => {
       fontSize,
       lineHeight: 1.3,
       cursorBlink: true,
-      theme: terminalTheme
+      theme: resolveTerminalTheme(themeMode)
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
@@ -668,10 +811,145 @@ const App = () => {
       (terminal as any).__touchCleanup = null;
     }
 
-    // Selection mode uses native text selection; CSS re-enables pointer events
-    // on xterm rows so iOS handles selection, and we skip custom scrolling.
+    // Selection mode: use xterm.js built-in selection driven by touch events.
+    // This supports selecting across the full scrollback buffer with auto-scroll.
     if (selectionMode) {
-      return;
+      const getCellDims = () => {
+        const core = (terminal as any)._core;
+        const w = core?._renderService?.dimensions?.css?.cell?.width;
+        const h = core?._renderService?.dimensions?.css?.cell?.height;
+        return { w: w && w > 0 ? w : 9, h: h && h > 0 ? h : 18 };
+      };
+
+      const getTermRect = () => {
+        const el = containerRef.current?.querySelector('.xterm-screen');
+        return el ? el.getBoundingClientRect() : null;
+      };
+
+      const touchToCell = (touch: Touch) => {
+        const rect = getTermRect();
+        if (!rect) return null;
+        const cell = getCellDims();
+        const col = Math.floor((touch.clientX - rect.left) / cell.w);
+        const row = Math.floor((touch.clientY - rect.top) / cell.h);
+        return { col: Math.max(0, col), row: Math.max(0, row) };
+      };
+
+      let selAnchor: { col: number; row: number } | null = null;
+      let selScrollTimer: number | null = null;
+      let lastTouchY = 0;
+      let isDragging = false;
+
+      const stopSelScroll = () => {
+        if (selScrollTimer !== null) {
+          clearInterval(selScrollTimer);
+          selScrollTimer = null;
+        }
+      };
+
+      const updateSelection = (anchorRow: number, anchorCol: number, endRow: number, endCol: number) => {
+        const buffer = terminal.buffer.active;
+        const absAnchorRow = buffer.viewportY + anchorRow;
+        const absEndRow = buffer.viewportY + endRow;
+        let startRow: number, startCol: number, finalRow: number, finalCol: number;
+        if (absAnchorRow < absEndRow || (absAnchorRow === absEndRow && anchorCol <= endCol)) {
+          startRow = absAnchorRow; startCol = anchorCol; finalRow = absEndRow; finalCol = endCol;
+        } else {
+          startRow = absEndRow; startCol = endCol; finalRow = absAnchorRow; finalCol = anchorCol;
+        }
+        // select() takes column, row (in buffer coords), and length
+        // For multi-line, use selectLines then refine — or compute total length
+        // Simplest: select line range then we get full lines
+        if (startRow === finalRow) {
+          const len = Math.max(1, finalCol - startCol + 1);
+          terminal.select(startCol, startRow, len);
+        } else {
+          terminal.selectLines(startRow, finalRow);
+        }
+      };
+
+      const handleSelTouchStart = (e: TouchEvent) => {
+        if (e.touches.length !== 1) return;
+        if (e.cancelable) e.preventDefault();
+        const cell = touchToCell(e.touches[0]);
+        if (!cell) return;
+        terminal.clearSelection();
+        selAnchor = cell;
+        lastTouchY = e.touches[0].clientY;
+        isDragging = false;
+      };
+
+      const handleSelTouchMove = (e: TouchEvent) => {
+        if (e.touches.length !== 1 || !selAnchor) return;
+        if (e.cancelable) e.preventDefault();
+        isDragging = true;
+
+        const touch = e.touches[0];
+        lastTouchY = touch.clientY;
+        const cell = touchToCell(touch);
+        if (!cell) return;
+
+        updateSelection(selAnchor.row, selAnchor.col, cell.row, cell.col);
+
+        // Auto-scroll at edges
+        const rect = getTermRect();
+        if (!rect) return;
+        const edgeZone = getCellDims().h * 2;
+
+        stopSelScroll();
+        if (touch.clientY < rect.top + edgeZone) {
+          // Near top — scroll up
+          selScrollTimer = window.setInterval(() => {
+            terminal.scrollLines(-1);
+            if (selAnchor) selAnchor.row += 1; // anchor moves relative to viewport
+            scheduleRender();
+          }, 60);
+        } else if (touch.clientY > rect.bottom - edgeZone) {
+          // Near bottom — scroll down
+          selScrollTimer = window.setInterval(() => {
+            terminal.scrollLines(1);
+            if (selAnchor) selAnchor.row -= 1;
+            scheduleRender();
+          }, 60);
+        }
+      };
+
+      const handleSelTouchEnd = (e: TouchEvent) => {
+        stopSelScroll();
+        if (isDragging && terminal.hasSelection()) {
+          const text = terminal.getSelection();
+          if (text) {
+            navigator.clipboard.writeText(text).then(
+              () => showToast(`Copied ${text.split("\n").length} line(s)`),
+              () => showToast("Copy failed")
+            );
+          }
+        } else {
+          terminal.clearSelection();
+        }
+        selAnchor = null;
+        isDragging = false;
+      };
+
+      container.addEventListener('touchstart', handleSelTouchStart, { passive: false, capture: true });
+      container.addEventListener('touchmove', handleSelTouchMove, { passive: false, capture: true });
+      container.addEventListener('touchend', handleSelTouchEnd, { passive: true, capture: true });
+      container.addEventListener('touchcancel', handleSelTouchEnd, { passive: true, capture: true });
+
+      (terminal as any).__touchCleanup = () => {
+        stopSelScroll();
+        container.removeEventListener('touchstart', handleSelTouchStart, { capture: true });
+        container.removeEventListener('touchmove', handleSelTouchMove, { capture: true });
+        container.removeEventListener('touchend', handleSelTouchEnd, { capture: true });
+        container.removeEventListener('touchcancel', handleSelTouchEnd, { capture: true });
+      };
+
+      return () => {
+        if ((terminal as any).__touchCleanup) {
+          (terminal as any).__touchCleanup();
+          (terminal as any).__touchCleanup = null;
+        }
+      };
     }
 
     // Mobile touch scrolling with momentum (native-feeling)
@@ -918,50 +1196,8 @@ const App = () => {
     };
   }, [terminalReady, isMobile, selectionMode]);
 
-  useEffect(() => {
-    if (!isMobile || !selectionMode) {
-      return;
-    }
-    const container = containerRef.current?.closest(".terminal-scroll");
-    if (!container) {
-      return;
-    }
-
-    const resetUserSelect = () => {
-      const xterm = containerRef.current?.querySelector(".xterm") as HTMLElement | null;
-      if (!xterm) {
-        return;
-      }
-      xterm.style.webkitUserSelect = "none";
-      xterm.style.userSelect = "none";
-      requestAnimationFrame(() => {
-        xterm.style.webkitUserSelect = "";
-        xterm.style.userSelect = "";
-      });
-    };
-
-    const handleClick = () => {
-      const selection = window.getSelection();
-      if (!selection || !selection.isCollapsed) {
-        return;
-      }
-      const textarea = containerRef.current?.querySelector("textarea") as HTMLTextAreaElement | null;
-      const active = document.activeElement as HTMLElement | null;
-      selection.removeAllRanges();
-      textarea?.blur();
-      if (active && active !== document.body) {
-        active.blur();
-      }
-      termRef.current?.clearSelection?.();
-      termRef.current?.blur?.();
-      resetUserSelect();
-    };
-
-    container.addEventListener("click", handleClick, true);
-    return () => {
-      container.removeEventListener("click", handleClick, true);
-    };
-  }, [isMobile, selectionMode]);
+  // No separate native selection effect needed — xterm selection handles everything
+  // in select mode via the touch handlers registered above.
 
   useEffect(() => {
     if (!session) {
@@ -1051,7 +1287,8 @@ const App = () => {
           active: (data.active || []).includes(s.name),
           starting: (data.starting || []).includes(s.name),
           type: s.type,
-          port: s.port
+          port: s.port,
+          cwd: s.cwd
         });
       }
 
@@ -1147,6 +1384,7 @@ const App = () => {
     setPresence([]);
     setControllerId(null);
     setClientId(null);
+    setLiveCwd(null);
     setStatus("connecting");
     setRoom(nextSession.name);
     setSessionLabel(nextSession.displayName || nextSession.name);
@@ -1315,9 +1553,10 @@ const App = () => {
             onTouchMove={(e) => handleFabDragMove(e.touches[0].clientX, e.touches[0].clientY)}
             onTouchEnd={handleFabDragEnd}
           >
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2" fill="currentColor"/>
+              <line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2" fill="currentColor"/>
+              <line x1="4" y1="18" x2="20" y2="18"/><circle cx="11" cy="18" r="2" fill="currentColor"/>
             </svg>
           </button>
           {drawerOpen && (
@@ -1331,119 +1570,119 @@ const App = () => {
             >
               ✕
             </button>
+            {/* Session info */}
             <div className="room-info">
               <p className="room-label">Session</p>
               <h2>{sessionLabel || session.room}</h2>
+              {liveCwd && (
+                <p className="room-cwd" title={liveCwd}>{shortenPath(liveCwd)}</p>
+              )}
               <p className="room-meta">
                 {status === "connected" ? "Live" : status === "connecting" ? "Connecting" : "Offline"}
               </p>
             </div>
-            <div className="control-actions">
+
+            {/* Quick actions — compact row */}
+            <div className="quick-actions">
               {isMobile && (
-                <button type="button" onClick={() => { handleKeyboardToggle(); setDrawerOpen(false); }}>
-                  {keyboardVisible ? "Hide keyboard" : "Show keyboard"}
+                <button type="button" className="quick-btn" onClick={() => { handleKeyboardToggle(); setDrawerOpen(false); }} title={keyboardVisible ? "Hide keyboard" : "Show keyboard"}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="4" width="20" height="14" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/>
+                  </svg>
+                  {keyboardVisible ? "" : ""}
                 </button>
               )}
-              <button type="button" onClick={handleCopyLink}>
-                Copy link
+              <button type="button" className="quick-btn" onClick={handleCopyLink} title="Copy share link">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
               </button>
-              <button type="button" onClick={() => { fitToViewport(); handleResize(); }}>
-                Fit to screen
+              <button type="button" className="quick-btn" onClick={() => { fitToViewport(); handleResize(); }}>
+                Fit
+              </button>
+              <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
+                Manage
               </button>
               {status === "disconnected" && (
-                <button type="button" onClick={() => setReconnectToken((value) => value + 1)}>
+                <button type="button" className="quick-btn primary" onClick={() => setReconnectToken((value) => value + 1)}>
                   Reconnect
                 </button>
               )}
             </div>
-            <div className="font-size-control">
-              <label>Font size</label>
-              <div className="font-size-buttons">
-                <button type="button" onClick={() => setFontSize((s) => Math.max(8, s - 1))}>−</button>
-                <span>{fontSize}px</span>
-                <button type="button" onClick={() => setFontSize((s) => Math.min(24, s + 1))}>+</button>
-              </div>
-            </div>
-            <div className="view-mode-control">
-              <label>View mode</label>
-              <div className="view-mode-buttons">
-                <button
-                  type="button"
-                  className={viewMode === "fit" ? "active" : ""}
-                  onClick={() => setViewMode("fit")}
-                >
-                  Auto-fit
-                </button>
-                <button
-                  type="button"
-                  className={viewMode === "full" ? "active" : ""}
-                  onClick={() => setViewMode("full")}
-                >
-                  Manual
-                </button>
-              </div>
-            </div>
-            <div className="view-mode-control">
-              <label>Session switch</label>
-              <div className="view-mode-buttons">
-                <button
-                  type="button"
-                  className={sessionSwitchMode === "page" ? "active" : ""}
-                  onClick={() => setSessionSwitchMode("page")}
-                >
-                  Page load
-                </button>
-                <button
-                  type="button"
-                  className={sessionSwitchMode === "instant" ? "active" : ""}
-                  onClick={() => setSessionSwitchMode("instant")}
-                >
-                  Instant
-                </button>
-              </div>
-            </div>
-            {isMobile && (
-              <div className="selection-mode-control">
-                <label>Selection mode</label>
+
+            {/* Display settings */}
+            <div className="drawer-group">
+              <div className="drawer-row">
+                <label>Theme</label>
                 <div className="view-mode-buttons">
-                  <button
-                    type="button"
-                    className={!selectionMode ? "active" : ""}
-                    onClick={() => setSelectionMode(false)}
-                  >
-                    Scroll
-                  </button>
-                  <button
-                    type="button"
-                    className={selectionMode ? "active" : ""}
-                    onClick={() => setSelectionMode(true)}
-                  >
-                    Select
-                  </button>
+                  <button type="button" className={themeMode === "system" ? "active" : ""} onClick={() => setThemeMode("system")}>Auto</button>
+                  <button type="button" className={themeMode === "light" ? "active" : ""} onClick={() => setThemeMode("light")}>Light</button>
+                  <button type="button" className={themeMode === "dark" ? "active" : ""} onClick={() => setThemeMode("dark")}>Dark</button>
                 </div>
               </div>
-            )}
-            {isMobile && (
-              <div className="haptics-control">
-                <label>Haptics</label>
-                <div className="view-mode-buttons">
-                  <button
-                    type="button"
-                    className={hapticsEnabled ? "active" : ""}
-                    onClick={() => setHapticsEnabled(true)}
-                  >
-                    On
-                  </button>
-                  <button
-                    type="button"
-                    className={!hapticsEnabled ? "active" : ""}
-                    onClick={() => setHapticsEnabled(false)}
-                  >
-                    Off
-                  </button>
+              <div className="drawer-row">
+                <label>Font</label>
+                <div className="font-size-buttons">
+                  <button type="button" onClick={() => setFontSize((s) => Math.max(8, s - 1))}>−</button>
+                  <span>{fontSize}px</span>
+                  <button type="button" onClick={() => setFontSize((s) => Math.min(24, s + 1))}>+</button>
                 </div>
               </div>
-            )}
+              {isMobile && (
+                <div className="drawer-row">
+                  <label>Touch</label>
+                  <div className="view-mode-buttons">
+                    <button type="button" className={!selectionMode ? "active" : ""} onClick={() => setSelectionMode(false)}>Scroll</button>
+                    <button type="button" className={selectionMode ? "active" : ""} onClick={() => setSelectionMode(true)}>Select</button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Copy */}
+            <div className="copy-actions">
+              <div className="copy-buttons">
+                <button type="button" onClick={() => copyToClipboard(getVisibleText(), "Visible text")}>
+                  Copy visible
+                </button>
+                <button type="button" onClick={() => copyToClipboard(getBufferText(200), "Last 200 lines")}>
+                  Last 200
+                </button>
+                <button type="button" onClick={() => copyToClipboard(getBufferText(), "Full buffer")}>
+                  Copy all
+                </button>
+              </div>
+            </div>
+
+            {/* Advanced settings — collapsed */}
+            <details className="drawer-details">
+              <summary>More settings</summary>
+              <div className="drawer-group">
+                <div className="drawer-row">
+                  <label>View</label>
+                  <div className="view-mode-buttons">
+                    <button type="button" className={viewMode === "fit" ? "active" : ""} onClick={() => setViewMode("fit")}>Auto-fit</button>
+                    <button type="button" className={viewMode === "full" ? "active" : ""} onClick={() => setViewMode("full")}>Manual</button>
+                  </div>
+                </div>
+                <div className="drawer-row">
+                  <label>Switch</label>
+                  <div className="view-mode-buttons">
+                    <button type="button" className={sessionSwitchMode === "page" ? "active" : ""} onClick={() => setSessionSwitchMode("page")}>Page</button>
+                    <button type="button" className={sessionSwitchMode === "instant" ? "active" : ""} onClick={() => setSessionSwitchMode("instant")}>Instant</button>
+                  </div>
+                </div>
+                {isMobile && (
+                  <div className="drawer-row">
+                    <label>Haptics</label>
+                    <div className="view-mode-buttons">
+                      <button type="button" className={hapticsEnabled ? "active" : ""} onClick={() => setHapticsEnabled(true)}>On</button>
+                      <button type="button" className={!hapticsEnabled ? "active" : ""} onClick={() => setHapticsEnabled(false)}>Off</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </details>
             {notice && <p className="notice">{notice}</p>}
             {(() => {
               const currentSessionName = sessionLabel || session?.room;
@@ -1464,7 +1703,10 @@ const App = () => {
                           className={`session-list-item${s.active ? " active" : ""}${s.starting ? " starting" : ""}`}
                           onClick={() => switchSession(s)}
                         >
-                          <span className="session-list-name">{s.displayName}</span>
+                          <span className="session-list-name-group">
+                            <span className="session-list-name">{s.displayName}</span>
+                            {s.cwd && <span className="session-list-cwd">{shortenPath(s.cwd)}</span>}
+                          </span>
                           {s.active && <span className="session-badge live">LIVE</span>}
                           {s.starting && !s.active && <span className="session-badge starting">STARTING</span>}
                           {s.type === "port" && <span className="session-badge port">PORT {s.port}</span>}
@@ -1506,6 +1748,7 @@ const App = () => {
               hapticsEnabled={hapticsEnabled}
             />
           )}
+          {toast && <div className="terminal-toast">{toast}</div>}
         </main>
       )}
     </div>

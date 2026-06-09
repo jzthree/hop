@@ -17,7 +17,7 @@ Hop gives you secure browser access to local terminals and a built-in MCP server
 - **Browser terminal from anywhere** — Tunnel through Cloudflare with no port forwarding
 - **MCP-native terminal control** — Claude Code, Codex, Gemini, Cursor, and other MCP clients can create terminals, stream output, and send input through Hop
 - **One runtime for humans and agents** — The browser UI, local CLI, and MCP server operate on the same sessions
-- **Operationally useful primitives** — Named sessions, port sessions, auto-attach, and per-session workspaces
+- **Operationally useful primitives** — Named sessions, port sessions, auto-attach, and explicit workspace snapshots
 - **Auditability built in** — Per-session logs, isolated agent history, and TUI-aware capture defaults
 - **Security when you need it** — Password + 2FA, custom domains, and multi-user support
 
@@ -114,15 +114,23 @@ Create multiple independent terminal sessions from the Session Picker (`/session
 - Create a new named shell session
 - Join any existing session
 - Share a live session between multiple devices
+- Save selected live terminal sessions into a named workspace when you want to reuse them later
 
-You can also create sessions from the CLI:
+Scratch sessions stay live-only unless you explicitly save them into a workspace. To save reusable definitions from the CLI:
 
 ```bash
-hop session add workspace-shell --cwd ~/src/my-project
-hop session add myapp --port 3000
+hop session add workspace-shell --cwd ~/src/my-project --workspace dev
+hop session add myapp --port 3000 --workspace dev
 ```
 
-Use a regular terminal session for shell work and a port session when you want Hop to proxy a local service.
+Use `hop workspace save <name>` to snapshot selected live terminal sessions, or `hop session add ... --workspace <name>` when you want to define a reusable terminal or port entry directly.
+
+Inspect or remove saved workspace definitions with:
+
+```bash
+hop workspace show dev
+hop workspace delete dev
+```
 
 ### Drive a Subagent Over MCP
 
@@ -164,6 +172,7 @@ hop attach <session>
 ```
 
 This is useful when you want a browser, an MCP client, and a local shell to converge on the same named session.
+Local terminal sessions are persistent by default: they keep running in the Hay host if the local CLI detaches or the Hop daemon restarts. The local CLI status line shows `persists`; use `Ctrl+Q` inside the local Hop view to kill the session.
 
 ### Use Hop on Mobile
 
@@ -188,8 +197,10 @@ Default behavior:
 
 Paths:
 
-- history: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
-- audit log: `~/.hop2/workspaces/<workspace>/logs/<internal-session>/audit.ndjson`
+- scratch sessions: `~/.hop2/runtime/history/<internal-session>.history`
+- scratch audit logs: `~/.hop2/runtime/logs/<internal-session>/audit.ndjson`
+- workspace-backed sessions: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
+- workspace-backed audit logs: `~/.hop2/workspaces/<workspace>/logs/<internal-session>/audit.ndjson`
 
 Key tunables:
 
@@ -253,7 +264,7 @@ Hop uses the external Hay host runtime for PTY hosting and session recovery.
 
 | Command | Description |
 |---------|-------------|
-| `hop` | Start hop daemon/tunnel if needed, then launch a local terminal |
+| `hop` | Start hop daemon/tunnel if needed, then launch a local terminal. Unnamed launches do not reuse a session that already has a local CLI attached. |
 | `hop attach all` | Attach sequentially to all terminal sessions |
 | `hop local [session]` | Start a daemonless local terminal (`[session]` attaches if it exists) |
 | `hop url` | Print current tunnel URL |
@@ -267,14 +278,22 @@ Hop uses the external Hay host runtime for PTY hosting and session recovery.
 | `hop user add <name>` | Add user + subdomain |
 | `hop user remove <name>` | Remove user |
 | `hop user export <name>` | Export user credentials |
-| `hop session list` | List sessions with `LIVE` vs `SAVED` terminal status |
-| `hop session add <name> [--cwd P]` | Create a terminal session |
-| `hop session add <name> --port N` | Create a port session |
+| `hop session list` | List live terminal sessions |
+| `hop session list --all` | Include saved definitions from all workspaces alongside live sessions |
+| `hop session add <name> [--cwd P] --workspace W` | Save a terminal session definition to a named workspace |
+| `hop session add <name> --port N --workspace W` | Save a port session definition to a named workspace |
+| `hop workspace create <name>` | Create an empty workspace |
+| `hop workspace show <name>` | Show saved definitions in a workspace |
+| `hop workspace save <name>` | Save selected live terminal sessions into a workspace |
+| `hop workspace load <name>` | Start sessions defined in a workspace |
+| `hop workspace delete <name>` | Delete a workspace |
 | `hop session rename <old> <new>` | Rename a session |
 | `hop session remove <name>` | Remove a session |
 | `hop client <credentials>` | Run hop with exported credentials |
-| `hop wipe [--all]` | Remove saved sessions (`--all` also kills live sessions) |
+| `hop wipe [--all]` | Remove workspace-defined sessions (`--all` also kills live sessions) |
 | `quit` | Type at exit prompt to shut down the tunnel |
+
+Local CLI mouse capture is off by default so terminal-native selection and context menus keep working. Use Option+M / Alt+M inside the local Hop view to toggle Hop mouse selection when needed. Use Option+B / Alt+B to toggle the status bar. CLI defaults live under `hay-cli` in `~/.hop.json`.
 
 ### Development
 

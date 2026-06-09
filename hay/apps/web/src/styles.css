@@ -1,16 +1,88 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap");
+/* System font stack — no external font loading, instant render */
 
+/* ── Light theme (default) ── */
 :root {
   color-scheme: light;
-  --bg: #f3eee5;
-  --bg-alt: #f8f4ee;
-  --ink: #1f1b16;
-  --ink-muted: #6b6257;
-  --accent: #d97706;
-  --accent-2: #0f766e;
-  --line: #d6cbb9;
-  --panel: #fffdf9;
-  --shadow: 0 18px 50px rgba(31, 27, 22, 0.08);
+  --bg: #f4f5f7;
+  --bg-alt: #eef0f3;
+  --ink: #1a1d23;
+  --ink-muted: #6b7280;
+  --accent: #3b82f6;
+  --accent-2: #6366f1;
+  --line: #e2e4e9;
+  --panel: #ffffff;
+  --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.04);
+  --terminal-bg: #ffffff;
+  --terminal-fg: #000000;
+  --terminal-cursor: #3b82f6;
+  --btn-bg: #eef0f3;
+  --topbar-bg: rgba(255,255,255,0.72);
+  --chip-bg: rgba(255,255,255,0.92);
+  --fab-bg: rgba(160,165,175,0.28);
+  --fab-border: rgba(0,0,0,0.06);
+  --fab-highlight: rgba(255,255,255,0.5);
+  --fab-color: rgba(0,0,0,0.45);
+  --keyboard-bg: #d1d3d9;
+  --keyboard-key-bg: #fff;
+  --keyboard-key-color: #000;
+  --keyboard-special-bg: #a9abaf;
+}
+
+/* ── Dark theme ── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111318;
+  --bg-alt: #191b22;
+  --ink: #e4e5e9;
+  --ink-muted: #7d818a;
+  --accent: #60a5fa;
+  --accent-2: #818cf8;
+  --line: #272a33;
+  --panel: #191b22;
+  --shadow: 0 1px 3px rgba(0,0,0,0.2), 0 8px 24px rgba(0,0,0,0.15);
+  --terminal-bg: #0d1117;
+  --terminal-fg: #e6edf3;
+  --terminal-cursor: #60a5fa;
+  --btn-bg: #272a33;
+  --topbar-bg: rgba(17,19,24,0.85);
+  --chip-bg: rgba(39,42,51,0.92);
+  --fab-bg: rgba(80,85,95,0.3);
+  --fab-border: rgba(255,255,255,0.08);
+  --fab-highlight: rgba(255,255,255,0.06);
+  --fab-color: rgba(255,255,255,0.72);
+  --keyboard-bg: #272a33;
+  --keyboard-key-bg: #363940;
+  --keyboard-key-color: #e4e5e9;
+  --keyboard-special-bg: #1e2028;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111318;
+    --bg-alt: #191b22;
+    --ink: #e4e5e9;
+    --ink-muted: #7d818a;
+    --accent: #60a5fa;
+    --accent-2: #818cf8;
+    --line: #272a33;
+    --panel: #191b22;
+    --shadow: 0 1px 3px rgba(0,0,0,0.2), 0 8px 24px rgba(0,0,0,0.15);
+    --terminal-bg: #0d1117;
+    --terminal-fg: #e6edf3;
+    --terminal-cursor: #60a5fa;
+    --btn-bg: #272a33;
+    --topbar-bg: rgba(17,19,24,0.85);
+    --chip-bg: rgba(39,42,51,0.92);
+    --fab-bg: rgba(80,85,95,0.3);
+    --fab-border: rgba(255,255,255,0.08);
+    --fab-highlight: rgba(255,255,255,0.06);
+    --fab-color: rgba(255,255,255,0.72);
+    --keyboard-bg: #272a33;
+    --keyboard-key-bg: #363940;
+    --keyboard-key-color: #e4e5e9;
+    --keyboard-special-bg: #1e2028;
+  }
 }
 
 * {
@@ -19,8 +91,8 @@
 
 body {
   margin: 0;
-  font-family: "Space Grotesk", "Segoe UI", sans-serif;
-  background: radial-gradient(circle at top left, #fdf9f2 0%, var(--bg) 45%, #efe5d7 100%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
   color: var(--ink);
   min-height: 100vh;
 }
@@ -61,7 +133,7 @@ body {
   padding: 20px 32px;
   gap: 24px;
   border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--topbar-bg, rgba(255, 255, 255, 0.6));
   backdrop-filter: blur(16px);
 }
 
@@ -77,10 +149,10 @@ body {
   width: 44px;
   height: 44px;
   border-radius: 16px;
-  background: linear-gradient(140deg, var(--accent), #fbbf24);
-  color: #fffaf0;
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  color: #fff;
   font-size: 20px;
-  box-shadow: 0 12px 24px rgba(217, 119, 6, 0.25);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
 }
 
 .brand-title {
@@ -110,7 +182,7 @@ body {
   gap: 8px;
   padding: 6px 12px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--chip-bg, rgba(255, 255, 255, 0.9));
   border: 1px solid var(--line);
   font-size: 13px;
   color: var(--ink);
@@ -118,8 +190,8 @@ body {
 }
 
 .presence-chip.self {
-  border-color: var(--accent-2);
-  box-shadow: 0 8px 20px rgba(15, 118, 110, 0.15);
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.12);
 }
 
 .presence-chip:hover {
@@ -219,19 +291,19 @@ button {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  background: #f1e7d8;
+  background: var(--btn-bg, #f1e7d8);
   color: var(--ink);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 button:hover {
   transform: translateY(-1px);
-  box-shadow: 0 12px 24px rgba(31, 27, 22, 0.12);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.12);
 }
 
 button.primary {
-  background: linear-gradient(120deg, var(--accent), #f59e0b);
-  color: #fffef8;
+  background: var(--accent);
+  color: #fff;
 }
 
 .join-links {
@@ -301,6 +373,17 @@ button.primary {
   font-size: 20px;
 }
 
+.room-cwd {
+  margin: 2px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.7;
+}
+
 .room-meta {
   margin: 0;
   color: var(--ink-muted);
@@ -310,6 +393,86 @@ button.primary {
 .control-actions {
   display: grid;
   gap: 8px;
+}
+
+.quick-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.quick-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  border-radius: 10px !important;
+  background: var(--btn-bg) !important;
+  color: var(--ink) !important;
+  border: 1px solid var(--line) !important;
+}
+
+.quick-btn.primary {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+
+.quick-btn:active {
+  filter: brightness(0.9);
+}
+
+.drawer-group {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.drawer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  min-height: 36px;
+}
+
+.drawer-row + .drawer-row {
+  border-top: 1px solid var(--line);
+}
+
+.drawer-row label {
+  font-size: 13px;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.drawer-details {
+  margin: 0;
+}
+
+.drawer-details summary {
+  font-size: 12px;
+  color: var(--ink-muted);
+  cursor: pointer;
+  padding: 4px 0;
+  list-style: none;
+}
+
+.drawer-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.drawer-details summary::before {
+  content: "▸ ";
+}
+
+.drawer-details[open] summary::before {
+  content: "▾ ";
+}
+
+.drawer-details .drawer-group {
+  margin-top: 6px;
 }
 
 .status-card {
@@ -355,7 +518,7 @@ button.primary {
 
 .notice {
   margin: 0;
-  background: rgba(15, 118, 110, 0.12);
+  background: rgba(59, 130, 246, 0.1);
   padding: 10px 12px;
   border-radius: 12px;
   font-size: 13px;
@@ -417,6 +580,62 @@ button.primary {
   min-height: 32px;
 }
 
+.terminal-toast {
+  position: fixed;
+  top: 40%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 12px;
+  font-size: 14px;
+  z-index: 500;
+  pointer-events: none;
+  white-space: nowrap;
+  animation: toast-fade 2s ease-in-out;
+}
+
+@keyframes toast-fade {
+  0% { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  15% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.copy-actions {
+  padding: 8px 0;
+}
+
+.copy-actions label {
+  font-size: 12px;
+  color: var(--ink-muted);
+  line-height: 1.2;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.copy-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.copy-buttons button {
+  flex: 1;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.copy-buttons button:active {
+  background: var(--line);
+}
+
 .view-mode-control label,
 .selection-mode-control label,
 .haptics-control label {
@@ -468,9 +687,9 @@ button.primary {
   min-height: 300px;
   border-radius: 24px;
   overflow: hidden;
-  border: 1px solid #1f2937;
-  box-shadow: 0 22px 60px rgba(9, 15, 23, 0.35);
-  background: #0b1117;
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  background: var(--terminal-bg);
   animation: lift 0.6s ease;
   display: flex;
   flex-direction: column;
@@ -500,12 +719,12 @@ button.primary {
 
 /* Ensure xterm container has proper background to cover old content on resize */
 .terminal-frame .xterm {
-  background: #0d1117;
+  background: var(--terminal-bg);
   overflow: hidden;
 }
 
 .terminal-frame .xterm-viewport {
-  background: #0d1117 !important;
+  background: var(--terminal-bg) !important;
   overflow: hidden !important;
 }
 
@@ -545,11 +764,11 @@ button.primary {
 @media (max-width: 768px) {
   /* Mobile: full bleed terminal, no chrome */
   body {
-    background: #0b1117;
+    background: var(--terminal-bg);
   }
 
   .app {
-    background: #0b1117;
+    background: var(--terminal-bg);
   }
 
   .topbar {
@@ -563,7 +782,7 @@ button.primary {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: #0b1117;
+    background: var(--terminal-bg);
     --mobile-keyboard-height: 0px;
   }
 
@@ -660,14 +879,17 @@ button.primary {
     align-items: center;
     justify-content: center;
     position: fixed;
-    z-index: 100;
-    width: 56px;
-    height: 56px;
+    z-index: 180;
+    width: 52px;
+    height: 52px;
     padding: 0;
     border-radius: 50%;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    box-shadow: 0 8px 24px rgba(31, 27, 22, 0.15);
+    background: var(--fab-bg, rgba(0, 0, 0, 0.15));
+    border: 1px solid var(--fab-border, rgba(0, 0, 0, 0.1));
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), inset 0 1px 0 var(--fab-highlight, rgba(255, 255, 255, 0.2));
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    color: var(--fab-color, rgba(0, 0, 0, 0.6));
     cursor: grab;
     touch-action: none;
     user-select: none;
@@ -786,7 +1008,7 @@ button.primary {
   right: 0;
   bottom: 0;
   width: 100%;
-  background: #d1d3d9;
+  background: var(--keyboard-bg);
   padding: 2px max(2px, env(safe-area-inset-right)) env(safe-area-inset-bottom, 0px) max(2px, env(safe-area-inset-left));
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
   box-sizing: border-box;
@@ -801,7 +1023,7 @@ button.primary {
   display: flex;
   margin: 0 2px calc(5px * var(--kb-scale));
   padding: calc(3.6px * var(--kb-scale)) calc(3.6px * var(--kb-scale)) calc(5.4px * var(--kb-scale));
-  background: #d1d3d9;
+  background: var(--keyboard-bg);
   border-radius: 8px;
 }
 
@@ -846,8 +1068,8 @@ button.primary {
   font-weight: 400;
   letter-spacing: -0.5px;
   position: relative;
-  background: #ffffff;
-  color: #000;
+  background: var(--keyboard-key-bg);
+  color: var(--keyboard-key-color);
   border: none;
   cursor: pointer;
   flex-grow: 1;
@@ -856,7 +1078,7 @@ button.primary {
   /* Long transition for fade-out effect - gives user visual confirmation */
   transition: background-color 1s ease-out, transform 1s ease-out, box-shadow 1s ease-out, filter 1s ease-out;
   /* iOS key shadow (the "chin") */
-  box-shadow: 0 1px 0 #898c94;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
   padding: 0;
   font-family: inherit;
 }
@@ -891,18 +1113,18 @@ button.primary {
 
 /* Function keys - darker background */
 .kb-key.kb-act {
-  background: #b2b6bf;
+  background: var(--keyboard-special-bg);
   font-size: var(--kb-fn-font);
   font-weight: 400;
   letter-spacing: -0.2px;
 }
 
 .kb-key.kb-act.kb-pressed {
-  background: #9ea2ab !important;
+  filter: brightness(0.85);
 }
 
 .kb-key.kb-act:active:not(.kb-pressed) {
-  background: #9ea2ab;
+  filter: brightness(0.85);
 }
 
 /* Accessory row keys */
@@ -1060,8 +1282,8 @@ button.primary {
   line-height: 1.35;
   resize: none;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.9);
-  color: #000;
+  background: var(--keyboard-key-bg);
+  color: var(--keyboard-key-color);
 }
 
 .kb-sys-input:focus {
@@ -1165,18 +1387,36 @@ button.primary {
 }
 
 .session-list-item.starting {
-  border-color: #f59e0b40;
-  background: #f59e0b10;
+  border-color: rgba(234, 179, 8, 0.25);
+  background: rgba(234, 179, 8, 0.06);
+}
+
+.session-list-name-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+  min-width: 0;
 }
 
 .session-list-name {
-  flex: 1;
   font-size: 13px;
   font-weight: 500;
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-list-cwd {
+  font-size: 11px;
+  color: var(--ink-muted);
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.6;
 }
 
 .session-badge {
@@ -1195,8 +1435,8 @@ button.primary {
 }
 
 .session-badge.starting {
-  background: #f59e0b;
-  color: #111827;
+  background: #eab308;
+  color: #1a1d23;
 }
 
 .session-badge.port {

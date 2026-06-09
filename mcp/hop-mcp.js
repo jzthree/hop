@@ -103,6 +103,30 @@ const NAMED_KEY_INPUTS = Object.freeze({
 let HeadlessTerminalCtor = undefined;
 let headlessTerminalLoadError = null;
 
+// Regex to strip all ANSI escape sequences (CSI, OSC, simple escapes, \r-based line rewrites)
+const ANSI_RE = /(?:\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-B012]|\x1b[=>Nno|}~78DHM]|\x1b\[[\?=!>]?[0-9;]*[A-Za-z@`]|\r(?!\n))/g;
+
+/**
+ * Strip all ANSI escape sequences and carriage-return line rewrites from text.
+ * Returns clean, plain text suitable for programmatic consumption.
+ */
+function stripAnsi(text) {
+  if (typeof text !== 'string') return '';
+  return text.replace(ANSI_RE, '');
+}
+
+/**
+ * Heuristic: does this line look like a shell prompt?
+ * Matches common patterns: user@host:path$, (env) $, bash-5.2$, etc.
+ */
+function isLikelyPrompt(line) {
+  if (typeof line !== 'string') return false;
+  const trimmed = line.trim();
+  if (!trimmed) return true; // empty lines are prompt-adjacent
+  // Ends with common prompt chars, optionally followed by a space
+  return /[#$>%]\s*$/.test(trimmed);
+}
+
 function log(...args) {
   console.error(...args);
 }
@@ -311,21 +335,38 @@ function slimWaitPayload(waitPayload, sentData) {
 
   // Strip echoed command from the start of text.
   // The terminal echoes the typed command back before output. The echo may be:
-  //   - preceded by the shell prompt
+  //   - preceded by the shell prompt (e.g., "user@host:~$ grep foo bar.py")
   //   - immediately followed by output with no newline separator
   // Strategy: find the sent command string in the first ~512 chars of text,
   // then strip everything up through the end of the command (plus one trailing \n if present).
   if (typeof out.text === 'string' && typeof sentData === 'string' && sentData.length > 0) {
     const text = out.text;
-    const searchWindow = text.slice(0, 512);
-    const idx = searchWindow.indexOf(sentData);
+    // Strip ANSI from search window for more reliable matching
+    const rawWindow = text.slice(0, 1024);
+    const cleanWindow = stripAnsi(rawWindow);
+    const cmdToFind = sentData.replace(/\r$/, ''); // strip trailing \r if present
+    const idx = cleanWindow.indexOf(cmdToFind);
     if (idx !== -1) {
-      const afterCmd = idx + sentData.length;
-      // Skip a trailing \n or \r\n if present right after the command
-      let skip = afterCmd;
-      if (text[skip] === '\r') skip++;
-      if (text[skip] === '\n') skip++;
-      out.text = text.slice(skip);
+      // Map the clean-text index back to the raw text position.
+      // Walk the raw text, skipping ANSI sequences, to find the corresponding raw offset.
+      let rawIdx = 0;
+      let cleanIdx = 0;
+      while (cleanIdx < idx + cmdToFind.length && rawIdx < rawWindow.length) {
+        // Check if we're at an ANSI escape
+        const remaining = rawWindow.slice(rawIdx);
+        ANSI_RE.lastIndex = 0;
+        const ansiMatch = ANSI_RE.exec(remaining);
+        if (ansiMatch && ansiMatch.index === 0) {
+          rawIdx += ansiMatch[0].length;
+          continue;
+        }
+        rawIdx++;
+        cleanIdx++;
+      }
+      // Skip a trailing \n or \r\n after the command
+      if (text[rawIdx] === '\r') rawIdx++;
+      if (text[rawIdx] === '\n') rawIdx++;
+      out.text = text.slice(rawIdx);
     }
   }
 
@@ -2434,6 +2475,7 @@ class HopMCPServer {
             capture: { type: 'string', enum: ['raw', 'readable_raw'], description: 'Capture format for returned events (default: readable_raw).' },
             capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 60 for hopx helper).' },
             text_only: { type: 'boolean', description: 'If true and capture="readable_raw", return concatenated wait.text and omit wait.events for smaller payloads. Default is true for readable_raw capture.' },
+            clean_text: { type: 'boolean', description: 'If true, strip ANSI escape codes from wait.text for plain text output (default: false).' },
             maxControlOps: { type: 'number', description: 'In readable_raw capture, max parsed control ops per event (default: 200).' },
             includeRawData: { type: 'boolean', description: 'In readable_raw capture, include original event data.' },
             includeMetaEvents: { type: 'boolean', description: 'In readable_raw capture, include non-output meta events (default: false).' },
@@ -2451,6 +2493,21 @@ class HopMCPServer {
             coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
           },
           required: ['terminal_id']
+        }
+      },
+      {
+        name: 'hopx_exec',
+        description: 'Execute a shell command and return clean stdout — like a Bash tool on a persistent terminal session. Sends the command, waits for the next shell prompt, strips the echoed input and ANSI codes, and returns plain text output. For simple command-then-read workflows that don\'t need raw terminal events.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            terminal_id: { type: 'string', description: 'Terminal to run the command in.' },
+            command: { type: 'string', description: 'Shell command to execute (Enter is sent automatically).' },
+            timeout_ms: { type: 'number', description: 'Max time to wait for prompt return (default: 30000).' },
+            prompt_regex: { type: 'string', description: 'Custom prompt regex for this command (default: conservative shell prompt matcher). Useful for SSH sessions with non-standard prompts.' },
+            idle_ms: { type: 'number', description: 'Fallback: match after this many ms of silence if prompt regex doesn\'t match (useful for commands with non-standard output endings).' }
+          },
+          required: ['terminal_id', 'command']
         }
       },
       {
@@ -2580,7 +2637,7 @@ class HopMCPServer {
             maxEvents: { type: 'number' },
             mode: { type: 'string', enum: READ_TERMINAL_MODES },
             uiMaxLines: { type: 'number', description: 'In UI mode, number of visible lines to include (default: terminal rows).' },
-            includeRawTail: { type: 'boolean', description: 'In UI mode, include raw output tail for lossless event inspection.' },
+            includeRawTail: { type: 'boolean', description: 'In UI mode, include raw output tail for lossless event inspection (default: false, opt-in).' },
             rawTailMaxEvents: { type: 'number', description: 'In UI mode, max raw tail events to include (default: 40).' },
             maxControlOps: { type: 'number', description: 'In readable_raw mode, max parsed control ops per event (default: 200).' },
             includeRawData: { type: 'boolean', description: 'In readable_raw mode, include original data string per event.' },
@@ -2628,12 +2685,46 @@ class HopMCPServer {
       },
       {
         name: 'hop_list_workspaces',
-        description: 'List available workspaces and the current default.',
+        description: 'List available workspaces.',
         inputSchema: { type: 'object', properties: {} }
       },
       {
+        name: 'hop_create_workspace',
+        description: 'Create an empty workspace by name.',
+        inputSchema: {
+          type: 'object',
+          properties: { name: { type: 'string' } },
+          required: ['name']
+        }
+      },
+      {
+        name: 'hop_show_workspace',
+        description: 'Show saved definitions in a workspace.',
+        inputSchema: {
+          type: 'object',
+          properties: { name: { type: 'string' } },
+          required: ['name']
+        }
+      },
+      {
         name: 'hop_save_workspace',
-        description: 'Save a workspace snapshot by name.',
+        description: 'Save a workspace snapshot from live sessions.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            sessionNames: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional list of live session internal names to save. Defaults to all live terminal sessions.'
+            }
+          },
+          required: ['name']
+        }
+      },
+      {
+        name: 'hop_delete_workspace',
+        description: 'Delete a workspace by name.',
         inputSchema: {
           type: 'object',
           properties: { name: { type: 'string' } },
@@ -2649,15 +2740,6 @@ class HopMCPServer {
             name: { type: 'string' },
             start: { type: 'boolean' }
           },
-          required: ['name']
-        }
-      },
-      {
-        name: 'hop_use_workspace',
-        description: 'Set the default workspace by name.',
-        inputSchema: {
-          type: 'object',
-          properties: { name: { type: 'string' } },
           required: ['name']
         }
       },
@@ -2703,6 +2785,7 @@ class HopMCPServer {
             max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
             capture_max_events: { type: 'number', description: 'Max captured wait events (default: 60 for hopx helper; 0 when selected mode is ui unless overridden).' },
             text_only: { type: 'boolean', description: 'If true, condense readable waits to wait.text + metadata. Ignored for mode="ui" output snapshots. Default is true for readable modes.' },
+            clean_text: { type: 'boolean', description: 'If true, strip ANSI escape codes from text output (default: false).' },
             maxControlOps: { type: 'number' },
             includeRawData: { type: 'boolean' },
             includeMetaEvents: { type: 'boolean' },
@@ -2738,7 +2821,7 @@ class HopMCPServer {
         uri: 'hop://workspaces',
         name: 'Hop Workspaces',
         mimeType: 'application/json',
-        description: 'Available workspaces and current default.'
+        description: 'Available workspaces.'
       }
     ];
   }
@@ -2881,6 +2964,8 @@ class HopMCPServer {
       }
       case 'hopx_send_and_wait':
         return await this.handleSendAndWait(args);
+      case 'hopx_exec':
+        return await this.handleExec(args);
       case 'hop_wait_terminal':
         if (args.async === true) {
           return await this.handleWaitStart(args);
@@ -2938,20 +3023,30 @@ class HopMCPServer {
         );
       case 'hop_list_workspaces':
         return this.wrapApiResult(await this.callApi('GET', '/api/workspaces'), { endpoint: '/api/workspaces' });
+      case 'hop_create_workspace':
+        return this.wrapApiResult(
+          await this.callApi('POST', '/api/workspaces/create', { name: args.name }),
+          { endpoint: '/api/workspaces/create' }
+        );
+      case 'hop_show_workspace':
+        return this.wrapApiResult(
+          await this.callApi('GET', `/api/workspaces/show?name=${encodeURIComponent(args.name)}`),
+          { endpoint: '/api/workspaces/show' }
+        );
       case 'hop_save_workspace':
         return this.wrapApiResult(
-          await this.callApi('POST', '/api/workspaces/save', { name: args.name }),
+          await this.callApi('POST', '/api/workspaces/save', { name: args.name, sessionNames: args.sessionNames }),
           { endpoint: '/api/workspaces/save' }
+        );
+      case 'hop_delete_workspace':
+        return this.wrapApiResult(
+          await this.callApi('POST', '/api/workspaces/delete', { name: args.name }),
+          { endpoint: '/api/workspaces/delete' }
         );
       case 'hop_load_workspace':
         return this.wrapApiResult(
           await this.callApi('POST', '/api/workspaces/load', { name: args.name, start: args.start }),
           { endpoint: '/api/workspaces/load' }
-        );
-      case 'hop_use_workspace':
-        return this.wrapApiResult(
-          await this.callApi('POST', '/api/workspaces/use', { name: args.name }),
-          { endpoint: '/api/workspaces/use' }
         );
       case 'hopx_agent_turn':
         return await this.handleHopxAgentTurn(args);
@@ -3905,7 +4000,8 @@ class HopMCPServer {
       noise_filter: args.noise_filter,
       coalesce_ms: args.coalesce_ms,
       coalesce_max_chars: args.coalesce_max_chars,
-      text_only: readableTextOnly
+      text_only: readableTextOnly,
+      clean_text: args.clean_text
     });
     if (sendAndWait.isError) return sendAndWait;
 
@@ -4096,11 +4192,115 @@ class HopMCPServer {
     const sentDataStr = (data && pressEnter) ? data : null;
     waitPayload = slimWaitPayload(waitPayload, sentDataStr);
 
+    // Strip ANSI escape codes if clean_text requested
+    if (args.clean_text === true && typeof waitPayload.text === 'string') {
+      waitPayload.text = stripAnsi(waitPayload.text);
+    }
+
     return this.wrapJson({
       ok: true,
       terminal_id: requestedTerminalId,
       wait: waitPayload
     });
+  }
+
+  /**
+   * hopx_exec: Bash-tool semantics on a persistent terminal.
+   * Send command → wait for prompt → return clean stdout (echo stripped, ANSI stripped).
+   */
+  async handleExec(args) {
+    const requestedTerminalId = args.terminal_id;
+    if (!requestedTerminalId) {
+      return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
+    }
+    const command = typeof args.command === 'string' ? args.command : '';
+    if (!command) {
+      return { content: [{ type: 'text', text: 'Error: command is required.' }], isError: true };
+    }
+
+    const timeoutMs = typeof args.timeout_ms === 'number' && Number.isFinite(args.timeout_ms)
+      ? Math.max(1000, args.timeout_ms)
+      : DEFAULT_WAIT_MAX_MS;
+
+    let terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
+    const cursorBeforeSend = this.streamManager.getLatestCursor(terminalId);
+
+    // Send the command + Enter
+    this.streamManager.noteTerminalInput(terminalId, command);
+    const sendResult = await this.callTerminalEndpointWithRecovery(
+      requestedTerminalId,
+      'POST',
+      (tid) => `/api/terminals/${encodeURIComponent(tid)}/write`,
+      { data: command + '\r' }
+    );
+    terminalId = sendResult.terminalId;
+    if (this.isApiFailurePayload(sendResult.payload)) {
+      return this.wrapApiResult(sendResult.payload, { endpoint: sendResult.endpoint });
+    }
+
+    // Build wait args: wait for prompt (primary) or idle (fallback)
+    const waitArgs = {
+      terminal_id: requestedTerminalId,
+      start_from: 'cursor',
+      cursor: cursorBeforeSend,
+      until_prompt: true,
+      capture: 'readable_raw',
+      capture_max_events: DEFAULT_HOPX_WAIT_CAPTURE_MAX_EVENTS,
+      max_wait_ms: timeoutMs,
+      control_level: 'none',
+      noise_filter: 'balanced',
+      coalesce_ms: DEFAULT_HOPX_READABLE_COALESCE_MS
+    };
+
+    // Custom prompt regex
+    if (typeof args.prompt_regex === 'string' && args.prompt_regex.length > 0) {
+      waitArgs.prompt_regex = args.prompt_regex;
+    }
+
+    // Idle fallback (if provided, use both prompt + idle whichever fires first)
+    if (typeof args.idle_ms === 'number' && Number.isFinite(args.idle_ms)) {
+      waitArgs.idle_ms = args.idle_ms;
+    }
+
+    const waited = await this.runWaitTerminal(this.applyHopxWaitDefaults(waitArgs));
+    if (waited.errorResponse) return waited.errorResponse;
+
+    // Condense to single text blob
+    let waitPayload = condenseReadableWaitPayload(waited.payload);
+    // Strip echo and slim
+    waitPayload = slimWaitPayload(waitPayload, command);
+
+    // Get clean text: strip ANSI, trim
+    let stdout = typeof waitPayload.text === 'string' ? waitPayload.text : '';
+    stdout = stripAnsi(stdout);
+
+    // Strip trailing prompt line (the prompt that triggered the match)
+    // The last line is typically the next shell prompt — remove it
+    const lines = stdout.split('\n');
+    while (lines.length > 0) {
+      const last = lines[lines.length - 1].trim();
+      if (!last || isLikelyPrompt(last)) {
+        lines.pop();
+      } else {
+        break;
+      }
+    }
+    stdout = lines.join('\n').trimEnd();
+
+    const timedOut = waitPayload.status === 'timeout';
+    const result = {
+      ok: !timedOut,
+      terminal_id: requestedTerminalId,
+      stdout
+    };
+    if (timedOut) {
+      result.timed_out = true;
+    }
+    if (waitPayload.next_cursor !== undefined) {
+      result.next_cursor = waitPayload.next_cursor;
+    }
+
+    return this.wrapJson(result);
   }
 
   async runWaitTerminal(args) {
@@ -4498,7 +4698,7 @@ class HopMCPServer {
       return this.wrapJson(readableRawPayload);
     }
 
-    const includeRawTail = args.includeRawTail !== false;
+    const includeRawTail = args.includeRawTail === true;
     const rawTailMaxEvents = Number.isFinite(args.rawTailMaxEvents)
       ? Math.max(0, Math.floor(args.rawTailMaxEvents))
       : 40;

@@ -1,7 +1,7 @@
 // Termshare Server Library
 // Export everything needed for embedding into other apps
 
-export { Room, RoomManager, type SocketAdapter, type ClientInfo } from "./rooms";
+export { Room, RoomManager, type SocketAdapter, type ClientInfo, type RoomSummary } from "./rooms";
 export { createPty, type PtyFactory } from "./pty";
 export { sanitizeName, sanitizeRoom } from "./utils";
 

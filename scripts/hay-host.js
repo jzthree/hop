@@ -53,7 +53,12 @@ async function main() {
         const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
         if (reqUrl.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
+            res.end(JSON.stringify({
+                ok: true,
+                capabilities: {
+                    localCliCount: true
+                }
+            }));
             return;
         }
         if (reqUrl.pathname === '/rooms' && req.method === 'GET') {
@@ -132,6 +137,7 @@ async function main() {
         const wsUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
         const roomId = hay.sanitizeRoom(wsUrl.searchParams.get('room'));
         const name = hay.sanitizeName(wsUrl.searchParams.get('name'));
+        const source = wsUrl.searchParams.get('source') || '';
         const colsRaw = Number(wsUrl.searchParams.get('cols') || 80);
         const rowsRaw = Number(wsUrl.searchParams.get('rows') || 24);
         const cols = Number.isFinite(colsRaw) ? colsRaw : 80;
@@ -146,6 +152,7 @@ async function main() {
             {
                 id: randomUUID(),
                 name,
+                source,
                 colorIndex: Math.floor(Math.random() * 1000),
                 cols,
                 rows

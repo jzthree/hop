@@ -24,3 +24,8 @@ Thumbs.db
 *.bak
 *.bak2
 .webauthn_credentials.json
+
+# Demo capture output
+demo-output/
+.tmp-demo-playwright/
+.tmp-demo-playwright-local/

@@ -12,7 +12,13 @@ const isMac = process.platform === "darwin";
 const keyLabelShort = isMac ? "Opt" : "Alt";
 const keyLabelLong = isMac ? "Option" : "Alt";
 
-type CliConfig = { showHints?: boolean; scrollOff?: number };
+type CliConfig = {
+  showHints?: boolean;
+  showStatusBar?: boolean;
+  mouseCapture?: boolean;
+  syncSize?: boolean;
+  scrollOff?: number;
+};
 type HopConfig = { "hay-cli"?: CliConfig };
 const DEFAULT_SCROLL_OFF = 3;
 
@@ -138,11 +144,13 @@ Options:
   -h, --help           Show this help
 
 Keyboard shortcuts:
-  Ctrl+G               Detach (session continues in background)
+  Ctrl+G               Detach (session keeps running)
   Ctrl+Q               Kill session and exit
   Ctrl+T               Toggle hint bar (saved)
   ${keyLabelLong}+←/→/↑/↓        Pan viewport (Shift = faster)
-  ${keyLabelLong}+A             Toggle autofit (resize remote to local)
+  ${keyLabelLong}+A             Toggle autofit (saved)
+  ${keyLabelLong}+B             Toggle status bar (saved)
+  ${keyLabelLong}+M             Toggle mouse capture (saved)
 
 Examples:
   hay -r my-room
@@ -166,6 +174,7 @@ if (!config.room) {
 }
 
 let sessionLabel = config.room;
+let liveCwd: string | null = null;
 
 const DETACH_EXIT_CODE = 10;
 const KILL_EXIT_CODE = 11;
@@ -204,6 +213,7 @@ let daemonPollTimer: NodeJS.Timeout | null = null;
 let exitCode = 0;
 let exitMessage: string | null = null;
 let shortcutsEnabledAt = 0;
+let persistenceNoticeShown = false;
 
 let collabMode = true;
 let controllerId: string | null = null;
@@ -211,15 +221,32 @@ let presence: PresenceClient[] = [];
 let notice: { message: string; expiresAt: number } | null = null;
 
 let syncSize = true;
-let mouseCapture = true;
+let mouseCapture = false;
+let showStatusBar = true;
 let viewX = 0;
 let viewY = 0;
-let userPannedAway = false;
+let followOutput = true;
 let showHints = true;
 let scrollOff = DEFAULT_SCROLL_OFF;
 
-const configFile = loadConfig();
+// Mouse selection state
+type SelectionPoint = { row: number; col: number }; // buffer coordinates
+let selectionAnchor: SelectionPoint | null = null;    // where drag started
+let selectionEnd: SelectionPoint | null = null;       // where drag currently is
+let isSelecting = false;
+let selectionScrollTimer: NodeJS.Timeout | null = null;
+const SELECTION_SCROLL_INTERVAL = 50;
+const SELECTION_SCROLL_SPEED = 1;
+
+let configFile = loadConfig();
+const persistConfig = (patch: Partial<CliConfig>) => {
+  configFile = { ...configFile, ...patch };
+  saveConfig(configFile);
+};
 showHints = configFile.showHints ?? true;
+showStatusBar = configFile.showStatusBar ?? true;
+mouseCapture = configFile.mouseCapture ?? false;
+syncSize = configFile.syncSize ?? true;
 scrollOff = configFile.scrollOff ?? DEFAULT_SCROLL_OFF;
 
 let uiInitialized = false;
@@ -270,8 +297,9 @@ let hopDaemonShareUrl = "";
 const getLocalMetrics = () => {
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  const showBottomBar = rows >= 2;
-  const showHintBar = showHints && rows >= 3;
+  const hasNotice = !!notice && notice.expiresAt > Date.now();
+  const showBottomBar = showStatusBar && rows >= 2;
+  const showHintBar = (showHints || hasNotice) && rows >= (showBottomBar ? 3 : 2);
   const barRows = (showBottomBar ? 1 : 0) + (showHintBar ? 1 : 0);
   return {
     cols,
@@ -312,28 +340,193 @@ const getDirectionalKey = (direction: number) => {
 };
 
 const stripMouseSequences = (data: string) => {
-  const cleaned = data.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (sequence, buttonText, _x, _y, kind) => {
+  const cleaned = data.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (sequence, buttonText, xText, yText, kind) => {
+    if (!mouseCapture) {
+      return "";
+    }
     const button = Number(buttonText);
+    const x = Number(xText);
+    const y = Number(yText);
+
+    // Handle wheel events first (existing logic)
     const isWheel = (button & 64) === 64;
     if (isWheel && kind === "M") {
-      const direction = (button & 1) === 1 ? 1 : -1;
+      // Wheel left/right (buttons 66/67) arrive on touchpads with any
+      // horizontal drift; treating them as vertical makes scrolling bounce.
+      const wheelAxis = button & 3;
+      if (wheelAxis >= 2) {
+        return "";
+      }
+      // Wheel clears any active selection
+      clearSelection();
+      const direction = wheelAxis === 1 ? 1 : -1;
       const isTuiLikeMode = remoteAlternateScreen || remoteMouseModes.size > 0;
       if (isTuiLikeMode) {
         return getDirectionalKey(direction).repeat(SCROLL_STEP);
       }
-      // In normal shell mode, wheel should pan local viewport scrollback.
       viewY += direction * SCROLL_STEP;
       clampView();
-      userPannedAway = viewY < getMaxViewY();
+      updateFollowOutputFromViewport();
       scheduleRender();
       return "";
     }
-    if (remoteMouseModes.size > 0) {
-      return sequence;
-    }
+
+    // Try local mouse selection handling
+    const result = handleMouseEvent(button, x, y, kind);
+    if (result === "handled") return "";
+    if (result === "passthrough") return sequence;
+
     return "";
   });
   return { cleaned };
+};
+
+// ── Selection helpers ──
+
+const selectionNormalized = (): { start: SelectionPoint; end: SelectionPoint } | null => {
+  if (!selectionAnchor || !selectionEnd) return null;
+  const a = selectionAnchor;
+  const b = selectionEnd;
+  if (a.row < b.row || (a.row === b.row && a.col <= b.col)) {
+    return { start: a, end: b };
+  }
+  return { start: b, end: a };
+};
+
+const isCellSelected = (bufferRow: number, bufferCol: number): boolean => {
+  const sel = selectionNormalized();
+  if (!sel) return false;
+  const { start, end } = sel;
+  if (bufferRow < start.row || bufferRow > end.row) return false;
+  if (bufferRow === start.row && bufferRow === end.row) {
+    return bufferCol >= start.col && bufferCol <= end.col;
+  }
+  if (bufferRow === start.row) return bufferCol >= start.col;
+  if (bufferRow === end.row) return bufferCol <= end.col;
+  return true;
+};
+
+const getSelectedText = (): string => {
+  const sel = selectionNormalized();
+  if (!sel) return "";
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let row = sel.start.row; row <= sel.end.row; row++) {
+    const line = buffer.getLine(row);
+    if (!line) { lines.push(""); continue; }
+    const text = line.translateToString(true);
+    if (row === sel.start.row && row === sel.end.row) {
+      lines.push(text.slice(sel.start.col, sel.end.col + 1));
+    } else if (row === sel.start.row) {
+      lines.push(text.slice(sel.start.col));
+    } else if (row === sel.end.row) {
+      lines.push(text.slice(0, sel.end.col + 1));
+    } else {
+      lines.push(text);
+    }
+  }
+  return lines.map(l => l.trimEnd()).join("\n");
+};
+
+const copySelectionToClipboard = () => {
+  const text = getSelectedText();
+  if (!text) return;
+  // OSC 52: set clipboard. Base64-encode the text.
+  const encoded = Buffer.from(text, "utf8").toString("base64");
+  process.stdout.write(`\x1b]52;c;${encoded}\x07`);
+  pushNotice(`Copied ${text.split("\n").length} line(s)`);
+};
+
+const clearSelection = () => {
+  if (!selectionAnchor && !selectionEnd) return;
+  selectionAnchor = null;
+  selectionEnd = null;
+  isSelecting = false;
+  stopSelectionScroll();
+  scheduleRender();
+};
+
+const stopSelectionScroll = () => {
+  if (selectionScrollTimer) {
+    clearInterval(selectionScrollTimer);
+    selectionScrollTimer = null;
+  }
+};
+
+const handleMouseEvent = (button: number, x: number, y: number, kind: string): string => {
+  const isPress = kind === "M";
+  const isRelease = kind === "m";
+  const btnId = button & 3;     // 0=left, 1=middle, 2=right
+  const isMotion = (button & 32) !== 0;
+  const isWheel = (button & 64) !== 0;
+
+  // Wheel events: handle scrolling (pass through to existing logic)
+  if (isWheel) return "wheel";
+
+  // If remote mouse modes are active, don't handle selection locally
+  if (remoteMouseModes.size > 0) return "passthrough";
+
+  // Convert 1-based terminal coords to 0-based buffer coords
+  const screenRow = y - 1;  // 0-based viewport row
+  const screenCol = x - 1;  // 0-based viewport col
+  const bufferRow = viewY + screenRow;
+  const bufferCol = viewX + screenCol;
+
+  // Left button press: start selection
+  if (btnId === 0 && isPress && !isMotion) {
+    clearSelection();
+    selectionAnchor = { row: bufferRow, col: bufferCol };
+    selectionEnd = { row: bufferRow, col: bufferCol };
+    isSelecting = true;
+    return "handled";
+  }
+
+  // Motion with left button held: extend selection
+  if (isMotion && isPress && isSelecting) {
+    selectionEnd = { row: bufferRow, col: bufferCol };
+
+    // Auto-scroll when dragging near viewport edges
+    stopSelectionScroll();
+    if (screenRow <= 0) {
+      // Dragging above viewport — scroll up
+      selectionScrollTimer = setInterval(() => {
+        if (!isSelecting) { stopSelectionScroll(); return; }
+        viewY = Math.max(0, viewY - SELECTION_SCROLL_SPEED);
+        if (selectionEnd) selectionEnd = { row: selectionEnd.row - SELECTION_SCROLL_SPEED, col: selectionEnd.col };
+        updateFollowOutputFromViewport();
+        scheduleRender();
+      }, SELECTION_SCROLL_INTERVAL);
+    } else if (screenRow >= localMetrics.viewportRows - 1) {
+      // Dragging below viewport — scroll down
+      selectionScrollTimer = setInterval(() => {
+        if (!isSelecting) { stopSelectionScroll(); return; }
+        const maxView = terminal.buffer.active.length - localMetrics.viewportRows;
+        viewY = Math.min(Math.max(0, maxView), viewY + SELECTION_SCROLL_SPEED);
+        if (selectionEnd) selectionEnd = { row: selectionEnd.row + SELECTION_SCROLL_SPEED, col: selectionEnd.col };
+        updateFollowOutputFromViewport();
+        scheduleRender();
+      }, SELECTION_SCROLL_INTERVAL);
+    }
+
+    scheduleRender();
+    return "handled";
+  }
+
+  // Left button release: finalize selection
+  if (btnId === 0 && isRelease) {
+    stopSelectionScroll();
+    isSelecting = false;
+    const sel = selectionNormalized();
+    if (sel && (sel.start.row !== sel.end.row || sel.start.col !== sel.end.col)) {
+      copySelectionToClipboard();
+    } else {
+      // Click without drag — clear selection
+      clearSelection();
+    }
+    return "handled";
+  }
+
+  return "unhandled";
 };
 
 const parseOscColor = (value: string): RgbColor | null => {
@@ -420,6 +613,62 @@ const clampView = () => {
   viewY = clamp(viewY, 0, maxY);
 };
 
+const isViewportAtBottom = () => viewY >= getMaxViewY();
+
+// Anchor the scrolled viewport to a buffer line marker. viewY is an absolute
+// buffer index, so once scrollback is full every trimmed line drags a fixed
+// viewY toward the bottom while output streams. The marker tracks the line
+// across trims/reflows so the view stays put.
+type ScrollAnchor = NonNullable<ReturnType<typeof terminal.registerMarker>>;
+let scrollAnchor: ScrollAnchor | null = null;
+
+const releaseScrollAnchor = () => {
+  if (scrollAnchor) {
+    if (!scrollAnchor.isDisposed) scrollAnchor.dispose();
+    scrollAnchor = null;
+  }
+};
+
+const updateScrollAnchor = () => {
+  releaseScrollAnchor();
+  if (followOutput) return;
+  const buffer = terminal.buffer.active;
+  const cursorAbs = buffer.baseY + buffer.cursorY;
+  scrollAnchor = terminal.registerMarker(viewY - cursorAbs) ?? null;
+};
+
+const restoreViewFromAnchor = () => {
+  if (!followOutput && scrollAnchor) {
+    if (scrollAnchor.line >= 0) {
+      viewY = scrollAnchor.line;
+    } else {
+      // The anchored line was trimmed out of scrollback — hold at the top.
+      viewY = 0;
+    }
+  }
+  clampView();
+  if (!followOutput && (!scrollAnchor || scrollAnchor.isDisposed)) {
+    updateScrollAnchor();
+  }
+};
+
+const updateFollowOutputFromViewport = () => {
+  followOutput = isViewportAtBottom();
+  updateScrollAnchor();
+};
+
+const followCursorWithMargin = () => {
+  const buffer = terminal.buffer.active;
+  const cursorRow = buffer.baseY + buffer.cursorY;
+  const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
+  if (cursorRow < viewY + margin) {
+    viewY = Math.max(0, cursorRow - margin);
+  } else if (cursorRow >= viewY + localMetrics.viewportRows - margin) {
+    viewY = cursorRow - localMetrics.viewportRows + margin + 1;
+  }
+  clampView();
+};
+
 const ensureCursorVisible = (_force: boolean) => {
   const buffer = terminal.buffer.active;
   const cursorX = buffer.cursorX;
@@ -442,6 +691,8 @@ const ensureCursorVisible = (_force: boolean) => {
 
   viewX = nextX;
   viewY = clamp(nextY, 0, maxY);
+  followOutput = true;
+  releaseScrollAnchor();
 };
 
 const scheduleRender = () => {
@@ -680,16 +931,12 @@ const applyRemoteSize = (cols: number, rows: number) => {
   remoteCols = nextCols;
   remoteRows = nextRows;
   terminal.resize(remoteCols, remoteRows);
-  // Only scroll if cursor is outside viewport (with scrollOff margin)
-  const buffer = terminal.buffer.active;
-  const cursorRow = buffer.baseY + buffer.cursorY;
-  const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
-  if (cursorRow < viewY + margin) {
-    viewY = Math.max(0, cursorRow - margin);
-  } else if (cursorRow >= viewY + localMetrics.viewportRows - margin) {
-    viewY = cursorRow - localMetrics.viewportRows + margin + 1;
+  if (followOutput) {
+    followCursorWithMargin();
+  } else {
+    // Markers survive reflow, so the anchor re-locates the viewed content.
+    restoreViewFromAnchor();
   }
-  clampView();
   scheduleRender();
 };
 
@@ -707,12 +954,13 @@ const applySyncSize = () => {
 
 const enableMouseCapture = () => {
   if (!process.stdout.isTTY) return;
-  process.stdout.write("\x1b[?1000h\x1b[?1006h");
+  // 1000=normal tracking, 1002=button-event tracking (motion while pressed), 1006=SGR encoding
+  process.stdout.write("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
 };
 
 const disableMouseCapture = () => {
   if (!process.stdout.isTTY) return;
-  process.stdout.write("\x1b[?1006l\x1b[?1000l");
+  process.stdout.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l");
 };
 
 const setMouseCapture = (enabled: boolean) => {
@@ -734,6 +982,8 @@ const initUi = () => {
   process.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
   if (mouseCapture) {
     enableMouseCapture();
+  } else {
+    disableMouseCapture();
   }
   lastRenderCols = 0;
   lastRenderRows = 0;
@@ -820,12 +1070,22 @@ const composeBar = (left: string, right: string, cols: number) => {
   }
   const rightLen = visibleLength(right);
   if (rightLen >= cols) {
-    return padOrTrim(right.slice(0, cols), cols);
+    return padOrTrim(truncateAnsi(right, cols), cols);
   }
   const availableLeft = Math.max(0, cols - rightLen - 1);
   const trimmedLeft = visibleLength(left) > availableLeft ? truncateAnsi(left, availableLeft) : left;
   const gap = Math.max(1, cols - visibleLength(trimmedLeft) - rightLen);
   return padOrTrim(trimmedLeft + " ".repeat(gap) + right, cols);
+};
+
+const formatCwd = (cwdPath: string | null) => {
+  if (!cwdPath) return "";
+  const homeDir = os.homedir();
+  if (cwdPath === homeDir) return "~";
+  if (cwdPath.startsWith(`${homeDir}${path.sep}`)) {
+    return `~${cwdPath.slice(homeDir.length)}`;
+  }
+  return cwdPath;
 };
 
 const BAR_TOP_BG = "\x1b[48;5;254m";
@@ -998,13 +1258,20 @@ const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => 
       continue;
     }
     const cellData = line.getCell(remoteCol, cell);
+    const bufferRow = base + lineIndex;
     const isCursorCell = isCursorLine && remoteCol === cursorCol;
+    const isSelected = isCellSelected(bufferRow, remoteCol);
     if (!cellData) {
-      if (currentKey !== "default") {
-        output += "\x1b[0m";
+      if (isSelected) {
+        output += "\x1b[7m \x1b[0m";
         currentKey = "default";
+      } else {
+        if (currentKey !== "default") {
+          output += "\x1b[0m";
+          currentKey = "default";
+        }
+        output += " ";
       }
-      output += " ";
       continue;
     }
 
@@ -1014,7 +1281,7 @@ const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => 
       chars = " ";
     }
 
-    if (width === 0 && !isCursorCell) {
+    if (width === 0 && !isCursorCell && !isSelected) {
       if (currentKey !== "default") {
         output += "\x1b[0m";
         currentKey = "default";
@@ -1022,7 +1289,7 @@ const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => 
       output += " ";
       continue;
     }
-    if (width === 0 && isCursorCell) {
+    if (width === 0 && (isCursorCell || isSelected)) {
       width = 1;
       chars = " ";
     }
@@ -1038,7 +1305,7 @@ const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => 
 
     const style = styleKeyForCell(
       cellData as ReturnType<typeof terminal.buffer.active.getNullCell>,
-      isCursorCell
+      isCursorCell || isSelected
     );
     if (style.key !== currentKey) {
       output += style.ansi;
@@ -1076,8 +1343,11 @@ const render = () => {
   const shareUrl = buildShareUrl();
   const hopDaemonLabel = buildHopDaemonLabel();
 
-  const bottomLeft = `● ${sessionLabel}`;
-  const autofitLabel = syncSize ? "autofit on" : "autofit off";
+  const cwdLabel = formatCwd(liveCwd);
+  const cwdText = cwdLabel ? ` · ${cwdLabel}` : "";
+  const bottomLeft = `● ${sessionLabel}${cwdText}`;
+  const autofitLabel = syncSize ? "fit" : "manual";
+  const persistenceLabel = "persists";
   const peerLabel = `peers ${presenceNames.length}`;
   const rightSegments = fitBarSegments(
     bottomLeft,
@@ -1085,8 +1355,9 @@ const render = () => {
       statusLabel ? { text: statusLabel } : null,
       hopDaemonLabel ? { text: hopDaemonLabel, secondary: true, dropPriority: 1 } : null,
       !statusLabel && shareUrl ? { text: shareUrl, secondary: true, dropPriority: 0 } : null,
-      { text: autofitLabel, secondary: true, dropPriority: 2 },
-      { text: peerLabel, secondary: true, dropPriority: 3 }
+      { text: persistenceLabel, secondary: true, dropPriority: 2 },
+      { text: autofitLabel, secondary: true, dropPriority: 3 },
+      { text: peerLabel, secondary: true, dropPriority: 4 }
     ].filter((segment): segment is BarSegment => !!segment),
     localMetrics.cols
   );
@@ -1098,15 +1369,17 @@ const render = () => {
     rightPriority
   );
   const topPriority = rightSegments
-    .filter((segment) => segment.text === hopDaemonLabel || segment.text === shareUrl)
+    .filter((segment) => segment.text === hopDaemonLabel || segment.text === shareUrl || segment.text === persistenceLabel)
     .map((segment) => segment.text);
   const bottomPrimary = renderBar(
     decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), topPriority, [sessionLabel]),
     "bottom"
   );
 
-  const noticeText = notice && notice.expiresAt > Date.now() ? ` ${notice.message} ` : "";
-  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, M mouse | Ctrl: T hints, G detach, Q kill`;
+  const noticeText = notice && notice.expiresAt > Date.now()
+    ? ` ${notice.message} `
+    : "";
+  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, B status ${showStatusBar ? "on" : "off"}, M mouse ${mouseCapture ? "on" : "off"} | Ctrl: T hints, G detach, Q kill`;
   const hintLine = renderBar(
     composeBar(noticeText || `${BAR_DIM}${controls}${BAR_RESET_FG}`, "", localMetrics.cols),
     "bottom"
@@ -1175,6 +1448,10 @@ const connect = () => {
     if (syncSize) {
       applySyncSize();
     }
+    if (!persistenceNoticeShown) {
+      persistenceNoticeShown = true;
+      pushNotice("Session persists if Hop exits; Ctrl+Q kills it");
+    }
     scheduleRender();
   });
 
@@ -1193,6 +1470,10 @@ const connect = () => {
         presence = message.clients;
         scheduleRender();
         break;
+      case "cwd_changed":
+        liveCwd = message.cwd;
+        scheduleRender();
+        break;
       case "output":
         {
           trackPrivateModes(message.data);
@@ -1200,17 +1481,10 @@ const connect = () => {
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
-            if (!userPannedAway) {
-              // Follow cursor: keep it visible with scrollOff margin
-              const buffer = terminal.buffer.active;
-              const cursorRow = buffer.baseY + buffer.cursorY;
-              const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
-              if (cursorRow < viewY + margin) {
-                viewY = Math.max(0, cursorRow - margin);
-              } else if (cursorRow >= viewY + localMetrics.viewportRows - margin) {
-                viewY = cursorRow - localMetrics.viewportRows + margin + 1;
-              }
-              clampView();
+            if (followOutput) {
+              followCursorWithMargin();
+            } else {
+              restoreViewFromAnchor();
             }
             scheduleRender();
           });
@@ -1224,20 +1498,16 @@ const connect = () => {
           }
           trackOscColors(message.data);
           terminal.clear();
-          userPannedAway = false;
+          releaseScrollAnchor();
+          followOutput = true;
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
           terminal.write(filtered, () => {
-            // Always follow cursor on snapshot load
-            const buffer = terminal.buffer.active;
-            const cursorRow = buffer.baseY + buffer.cursorY;
-            const margin = Math.min(scrollOff, Math.floor(localMetrics.viewportRows / 2));
-            if (cursorRow < viewY + margin) {
-              viewY = Math.max(0, cursorRow - margin);
-            } else if (cursorRow >= viewY + localMetrics.viewportRows - margin) {
-              viewY = cursorRow - localMetrics.viewportRows + margin + 1;
+            if (followOutput) {
+              followCursorWithMargin();
+            } else {
+              clampView();
             }
-            clampView();
             scheduleRender();
           });
         }
@@ -1324,6 +1594,17 @@ const cleanupAndExit = () => {
 const handleLocalShortcut = (input: string) => {
   if (!input) return false;
 
+  // Escape clears selection if active (before passing to remote)
+  if (input === "\x1b" && selectionAnchor) {
+    clearSelection();
+    return true;
+  }
+
+  // Any non-mouse input clears selection
+  if (selectionAnchor && !input.startsWith("\x1b[<")) {
+    clearSelection();
+  }
+
   const shouldExitImmediately =
     !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
   const ctrlShortcutsReady = Date.now() >= shortcutsEnabledAt;
@@ -1362,8 +1643,9 @@ const handleLocalShortcut = (input: string) => {
   // Ctrl+T toggles hint bar
   if (ctrlShortcutsReady && input === "\x14") {
     showHints = !showHints;
-    saveConfig({ ...configFile, showHints });
+    persistConfig({ showHints });
     pushNotice(`Hints ${showHints ? "on" : "off"}`);
+    scheduleRender();
     return true;
   }
 
@@ -1389,7 +1671,7 @@ const handleLocalShortcut = (input: string) => {
     const step = altKey("K") ? PAN_FAST_STEP : PAN_STEP;
     viewY -= step;
     clampView();
-    userPannedAway = viewY < getMaxViewY();
+    updateFollowOutputFromViewport();
     scheduleRender();
     return true;
   }
@@ -1397,20 +1679,29 @@ const handleLocalShortcut = (input: string) => {
     const step = altKey("J") ? PAN_FAST_STEP : PAN_STEP;
     viewY += step;
     clampView();
-    userPannedAway = viewY < getMaxViewY();
+    updateFollowOutputFromViewport();
     scheduleRender();
     return true;
   }
   if (altKey("a") || altKey("A") || optionChar("å")) {
     syncSize = !syncSize;
+    persistConfig({ syncSize });
     pushNotice(`Autofit ${syncSize ? "on" : "off"}`);
     if (syncSize) {
       applySyncSize();
     }
     return true;
   }
+  if (altKey("b") || altKey("B") || optionChar("∫")) {
+    showStatusBar = !showStatusBar;
+    persistConfig({ showStatusBar });
+    pushNotice(`Status bar ${showStatusBar ? "on" : "off"}`);
+    scheduleRender();
+    return true;
+  }
   if (altKey("m") || altKey("M") || optionChar("µ")) {
     setMouseCapture(!mouseCapture);
+    persistConfig({ mouseCapture });
     pushNotice(`Mouse capture ${mouseCapture ? "on" : "off"}`);
     return true;
   }
@@ -1434,6 +1725,16 @@ process.stdin.on("data", (data) => {
       input = input.slice(0, lastMouseStart);
     }
   }
+  // A mouse sequence can also split right inside its "\x1b[<" prefix. Stash a
+  // trailing bare ESC / "\x1b[" only when it follows other input, so a real
+  // lone Escape keypress still goes through immediately.
+  if (mouseCapture && !pendingInput) {
+    const partialPrefix = input.endsWith("\x1b[") ? "\x1b[" : input.endsWith("\x1b") ? "\x1b" : "";
+    if (partialPrefix && input.length > partialPrefix.length) {
+      pendingInput = partialPrefix;
+      input = input.slice(0, -partialPrefix.length);
+    }
+  }
   if (!input) return;
   const mouseResult = stripMouseSequences(input);
   input = mouseResult.cleaned;
@@ -1447,7 +1748,8 @@ process.stdin.on("data", (data) => {
     applySyncSize();
   }
 
-  userPannedAway = false;
+  followOutput = true;
+  releaseScrollAnchor();
   sendMessage({ type: "input", data: sanitized });
   handleTyping();
 });

@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { execFile } from "node:child_process";
+import { readlink } from "node:fs";
 import type { IPty } from "node-pty-prebuilt-multiarch";
 import { pickPresenceColor, safeParseClientMessage } from "hay-shared";
 import type { ClientMessage, PresenceClient, ServerMessage } from "hay-shared";
@@ -16,6 +18,7 @@ export type SocketAdapter = {
 export type ClientInfo = {
   id: string;
   name: string;
+  source?: string;
   colorIndex: number;
   cols: number;
   rows: number;
@@ -30,7 +33,9 @@ export type RoomCreateOptions = {
 export type RoomSummary = {
   id: string;
   cwd: string;
+  liveCwd: string;
   clientCount: number;
+  localCliCount: number;
 };
 
 const MAX_BUFFER_SIZE = 200_000;
@@ -63,12 +68,14 @@ class ClientState {
   typing = false;
   lastActive = now();
   socket: SocketAdapter;
+  source: string;
   cols: number;
   rows: number;
 
   constructor(info: ClientInfo, socket: SocketAdapter) {
     this.id = info.id;
     this.name = info.name;
+    this.source = info.source || "";
     this.color = pickPresenceColor(info.colorIndex);
     this.socket = socket;
     this.cols = info.cols;
@@ -79,7 +86,8 @@ class ClientState {
 export class Room extends EventEmitter {
   id: string;
   private pty: IPty;
-  private readonly cwd: string;
+  private readonly initialCwd: string;
+  private liveCwd: string;
   private clients = new Map<string, ClientState>();
   private collabMode = true;
   private controllerId: string | null = null;
@@ -90,13 +98,16 @@ export class Room extends EventEmitter {
   private alternateScreen = false;
   private cursorHidden = false;
   private controlSequenceTail = "";
+  private oscBuffer = "";
   private cleanupTimer: NodeJS.Timeout | null = null;
   private ended = false;
+  private cwdPollTimer: NodeJS.Timeout | null = null;
 
   constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, options: RoomCreateOptions) {
     super();
     this.id = id;
-    this.cwd = options.cwd;
+    this.initialCwd = options.cwd;
+    this.liveCwd = options.cwd;
     this.pty = ptyFactory({
       cols: initialSize.cols,
       rows: initialSize.rows,
@@ -139,6 +150,9 @@ export class Room extends EventEmitter {
         handleExit(exitCode, signal);
       });
     }
+
+    // Start PID-based cwd polling as fallback for shells without OSC 7
+    this.startCwdPolling();
   }
 
   attachClient(info: ClientInfo, socket: SocketAdapter) {
@@ -178,6 +192,12 @@ export class Room extends EventEmitter {
         cursorHidden: this.cursorHidden
       } satisfies ServerMessage));
     }
+
+    // Send current cwd to the new client
+    socket.send(JSON.stringify({
+      type: "cwd_changed",
+      cwd: this.liveCwd
+    } satisfies ServerMessage));
 
     this.broadcastPresence();
 
@@ -247,6 +267,8 @@ export class Room extends EventEmitter {
 
   private updateTerminalState(data: string) {
     const combined = this.controlSequenceTail + data;
+
+    // Parse CSI mode sequences (cursor visibility, alternate screen)
     const regex = /\x1b\[\?([0-9;]*)([hl])/g;
     let match: RegExpExecArray | null;
     let nextAlternate = this.alternateScreen;
@@ -289,10 +311,123 @@ export class Room extends EventEmitter {
       });
     }
 
+    // Parse OSC 7 — only scan when ESC is present (fast path: skip most data chunks)
+    if (data.includes("\x1b]7;") || this.oscBuffer) {
+      this.parseOsc7(data);
+    }
+
     this.controlSequenceTail = combined.slice(-CONTROL_SEQUENCE_TAIL);
   }
 
+  // Regex: matches OSC 7 with BEL (\x07) or ST (\x1b\\) terminator
+  private static readonly OSC7_RE = /\x1b\]7;([^\x07\x1b]*?)(?:\x07|\x1b\\)/g;
+
+  private parseOsc7(data: string) {
+    const chunk = this.oscBuffer + data;
+    this.oscBuffer = "";
+
+    // Fast regex scan — no allocations when there's no match
+    Room.OSC7_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = Room.OSC7_RE.exec(chunk)) !== null) {
+      this.handleOsc7Uri(match[1]);
+    }
+
+    // Check for a partial OSC 7 at the end of the chunk (split across packets)
+    const tailIdx = chunk.lastIndexOf("\x1b]7;");
+    if (tailIdx !== -1) {
+      const tail = chunk.slice(tailIdx);
+      // If the regex didn't consume this position, it's incomplete
+      if (tail.indexOf("\x07") === -1 && tail.indexOf("\x1b\\") === -1 && tail.length < 512) {
+        this.oscBuffer = tail;
+      }
+    }
+  }
+
+  private handleOsc7Uri(uri: string) {
+    // Parse file://hostname/path URI
+    try {
+      let cwdPath: string;
+      if (uri.startsWith("file://")) {
+        // Extract path portion, skipping hostname
+        const withoutScheme = uri.slice(7);
+        const slashIdx = withoutScheme.indexOf("/");
+        if (slashIdx === -1) return;
+        cwdPath = decodeURIComponent(withoutScheme.slice(slashIdx));
+      } else if (uri.startsWith("/")) {
+        cwdPath = decodeURIComponent(uri);
+      } else {
+        return;
+      }
+
+      if (cwdPath && cwdPath !== this.liveCwd) {
+        if (DEBUG_STATE) {
+          console.log(`[hay] room=${this.id} cwd=${cwdPath}`);
+        }
+        this.liveCwd = cwdPath;
+        this.broadcast({ type: "cwd_changed", cwd: cwdPath });
+        this.emit("cwd_changed", { roomId: this.id, cwd: cwdPath, timestamp: now() });
+      }
+    } catch {
+      // Malformed URI — ignore
+    }
+  }
+
+  /**
+   * Start polling PID-based cwd as fallback for shells that don't emit OSC 7.
+   * Uses a long interval to avoid system overhead (lsof is expensive on macOS).
+   * OSC 7 parsing is the primary mechanism; this is a best-effort fallback.
+   */
+  startCwdPolling(intervalMs = 15000) {
+    this.stopCwdPolling();
+    const pid = (this.pty as unknown as { pid?: number }).pid;
+    if (!pid) return;
+
+    const updateCwd = (cwdPath: string) => {
+      if (cwdPath && cwdPath !== this.liveCwd) {
+        if (DEBUG_STATE) {
+          console.log(`[hay] room=${this.id} cwd(poll)=${cwdPath}`);
+        }
+        this.liveCwd = cwdPath;
+        this.broadcast({ type: "cwd_changed", cwd: cwdPath });
+        this.emit("cwd_changed", { roomId: this.id, cwd: cwdPath, timestamp: now() });
+      }
+    };
+
+    const poll = () => {
+      if (this.ended) return;
+      if (process.platform === "darwin") {
+        execFile("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeout: 5000 }, (err, stdout) => {
+          if (err || !stdout) return;
+          for (const line of stdout.split("\n")) {
+            if (line.startsWith("n/")) {
+              updateCwd(line.slice(1));
+              break;
+            }
+          }
+        });
+      } else if (process.platform === "linux") {
+        readlink(`/proc/${pid}/cwd`, (err, target) => {
+          if (err || !target) return;
+          updateCwd(target);
+        });
+      }
+    };
+
+    this.cwdPollTimer = setInterval(poll, intervalMs);
+    // Initial poll with a generous delay to not interfere with startup
+    setTimeout(poll, 3000);
+  }
+
+  stopCwdPolling() {
+    if (this.cwdPollTimer) {
+      clearInterval(this.cwdPollTimer);
+      this.cwdPollTimer = null;
+    }
+  }
+
   kill() {
+    this.stopCwdPolling();
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
@@ -419,6 +554,7 @@ export class Room extends EventEmitter {
   private endSession(payload: { exitCode: number | null; signal: string | null; message: string }) {
     if (this.ended) return;
     this.ended = true;
+    this.stopCwdPolling();
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
@@ -440,10 +576,13 @@ export class Room extends EventEmitter {
   }
 
   getSummary(): RoomSummary {
+    const localCliCount = [...this.clients.values()].filter((client) => client.source === "local-cli").length;
     return {
       id: this.id,
-      cwd: this.cwd,
-      clientCount: this.clients.size
+      cwd: this.initialCwd,
+      liveCwd: this.liveCwd,
+      clientCount: this.clients.size,
+      localCliCount
     };
   }
 }

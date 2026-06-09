@@ -75,10 +75,20 @@ node apps/cli/dist/index.js -r my-room -n alice
 | `←` `→` `↑` `↓` | Pan viewport |
 | `0` | Center on cursor |
 | `A` | Auto-fit viewport to content |
-| `M` | Toggle mouse mode |
+| `B` | Toggle status bar |
+| `M` | Toggle mouse capture (off by default, so terminal context menus keep working) |
 | `Ctrl+T` | Toggle hints bar |
-| `Ctrl+G` | Detach from session |
+| `Ctrl+G` | Detach from session; the session keeps running |
 | `Ctrl+Q` | Kill session |
+
+Local sessions are persistent by default: they keep running in the Hay host if
+the local CLI detaches or the Hop daemon restarts. Use `Ctrl+Q` to end the
+session itself.
+
+When the viewport is at the bottom, the CLI follows new output automatically.
+If you pan upward to inspect scrollback, incoming output no longer forces the
+viewport back down until you return to the bottom, center on the cursor, or
+send new input.
 
 ### Configuration
 
@@ -95,6 +105,9 @@ Example `.hop.json`:
 {
   "hay-cli": {
     "showHints": true,
+    "showStatusBar": true,
+    "mouseCapture": false,
+    "syncSize": true,
     "scrollOff": 3
   }
 }
@@ -105,6 +118,9 @@ Configuration options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `showHints` | `true` | Show keyboard shortcut hints at the bottom |
+| `showStatusBar` | `true` | Show the session/status bar |
+| `mouseCapture` | `false` | Capture mouse events for Hop selection and local wheel scrolling |
+| `syncSize` | `true` | Auto-fit the remote terminal size to the local viewport |
 | `scrollOff` | `3` | Lines of context to keep above/below the cursor |
 
 ## Web Client

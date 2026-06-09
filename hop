@@ -15,6 +15,7 @@ const { pathToFileURL } = require('url');
 const net = require('net');
 const WebSocket = require('ws');
 const { resolveActorFromHeaders, canActorAccessSession } = require('./lib/terminal-access');
+const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = require('./lib/naming-themes');
 
 const os = require('os');
 const DAEMON_FLAG = process.argv.includes('--daemon');
@@ -172,6 +173,7 @@ const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
 const SESSION_SECRET_FILE = path.join(HOME_DIR, '.session_secret');
 const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
+const HOP_CONFIG_FILE = path.join(HOME_DIR, '.config.json');
 const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
 const LOG_DIR = path.join(HOME_DIR, 'logs');
@@ -191,9 +193,8 @@ const ENABLE_AGENT_POST_START_HISTORY_INIT = process.env.HOP_AGENT_POST_START_HI
 const ENABLE_POST_START_HISTORY_INIT = process.env.HOP_POST_START_HISTORY_INIT === '1';
 let SECRET_FILE_PATH = DEFAULT_SECRET_FILE;
 let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
-const SESSIONS_FILE = path.join(HOME_DIR, '.sessions.json');
 const WORKSPACES_DIR = path.join(HOME_DIR, 'workspaces');
-const WORKSPACE_POINTER_FILE = path.join(HOME_DIR, '.workspace');
+const RUNTIME_DATA_DIR = path.join(HOME_DIR, 'runtime');
 const HAY_HOST_STATE_FILE = path.join(HOME_DIR, '.hay-host-state');
 const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 5000);
 const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_CACHE_MS', 1500);
@@ -265,6 +266,7 @@ function isLegacyInternalSessionName(name) {
 
 ensurePrivateDir(LOG_DIR);
 ensurePrivateDir(WORKSPACES_DIR);
+ensurePrivateDir(RUNTIME_DATA_DIR);
 
 function toInternalSessionName(displayName) {
     if (!displayName || typeof displayName !== 'string') return null;
@@ -277,11 +279,23 @@ function toDisplaySessionName(internalName) {
     return stripLegacySessionPrefix(internalName);
 }
 
-const SESSION_STORE_VERSION = 2;
+const SESSION_STORE_VERSION = 3;
+const WORKSPACE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
-function createEmptySessionStore() {
+function normalizeWorkspaceName(name) {
+    if (!name || typeof name !== 'string') return null;
+    const trimmed = name.trim();
+    if (!trimmed || !WORKSPACE_NAME_RE.test(trimmed)) return null;
+    return trimmed;
+}
+
+function createEmptySessionStore(name = DEFAULT_WORKSPACE_NAME) {
+    const now = new Date().toISOString();
     return {
         version: SESSION_STORE_VERSION,
+        name: normalizeWorkspaceName(name) || DEFAULT_WORKSPACE_NAME,
+        createdAt: now,
+        updatedAt: now,
         sessions: {},
         folders: {},
         order: {
@@ -291,127 +305,209 @@ function createEmptySessionStore() {
     };
 }
 
-function normalizeSessionStore(raw) {
-    const empty = createEmptySessionStore();
-    if (!raw || typeof raw !== 'object') return empty;
-
-    if (raw.version === SESSION_STORE_VERSION && raw.sessions && typeof raw.sessions === 'object') {
-        const rawSessions = raw.sessions || {};
-        const sessions = {};
-        const canonicalNameMap = new Map();
-        for (const [name, config] of Object.entries(rawSessions)) {
-            if (!config || typeof config !== 'object') continue;
-            let targetName = name;
-            if (isLegacyInternalSessionName(name)) {
-                const stripped = stripLegacySessionPrefix(name);
-                // Migrate legacy prefixed keys when no collision with existing session.
-                if (stripped && !rawSessions[stripped] && !sessions[stripped]) {
-                    targetName = stripped;
-                }
-            }
-            if (sessions[targetName]) continue;
-            sessions[targetName] = config;
-            canonicalNameMap.set(name, targetName);
-        }
-        const folders = raw.folders && typeof raw.folders === 'object' ? raw.folders : {};
-        const order = raw.order && typeof raw.order === 'object' ? raw.order : {};
-        const folderOrder = Array.isArray(order.folders)
-            ? order.folders.filter((id) => folders[id])
-            : [];
-        const orderSessions = order.sessions && typeof order.sessions === 'object' ? order.sessions : {};
-        const canonicalName = (name) => canonicalNameMap.get(name) || name;
-        const canonicalizeOrderList = (list) => {
-            if (!Array.isArray(list)) return [];
-            const out = [];
-            const seen = new Set();
-            for (const name of list) {
-                const mapped = canonicalName(name);
-                if (!sessions[mapped] || seen.has(mapped)) continue;
-                seen.add(mapped);
-                out.push(mapped);
-            }
-            return out;
-        };
-
-        const normalized = {
-            version: SESSION_STORE_VERSION,
-            sessions,
-            folders,
-            order: {
-                folders: folderOrder,
-                sessions: { root: [] }
-            }
-        };
-
-        normalized.order.sessions.root = canonicalizeOrderList(orderSessions.root);
-
-        for (const id of Object.keys(folders)) {
-            normalized.order.sessions[id] = canonicalizeOrderList(orderSessions[id]);
-            if (!normalized.order.folders.includes(id)) {
-                normalized.order.folders.push(id);
-            }
-        }
-
-        for (const [name, config] of Object.entries(sessions)) {
-            if (!config || typeof config !== 'object') continue;
-            if (!config.displayName) {
-                config.displayName = toDisplaySessionName(name);
-            }
-            const folderId = config.folderId && folders[config.folderId] ? config.folderId : null;
-            if (config.folderId && !folders[config.folderId]) {
-                config.folderId = null;
-            }
-            const bucket = folderId || 'root';
-            if (!normalized.order.sessions[bucket]) {
-                normalized.order.sessions[bucket] = [];
-            }
-            if (!normalized.order.sessions[bucket].includes(name)) {
-                normalized.order.sessions[bucket].push(name);
-            }
-        }
-
-        return normalized;
-    }
-
-    const normalized = createEmptySessionStore();
-    const sessions = raw && typeof raw === 'object' ? raw : {};
-    for (const [name, config] of Object.entries(sessions)) {
-        if (!config || typeof config !== 'object') continue;
-        normalized.sessions[name] = {
-            ...config,
-            displayName: config.displayName || toDisplaySessionName(name),
-            folderId: config.folderId || null
-        };
-    }
-    normalized.order.sessions.root = Object.keys(normalized.sessions).sort((a, b) => {
-        const aName = normalized.sessions[a]?.displayName || toDisplaySessionName(a);
-        const bName = normalized.sessions[b]?.displayName || toDisplaySessionName(b);
-        return aName.localeCompare(bName);
-    });
-    return normalized;
+function normalizeStoredSessionConfig(name, config, folders, workspaceName, fallbackTimestamps) {
+    if (!SESSION_NAME_RE.test(name) || !config || typeof config !== 'object') return null;
+    const type = config.type === 'port' ? 'port' : 'terminal';
+    const createdBy = config.createdBy === 'agent' ? 'agent' : 'user';
+    const folderId = config.folderId && folders[config.folderId] ? config.folderId : null;
+    return {
+        type,
+        port: type === 'port' ? config.port : undefined,
+        cwd: typeof config.cwd === 'string' && config.cwd ? config.cwd : undefined,
+        shell: typeof config.shell === 'string' && config.shell ? config.shell : undefined,
+        env: config.env && typeof config.env === 'object' && !Array.isArray(config.env) ? config.env : undefined,
+        cols: Number.isInteger(config.cols) ? config.cols : undefined,
+        rows: Number.isInteger(config.rows) ? config.rows : undefined,
+        startup: typeof config.startup === 'string' && config.startup ? config.startup : undefined,
+        autoStart: typeof config.autoStart === 'boolean' ? config.autoStart : undefined,
+        createdBy,
+        agentPermitted: typeof config.agentPermitted === 'boolean' ? config.agentPermitted : createdBy === 'agent',
+        displayName: typeof config.displayName === 'string' && config.displayName ? config.displayName : toDisplaySessionName(name),
+        folderId,
+        workspaceName,
+        createdAt: config.createdAt || fallbackTimestamps.createdAt,
+        updatedAt: config.updatedAt || fallbackTimestamps.updatedAt
+    };
 }
 
-function loadSessionStore() {
-    if (fs.existsSync(SESSIONS_FILE)) {
-        try {
-            ensurePrivateFile(SESSIONS_FILE);
-            const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-            return normalizeSessionStore(data);
-        } catch (e) {
-            return createEmptySessionStore();
+function normalizeSessionStore(raw, opts = {}) {
+    const workspaceName = normalizeWorkspaceName(opts.workspaceName) || normalizeWorkspaceName(raw?.name) || DEFAULT_WORKSPACE_NAME;
+    const empty = createEmptySessionStore(workspaceName);
+    if (!raw || typeof raw !== 'object') return empty;
+
+    const folders = {};
+    for (const [id, folder] of Object.entries(raw.folders || {})) {
+        if (!id || !folder || typeof folder !== 'object') continue;
+        const name = String(folder.name || '').trim();
+        if (!name) continue;
+        folders[id] = {
+            id,
+            name,
+            createdAt: folder.createdAt || empty.createdAt,
+            updatedAt: folder.updatedAt || empty.updatedAt
+        };
+    }
+
+    const sessions = {};
+    for (const [name, config] of Object.entries(raw.sessions || {})) {
+        const normalizedConfig = normalizeStoredSessionConfig(name, config, folders, workspaceName, empty);
+        if (!normalizedConfig) continue;
+        sessions[name] = normalizedConfig;
+    }
+
+    const rawOrder = raw.order && typeof raw.order === 'object' ? raw.order : {};
+    const folderOrder = Array.isArray(rawOrder.folders)
+        ? rawOrder.folders.filter((id) => folders[id])
+        : [];
+    const rawOrderSessions = rawOrder.sessions && typeof rawOrder.sessions === 'object' ? rawOrder.sessions : {};
+    const canonicalizeOrderList = (list) => {
+        if (!Array.isArray(list)) return [];
+        const out = [];
+        const seen = new Set();
+        for (const name of list) {
+            if (!sessions[name] || seen.has(name)) continue;
+            seen.add(name);
+            out.push(name);
+        }
+        return out;
+    };
+
+    const order = {
+        folders: folderOrder,
+        sessions: {
+            root: canonicalizeOrderList(rawOrderSessions.root)
+        }
+    };
+
+    for (const id of Object.keys(folders)) {
+        order.sessions[id] = canonicalizeOrderList(rawOrderSessions[id]);
+        if (!order.folders.includes(id)) {
+            order.folders.push(id);
         }
     }
-    return createEmptySessionStore();
+
+    for (const [name, config] of Object.entries(sessions)) {
+        const bucket = config.folderId || 'root';
+        if (!order.sessions[bucket]) {
+            order.sessions[bucket] = [];
+        }
+        if (!order.sessions[bucket].includes(name)) {
+            order.sessions[bucket].push(name);
+        }
+    }
+
+    return {
+        version: SESSION_STORE_VERSION,
+        name: workspaceName,
+        createdAt: raw.createdAt || empty.createdAt,
+        updatedAt: raw.updatedAt || empty.updatedAt,
+        sessions,
+        folders,
+        order
+    };
+}
+
+function loadWorkspaceStore(name) {
+    const workspaceName = normalizeWorkspaceName(name) || DEFAULT_WORKSPACE_NAME;
+    const filePath = getWorkspacePath(workspaceName);
+    if (!fs.existsSync(filePath)) {
+        return createEmptySessionStore(workspaceName);
+    }
+    try {
+        ensurePrivateFile(filePath);
+        const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return normalizeSessionStore(raw, { workspaceName });
+    } catch (e) {
+        return createEmptySessionStore(workspaceName);
+    }
+}
+
+function serializeWorkspaceStore(name, store) {
+    const workspaceName = normalizeWorkspaceName(name) || DEFAULT_WORKSPACE_NAME;
+    const normalized = normalizeSessionStore(store, { workspaceName });
+    const updatedAt = new Date().toISOString();
+    return {
+        ...normalized,
+        name: workspaceName,
+        updatedAt,
+        sessions: Object.fromEntries(
+            Object.entries(normalized.sessions).map(([internalName, config]) => [
+                internalName,
+                { ...config, workspaceName }
+            ])
+        )
+    };
+}
+
+function writeWorkspaceStore(name, store = null) {
+    const workspaceName = normalizeWorkspaceName(name) || DEFAULT_WORKSPACE_NAME;
+    const filePath = getWorkspacePath(workspaceName);
+    const doc = serializeWorkspaceStore(workspaceName, store || createEmptySessionStore(workspaceName));
+    writePrivateFile(filePath, JSON.stringify(doc, null, 2));
+    return doc;
+}
+
+function initializeWorkspaceState() {
+    return { workspaceName: null, store: createEmptySessionStore() };
 }
 
 function saveSessionStore() {
-    writePrivateFile(SESSIONS_FILE, JSON.stringify(sessionStore, null, 2));
+    if (!currentWorkspaceName) return;
+    sessionStore.name = currentWorkspaceName;
+    sessionStore.updatedAt = new Date().toISOString();
+    writeWorkspaceStore(currentWorkspaceName, sessionStore);
 }
 
-let sessionStore = loadSessionStore();
+const initialWorkspaceState = initializeWorkspaceState();
+let currentWorkspaceName = initialWorkspaceState.workspaceName;
+let sessionStore = initialWorkspaceState.store;
+const runtimeSessionMetadata = new Map();
 
 function getSessionConfig(name) {
     return sessionStore.sessions[name] || null;
+}
+
+function getSavedSessionConfig(name) {
+    const config = getSessionConfig(name);
+    return normalizeWorkspaceName(config?.workspaceName) ? config : null;
+}
+
+function rememberRuntimeSessionMetadata(name, next = {}) {
+    if (!name) return null;
+    const existing = runtimeSessionMetadata.get(name) || {};
+    const merged = {
+        ...existing,
+        ...next,
+        type: next.type || existing.type || 'terminal',
+        displayName: next.displayName || existing.displayName || name,
+        cwd: next.cwd || existing.cwd,
+        createdAt: next.createdAt || existing.createdAt || new Date().toISOString()
+    };
+    runtimeSessionMetadata.set(name, merged);
+    return merged;
+}
+
+function clearRuntimeSessionMetadata(name) {
+    if (!name) return;
+    runtimeSessionMetadata.delete(name);
+}
+
+function getRuntimeSessionMetadata(name) {
+    if (!name) return null;
+    return runtimeSessionMetadata.get(name) || null;
+}
+
+function getEffectiveSessionConfig(name) {
+    const saved = getSessionConfig(name);
+    const runtime = getRuntimeSessionMetadata(name);
+    if (saved && runtime) {
+        return { ...runtime, ...saved };
+    }
+    return saved || runtime || null;
+}
+
+function hasSavedSessionConfig(name) {
+    return !!getSavedSessionConfig(name);
 }
 
 function ensureSessionOrder(name, folderId) {
@@ -444,7 +540,7 @@ function deleteSessionConfig(name) {
 }
 
 function getSessionDisplayName(name) {
-    const config = getSessionConfig(name);
+    const config = getEffectiveSessionConfig(name);
     if (config?.displayName) return config.displayName;
     return toDisplaySessionName(name);
 }
@@ -455,11 +551,16 @@ function findInternalSessionName(displayName) {
         const current = config?.displayName || toDisplaySessionName(name);
         if (current === displayName) return name;
     }
+    for (const [name, config] of runtimeSessionMetadata.entries()) {
+        if ((config?.displayName || name) === displayName) return name;
+    }
     return null;
 }
 
 function isDisplayNameInUse(displayName) {
-    return !!findInternalSessionName(displayName);
+    if (findInternalSessionName(displayName)) return true;
+    const internalName = toInternalSessionName(resolveDisplayNameAlias(displayName));
+    return !!(internalName && hopSessionExists(internalName));
 }
 
 function renameSessionDisplayName(oldDisplayName, newDisplayName) {
@@ -478,7 +579,9 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName) {
         return { ok: true, changed: false };
     }
 
-    const internalName = findInternalSessionName(resolvedOldDisplayName);
+    const fallbackInternalName = toInternalSessionName(resolvedOldDisplayName);
+    const internalName = findInternalSessionName(resolvedOldDisplayName)
+        || (fallbackInternalName && hopSessionExists(fallbackInternalName) ? fallbackInternalName : null);
     if (!internalName) {
         const err = new Error('Session not found');
         err.status = 404;
@@ -497,15 +600,21 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName) {
         throw err;
     }
 
-    const config = getSessionConfig(internalName) || {
+    const savedConfig = getSavedSessionConfig(internalName);
+    const config = savedConfig || getRuntimeSessionMetadata(internalName) || {
         type: 'terminal',
         createdAt: new Date().toISOString()
     };
-    setSessionConfig(internalName, {
+    const next = {
         ...config,
         displayName: newDisplayName,
         updatedAt: new Date().toISOString()
-    });
+    };
+    if (savedConfig) {
+        setSessionConfig(internalName, next);
+    } else {
+        rememberRuntimeSessionMetadata(internalName, next);
+    }
 
     sessionAliases[resolvedOldDisplayName] = newDisplayName;
     if (oldDisplayName !== resolvedOldDisplayName) {
@@ -685,8 +794,9 @@ function deleteFolder(id) {
 }
 
 function moveSessionToFolder(name, folderId, index) {
-    const config = getSessionConfig(name);
-    if (!config) return false;
+    const savedConfig = getSessionConfig(name);
+    const config = savedConfig || getEffectiveSessionConfig(name);
+    if (!config || config.type === 'port') return false;
     const targetFolder = folderId && sessionStore.folders[folderId] ? folderId : null;
     removeSessionFromOrder(name);
     const bucket = targetFolder || 'root';
@@ -696,10 +806,19 @@ function moveSessionToFolder(name, folderId, index) {
     const list = sessionStore.order.sessions[bucket];
     let insertIndex = Number.isInteger(index) ? Math.max(0, Math.min(index, list.length)) : list.length;
     list.splice(insertIndex, 0, name);
-    config.folderId = targetFolder;
-    config.updatedAt = new Date().toISOString();
-    sessionStore.sessions[name] = config;
-    saveSessionStore();
+    const next = {
+        ...config,
+        type: 'terminal',
+        displayName: config.displayName || toDisplaySessionName(name),
+        workspaceName: resolveSessionWorkspaceName(config),
+        createdBy: config.createdBy || 'user',
+        agentPermitted: typeof config.agentPermitted === 'boolean'
+            ? config.agentPermitted
+            : (config.createdBy === 'agent'),
+        folderId: targetFolder,
+        updatedAt: new Date().toISOString()
+    };
+    setSessionConfig(name, next);
     return true;
 }
 
@@ -712,17 +831,14 @@ function setFolderOrder(order) {
     return true;
 }
 
-const WORKSPACE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
-
-function normalizeWorkspaceName(name) {
-    if (!name || typeof name !== 'string') return null;
-    const trimmed = name.trim();
-    if (!trimmed || !WORKSPACE_NAME_RE.test(trimmed)) return null;
-    return trimmed;
-}
-
 function getWorkspacePath(name) {
     return path.join(WORKSPACES_DIR, `${name}.json`);
+}
+
+function workspaceExists(name) {
+    const normalized = normalizeWorkspaceName(name);
+    if (!normalized) return false;
+    return fs.existsSync(getWorkspacePath(normalized));
 }
 
 function listWorkspaceNames() {
@@ -736,260 +852,285 @@ function listWorkspaceNames() {
     }
 }
 
-function buildWorkspaceSnapshot(name) {
-    const now = new Date().toISOString();
-    const folderIdToName = {};
-    for (const [id, folder] of Object.entries(sessionStore.folders)) {
-        folderIdToName[id] = folder.name;
-    }
-
-    const sessions = Object.entries(sessionStore.sessions).map(([id, config]) => ({
-        name: config.displayName || toDisplaySessionName(id),
-        type: config.type || 'terminal',
-        port: config.port,
-        cwd: config.cwd,
-        shell: config.shell,
-        env: config.env,
-        cols: config.cols,
-        rows: config.rows,
-        startup: config.startup,
-        autoStart: config.autoStart,
-        createdBy: config.createdBy,
-        agentPermitted: config.agentPermitted,
-        folder: config.folderId ? folderIdToName[config.folderId] || null : null
-    }));
-
-    const order = { folders: [], sessions: { root: [] } };
-    order.folders = sessionStore.order.folders
-        .map((id) => folderIdToName[id])
-        .filter(Boolean);
-
-    for (const [bucket, list] of Object.entries(sessionStore.order.sessions)) {
-        if (bucket === 'root') {
-            order.sessions.root = list.map((id) => sessionStore.sessions[id]?.displayName || toDisplaySessionName(id));
-        } else if (folderIdToName[bucket]) {
-            order.sessions[folderIdToName[bucket]] = list.map((id) => sessionStore.sessions[id]?.displayName || toDisplaySessionName(id));
-        }
-    }
-
-    return {
-        version: 2,
-        name,
-        createdAt: now,
-        sessions,
-        order
-    };
-}
-
-function saveWorkspaceFile(name) {
+function createWorkspaceFile(name) {
     const normalized = normalizeWorkspaceName(name);
     if (!normalized) return null;
-    const snapshot = buildWorkspaceSnapshot(normalized);
-    const filePath = getWorkspacePath(normalized);
-    writePrivateFile(filePath, JSON.stringify(snapshot, null, 2));
-    return snapshot;
+    if (workspaceExists(normalized)) return false;
+    return writeWorkspaceStore(normalized, createEmptySessionStore(normalized));
 }
 
 function loadWorkspaceFile(name) {
     const normalized = normalizeWorkspaceName(name);
     if (!normalized) return null;
-    const filePath = getWorkspacePath(normalized);
-    if (!fs.existsSync(filePath)) return null;
-    try {
-        ensurePrivateFile(filePath);
-        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    } catch (e) {
+    if (!workspaceExists(normalized)) return null;
+    return loadWorkspaceStore(normalized);
+}
+
+function deleteWorkspaceFile(name) {
+    const normalized = normalizeWorkspaceName(name);
+    if (!normalized) return null;
+    if (!workspaceExists(normalized)) return false;
+    fs.unlinkSync(getWorkspacePath(normalized));
+    const workspaceDataDir = path.join(WORKSPACES_DIR, normalized);
+    if (fs.existsSync(workspaceDataDir)) {
+        fs.rmSync(workspaceDataDir, { recursive: true, force: true });
+    }
+    return true;
+}
+
+function normalizeSnapshotSessionConfig(name, config, workspaceName) {
+    const fallback = {
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+    };
+    return normalizeStoredSessionConfig(name, {
+        type: 'terminal',
+        cwd: config?.cwd,
+        shell: config?.shell,
+        env: config?.env,
+        cols: config?.cols,
+        rows: config?.rows,
+        startup: config?.startup,
+        autoStart: config?.autoStart,
+        createdBy: config?.createdBy || 'user',
+        agentPermitted: typeof config?.agentPermitted === 'boolean' ? config.agentPermitted : false,
+        displayName: config?.displayName || toDisplaySessionName(name),
+        createdAt: config?.createdAt || fallback.createdAt,
+        updatedAt: fallback.updatedAt
+    }, {}, workspaceName, fallback);
+}
+
+async function snapshotWorkspaceFile(name, selectedInternalNames = null) {
+    const workspaceName = normalizeWorkspaceName(name);
+    if (!workspaceName) return { error: 'invalid-workspace' };
+
+    const snapshot = await listAllSessionEntriesRuntimeFirst();
+    const liveEntries = snapshot.entries.filter((entry) => entry && entry.type === 'terminal' && entry.live === true);
+    const liveMap = new Map(liveEntries.map((entry) => [entry.internalName, entry]));
+
+    const requestedNames = Array.isArray(selectedInternalNames) && selectedInternalNames.length
+        ? Array.from(new Set(selectedInternalNames))
+        : liveEntries.map((entry) => entry.internalName);
+
+    if (requestedNames.length === 0) {
+        return { error: 'no-live-sessions' };
+    }
+
+    const selectedEntries = [];
+    for (const name of requestedNames) {
+        if (!liveMap.has(name)) {
+            return { error: 'session-not-live', internalName: name };
+        }
+        selectedEntries.push(liveMap.get(name));
+    }
+
+    const store = createEmptySessionStore(workspaceName);
+    for (const entry of selectedEntries) {
+        const internalName = entry.internalName;
+        const config = getEffectiveSessionConfig(internalName) || entry;
+        const normalizedConfig = normalizeSnapshotSessionConfig(internalName, {
+            ...config,
+            cwd: entry.cwd || config.cwd,
+            displayName: entry.displayName || config.displayName || toDisplaySessionName(internalName)
+        }, workspaceName);
+        if (!normalizedConfig) continue;
+        store.sessions[internalName] = normalizedConfig;
+        store.order.sessions.root.push(internalName);
+    }
+
+    store.updatedAt = new Date().toISOString();
+    const workspace = writeWorkspaceStore(workspaceName, store);
+    return { workspace, selected: selectedEntries.map((entry) => entry.displayName || entry.internalName) };
+}
+
+async function promptForWorkspaceSnapshotSelection(liveEntries) {
+    const entries = Array.isArray(liveEntries) ? liveEntries : [];
+    if (entries.length === 0) {
+        return { selectedInternalNames: [], cancelled: false };
+    }
+
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        return { selectedInternalNames: entries.map((entry) => entry.internalName), cancelled: false };
+    }
+
+    log(`\n${BOLD}Select live sessions to save:${RESET}`, CYAN);
+    entries.forEach((entry, index) => {
+        const cwd = entry.cwd ? ` ${DIM}(${entry.cwd})${RESET}` : '';
+        log(`  ${index + 1}. ${entry.displayName || entry.internalName}${cwd}`, RESET);
+    });
+    log(``, RESET);
+    log(`Enter numbers like ${CYAN}1,3${RESET}, press ${CYAN}a${RESET} for all, or just press Enter to cancel.`, RESET);
+
+    const readline = require('readline');
+    const answer = await new Promise((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question('Selection: ', (value) => {
+            rl.close();
+            resolve(String(value || '').trim());
+        });
+    });
+
+    if (!answer) {
+        return { selectedInternalNames: [], cancelled: true };
+    }
+    if (answer.toLowerCase() === 'a' || answer.toLowerCase() === 'all') {
+        return { selectedInternalNames: entries.map((entry) => entry.internalName), cancelled: false };
+    }
+
+    const indexes = Array.from(new Set(
+        answer.split(',')
+            .map((part) => Number.parseInt(part.trim(), 10))
+            .filter((value) => Number.isInteger(value) && value >= 1 && value <= entries.length)
+    ));
+    if (indexes.length === 0) {
+        return { selectedInternalNames: [], cancelled: true };
+    }
+    return {
+        selectedInternalNames: indexes.map((value) => entries[value - 1].internalName),
+        cancelled: false
+    };
+}
+
+function upsertWorkspaceSessionDefinition(workspaceName, internalName, config) {
+    const normalizedWorkspaceName = normalizeWorkspaceName(workspaceName);
+    if (!normalizedWorkspaceName || !internalName || !SESSION_NAME_RE.test(internalName)) {
         return null;
+    }
+    const store = loadWorkspaceStore(normalizedWorkspaceName) || createEmptySessionStore(normalizedWorkspaceName);
+    const normalizedConfig = normalizeStoredSessionConfig(internalName, config, store.folders || {}, normalizedWorkspaceName, {
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+    });
+    if (!normalizedConfig) return null;
+    store.sessions[internalName] = normalizedConfig;
+    if (!store.order?.sessions?.root) {
+        store.order = store.order && typeof store.order === 'object' ? store.order : { folders: [], sessions: {} };
+        store.order.sessions = store.order.sessions && typeof store.order.sessions === 'object' ? store.order.sessions : {};
+        store.order.sessions.root = [];
+    }
+    if (!store.order.sessions.root.includes(internalName)) {
+        store.order.sessions.root.push(internalName);
+    }
+    return writeWorkspaceStore(normalizedWorkspaceName, store);
+}
+
+function listWorkspaceSessionDefinitions() {
+    const entries = [];
+    for (const workspaceName of listWorkspaceNames()) {
+        const store = loadWorkspaceStore(workspaceName);
+        if (!store || !store.sessions || typeof store.sessions !== 'object') continue;
+        for (const [internalName, config] of Object.entries(store.sessions)) {
+            if (!config || typeof config !== 'object') continue;
+            entries.push({
+                internalName,
+                displayName: config.displayName || toDisplaySessionName(internalName),
+                type: config.type === 'port' ? 'port' : 'terminal',
+                port: config.port,
+                cwd: config.cwd,
+                shell: config.shell,
+                env: config.env,
+                cols: config.cols,
+                rows: config.rows,
+                startup: config.startup,
+                autoStart: config.autoStart,
+                createdAt: config.createdAt,
+                createdBy: config.createdBy || 'user',
+                agentPermitted: config.agentPermitted === true,
+                folderId: config.folderId || null,
+                workspaceName
+            });
+        }
+    }
+    return entries;
+}
+
+function getWorkspaceDisplayEntries(workspace) {
+    const store = normalizeSessionStore(workspace, { workspaceName: workspace?.name });
+    const ordered = [];
+    const seen = new Set();
+    const buckets = ['root', ...(store.order?.folders || [])];
+    for (const bucket of buckets) {
+        const names = Array.isArray(store.order?.sessions?.[bucket]) ? store.order.sessions[bucket] : [];
+        for (const internalName of names) {
+            if (seen.has(internalName)) continue;
+            const config = store.sessions?.[internalName];
+            if (!config) continue;
+            seen.add(internalName);
+            ordered.push({ internalName, ...config });
+        }
+    }
+    for (const [internalName, config] of Object.entries(store.sessions || {})) {
+        if (seen.has(internalName) || !config) continue;
+        ordered.push({ internalName, ...config });
+    }
+    return ordered;
+}
+
+function printWorkspaceDetails(workspace) {
+    const store = normalizeSessionStore(workspace, { workspaceName: workspace?.name });
+    const entries = getWorkspaceDisplayEntries(store);
+    const folderCount = Object.keys(store.folders || {}).length;
+    log(`\n${BOLD}Workspace:${RESET} ${store.name}`, CYAN);
+    log(`  Sessions: ${entries.length}`, RESET);
+    log(`  Folders:  ${folderCount}`, RESET);
+    if (store.updatedAt) {
+        log(`  Updated:  ${store.updatedAt}`, RESET);
+    }
+    if (entries.length === 0) {
+        log(`  ${DIM}No saved sessions.${RESET}`, RESET);
+        return;
+    }
+    log('', RESET);
+    for (const entry of entries) {
+        const folderName = entry.folderId && store.folders?.[entry.folderId]?.name
+            ? ` · folder ${store.folders[entry.folderId].name}`
+            : '';
+        if (entry.type === 'port') {
+            log(`  ${entry.displayName || entry.internalName}  ${YELLOW}[PORT ${entry.port}]${RESET}${folderName}`, RESET);
+            continue;
+        }
+        const cwdInfo = entry.cwd ? ` · ${entry.cwd}` : '';
+        log(`  ${entry.displayName || entry.internalName}  ${GREEN}[TERMINAL]${RESET}${folderName}${cwdInfo}`, RESET);
     }
 }
 
 async function applyWorkspace(workspace, opts = {}) {
-    const startSessions = !!opts.startSessions;
-    const workspaceName = normalizeWorkspaceName(opts.workspaceName) || null;
-    const created = [];
+    const workspaceName = normalizeWorkspaceName(opts.workspaceName) || normalizeWorkspaceName(workspace?.name) || DEFAULT_WORKSPACE_NAME;
+    const startSessions = opts.startSessions !== false;
+    const store = normalizeSessionStore(workspace, { workspaceName });
+    const created = Object.values(store.sessions)
+        .map((config) => config?.displayName)
+        .filter(Boolean);
     const skipped = [];
     const started = [];
 
-    if (!workspace || typeof workspace !== 'object' || !Array.isArray(workspace.sessions)) {
-        return { created, skipped, started, error: 'Invalid workspace' };
+    if (!startSessions) {
+        return { created, skipped, started };
     }
 
-    const folderNameToId = new Map();
-    for (const [id, folder] of Object.entries(sessionStore.folders)) {
-        folderNameToId.set(folder.name, id);
-    }
-
-    const workspaceFolderNames = new Set();
-    if (workspace.order && Array.isArray(workspace.order.folders)) {
-        workspace.order.folders.forEach((name) => {
-            if (name) workspaceFolderNames.add(name);
-        });
-    }
-    workspace.sessions.forEach((session) => {
-        if (session?.folder) workspaceFolderNames.add(session.folder);
-    });
-
-    for (const name of workspaceFolderNames) {
-        if (!folderNameToId.has(name)) {
-            const createdFolder = createFolder(name);
-            if (createdFolder) {
-                folderNameToId.set(name, createdFolder.id);
-            }
-        }
-    }
-
-    if (workspace.order && Array.isArray(workspace.order.folders)) {
-        const orderIds = workspace.order.folders
-            .map((name) => folderNameToId.get(name))
-            .filter(Boolean);
-        if (orderIds.length > 0) {
-            setFolderOrder(orderIds);
-        }
-    }
-
-    const sessionByName = new Map();
-    workspace.sessions.forEach((session) => {
-        if (session?.name) {
-            sessionByName.set(session.name, session);
-        }
-    });
-
-    const orderedNames = [];
-    if (workspace.order && workspace.order.sessions) {
-        if (Array.isArray(workspace.order.sessions.root)) {
-            workspace.order.sessions.root.forEach((name) => {
-                if (sessionByName.has(name)) orderedNames.push(name);
+    for (const [internalName, config] of Object.entries(store.sessions)) {
+        if (!config || config.type === 'port') continue;
+        try {
+            await ensureExternalRuntimeSession(internalName, config.cwd, config.displayName || toDisplaySessionName(internalName), {
+                shell: config.shell,
+                env: config.env,
+                cols: config.cols,
+                rows: config.rows,
+                startup: config.startup,
+                autoStart: config.autoStart,
+                createdBy: config.createdBy,
+                agentPermitted: config.agentPermitted,
+                workspaceName,
+                folderId: config.folderId,
+                saveDefinition: false
             });
+            started.push(config.displayName || toDisplaySessionName(internalName));
+        } catch (e) {
+            skipped.push({ name: config.displayName || toDisplaySessionName(internalName), reason: 'start-failed' });
         }
-        if (workspace.order.folders && Array.isArray(workspace.order.folders)) {
-            workspace.order.folders.forEach((folderName) => {
-                const list = workspace.order.sessions[folderName];
-                if (Array.isArray(list)) {
-                    list.forEach((name) => {
-                        if (sessionByName.has(name)) orderedNames.push(name);
-                    });
-                }
-            });
-        }
-    }
-
-    const remainingNames = workspace.sessions
-        .map((s) => s?.name)
-        .filter((name) => name && !orderedNames.includes(name));
-    const createQueue = orderedNames.concat(remainingNames);
-
-    const createdInternal = new Map();
-
-    for (const name of createQueue) {
-        const session = sessionByName.get(name);
-        if (!session) continue;
-        if (!SESSION_NAME_RE.test(name)) {
-            skipped.push({ name, reason: 'invalid-name' });
-            continue;
-        }
-        if (isDisplayNameInUse(name)) {
-            skipped.push({ name, reason: 'exists' });
-            continue;
-        }
-        const internalName = toInternalSessionName(name);
-        if (!internalName || sessionStore.sessions[internalName]) {
-            skipped.push({ name, reason: 'internal-conflict' });
-            continue;
-        }
-        const folderId = session.folder ? (folderNameToId.get(session.folder) || null) : null;
-        if (session.type === 'port') {
-            if (!Number.isInteger(session.port) || session.port < 1 || session.port > 65535) {
-                skipped.push({ name, reason: 'invalid-port' });
-                continue;
-            }
-            setPortSessionConfig(internalName, session.port, name, folderId, {
-                workspaceName
-            });
-        } else {
-            ensureTerminalSessionConfig(internalName, session.cwd, name, folderId, {
-                shell: session.shell,
-                env: session.env,
-                cols: session.cols,
-                rows: session.rows,
-                startup: session.startup,
-                autoStart: session.autoStart,
-                createdBy: session.createdBy,
-                agentPermitted: session.agentPermitted,
-                workspaceName
-            });
-        }
-        created.push(name);
-        createdInternal.set(name, internalName);
-    }
-
-    if (workspace.order && workspace.order.sessions) {
-        const applyOrder = (bucketName, list) => {
-            if (!Array.isArray(list)) return;
-            const folderId = bucketName === 'root' ? null : folderNameToId.get(bucketName);
-            list.forEach((displayName) => {
-                const internalName = createdInternal.get(displayName);
-                if (!internalName) return;
-                moveSessionToFolder(internalName, folderId, sessionStore.order.sessions[folderId || 'root']?.length);
-            });
-        };
-        applyOrder('root', workspace.order.sessions.root);
-        if (workspace.order.folders && Array.isArray(workspace.order.folders)) {
-            workspace.order.folders.forEach((folderName) => {
-                applyOrder(folderName, workspace.order.sessions[folderName]);
-            });
-        }
-    }
-
-    if (startSessions) {
-        workspace.sessions.forEach((session) => {
-            if (!session?.name) return;
-            const internalName = findInternalSessionName(session.name) || toInternalSessionName(session.name);
-            const config = getSessionConfig(internalName);
-            if (!config || config.type === 'port') return;
-            started.push({ internalName, session });
-        });
-    }
-
-    if (startSessions) {
-        for (const entry of started.slice()) {
-            const internalName = entry.internalName;
-            const session = entry.session;
-            try {
-                if (isExternalTerminalBackend()) {
-                    await ensureExternalRuntimeSession(internalName);
-                } else {
-                    getOrCreateSession(internalName);
-                }
-                entry.name = session.name;
-            } catch (e) {
-                skipped.push({ name: session.name, reason: 'start-failed' });
-            }
-        }
-        const startedNames = started
-            .map((entry) => entry?.name)
-            .filter(Boolean);
-        started.length = 0;
-        started.push(...startedNames);
     }
 
     return { created, skipped, started };
-}
-
-function setDefaultWorkspace(name) {
-    const normalized = normalizeWorkspaceName(name);
-    if (!normalized) return false;
-    writePrivateFile(WORKSPACE_POINTER_FILE, normalized + '\n');
-    return true;
-}
-
-function getDefaultWorkspace() {
-    if (!fs.existsSync(WORKSPACE_POINTER_FILE)) return null;
-    try {
-        ensurePrivateFile(WORKSPACE_POINTER_FILE);
-        return fs.readFileSync(WORKSPACE_POINTER_FILE, 'utf8').trim() || null;
-    } catch (e) {
-        return null;
-    }
 }
 
 function resolveSessionWorkspaceName(config, opts = {}) {
@@ -997,8 +1138,7 @@ function resolveSessionWorkspaceName(config, opts = {}) {
     if (explicit) return explicit;
     const fromConfig = normalizeWorkspaceName(config?.workspaceName);
     if (fromConfig) return fromConfig;
-    const fromDefault = normalizeWorkspaceName(getDefaultWorkspace());
-    return fromDefault || DEFAULT_WORKSPACE_NAME;
+    return null;
 }
 
 function ensurePrivateWritableFile(filePath) {
@@ -1010,8 +1150,10 @@ function ensurePrivateWritableFile(filePath) {
 }
 
 function ensureWorkspaceDataDirs(workspaceName) {
-    const normalized = normalizeWorkspaceName(workspaceName) || DEFAULT_WORKSPACE_NAME;
-    const workspaceDir = path.join(WORKSPACES_DIR, normalized);
+    const normalized = normalizeWorkspaceName(workspaceName);
+    const workspaceDir = normalized
+        ? path.join(WORKSPACES_DIR, normalized)
+        : RUNTIME_DATA_DIR;
     const historyDir = path.join(workspaceDir, HISTORY_DIR_NAME);
     const logsDir = path.join(workspaceDir, WORKSPACE_LOGS_DIR_NAME);
     ensurePrivateDir(workspaceDir);
@@ -1504,14 +1646,6 @@ function clearSessionClientActors(sessionName) {
     sessionClientActors.delete(sessionName);
 }
 
-async function loadDefaultWorkspace(startSessions = true) {
-    const workspaceName = getDefaultWorkspace();
-    if (!workspaceName) return null;
-    const workspace = loadWorkspaceFile(workspaceName);
-    if (!workspace) return null;
-    return await applyWorkspace(workspace, { startSessions, workspaceName });
-}
-
 // Load domain config if exists
 function getDomainConfig() {
     if (fs.existsSync(DOMAIN_CONFIG_FILE)) {
@@ -1525,7 +1659,109 @@ function getDomainConfig() {
 }
 
 function saveDomainConfig(config) {
-    fs.writeFileSync(DOMAIN_CONFIG_FILE, JSON.stringify(config, null, 2));
+    writePrivateFile(DOMAIN_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+function getCloudflaredCredentialsFile(tunnel) {
+    if (!tunnel || !tunnel.id) return null;
+    return path.join(os.homedir(), '.cloudflared', `${tunnel.id}.json`);
+}
+
+function getTunnelTokenFile(tunnelName) {
+    const safeName = String(tunnelName || 'hop').replace(/[^a-zA-Z0-9_-]/g, '-');
+    return path.join(HOME_DIR, `.tunnel-token-${safeName}`);
+}
+
+function ensureTunnelRunCredential(tunnelName, tunnel) {
+    const credentialsFile = getCloudflaredCredentialsFile(tunnel);
+    if (credentialsFile && fs.existsSync(credentialsFile)) {
+        return { credentialsFile };
+    }
+
+    const tokenFile = getTunnelTokenFile(tunnelName);
+    if (fs.existsSync(tokenFile)) {
+        ensurePrivateFile(tokenFile);
+        return { tunnelTokenFile: tokenFile };
+    }
+
+    const token = execFileSync('cloudflared', ['tunnel', 'token', tunnelName], {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+    if (!token) {
+        throw new Error('cloudflared returned an empty tunnel token');
+    }
+    writePrivateFile(tokenFile, `${token}\n`);
+    return { tunnelTokenFile: tokenFile };
+}
+
+// --- Global hop config ---
+function getHopConfig() {
+    if (fs.existsSync(HOP_CONFIG_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(HOP_CONFIG_FILE, 'utf8'));
+        } catch (e) {
+            return {};
+        }
+    }
+    return {};
+}
+
+function saveHopConfig(config) {
+    writePrivateFile(HOP_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+function getNamingTheme() {
+    const config = getHopConfig();
+    if (config.naming_theme && isValidTheme(config.naming_theme)) {
+        return config.naming_theme;
+    }
+    return null;
+}
+
+function setNamingTheme(theme) {
+    const config = getHopConfig();
+    config.naming_theme = theme;
+    saveHopConfig(config);
+}
+
+async function promptNamingTheme() {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        return DEFAULT_THEME;
+    }
+    const choices = getThemeChoices();
+    console.log(`\n${BOLD}Choose a session naming theme:${RESET}\n`);
+    choices.forEach((c, i) => {
+        console.log(`  ${CYAN}${i + 1}${RESET}) ${c.label.padEnd(10)} ${DIM}(${c.example})${RESET}`);
+    });
+    console.log('');
+
+    const readline = require('readline');
+    return await new Promise((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question(`  Select [1-${choices.length}]: `, (answer) => {
+            rl.close();
+            const num = parseInt(String(answer || '').trim(), 10);
+            if (num >= 1 && num <= choices.length) {
+                const selected = choices[num - 1].id;
+                setNamingTheme(selected);
+                console.log(`\n  ${GREEN}Theme set to "${selected}".${RESET}\n`);
+                resolve(selected);
+            } else {
+                setNamingTheme(DEFAULT_THEME);
+                console.log(`\n  Using default theme "${DEFAULT_THEME}".\n`);
+                resolve(DEFAULT_THEME);
+            }
+        });
+    });
+}
+
+async function ensureNamingTheme() {
+    let theme = getNamingTheme();
+    if (!theme) {
+        theme = await promptNamingTheme();
+    }
+    return theme;
 }
 
 // Check if cloudflared is logged in
@@ -1609,6 +1845,9 @@ async function setupDomain(hostname) {
             // Only treat as success if it's not part of a failure message
             dnsSuccess = true;
             log(`  DNS already configured.`, GREEN);
+        } else if (result.includes('already configured to route to your tunnel') && !result.includes('Failed')) {
+            dnsSuccess = true;
+            log(`  DNS already configured.`, GREEN);
         } else {
             // Unexpected output - treat as potential failure
             log(`  Unexpected response: ${result.trim()}`, YELLOW);
@@ -1637,6 +1876,9 @@ async function setupDomain(hostname) {
             // Only treat as success if it's a clean "already exists" not part of error
             dnsSuccess = true;
             log(`  DNS already configured.`, GREEN);
+        } else if (errorOutput.includes('already configured to route to your tunnel') && !errorOutput.includes('Failed')) {
+            dnsSuccess = true;
+            log(`  DNS already configured.`, GREEN);
         } else {
             log(`\n${RED}ERROR: DNS configuration failed.${RESET}`, RED);
             log(`Details: ${errorOutput.trim()}`, YELLOW);
@@ -1661,10 +1903,19 @@ async function setupDomain(hostname) {
 
     // Step 4: Save config
     log(`[4/4] Saving configuration...`, BOLD);
+    let runCredential = {};
+    try {
+        runCredential = ensureTunnelRunCredential(tunnelName, tunnel);
+    } catch (e) {
+        log(`Failed to prepare tunnel credential: ${e.message}`, RED);
+        process.exit(1);
+    }
     saveDomainConfig({
         tunnelName,
         tunnelId: tunnel ? tunnel.id : null,
         hostname,
+        credentialsFile: runCredential.credentialsFile || null,
+        tunnelTokenFile: runCredential.tunnelTokenFile || null,
         createdAt: new Date().toISOString()
     });
     log(`  Configuration saved.`, GREEN);
@@ -2112,6 +2363,9 @@ const activeSessions = {}; // { sessionName: { room: HayRoom } }
 const startingSessions = new Set(); // session names being initialized
 const sessionAliases = {};  // { oldDisplayName: newDisplayName } - in-memory redirects
 const sessionClientSummary = new Map(); // internalName -> { localCliCount: number, total: number }
+const localCliClaims = new Map(); // claimId -> { sessionName, expiresAt }
+const LOCAL_CLI_CLAIM_TTL_MS = 20000;
+let localCliClaimLock = Promise.resolve();
 let nextPort = BASE_PORT + 1;
 
 // Terminal API sessions (virtual clients attached to hay rooms)
@@ -2244,6 +2498,7 @@ const YELLOW = "\x1b[33m";
 const CYAN = "\x1b[36m";
 const RED = "\x1b[31m";
 const BOLD = "\x1b[1m";
+const DIM = "\x1b[2m";
 const MAGENTA = "\x1b[35m";
 
 function log(msg, color = RESET) {
@@ -2357,14 +2612,60 @@ async function listActiveSessionsRuntimeFirst() {
         name: room.id,
         windows: 1,
         attached: Number(room.clientCount) > 0,
+        localCliCount: Number(room.localCliCount) || 0,
+        hasLocalCli: room.hasLocalCli === true || Number(room.localCliCount) > 0,
         cwd: room.cwd,
         hostPort: room.hostPort
     }));
     return { sessions, runtimeAvailable: true };
 }
 
-function noteClientConnected(sessionName, source) {
+function pruneExpiredLocalCliClaims() {
+    const now = Date.now();
+    for (const [claimId, claim] of localCliClaims.entries()) {
+        if (!claim || Number(claim.expiresAt) <= now) {
+            localCliClaims.delete(claimId);
+        }
+    }
+}
+
+function countPendingLocalCliClaims(sessionName) {
+    if (!sessionName) return 0;
+    pruneExpiredLocalCliClaims();
+    let count = 0;
+    for (const claim of localCliClaims.values()) {
+        if (claim?.sessionName === sessionName) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+function claimPendingLocalCliSession(sessionName) {
+    if (!sessionName) return null;
+    pruneExpiredLocalCliClaims();
+    const claimId = crypto.randomBytes(8).toString('hex');
+    localCliClaims.set(claimId, {
+        sessionName,
+        expiresAt: Date.now() + LOCAL_CLI_CLAIM_TTL_MS
+    });
+    return claimId;
+}
+
+function consumePendingLocalCliClaim(sessionName, claimId) {
+    if (!sessionName || !claimId) return false;
+    pruneExpiredLocalCliClaims();
+    const claim = localCliClaims.get(claimId);
+    if (!claim || claim.sessionName !== sessionName) return false;
+    localCliClaims.delete(claimId);
+    return true;
+}
+
+function noteClientConnected(sessionName, source, claimId = null) {
     if (!sessionName) return;
+    if (source === 'local-cli') {
+        consumePendingLocalCliClaim(sessionName, claimId);
+    }
     const entry = sessionClientSummary.get(sessionName) || { localCliCount: 0, total: 0 };
     entry.total += 1;
     if (source === 'local-cli') {
@@ -2389,18 +2690,33 @@ function noteClientDisconnected(sessionName, source) {
 }
 
 function getSessionClientSummary(sessionName) {
+    const pendingLocalCliCount = countPendingLocalCliClaims(sessionName);
     const entry = sessionClientSummary.get(sessionName) || { localCliCount: 0, total: 0 };
     return {
-        localCliCount: entry.localCliCount,
+        localCliCount: entry.localCliCount + pendingLocalCliCount,
         totalClients: entry.total,
-        hasLocalCli: entry.localCliCount > 0
+        hasLocalCli: entry.localCliCount + pendingLocalCliCount > 0
     };
+}
+
+async function withLocalCliClaimLock(fn) {
+    const previous = localCliClaimLock;
+    let release;
+    localCliClaimLock = new Promise((resolve) => {
+        release = resolve;
+    });
+    await previous;
+    try {
+        return await fn();
+    } finally {
+        release();
+    }
 }
 
 function hopSessionExists(name) {
     if (!name) return false;
     if (isExternalTerminalBackend()) {
-        return !!activeSessions[name] || !!sessionStore.sessions[name];
+        return !!activeSessions[name] || !!getRuntimeSessionMetadata(name);
     }
     return hayRooms.hasRoom(name) || activeSessions[name];
 }
@@ -2411,11 +2727,12 @@ function buildSessionEntries(haySessions, opts = {}) {
     const runtimeSessionNames = new Set();
 
     for (const s of Array.isArray(haySessions) ? haySessions : []) {
-        const config = getSessionConfig(s.name);
+        const config = getEffectiveSessionConfig(s.name);
         const type = config?.type || 'terminal';
         const displayName = config?.displayName || s.name;
         const folderId = config?.folderId || null;
         const clientSummary = getSessionClientSummary(s.name);
+        const localCliCount = Math.max(clientSummary.localCliCount, Number(s.localCliCount) || 0);
         const attached = typeof s.attached === 'boolean'
             ? s.attached
             : (clientSummary.totalClients > 0);
@@ -2437,10 +2754,11 @@ function buildSessionEntries(haySessions, opts = {}) {
             rows: config?.rows,
             startup: config?.startup,
             autoStart: config?.autoStart,
+            createdAt: config?.createdAt,
             createdBy: config?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
-            localCliCount: clientSummary.localCliCount,
-            hasLocalCli: clientSummary.hasLocalCli
+            localCliCount,
+            hasLocalCli: clientSummary.hasLocalCli || localCliCount > 0 || s.hasLocalCli === true
         });
     }
 
@@ -2471,6 +2789,7 @@ function buildSessionEntries(haySessions, opts = {}) {
                 rows: config?.rows,
                 startup: config?.startup,
                 autoStart: config?.autoStart,
+                createdAt: config?.createdAt,
                 createdBy: config?.createdBy || 'user',
                 agentPermitted: config?.agentPermitted === true,
                 localCliCount: clientSummary.localCliCount,
@@ -2478,6 +2797,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             });
         } else {
             const entry = sessionMap.get(name);
+            const localCliCount = Math.max(clientSummary.localCliCount, Number(entry.localCliCount) || 0);
             entry.type = type || entry.type;
             entry.live = type === 'terminal' ? runtimeSessionNames.has(name) : null;
             entry.port = config.port;
@@ -2492,11 +2812,45 @@ function buildSessionEntries(haySessions, opts = {}) {
             entry.rows = config?.rows;
             entry.startup = config?.startup;
             entry.autoStart = config?.autoStart;
+            entry.createdAt = config?.createdAt;
             entry.createdBy = config?.createdBy || 'user';
             entry.agentPermitted = config?.agentPermitted === true;
-            entry.localCliCount = clientSummary.localCliCount;
-            entry.hasLocalCli = clientSummary.hasLocalCli;
+            entry.localCliCount = localCliCount;
+            entry.hasLocalCli = clientSummary.hasLocalCli || localCliCount > 0 || entry.hasLocalCli === true;
         }
+    }
+
+    for (const [name, config] of runtimeSessionMetadata.entries()) {
+        if (!name || sessionMap.has(name)) continue;
+        const type = config?.type || 'terminal';
+        if (type !== 'port' && !includeStoredTerminalSessions) continue;
+        const displayName = config?.displayName || toDisplaySessionName(name);
+        const folderId = config?.folderId || null;
+        const clientSummary = getSessionClientSummary(name);
+        sessionMap.set(name, {
+            name,
+            windows: null,
+            attached: clientSummary.totalClients > 0,
+            type,
+            live: type === 'terminal' ? runtimeSessionNames.has(name) : null,
+            port: config.port,
+            displayName,
+            folderId,
+            internalName: name,
+            cwd: config?.cwd,
+            shell: config?.shell,
+            env: config?.env,
+            workspaceName: config?.workspaceName || resolveSessionWorkspaceName(config),
+            cols: config?.cols,
+            rows: config?.rows,
+            startup: config?.startup,
+            autoStart: config?.autoStart,
+            createdAt: config?.createdAt,
+            createdBy: config?.createdBy || 'user',
+            agentPermitted: config?.agentPermitted === true,
+            localCliCount: clientSummary.localCliCount,
+            hasLocalCli: clientSummary.hasLocalCli
+        });
     }
 
     const folderIndex = new Map();
@@ -2538,7 +2892,7 @@ async function listAllSessionEntriesRuntimeFirst() {
     const activeDisplayNames = (Array.isArray(runtime.sessions) ? runtime.sessions : [])
         .map((entry) => {
             if (!entry || entry.type === 'port') return null;
-            const config = getSessionConfig(entry.name);
+            const config = getEffectiveSessionConfig(entry.name);
             return config?.displayName || getSessionDisplayName(entry.name) || entry.name;
         })
         .filter(Boolean);
@@ -2577,11 +2931,27 @@ function getOrCreateSession(sessionName, cwd, displayName) {
     if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
         throw new Error('Invalid session name');
     }
-    const existingConfig = getSessionConfig(sessionName);
+    const existingConfig = getEffectiveSessionConfig(sessionName);
     if (existingConfig && existingConfig.type === 'port') {
         throw new Error('Session is configured as a port proxy');
     }
-    ensureTerminalSessionConfig(sessionName, cwd, displayName);
+    rememberRuntimeSessionMetadata(sessionName, {
+        type: 'terminal',
+        cwd: cwd || existingConfig?.cwd,
+        displayName: displayName || existingConfig?.displayName || toDisplaySessionName(sessionName),
+        shell: existingConfig?.shell,
+        env: existingConfig?.env,
+        cols: existingConfig?.cols,
+        rows: existingConfig?.rows,
+        startup: existingConfig?.startup,
+        autoStart: existingConfig?.autoStart,
+        createdBy: existingConfig?.createdBy || 'user',
+        agentPermitted: typeof existingConfig?.agentPermitted === 'boolean'
+            ? existingConfig.agentPermitted
+            : (existingConfig?.createdBy === 'agent'),
+        folderId: existingConfig?.folderId || null,
+        workspaceName: resolveSessionWorkspaceName(existingConfig)
+    });
     if (activeSessions[sessionName]) {
         return activeSessions[sessionName];
     }
@@ -2594,7 +2964,7 @@ function getOrCreateSession(sessionName, cwd, displayName) {
         return activeSessions[sessionName];
     }
 
-    const config = getSessionConfig(sessionName);
+    const config = getEffectiveSessionConfig(sessionName);
     const workspaceName = resolveSessionWorkspaceName(config);
     const ptyRuntime = buildSessionPtyEnv(sessionName, config, workspaceName);
     const effectiveCwd = cwd || config?.cwd;
@@ -2684,10 +3054,7 @@ function getOrCreateSession(sessionName, cwd, displayName) {
         closeSessionAuditSink(sessionName);
         clearSessionClientActors(sessionName);
         delete activeSessions[sessionName];
-        const config = getSessionConfig(sessionName);
-        if (config && config.type !== 'port') {
-            deleteSessionConfig(sessionName);
-        }
+        clearRuntimeSessionMetadata(sessionName);
         log(`Session ${getSessionDisplayName(sessionName)} closed.`, YELLOW);
         sessionClientSummary.delete(sessionName);
     });
@@ -2793,7 +3160,9 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         autoStart: opts.autoStart,
         createdBy: opts.createdBy,
         agentPermitted: opts.agentPermitted,
-        workspaceName: opts.workspaceName
+        workspaceName: opts.workspaceName,
+        folderId: opts.folderId,
+        saveDefinition: opts.saveDefinition === true
     });
 
     const cols = Number.isInteger(opts.cols) ? opts.cols : 80;
@@ -2801,7 +3170,7 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
     const label = opts.label || 'agent';
     const terminalId = `t_${crypto.randomBytes(6).toString('hex')}`;
     const clientId = hay.generateClientId();
-    const sessionCwd = opts.cwd || (getSessionConfig(sessionName) || {}).cwd;
+    const sessionCwd = opts.cwd || (getEffectiveSessionConfig(sessionName) || {}).cwd;
     const wsUrl = buildExternalHayWsUrl(sessionName, {
         name: label,
         cols,
@@ -3238,7 +3607,9 @@ function buildSessionPath(displayName) {
 function resolveSessionDisplayName(displayName) {
     const resolvedDisplayName = resolveDisplayNameAlias(displayName);
     const internalFromConfig = findInternalSessionName(resolvedDisplayName);
-    const internalName = internalFromConfig || toInternalSessionName(resolvedDisplayName);
+    const fallbackInternalName = toInternalSessionName(resolvedDisplayName);
+    const internalName = internalFromConfig
+        || (fallbackInternalName && hopSessionExists(fallbackInternalName) ? fallbackInternalName : fallbackInternalName);
     return {
         displayName: resolvedDisplayName,
         internalName,
@@ -3327,10 +3698,10 @@ function resolveActor(req) {
 }
 
 function resolveSessionInternalName(name, internalName) {
-    if (internalName && sessionStore.sessions[internalName]) return internalName;
+    if (internalName && (getEffectiveSessionConfig(internalName) || hopSessionExists(internalName))) return internalName;
     if (!name) return null;
     const displayName = resolveDisplayNameAlias(name);
-    return findInternalSessionName(displayName);
+    return findInternalSessionName(displayName) || toInternalSessionName(displayName);
 }
 
 function waitForPort(port, host = '127.0.0.1', timeoutMs = 4000, intervalMs = 120) {
@@ -3352,6 +3723,29 @@ function waitForPort(port, host = '127.0.0.1', timeoutMs = 4000, intervalMs = 12
             });
         };
         tryConnect();
+    });
+}
+
+function allocateLocalPort(host = '127.0.0.1') {
+    return new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.unref();
+        server.once('error', reject);
+        server.listen(0, host, () => {
+            const address = server.address();
+            const port = address && typeof address === 'object' ? Number(address.port) : 0;
+            server.close((err) => {
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+                    reject(new Error('Failed to allocate local port'));
+                    return;
+                }
+                resolve(port);
+            });
+        });
     });
 }
 
@@ -3530,10 +3924,16 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                             const clientCount = Number.isFinite(clientCountRaw) && clientCountRaw >= 0
                                 ? Math.floor(clientCountRaw)
                                 : 0;
+                            const localCliCountRaw = Number(room?.localCliCount);
+                            const localCliCount = Number.isFinite(localCliCountRaw) && localCliCountRaw >= 0
+                                ? Math.floor(localCliCountRaw)
+                                : 0;
                             return {
                                 id,
                                 cwd,
                                 clientCount,
+                                localCliCount,
+                                hasLocalCli: localCliCount > 0,
                                 hostPid: hostState.pid,
                                 hostPort: hostState.port,
                                 scoped: hostState.scoped === true
@@ -3550,6 +3950,46 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
         req.setTimeout(1200, () => {
             req.destroy();
             finish(null);
+        });
+        req.end();
+    });
+}
+
+async function probeExternalHayHostFromHost(hostState, timeoutMs = 1200) {
+    if (!isExternalTerminalBackend()) return false;
+    if (!hostState || !Number.isInteger(hostState.port) || hostState.port <= 0) return false;
+    return await new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+        };
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: hostState.port,
+            path: '/health',
+            method: 'GET'
+        }, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+                    finish(false);
+                    return;
+                }
+                try {
+                    const parsed = JSON.parse(data || '{}');
+                    finish(parsed?.ok === true && parsed?.capabilities?.localCliCount === true);
+                } catch (e) {
+                    finish(false);
+                }
+            });
+        });
+        req.on('error', () => finish(false));
+        req.setTimeout(timeoutMs, () => {
+            req.destroy();
+            finish(false);
         });
         req.end();
     });
@@ -3579,9 +4019,10 @@ async function inspectExternalHayHosts(force = false) {
     if (candidates.length === 0) return [];
     const inspected = await Promise.all(candidates.map(async (host) => ({
         host,
+        healthy: await probeExternalHayHostFromHost(host),
         rooms: await fetchExternalHayRuntimeRoomsFromHost(host)
     })));
-    return inspected.filter((entry) => Array.isArray(entry.rooms));
+    return inspected.filter((entry) => entry.healthy === true && Array.isArray(entry.rooms));
 }
 
 function hostBelongsToCurrentHome(entry, preferredHost = null) {
@@ -3607,6 +4048,32 @@ function getExternalHayHostStateOrThrow() {
     return hayHostState;
 }
 
+async function stopExternalHayHostProcess(hostState, timeoutMs = 1500) {
+    const pid = Number(hostState?.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return true;
+    if (!isProcessAlive(pid)) return true;
+    try {
+        process.kill(pid, 'SIGTERM');
+    } catch (e) {
+        return !isProcessAlive(pid);
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (!isProcessAlive(pid)) return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!isProcessAlive(pid)) return true;
+    try {
+        process.kill(pid, 'SIGKILL');
+    } catch (e) { }
+    const forceDeadline = Date.now() + 500;
+    while (Date.now() < forceDeadline) {
+        if (!isProcessAlive(pid)) return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return !isProcessAlive(pid);
+}
+
 async function ensureExternalHayHostReady() {
     if (!isExternalTerminalBackend()) return null;
 
@@ -3620,11 +4087,13 @@ async function ensureExternalHayHostReady() {
     }
 
     if (existing && isProcessAlive(existing.pid)) {
-        const ready = await waitForPort(existing.port, '127.0.0.1', 1200, 120);
-        if (ready) {
+        const healthy = await probeExternalHayHostFromHost(existing, 1200);
+        if (healthy) {
             writeHayHostStateFile(existing);
             return existing;
         }
+        log(`[Hay] Existing host on port ${existing.port} is unresponsive. Restarting it.`, YELLOW);
+        await stopExternalHayHostProcess(existing);
     }
 
     clearHayHostStateFile();
@@ -3635,88 +4104,48 @@ async function ensureExternalHayHostReady() {
     }
 
     const requestedPort = Number.parseInt(process.env.HOP_HAY_HOST_PORT || '', 10);
-    const hostPort = Number.isInteger(requestedPort) && requestedPort > 0 ? String(requestedPort) : '';
-
-    const child = spawn(process.execPath, [hostScript, HAY_HOST_HOME_FLAG], {
-        detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-            ...process.env,
-            HAY_HOST_PORT: hostPort,
-            HAY_HOST_CWD: process.cwd()
-        }
-    });
-
-    let stdoutBuffer = '';
-    let stderrBuffer = '';
-
-    const started = await new Promise((resolve, reject) => {
-        let settled = false;
-
-        const finish = (err, state) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            if (err) {
-                try { child.kill('SIGTERM'); } catch (e) { }
-                reject(err);
-                return;
-            }
-            resolve(state);
-        };
-
-        const timer = setTimeout(() => {
-            const details = stderrBuffer.trim();
-            finish(new Error(details ? `Hay host start timeout (${details})` : 'Hay host start timeout'));
-        }, HAY_HOST_READY_TIMEOUT_MS);
-
-        child.on('error', (err) => {
-            finish(err);
-        });
-
-        child.on('exit', (code, signal) => {
-            const details = stderrBuffer.trim();
-            finish(new Error(
-                details || `Hay host exited before ready (code=${code ?? 'null'} signal=${signal ?? 'null'})`
-            ));
-        });
-
-        child.stderr.on('data', (chunk) => {
-            stderrBuffer += chunk.toString();
-        });
-
-        child.stdout.on('data', (chunk) => {
-            stdoutBuffer += chunk.toString();
-            let newlineIndex = stdoutBuffer.indexOf('\n');
-            while (newlineIndex !== -1) {
-                const line = stdoutBuffer.slice(0, newlineIndex).trim();
-                stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-                if (line) {
-                    try {
-                        const parsed = JSON.parse(line);
-                        const pid = Number(parsed?.pid) || child.pid;
-                        const port = Number(parsed?.port);
-                        if (Number.isInteger(pid) && pid > 0 && Number.isInteger(port) && port > 0 && port <= 65535) {
-                            finish(null, { pid, port, startedAt: Date.now() });
-                            return;
-                        }
-                    } catch (e) { }
-                }
-                newlineIndex = stdoutBuffer.indexOf('\n');
+    const hostPort = Number.isInteger(requestedPort) && requestedPort > 0
+        ? requestedPort
+        : await allocateLocalPort('127.0.0.1');
+    const hayHostLogFile = path.join(LOG_DIR, 'hay-host.log');
+    ensurePrivateWritableFile(hayHostLogFile);
+    const hayHostLogFd = fs.openSync(hayHostLogFile, 'a');
+    let child;
+    try {
+        child = spawn(process.execPath, [hostScript, HAY_HOST_HOME_FLAG], {
+            detached: true,
+            stdio: ['ignore', hayHostLogFd, hayHostLogFd],
+            env: {
+                ...process.env,
+                HAY_HOST_PORT: String(hostPort),
+                HAY_HOST_CWD: process.cwd()
             }
         });
-    });
+    } finally {
+        try { fs.closeSync(hayHostLogFd); } catch (e) { }
+    }
+
+    const started = {
+        pid: Number(child?.pid) || 0,
+        port: hostPort,
+        startedAt: Date.now()
+    };
+    if (!Number.isInteger(started.pid) || started.pid <= 0) {
+        throw new Error(`Hay host failed to start; see ${hayHostLogFile}`);
+    }
 
     const ready = await waitForPort(started.port, '127.0.0.1', HAY_HOST_READY_TIMEOUT_MS, 120);
     if (!ready) {
-        throw new Error('Hay host did not open its port in time');
+        await stopExternalHayHostProcess(started);
+        throw new Error(`Hay host did not open its port in time; see ${hayHostLogFile}`);
+    }
+    const healthy = await probeExternalHayHostFromHost(started, 1500);
+    if (!healthy) {
+        await stopExternalHayHostProcess(started);
+        throw new Error(`Hay host failed health check after startup; see ${hayHostLogFile}`);
     }
 
     writeHayHostStateFile(started);
-    try {
-        child.stdout.destroy();
-        child.stderr.destroy();
-    } catch (e) { }
     child.unref();
     return started;
 }
@@ -3787,27 +4216,59 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
         throw new Error('Invalid session name');
     }
 
-    ensureTerminalSessionConfig(sessionName, cwd, displayName, opts.folderId, {
-        shell: opts.shell,
-        env: opts.env,
-        cols: opts.cols,
-        rows: opts.rows,
-        startup: opts.startup,
-        autoStart: opts.autoStart,
-        createdBy: opts.createdBy,
-        agentPermitted: opts.agentPermitted,
-        workspaceName: opts.workspaceName
-    });
+    const savedConfig = getSavedSessionConfig(sessionName);
+    const runtimeConfig = getRuntimeSessionMetadata(sessionName);
+    const existingConfig = getEffectiveSessionConfig(sessionName);
+    const saveDefinition = opts.saveDefinition === true || !!savedConfig;
+    const createdBy = opts.createdBy || existingConfig?.createdBy || 'user';
+    const agentPermitted = typeof opts.agentPermitted === 'boolean'
+        ? opts.agentPermitted
+        : (typeof existingConfig?.agentPermitted === 'boolean'
+            ? existingConfig.agentPermitted
+            : createdBy === 'agent');
+    const effectiveConfig = {
+        type: 'terminal',
+        cwd: cwd || existingConfig?.cwd || process.cwd(),
+        shell: opts.shell || existingConfig?.shell,
+        env: opts.env || existingConfig?.env,
+        cols: Number.isInteger(opts.cols) ? opts.cols : existingConfig?.cols,
+        rows: Number.isInteger(opts.rows) ? opts.rows : existingConfig?.rows,
+        startup: opts.startup || existingConfig?.startup,
+        autoStart: typeof opts.autoStart === 'boolean'
+            ? opts.autoStart
+            : existingConfig?.autoStart,
+        createdBy,
+        agentPermitted,
+        displayName: displayName || existingConfig?.displayName || toDisplaySessionName(sessionName),
+        folderId: opts.folderId !== undefined
+            ? (opts.folderId || null)
+            : (existingConfig?.folderId || null),
+        workspaceName: resolveSessionWorkspaceName(savedConfig || existingConfig, { workspaceName: opts.workspaceName })
+    };
 
-    const config = getSessionConfig(sessionName) || {};
-    const workspaceName = resolveSessionWorkspaceName(config, { workspaceName: opts.workspaceName });
-    const ptyRuntime = buildSessionPtyEnv(sessionName, config, workspaceName);
+    if (saveDefinition) {
+        ensureTerminalSessionConfig(sessionName, effectiveConfig.cwd, effectiveConfig.displayName, effectiveConfig.folderId, {
+            shell: effectiveConfig.shell,
+            env: effectiveConfig.env,
+            cols: effectiveConfig.cols,
+            rows: effectiveConfig.rows,
+            startup: effectiveConfig.startup,
+            autoStart: effectiveConfig.autoStart,
+            createdBy: effectiveConfig.createdBy,
+            agentPermitted: effectiveConfig.agentPermitted,
+            workspaceName: effectiveConfig.workspaceName
+        });
+    }
+
+    rememberRuntimeSessionMetadata(sessionName, effectiveConfig);
+
+    const ptyRuntime = buildSessionPtyEnv(sessionName, effectiveConfig, effectiveConfig.workspaceName);
     const response = await callExternalHayHostApi('/rooms', 'POST', {
         id: sessionName,
-        cwd: cwd || config.cwd || process.cwd(),
-        cols: Number.isInteger(config.cols) ? config.cols : 80,
-        rows: Number.isInteger(config.rows) ? config.rows : 24,
-        shell: config.shell,
+        cwd: effectiveConfig.cwd,
+        cols: Number.isInteger(effectiveConfig.cols) ? effectiveConfig.cols : 80,
+        rows: Number.isInteger(effectiveConfig.rows) ? effectiveConfig.rows : 24,
+        shell: effectiveConfig.shell,
         env: ptyRuntime.env
     }, 2500);
     if (!response || response.status < 200 || response.status >= 300 || !response.data?.ok) {
@@ -3816,23 +4277,27 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
     }
 
     const room = response.data.room || {};
-    ensureTerminalSessionConfig(
-        sessionName,
-        typeof room.cwd === 'string' && room.cwd ? room.cwd : (cwd || config.cwd),
-        displayName || config.displayName || sessionName,
-        config.folderId,
-        {
-            shell: config.shell,
-            env: config.env,
-            cols: Number.isInteger(config.cols) ? config.cols : undefined,
-            rows: Number.isInteger(config.rows) ? config.rows : undefined,
-            startup: config.startup,
-            autoStart: config.autoStart,
-            createdBy: config.createdBy,
-            agentPermitted: config.agentPermitted,
-            workspaceName: workspaceName
-        }
-    );
+    const resolvedCwd = typeof room.cwd === 'string' && room.cwd ? room.cwd : effectiveConfig.cwd;
+    rememberRuntimeSessionMetadata(sessionName, { ...effectiveConfig, cwd: resolvedCwd });
+    if (saveDefinition) {
+        ensureTerminalSessionConfig(
+            sessionName,
+            resolvedCwd,
+            effectiveConfig.displayName,
+            effectiveConfig.folderId,
+            {
+                shell: effectiveConfig.shell,
+                env: effectiveConfig.env,
+                cols: Number.isInteger(effectiveConfig.cols) ? effectiveConfig.cols : undefined,
+                rows: Number.isInteger(effectiveConfig.rows) ? effectiveConfig.rows : undefined,
+                startup: effectiveConfig.startup,
+                autoStart: effectiveConfig.autoStart,
+                createdBy: effectiveConfig.createdBy,
+                agentPermitted: effectiveConfig.agentPermitted,
+                workspaceName: effectiveConfig.workspaceName
+            }
+        );
+    }
 
     return rememberExternalRuntimeSession(sessionName, getExternalHayHostStateOrThrow().port);
 }
@@ -3849,30 +4314,42 @@ async function reconcileExternalRuntimeSessions() {
     for (const room of rooms) {
         if (!room || !room.id) continue;
         runtimeIds.add(room.id);
-        const config = getSessionConfig(room.id);
-        ensureTerminalSessionConfig(
-            room.id,
-            room.cwd || config?.cwd,
-            config?.displayName || toDisplaySessionName(room.id) || room.id,
-            config?.folderId,
-            {
-                shell: config?.shell,
-                env: config?.env,
-                cols: Number.isInteger(config?.cols) ? config.cols : undefined,
-                rows: Number.isInteger(config?.rows) ? config.rows : undefined,
-                startup: config?.startup,
-                autoStart: config?.autoStart,
-                createdBy: config?.createdBy,
-                agentPermitted: config?.agentPermitted,
-                workspaceName: config?.workspaceName
-            }
-        );
+        const savedConfig = getSessionConfig(room.id);
+        const runtimeConfig = getRuntimeSessionMetadata(room.id);
+        const createdBy = savedConfig?.createdBy || runtimeConfig?.createdBy || 'user';
+        rememberRuntimeSessionMetadata(room.id, {
+            type: 'terminal',
+            cwd: room.cwd || savedConfig?.cwd || runtimeConfig?.cwd,
+            displayName: savedConfig?.displayName || runtimeConfig?.displayName || toDisplaySessionName(room.id) || room.id,
+            folderId: savedConfig?.folderId || runtimeConfig?.folderId || null,
+            shell: savedConfig?.shell || runtimeConfig?.shell,
+            env: savedConfig?.env || runtimeConfig?.env,
+            cols: Number.isInteger(savedConfig?.cols) ? savedConfig.cols : runtimeConfig?.cols,
+            rows: Number.isInteger(savedConfig?.rows) ? savedConfig.rows : runtimeConfig?.rows,
+            startup: savedConfig?.startup || runtimeConfig?.startup,
+            autoStart: typeof savedConfig?.autoStart === 'boolean' ? savedConfig.autoStart : runtimeConfig?.autoStart,
+            createdBy,
+            agentPermitted: typeof savedConfig?.agentPermitted === 'boolean'
+                ? savedConfig.agentPermitted
+                : (typeof runtimeConfig?.agentPermitted === 'boolean'
+                    ? runtimeConfig.agentPermitted
+                    : createdBy === 'agent'),
+            workspaceName: resolveSessionWorkspaceName(savedConfig || runtimeConfig, {
+                workspaceName: savedConfig?.workspaceName || runtimeConfig?.workspaceName
+            })
+        });
         rememberExternalRuntimeSession(room.id, room.hostPort);
     }
 
     for (const [name, session] of Object.entries(activeSessions)) {
         if (session?.backend === 'external' && !runtimeIds.has(name)) {
             delete activeSessions[name];
+            clearRuntimeSessionMetadata(name);
+        }
+    }
+    for (const name of Array.from(runtimeSessionMetadata.keys())) {
+        if (!runtimeIds.has(name)) {
+            clearRuntimeSessionMetadata(name);
         }
     }
 
@@ -3896,7 +4373,7 @@ function buildExternalHayWsPath(parsedUrl, sessionName) {
     }
     params.set('room', sessionName);
     if (!params.has('cwd')) {
-        const sessionCwd = (getSessionConfig(sessionName) || {}).cwd;
+        const sessionCwd = (getEffectiveSessionConfig(sessionName) || {}).cwd;
         if (sessionCwd) params.set('cwd', sessionCwd);
     }
     return `/ws?${params.toString()}`;
@@ -3923,6 +4400,7 @@ function buildExternalHayWsUrl(sessionName, options = {}) {
     if (Number.isFinite(options.cols)) params.set('cols', String(Math.floor(Number(options.cols))));
     if (Number.isFinite(options.rows)) params.set('rows', String(Math.floor(Number(options.rows))));
     if (options.source) params.set('source', String(options.source));
+    if (options.claim) params.set('claim', String(options.claim));
     if (options.cwd) params.set('cwd', String(options.cwd));
     return `ws://127.0.0.1:${port}/ws?${params.toString()}`;
 }
@@ -4456,6 +4934,7 @@ function startAuthProxy(authEmitter) {
                 rows: s.rows,
                 startup: s.startup,
                 autoStart: s.autoStart,
+                createdAt: s.createdAt,
                 createdBy: s.createdBy || 'user',
                 agentPermitted: s.agentPermitted === true,
                 hasLocalCli: !!s.hasLocalCli,
@@ -4479,13 +4958,44 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: Atomically choose and reserve a session for a local CLI attach.
+        if (parsedUrl.pathname === '/api/sessions/claim-local-cli' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const parsed = body ? JSON.parse(body) : {};
+                    const cwdPath = typeof parsed.cwd === 'string' && parsed.cwd.trim()
+                        ? parsed.cwd
+                        : process.cwd();
+                    const cwdName = typeof parsed.cwdName === 'string' && parsed.cwdName.trim()
+                        ? parsed.cwdName
+                        : path.basename(cwdPath).replace(/[^a-zA-Z0-9_-]/g, '-');
+                    const claimed = await withLocalCliClaimLock(() => (
+                        claimUnnamedLocalCliSession({ cwdPath, cwdName })
+                    ));
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        createdNew: claimed.createdNew,
+                        target: claimed.target
+                    }));
+                } catch (e) {
+                    const status = Number.isInteger(e?.status) ? e.status : 500;
+                    res.writeHead(status, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: e?.message || 'Failed to claim local session' }));
+                }
+            });
+            return;
+        }
+
         // API: Create session
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    let { name, type, port, cwd, folderId, startRuntime } = JSON.parse(body);
+                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName } = JSON.parse(body);
                     const displayName = name;
                     const internalName = toInternalSessionName(displayName);
                     if (!internalName || !displayName) {
@@ -4498,7 +5008,7 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Session name already in use' }));
                         return;
                     }
-                    if (sessionStore.sessions[internalName]) {
+                    if (hasSavedSessionConfig(internalName)) {
                         res.writeHead(409, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Session internal name already in use' }));
                         return;
@@ -4510,6 +5020,7 @@ function startAuthProxy(authEmitter) {
                         return;
                     }
                     const targetFolderId = folderId && sessionStore.folders[folderId] ? folderId : null;
+                    const targetWorkspaceName = normalizeWorkspaceName(workspaceName || workspace);
                     if (type === 'port') {
                         const parsedPort = parseInt(port, 10);
                         if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
@@ -4522,24 +5033,67 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
                             return;
                         }
-                        const existingConfig = getSessionConfig(internalName);
+                        const existingConfig = getEffectiveSessionConfig(internalName);
                         if (existingConfig && existingConfig.type === 'terminal') {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
                             return;
                         }
-                        setPortSessionConfig(internalName, parsedPort, displayName, targetFolderId);
+                        if (targetWorkspaceName) {
+                            const saved = upsertWorkspaceSessionDefinition(targetWorkspaceName, internalName, {
+                                type: 'port',
+                                port: parsedPort,
+                                displayName,
+                                folderId: targetFolderId,
+                                createdAt: new Date().toISOString(),
+                                updatedAt: new Date().toISOString(),
+                                createdBy: 'user',
+                                agentPermitted: false,
+                                workspaceName: targetWorkspaceName
+                            });
+                            if (!saved) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'Invalid workspace session config' }));
+                                return;
+                            }
+                        } else {
+                            setPortSessionConfig(internalName, parsedPort, displayName, targetFolderId);
+                        }
                     } else {
-                        const existingConfig = getSessionConfig(internalName);
+                        const existingConfig = getEffectiveSessionConfig(internalName);
                         if (existingConfig && existingConfig.type === 'port') {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Port session already exists with this name' }));
                             return;
                         }
                         if (startRuntime === false) {
-                            ensureTerminalSessionConfig(internalName, cwd, displayName, targetFolderId);
+                            if (targetWorkspaceName) {
+                                const saved = upsertWorkspaceSessionDefinition(targetWorkspaceName, internalName, {
+                                    type: 'terminal',
+                                    cwd,
+                                    displayName,
+                                    folderId: targetFolderId,
+                                    createdAt: new Date().toISOString(),
+                                    updatedAt: new Date().toISOString(),
+                                    createdBy: 'user',
+                                    agentPermitted: false,
+                                    workspaceName: targetWorkspaceName
+                                });
+                                if (!saved) {
+                                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                                    res.end(JSON.stringify({ error: 'Invalid workspace session config' }));
+                                    return;
+                                }
+                            } else {
+                                res.writeHead(400, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'workspace is required when startRuntime is false' }));
+                                return;
+                            }
                         } else if (isExternalTerminalBackend()) {
-                            await ensureExternalRuntimeSession(internalName, cwd, displayName);
+                            await ensureExternalRuntimeSession(internalName, cwd, displayName, {
+                                folderId: targetFolderId,
+                                saveDefinition: false
+                            });
                         } else {
                             getOrCreateSession(internalName, cwd, displayName);
                         }
@@ -4547,8 +5101,10 @@ function startAuthProxy(authEmitter) {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, name: displayName, type }));
                 } catch (e) {
-                    res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                    const status = Number.isInteger(e?.status) ? e.status : 500;
+                    const message = e?.message || 'Failed to create session';
+                    res.writeHead(status, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: message }));
                 }
             });
             return;
@@ -4710,7 +5266,8 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
-                    const config = getSessionConfig(resolved);
+                    const savedConfig = getSessionConfig(resolved);
+                    const config = getEffectiveSessionConfig(resolved);
                     if (!config || config.type === 'port') {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Session not a terminal' }));
@@ -4720,7 +5277,11 @@ function startAuthProxy(authEmitter) {
                     next.agentPermitted = !!allowed;
                     if (!next.createdBy) next.createdBy = 'user';
                     next.updatedAt = new Date().toISOString();
-                    setSessionConfig(resolved, next);
+                    if (savedConfig) {
+                        setSessionConfig(resolved, next);
+                    } else {
+                        rememberRuntimeSessionMetadata(resolved, next);
+                    }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, agentPermitted: next.agentPermitted }));
                 } catch (e) {
@@ -4736,29 +5297,25 @@ function startAuthProxy(authEmitter) {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
-                let { name, internalName } = JSON.parse(body);
-                if (internalName && sessionStore.sessions[internalName]) {
-                    name = internalName;
-                } else {
-                    const displayName = resolveDisplayNameAlias(name);
-                    name = findInternalSessionName(displayName);
-                }
-                if (!name) {
-                    res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Invalid session name' }));
-                    return;
-                }
-
                 try {
-                    const config = getSessionConfig(name);
+                    let { name, internalName } = JSON.parse(body || '{}');
+                    const resolved = resolveSessionInternalName(name, internalName);
+                    if (!resolved) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const savedConfig = getSessionConfig(resolved);
+                    const config = getEffectiveSessionConfig(resolved);
                     if (config && config.type === 'port') {
-                        deleteSessionConfig(name);
+                        deleteSessionConfig(resolved);
+                        clearRuntimeSessionMetadata(resolved);
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ ok: true, type: 'port' }));
                         return;
                     }
 
-                    const exists = hopSessionExists(name);
+                    const exists = hopSessionExists(resolved);
                     if (!exists && !config) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Session not found' }));
@@ -4767,20 +5324,20 @@ function startAuthProxy(authEmitter) {
 
                     // Close the terminal session if it exists
                     if (isExternalTerminalBackend()) {
-                        await terminateExternalHaySession(name);
-                    } else if (hayRooms.hasRoom(name)) {
-                        hayRooms.closeRoom(name);
+                        await terminateExternalHaySession(resolved);
+                    } else if (hayRooms.hasRoom(resolved)) {
+                        hayRooms.closeRoom(resolved);
                     }
 
                     // Clean up internal tracking
-                    if (activeSessions[name]) {
-                        delete activeSessions[name];
+                    if (activeSessions[resolved]) {
+                        delete activeSessions[resolved];
                     }
-                    sessionClientSummary.delete(name);
+                    clearRuntimeSessionMetadata(resolved);
+                    sessionClientSummary.delete(resolved);
 
-                    // Always remove session config if present
-                    if (config) {
-                        deleteSessionConfig(name);
+                    if (savedConfig) {
+                        deleteSessionConfig(resolved);
                     }
 
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -4798,7 +5355,7 @@ function startAuthProxy(authEmitter) {
             const actor = resolveActor(req);
             const sessions = Array.from(terminalApiSessions.values())
                 .filter((entry) => {
-                    const config = getSessionConfig(entry.sessionName);
+                    const config = getEffectiveSessionConfig(entry.sessionName);
                     return canActorAccessSession(actor, config);
                 })
                 .map(entry => ({
@@ -4829,9 +5386,11 @@ function startAuthProxy(authEmitter) {
                     const env = payload.env;
                     const startup = payload.startup;
                     const autoStart = payload.autoStart;
+                    const targetWorkspaceName = normalizeWorkspaceName(payload.workspaceName || payload.workspace);
                     const folderId = payload.folderId && sessionStore.folders[payload.folderId]
                         ? payload.folderId
                         : null;
+                    const saveDefinition = payload.saveDefinition === true;
 
                     if (isExternalTerminalBackend()) {
                         await ensureExternalHayHostReady();
@@ -4858,8 +5417,40 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
                         return;
                     }
+                    if (saveDefinition && !targetWorkspaceName) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'workspace is required when saveDefinition is true' }));
+                        return;
+                    }
 
-                    ensureTerminalSessionConfig(internalName, cwd, displayName, folderId, {
+                    if (saveDefinition) {
+                        const saved = upsertWorkspaceSessionDefinition(targetWorkspaceName, internalName, {
+                            type: 'terminal',
+                            cwd,
+                            shell,
+                            env,
+                            cols,
+                            rows,
+                            startup,
+                            autoStart,
+                            createdBy: actor,
+                            agentPermitted: actor === 'agent',
+                            displayName,
+                            folderId,
+                            workspaceName: targetWorkspaceName,
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString()
+                        });
+                        if (!saved) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Invalid workspace session config' }));
+                            return;
+                        }
+                    }
+                    rememberRuntimeSessionMetadata(internalName, {
+                        type: 'terminal',
+                        cwd,
+                        displayName,
                         shell,
                         env,
                         cols,
@@ -4867,7 +5458,9 @@ function startAuthProxy(authEmitter) {
                         startup,
                         autoStart,
                         createdBy: actor,
-                        agentPermitted: actor === 'agent'
+                        agentPermitted: actor === 'agent',
+                        folderId,
+                        workspaceName: targetWorkspaceName || null
                     });
 
                     const entry = await attachTerminalApiClient(internalName, displayName, {
@@ -4875,7 +5468,16 @@ function startAuthProxy(authEmitter) {
                         cols,
                         rows,
                         cwd,
-                        label: actor
+                        label: actor,
+                        shell,
+                        env,
+                        startup,
+                        autoStart,
+                        createdBy: actor,
+                        agentPermitted: actor === 'agent',
+                        folderId,
+                        workspaceName: targetWorkspaceName || null,
+                        saveDefinition
                     });
 
                     if (startup && autoStart !== false) {
@@ -4911,7 +5513,7 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
-                    const config = getSessionConfig(target);
+                    const config = getEffectiveSessionConfig(target);
                     if (!canActorAccessSession(actor, config)) {
                         res.writeHead(403, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Agent access not permitted' }));
@@ -4952,7 +5554,7 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             const actor = resolveActor(req);
-            const config = getSessionConfig(entry.sessionName);
+            const config = getEffectiveSessionConfig(entry.sessionName);
             if (!canActorAccessSession(actor, config)) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Agent access not permitted' }));
@@ -4988,7 +5590,7 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             const actor = resolveActor(req);
-            const config = getSessionConfig(entry.sessionName);
+            const config = getEffectiveSessionConfig(entry.sessionName);
             if (!canActorAccessSession(actor, config)) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Agent access not permitted' }));
@@ -5027,7 +5629,7 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             const actor = resolveActor(req);
-            const config = getSessionConfig(entry.sessionName);
+            const config = getEffectiveSessionConfig(entry.sessionName);
             if (!canActorAccessSession(actor, config)) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Agent access not permitted' }));
@@ -5060,7 +5662,7 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             const actor = resolveActor(req);
-            const config = getSessionConfig(entry.sessionName);
+            const config = getEffectiveSessionConfig(entry.sessionName);
             if (!canActorAccessSession(actor, config)) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Agent access not permitted' }));
@@ -5100,7 +5702,7 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             const actor = resolveActor(req);
-            const config = getSessionConfig(entry.sessionName);
+            const config = getEffectiveSessionConfig(entry.sessionName);
             if (!canActorAccessSession(actor, config)) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Agent access not permitted' }));
@@ -5117,9 +5719,10 @@ function startAuthProxy(authEmitter) {
                 if (activeSessions[entry.sessionName]) {
                     delete activeSessions[entry.sessionName];
                 }
+                clearRuntimeSessionMetadata(entry.sessionName);
                 sessionClientSummary.delete(entry.sessionName);
-                const config = getSessionConfig(entry.sessionName);
-                if (config) {
+                const savedConfig = getSessionConfig(entry.sessionName);
+                if (savedConfig) {
                     deleteSessionConfig(entry.sessionName);
                 }
             }
@@ -5131,27 +5734,45 @@ function startAuthProxy(authEmitter) {
         // API: List workspaces
         if (parsedUrl.pathname === '/api/workspaces' && req.method === 'GET') {
             const names = listWorkspaceNames();
-            const current = getDefaultWorkspace();
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ workspaces: names, current }));
+            res.end(JSON.stringify({ workspaces: names }));
             return;
         }
 
-        // API: Save workspace
-        if (parsedUrl.pathname === '/api/workspaces/save' && req.method === 'POST') {
+        // API: Show workspace definition
+        if (parsedUrl.pathname === '/api/workspaces/show' && req.method === 'GET') {
+            const name = typeof parsedUrl.query?.name === 'string' ? parsedUrl.query.name : '';
+            const workspace = loadWorkspaceFile(name);
+            if (!workspace) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Workspace not found' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, workspace }));
+            return;
+        }
+
+        // API: Create workspace
+        if (parsedUrl.pathname === '/api/workspaces/create' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
                     const { name } = JSON.parse(body);
-                    const snapshot = saveWorkspaceFile(name);
-                    if (!snapshot) {
+                    const created = createWorkspaceFile(name);
+                    if (created === null) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid workspace name' }));
                         return;
                     }
+                    if (created === false) {
+                        res.writeHead(409, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Workspace already exists' }));
+                        return;
+                    }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, workspace: snapshot }));
+                    res.end(JSON.stringify({ ok: true, workspace: created }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -5160,7 +5781,44 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        // API: Load workspace (merge + start)
+        // API: Save workspace snapshot from selected live sessions
+        if (parsedUrl.pathname === '/api/workspaces/save' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const payload = JSON.parse(body);
+                    const name = payload?.name;
+                    const sessionNames = Array.isArray(payload?.sessionNames)
+                        ? payload.sessionNames.filter((entry) => typeof entry === 'string' && entry)
+                        : null;
+                    const result = await snapshotWorkspaceFile(name, sessionNames);
+                    if (!result || result.error === 'invalid-workspace') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid workspace name' }));
+                        return;
+                    }
+                    if (result.error === 'no-live-sessions') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'No live terminal sessions to save' }));
+                        return;
+                    }
+                    if (result.error === 'session-not-live') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: `Session is not live: ${result.internalName}` }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, workspace: result.workspace, selected: result.selected || [] }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Load workspace (start defined sessions)
         if (parsedUrl.pathname === '/api/workspaces/load' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -5187,28 +5845,26 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        // API: Set default workspace
-        if (parsedUrl.pathname === '/api/workspaces/use' && req.method === 'POST') {
+        // API: Delete workspace definition
+        if (parsedUrl.pathname === '/api/workspaces/delete' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
                     const { name } = JSON.parse(body);
-                    const normalized = normalizeWorkspaceName(name);
-                    if (!normalized) {
+                    const deleted = deleteWorkspaceFile(name);
+                    if (deleted === null) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid workspace name' }));
                         return;
                     }
-                    const workspace = loadWorkspaceFile(normalized);
-                    if (!workspace) {
+                    if (deleted === false) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Workspace not found' }));
                         return;
                     }
-                    setDefaultWorkspace(normalized);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, current: normalized }));
+                    res.end(JSON.stringify({ ok: true }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -5246,7 +5902,7 @@ function startAuthProxy(authEmitter) {
         const userAgent = req.headers['user-agent'] || '';
         const isIOS = /iPad|iPhone|iPod/.test(userAgent);
         const isMobile = isIOS || /Android/i.test(userAgent);
-        const sessionConfig = getSessionConfig(sessionName);
+        const sessionConfig = getEffectiveSessionConfig(sessionName);
         if (sessionConfig && sessionConfig.type === 'port') {
             const targetPort = sessionConfig.port;
             if (!targetPort) {
@@ -5454,7 +6110,7 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
-        const sessionConfig = getSessionConfig(sessionName);
+        const sessionConfig = getEffectiveSessionConfig(sessionName);
         if (sessionConfig && sessionConfig.type === 'port') {
             const targetPort = sessionConfig.port;
             if (!targetPort) {
@@ -5475,7 +6131,19 @@ function startAuthProxy(authEmitter) {
             (async () => {
                 try {
                     await reconcileExternalRuntimeSessions();
-                    getOrCreateSession(sessionName);
+                    await ensureExternalRuntimeSession(sessionName, sessionConfig?.cwd, getSessionDisplayName(sessionName), {
+                        shell: sessionConfig?.shell,
+                        env: sessionConfig?.env,
+                        cols: sessionConfig?.cols,
+                        rows: sessionConfig?.rows,
+                        startup: sessionConfig?.startup,
+                        autoStart: sessionConfig?.autoStart,
+                        createdBy: sessionConfig?.createdBy,
+                        agentPermitted: sessionConfig?.agentPermitted,
+                        workspaceName: sessionConfig?.workspaceName,
+                        folderId: sessionConfig?.folderId,
+                        saveDefinition: hasSavedSessionConfig(sessionName)
+                    });
                 } catch (e) {
                     socket.write('HTTP/1.1 500 Server Error\r\n\r\n');
                     socket.destroy();
@@ -5483,7 +6151,8 @@ function startAuthProxy(authEmitter) {
                 }
 
                 const source = typeof parsedUrl.query.source === 'string' ? parsedUrl.query.source : '';
-                noteClientConnected(sessionName, source);
+                const claimId = typeof parsedUrl.query.claim === 'string' ? parsedUrl.query.claim : null;
+                noteClientConnected(sessionName, source, claimId);
                 let disconnected = false;
                 const handleDisconnect = () => {
                     if (disconnected) return;
@@ -5533,12 +6202,13 @@ function startAuthProxy(authEmitter) {
             const cols = parseInt(wsUrl.searchParams.get('cols') || '80', 10);
             const rows = parseInt(wsUrl.searchParams.get('rows') || '24', 10);
             const source = wsUrl.searchParams.get('source') || '';
+            const claimId = wsUrl.searchParams.get('claim') || null;
 
             const clientId = hay.generateClientId();
             const colorIndex = Math.floor(Math.random() * 1000);
             const actorLabel = source ? `web:${source}` : 'web';
 
-            noteClientConnected(sessionName, source);
+            noteClientConnected(sessionName, source, claimId);
             registerSessionClientActor(sessionName, clientId, actorLabel);
             let disconnected = false;
             const handleDisconnect = () => {
@@ -5628,13 +6298,16 @@ function startTunnel(isRestart = false) {
 url: http://${localTunnelHost}:${PROXY_PORT}
 tunnel: ${domainConfig.tunnelName}
 `;
-        fs.writeFileSync(tunnelConfigPath, tunnelConfig);
+        writePrivateFile(tunnelConfigPath, tunnelConfig);
 
-        tunnel = spawn('cloudflared', [
-            'tunnel',
-            '--config', tunnelConfigPath,
-            'run', domainConfig.tunnelName
-        ]);
+        const runArgs = ['tunnel', '--config', tunnelConfigPath, 'run'];
+        if (domainConfig.tunnelTokenFile && fs.existsSync(domainConfig.tunnelTokenFile)) {
+            runArgs.push('--token-file', domainConfig.tunnelTokenFile);
+        } else if (domainConfig.credentialsFile && fs.existsSync(domainConfig.credentialsFile)) {
+            runArgs.push('--credentials-file', domainConfig.credentialsFile);
+        }
+        runArgs.push(domainConfig.tunnelName);
+        tunnel = spawn('cloudflared', runArgs);
     } else {
         // Quick tunnel - URL is random
         tunnel = spawn('cloudflared', ['tunnel', '--url', `http://${localTunnelHost}:${PROXY_PORT}`]);
@@ -6109,7 +6782,7 @@ function printStartupInfo(publicUrl, label) {
     showAuthQrCode(label || 'Hop');
     log(`\n--------------------------------------------------`, RESET);
     log(`\n[READY]`, GREEN + BOLD);
-    log(`Daemon started. Existing local sessions are reattached automatically. Run ${CYAN}hop${RESET} to open a new local session.`, RESET);
+        log(`Daemon started. Run ${CYAN}hop${RESET} to open a local session. Busy local sessions are not reused for unnamed launches.`, RESET);
 }
 
 function waitForStartPolling(state, label) {
@@ -6240,7 +6913,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     const existingSessions = listActiveSessions();
     const preferredExistingSession = existingSessions.find((session) => {
         if (!session?.attached) return false;
-        const config = getSessionConfig(session.name);
+        const config = getEffectiveSessionConfig(session.name);
         if (config?.type === 'port') return false;
         return config?.createdBy !== 'agent';
     });
@@ -6353,35 +7026,49 @@ async function attachToExistingTunnel(existingTunnel) {
     log(`URL: ${existingTunnel.url}`, BOLD);
 
     await ensureExternalHayHostReady();
-
-    let sessionsRes = { sessions: [] };
-    try {
-        sessionsRes = await fetchSessionList(existingTunnel);
-    } catch (e) {
-        log(`Note: Could not query daemon sessions (${e.message}). Defaulting to create-new.`, YELLOW);
-    }
-    const sessions = Array.isArray(sessionsRes.sessions) ? sessionsRes.sessions : [];
+    await ensureNamingTheme();
     const cwdName = getCwdSessionBaseName();
     const cwdPath = process.cwd();
-    const selection = await chooseUnnamedSessionTarget(sessions, { cwdPath, cwdName });
+
+    let selection = null;
+    try {
+        selection = await claimLocalCliSession(existingTunnel, cwdPath, cwdName);
+    } catch (e) {
+        if (e?.status && e.status !== 404) {
+            log(`Note: Could not claim session atomically (${e.message}). Falling back to local selection.`, YELLOW);
+        }
+    }
+
+    if (!selection) {
+        let sessionsRes = { sessions: [] };
+        try {
+            sessionsRes = await fetchSessionList(existingTunnel);
+        } catch (e) {
+            log(`Note: Could not query daemon sessions (${e.message}). Defaulting to create-new.`, YELLOW);
+        }
+        const sessions = Array.isArray(sessionsRes.sessions) ? sessionsRes.sessions : [];
+        selection = await chooseUnnamedSessionTarget(sessions, { cwdPath, cwdName });
+    }
     const target = selection.target;
 
     if (selection.createdNew) {
         log(`Creating new session: ${target.displayName}...`, RESET);
-        try {
-            const created = await callLocalApi(existingTunnel, '/api/sessions', 'POST', {
-                name: target.displayName,
-                cwd: cwdPath
-            });
-            if (created.status < 200 || created.status >= 300 || !(created.data?.ok || created.data?.success)) {
-                const errText = typeof created.data === 'string'
-                    ? created.data
-                    : (created.data?.error || `status ${created.status}`);
-                throw new Error(errText);
+        if (!target.localCliClaimId) {
+            try {
+                const created = await callLocalApi(existingTunnel, '/api/sessions', 'POST', {
+                    name: target.displayName,
+                    cwd: cwdPath
+                });
+                if (created.status < 200 || created.status >= 300 || !(created.data?.ok || created.data?.success)) {
+                    const errText = typeof created.data === 'string'
+                        ? created.data
+                        : (created.data?.error || `status ${created.status}`);
+                    throw new Error(errText);
+                }
+            } catch (e) {
+                log(`Note: Could not register session with daemon metadata: ${e.message}`, YELLOW);
+                log(`Continuing with local attach.`, RESET);
             }
-        } catch (e) {
-            log(`Note: Could not register session with daemon metadata: ${e.message}`, YELLOW);
-            log(`Continuing with local attach.`, RESET);
         }
     } else {
         log(`Attaching to existing session: ${target.displayName}`, RESET);
@@ -6418,6 +7105,22 @@ async function fetchSessionList(existingTunnel) {
         }).on('error', reject);
     });
     return sessionsRes || {};
+}
+
+async function claimLocalCliSession(existingTunnel, cwdPath, cwdName) {
+    const claimed = await callLocalApi(existingTunnel, '/api/sessions/claim-local-cli', 'POST', {
+        cwd: cwdPath,
+        cwdName
+    });
+    if (claimed.status < 200 || claimed.status >= 300 || claimed.data?.ok !== true || !claimed.data?.target) {
+        const err = new Error(claimed.data?.error || `status ${claimed.status}`);
+        err.status = claimed.status;
+        throw err;
+    }
+    return {
+        target: claimed.data.target,
+        createdNew: claimed.data.createdNew === true
+    };
 }
 
 async function callLocalApi(existingTunnel, apiPath, method = 'GET', body = null) {
@@ -6516,19 +7219,36 @@ async function listLocalTerminalSelectionCandidates() {
         .map((room) => {
             const internalName = room.id;
             const metadata = metadataByInternalName.get(internalName);
-            const config = getSessionConfig(internalName);
+            const config = getEffectiveSessionConfig(internalName);
             const displayName = metadata?.displayName || config?.displayName || internalName;
+            const localCliCount = Math.max(Number(room.localCliCount) || 0, Number(metadata?.localCliCount) || 0);
             return {
                 type: 'terminal',
                 internalName,
                 displayName,
                 cwd: room.cwd || metadata?.cwd || config?.cwd,
                 hostPort: room.hostPort,
-                hasLocalCli: metadata?.hasLocalCli === true,
-                localCliCount: Number(metadata?.localCliCount) || 0
+                createdAt: metadata?.createdAt || config?.createdAt,
+                hasLocalCli: room.hasLocalCli === true || metadata?.hasLocalCli === true || localCliCount > 0,
+                localCliCount
             };
         })
         .filter((session) => !!session && typeof session.displayName === 'string' && session.displayName);
+
+    for (const session of metadataSessions) {
+        if (!session || session.type === 'port' || !session.internalName) continue;
+        if (runtimeSessions.some((entry) => entry.internalName === session.internalName)) continue;
+        runtimeSessions.push({
+            type: 'terminal',
+            internalName: session.internalName,
+            displayName: session.displayName,
+            cwd: session.cwd,
+            hostPort: null,
+            createdAt: session.createdAt,
+            hasLocalCli: session.hasLocalCli === true,
+            localCliCount: Number(session.localCliCount) || 0
+        });
+    }
 
     return {
         sessions: runtimeSessions,
@@ -6554,10 +7274,48 @@ function pickSessionForDir(sessions, cwdName, opts = {}) {
             const num = parseInt(suffix, 10);
             if (Number.isFinite(num)) score = num;
         }
-        return { session: s, score };
+        const createdAtMs = Date.parse(s.createdAt || '');
+        return {
+            session: s,
+            score,
+            createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : Number.MAX_SAFE_INTEGER
+        };
     });
-    scored.sort((a, b) => a.score - b.score || a.session.displayName.localeCompare(b.session.displayName));
+    scored.sort((a, b) => (
+        a.score - b.score ||
+        a.createdAtMs - b.createdAtMs ||
+        a.session.displayName.localeCompare(b.session.displayName)
+    ));
     return { target: scored[0].session, totalMatches: matches.length };
+}
+
+function pickBestExactCwdSession(sessions, cwdName, opts = {}) {
+    const exactMatches = (Array.isArray(sessions) ? sessions : [])
+        .filter((session) => session && session.type !== 'port' && typeof session.displayName === 'string');
+    if (exactMatches.length === 0) return null;
+    const filtered = opts.requireNoLocalCli ? exactMatches.filter((session) => !session.hasLocalCli) : exactMatches;
+    if (filtered.length === 0) return null;
+    const prefix = `${cwdName}-`;
+    const scored = filtered.map((session) => {
+        let score = 2;
+        if (session.displayName === cwdName) {
+            score = 0;
+        } else if (session.displayName.startsWith(prefix)) {
+            score = 1;
+        }
+        const createdAtMs = Date.parse(session.createdAt || '');
+        return {
+            session,
+            score,
+            createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : Number.MAX_SAFE_INTEGER
+        };
+    });
+    scored.sort((a, b) => (
+        a.createdAtMs - b.createdAtMs ||
+        a.score - b.score ||
+        a.session.displayName.localeCompare(b.session.displayName)
+    ));
+    return scored[0].session;
 }
 
 function getCwdSessionBaseName() {
@@ -6592,6 +7350,16 @@ function buildNextSessionIdentity(existingSessions, cwdName, opts = {}) {
         }
     }
 
+    // Use naming theme if configured, otherwise fall back to cwdName-counter
+    const theme = getNamingTheme();
+    if (theme) {
+        const allUsed = new Set([...existingInternalNames, ...existingDisplayNames]);
+        const displayName = generateSessionName(theme, allUsed);
+        const internalName = toInternalSessionName(displayName) || displayName;
+        return { internalName, displayName };
+    }
+
+    // Legacy fallback: cwdName-counter
     let counter = 1;
     let displayName = `${cwdName}-${counter}`;
     let internalName = toInternalSessionName(displayName);
@@ -6607,38 +7375,16 @@ function buildNextSessionIdentity(existingSessions, cwdName, opts = {}) {
     return { internalName, displayName };
 }
 
-function pickSessionForCwd(sessions, cwdPath, cwdName) {
+function pickSessionForCwd(sessions, cwdPath, cwdName, opts = {}) {
     const terminalSessions = (Array.isArray(sessions) ? sessions : [])
         .filter((session) => session && session.type !== 'port' && typeof session.displayName === 'string');
     const exactCwdMatches = terminalSessions.filter((session) => (
         typeof session.cwd === 'string' && session.cwd === cwdPath
     ));
     if (exactCwdMatches.length > 0) {
-        return pickSessionForDir(exactCwdMatches, cwdName).target;
+        return pickBestExactCwdSession(exactCwdMatches, cwdName, opts);
     }
-    return pickSessionForDir(terminalSessions, cwdName).target;
-}
-
-function shouldPromptForAttachChoice() {
-    return !!(process.stdin.isTTY && process.stdout.isTTY);
-}
-
-async function promptAttachOrCreate(displayName) {
-    if (!shouldPromptForAttachChoice()) return 'create';
-    const readline = require('readline');
-    return await new Promise((resolve) => {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const message = `Found session "${displayName}" for this cwd. [a]ttach/[C]reate new: `;
-        rl.question(message, (answer) => {
-            rl.close();
-            const normalized = String(answer || '').trim().toLowerCase();
-            if (normalized === 'a' || normalized === 'attach') {
-                resolve('attach');
-                return;
-            }
-            resolve('create');
-        });
-    });
+    return pickSessionForDir(terminalSessions, cwdName, opts).target;
 }
 
 function buildAttachTargetFromSession(session) {
@@ -6662,15 +7408,14 @@ async function chooseUnnamedSessionTarget(existingSessions, opts = {}) {
     const cwdName = typeof opts.cwdName === 'string' && opts.cwdName.trim()
         ? opts.cwdName
         : path.basename(cwdPath).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const matched = pickSessionForCwd(existingSessions, cwdPath, cwdName);
+    const matched = pickSessionForCwd(existingSessions, cwdPath, cwdName, {
+        requireNoLocalCli: opts.requireNoLocalCli !== false
+    });
 
-    if (matched && shouldPromptForAttachChoice()) {
-        const choice = await promptAttachOrCreate(matched.displayName);
-        if (choice === 'attach') {
-            const attachTarget = buildAttachTargetFromSession(matched);
-            if (attachTarget) {
-                return { target: attachTarget, createdNew: false };
-            }
+    if (matched) {
+        const attachTarget = buildAttachTargetFromSession(matched);
+        if (attachTarget) {
+            return { target: attachTarget, createdNew: false };
         }
     }
 
@@ -6684,6 +7429,48 @@ async function chooseUnnamedSessionTarget(existingSessions, opts = {}) {
             cwd: cwdPath
         },
         createdNew: true
+    };
+}
+
+async function claimUnnamedLocalCliSession(opts = {}) {
+    const cwdPath = typeof opts.cwdPath === 'string' && opts.cwdPath.trim()
+        ? opts.cwdPath
+        : process.cwd();
+    const cwdName = typeof opts.cwdName === 'string' && opts.cwdName.trim()
+        ? opts.cwdName
+        : path.basename(cwdPath).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const snapshot = await listAllSessionEntriesRuntimeFirst();
+    const selection = await chooseUnnamedSessionTarget(snapshot.entries, {
+        cwdPath,
+        cwdName,
+        includeStoredSessions: opts.includeStoredSessions !== false
+    });
+    const target = selection.target;
+    if (!target || !target.internalName) {
+        const err = new Error('Failed to choose session target');
+        err.status = 500;
+        throw err;
+    }
+
+    if (selection.createdNew) {
+        rememberRuntimeSessionMetadata(target.internalName, {
+            type: 'terminal',
+            cwd: cwdPath,
+            displayName: target.displayName,
+            createdBy: 'user',
+            agentPermitted: false,
+            workspaceName: null
+        });
+    }
+
+    const localCliClaimId = claimPendingLocalCliSession(target.internalName);
+    return {
+        target: {
+            ...target,
+            cwd: target.cwd || cwdPath,
+            localCliClaimId
+        },
+        createdNew: selection.createdNew
     };
 }
 
@@ -6729,14 +7516,40 @@ async function runHayCliAttach(target, shareUrl = '') {
         throw new Error('Invalid session target');
     }
     const displayName = String(target.displayName || getSessionDisplayName(internalName) || internalName).trim();
-    const sessionCwd = target.cwd || (getSessionConfig(internalName) || {}).cwd || process.cwd();
+    const savedConfig = getSessionConfig(internalName);
+    const sessionCwd = target.cwd || (getEffectiveSessionConfig(internalName) || {}).cwd || process.cwd();
 
-    ensureTerminalSessionConfig(internalName, sessionCwd, displayName);
+    rememberRuntimeSessionMetadata(internalName, {
+        type: 'terminal',
+        cwd: sessionCwd,
+        displayName,
+        createdBy: target.createdBy || savedConfig?.createdBy || 'user',
+        agentPermitted: typeof target.agentPermitted === 'boolean'
+            ? target.agentPermitted
+            : (typeof savedConfig?.agentPermitted === 'boolean' ? savedConfig.agentPermitted : false),
+        workspaceName: target.workspaceName || savedConfig?.workspaceName || null
+    });
     await ensureExternalHayHostReady();
+    await ensureExternalRuntimeSession(internalName, sessionCwd, displayName, {
+        shell: target.shell,
+        env: target.env,
+        cols: target.cols,
+        rows: target.rows,
+        startup: target.startup,
+        autoStart: target.autoStart,
+        createdBy: target.createdBy || savedConfig?.createdBy || 'user',
+        agentPermitted: typeof target.agentPermitted === 'boolean'
+            ? target.agentPermitted
+            : savedConfig?.agentPermitted,
+        workspaceName: target.workspaceName || savedConfig?.workspaceName,
+        folderId: target.folderId,
+        saveDefinition: !!savedConfig
+    });
     await reconcileExternalRuntimeSessions();
     const wsUrl = buildExternalHayWsUrl(internalName, {
         name: 'Local',
         source: 'local-cli',
+        claim: target.localCliClaimId,
         cwd: sessionCwd,
         hostPort: target.hostPort
     });
@@ -6750,12 +7563,12 @@ function resolveOrCreateLocalTerminalSession(nameArg, opts = {}) {
 
     if (requested) {
         const requestedDisplay = resolveDisplayNameAlias(requested);
-        const existingInternal = sessionStore.sessions[requested]
+        const existingInternal = hasSavedSessionConfig(requested)
             ? requested
             : findInternalSessionName(requestedDisplay);
 
         if (existingInternal && (!runtimeSessionNames || runtimeSessionNames.has(existingInternal))) {
-            const existingConfig = getSessionConfig(existingInternal);
+            const existingConfig = getEffectiveSessionConfig(existingInternal);
             if (existingConfig?.type === 'port') {
                 throw new Error('Session is configured as a port proxy');
             }
@@ -6764,7 +7577,17 @@ function resolveOrCreateLocalTerminalSession(nameArg, opts = {}) {
                 internalName: existingInternal,
                 displayName: getSessionDisplayName(existingInternal),
                 cwd: runtimeMatch?.cwd || existingConfig?.cwd,
-                hostPort: runtimeMatch?.hostPort
+                hostPort: runtimeMatch?.hostPort,
+                shell: existingConfig?.shell,
+                env: existingConfig?.env,
+                cols: existingConfig?.cols,
+                rows: existingConfig?.rows,
+                startup: existingConfig?.startup,
+                autoStart: existingConfig?.autoStart,
+                createdBy: existingConfig?.createdBy,
+                agentPermitted: existingConfig?.agentPermitted,
+                folderId: existingConfig?.folderId,
+                workspaceName: existingConfig?.workspaceName
             };
         }
 
@@ -6790,22 +7613,30 @@ function resolveOrCreateLocalTerminalSession(nameArg, opts = {}) {
         if (!internalName) {
             throw new Error('Invalid session name');
         }
-        ensureTerminalSessionConfig(internalName, process.cwd(), displayName, null, {
+        rememberRuntimeSessionMetadata(internalName, {
+            type: 'terminal',
+            cwd: process.cwd(),
+            displayName,
             createdBy: 'user',
-            agentPermitted: false
+            agentPermitted: false,
+            workspaceName: null
         });
-        return { internalName, displayName };
+        return { internalName, displayName, cwd: process.cwd(), createdBy: 'user', agentPermitted: false, workspaceName: null };
     }
 
     const cwdName = getCwdSessionBaseName();
     const cwdPath = process.cwd();
     const { internalName, displayName } = buildNextSessionIdentity(existingSessions, cwdName);
 
-    ensureTerminalSessionConfig(internalName, cwdPath, displayName, null, {
+    rememberRuntimeSessionMetadata(internalName, {
+        type: 'terminal',
+        cwd: cwdPath,
+        displayName,
         createdBy: 'user',
-        agentPermitted: false
+        agentPermitted: false,
+        workspaceName: null
     });
-    return { internalName, displayName };
+    return { internalName, displayName, cwd: cwdPath, createdBy: 'user', agentPermitted: false, workspaceName: null };
 }
 
 async function runLocalOnlyTerminal(nameArg) {
@@ -6826,19 +7657,24 @@ async function runLocalOnlyTerminal(nameArg) {
             runtimeSessionNames
         });
     } else {
+        await ensureNamingTheme();
         const cwdName = getCwdSessionBaseName();
         const cwdPath = process.cwd();
         const selection = await chooseUnnamedSessionTarget(existingSessions, {
             cwdPath,
             cwdName,
-            includeStoredSessions: selectionSource === 'metadata'
+            includeStoredSessions: true
         });
         target = selection.target;
 
         if (selection.createdNew) {
-            ensureTerminalSessionConfig(target.internalName, cwdPath, target.displayName, null, {
+            rememberRuntimeSessionMetadata(target.internalName, {
+                type: 'terminal',
+                cwd: cwdPath,
+                displayName: target.displayName,
                 createdBy: 'user',
-                agentPermitted: false
+                agentPermitted: false,
+                workspaceName: null
             });
         } else {
             log(`Attaching to existing session: ${target.displayName}`, RESET);
@@ -7079,7 +7915,6 @@ async function main() {
         await ensureHayLoaded();
         await ensureExternalHayHostReady();
         await reconcileExternalRuntimeSessions();
-        await loadDefaultWorkspace(true);
         const authEmitter = new EventEmitter();
 
         const proxyServer = startAuthProxy(authEmitter);
@@ -7207,9 +8042,9 @@ async function main() {
         log(`  hop user export <name>    Export credentials for a user`, RESET);
         log('');
         log(`${BOLD}Sessions:${RESET}`, RESET);
-        log(`  hop session list                 List sessions`, RESET);
-        log(`  hop session add <name> [--cwd P] Add terminal session`, RESET);
-        log(`  hop session add <name> --port N  Add port session (proxy)`, RESET);
+        log(`  hop session list [--all]         List live sessions (use --all for workspace defs across all workspaces)`, RESET);
+        log(`  hop session add <name> [--cwd P] --workspace W  Save a terminal definition to a workspace`, RESET);
+        log(`  hop session add <name> --port N --workspace W   Save a port definition to a workspace`, RESET);
         log(`  hop session rename <old> <new>   Rename a session`, RESET);
         log(`  hop session remove <name>        Remove a session`, RESET);
         log(`  hop session permit <name>        Allow agent access`, RESET);
@@ -7217,21 +8052,58 @@ async function main() {
         log('');
         log(`${BOLD}Workspaces:${RESET}`, RESET);
         log(`  hop workspace list            List workspaces`, RESET);
-        log(`  hop workspace save <name>     Save current sessions`, RESET);
-        log(`  hop workspace load <name>     Load workspace (merge + start)`, RESET);
-        log(`  hop workspace use <name>      Set default workspace`, RESET);
+        log(`  hop workspace create <name>   Create an empty workspace`, RESET);
+        log(`  hop workspace show <name>     Show saved definitions in a workspace`, RESET);
+        log(`  hop workspace save <name>     Save selected live sessions into a workspace`, RESET);
+        log(`  hop workspace load <name>     Start sessions defined in a workspace`, RESET);
+        log(`  hop workspace delete <name>   Delete a workspace`, RESET);
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
         log('');
         log(`${BOLD}Maintenance:${RESET}`, RESET);
-        log(`  hop wipe [--all]          Remove saved sessions (use --all to kill live)`, RESET);
+        log(`  hop wipe [--all]          Remove workspace-defined sessions (use --all to kill live)`, RESET);
         log(`  hop wipe --agent          Close all agent-created terminal API sessions`, RESET);
         log('');
         process.exit(0);
     }
 
     // Handle `hop url` command - prints current tunnel URL (easy to copy)
+    // Handle `hop config` command
+    if (process.argv[2] === 'config') {
+        const subCmd = process.argv[3];
+        if (subCmd === 'theme' || subCmd === 'naming-theme') {
+            const themeArg = process.argv[4];
+            if (themeArg) {
+                if (!isValidTheme(themeArg)) {
+                    log(`Unknown theme "${themeArg}". Available: ${getThemeChoices().map(c => c.id).join(', ')}`, RED);
+                    process.exit(1);
+                }
+                setNamingTheme(themeArg);
+                log(`Naming theme set to "${themeArg}".`, GREEN);
+            } else {
+                const current = getNamingTheme();
+                if (current) {
+                    log(`Current naming theme: ${current}`, RESET);
+                    log(`Change with: hop config theme <name>`, DIM);
+                } else {
+                    log(`No naming theme configured. Run \`hop config theme <name>\` to set one.`, YELLOW);
+                }
+                log(`\nAvailable themes:`, RESET);
+                for (const c of getThemeChoices()) {
+                    const marker = c.id === current ? ` ${GREEN}(active)${RESET}` : '';
+                    log(`  ${c.id.padEnd(10)} ${DIM}${c.example}${RESET}${marker}`);
+                }
+            }
+            process.exit(0);
+        }
+        // Show all config
+        const config = getHopConfig();
+        log(`Hop config (${HOP_CONFIG_FILE}):`, BOLD);
+        log(JSON.stringify(config, null, 2));
+        process.exit(0);
+    }
+
     if (process.argv[2] === 'url') {
         const state = isServerRunning();
         if (!state) {
@@ -7538,29 +8410,75 @@ async function main() {
                     process.exit(1);
                 }
                 const names = res.data.workspaces || [];
-                const current = res.data.current;
                 if (names.length === 0) {
                     log(`No workspaces found.`, YELLOW);
                 } else {
                     log(`\n${BOLD}Workspaces:${RESET}\n`, CYAN);
                     names.forEach((name) => {
-                        const marker = current === name ? `${GREEN}*${RESET}` : ' ';
-                        log(` ${marker} ${name}`, RESET);
+                        log(`  ${name}`, RESET);
                     });
                 }
             } else {
                 const names = listWorkspaceNames();
-                const current = getDefaultWorkspace();
                 if (names.length === 0) {
                     log(`No workspaces found.`, YELLOW);
                 } else {
                     log(`\n${BOLD}Workspaces:${RESET}\n`, CYAN);
                     names.forEach((name) => {
-                        const marker = current === name ? `${GREEN}*${RESET}` : ' ';
-                        log(` ${marker} ${name}`, RESET);
+                        log(`  ${name}`, RESET);
                     });
                 }
             }
+            process.exit(0);
+        }
+
+        if (subcommand === 'create') {
+            if (!nameArg) {
+                log(`Usage: hop workspace create <name>`, RED);
+                process.exit(1);
+            }
+            if (existing) {
+                const res = await callLocalApi(existing, '/api/workspaces/create', 'POST', { name: nameArg });
+                if (res.status !== 200) {
+                    log(res.data?.error || `Failed to create workspace.`, RED);
+                    process.exit(1);
+                }
+            } else {
+                const created = createWorkspaceFile(nameArg);
+                if (created === null) {
+                    log(`Invalid workspace name.`, RED);
+                    process.exit(1);
+                }
+                if (created === false) {
+                    log(`Workspace already exists.`, RED);
+                    process.exit(1);
+                }
+            }
+            log(`Workspace "${nameArg}" created.`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'show') {
+            if (!nameArg) {
+                log(`Usage: hop workspace show <name>`, RED);
+                process.exit(1);
+            }
+            let workspace = null;
+            if (existing) {
+                const res = await callLocalApi(existing, `/api/workspaces/show?name=${encodeURIComponent(nameArg)}`, 'GET');
+                if (res.status !== 200) {
+                    log(res.data?.error || `Workspace not found: ${nameArg}`, RED);
+                    process.exit(1);
+                }
+                workspace = res.data?.workspace || null;
+            } else {
+                workspace = loadWorkspaceFile(nameArg);
+                if (!workspace) {
+                    log(`Workspace not found: ${nameArg}`, RED);
+                    process.exit(1);
+                }
+            }
+            printWorkspaceDetails(workspace);
             process.exit(0);
         }
 
@@ -7570,19 +8488,52 @@ async function main() {
                 process.exit(1);
             }
             if (existing) {
-                const res = await callLocalApi(existing, '/api/workspaces/save', 'POST', { name: nameArg });
-                if (res.status !== 200) {
-                    log(`Failed to save workspace.`, RED);
+                const sessionsRes = await callLocalApi(existing, '/api/sessions', 'GET');
+                if (sessionsRes.status !== 200) {
+                    log(`Failed to list live sessions.`, RED);
                     process.exit(1);
                 }
+                const liveEntries = (sessionsRes.data.sessions || [])
+                    .filter((entry) => entry && entry.type === 'terminal' && entry.live === true)
+                    .map((entry) => ({
+                        internalName: entry.internalName,
+                        displayName: entry.displayName || entry.name,
+                        cwd: entry.cwd
+                    }));
+                const selection = await promptForWorkspaceSnapshotSelection(liveEntries);
+                if (selection.cancelled) {
+                    log(`Workspace save cancelled.`, YELLOW);
+                    process.exit(0);
+                }
+                const res = await callLocalApi(existing, '/api/workspaces/save', 'POST', {
+                    name: nameArg,
+                    sessionNames: selection.selectedInternalNames
+                });
+                if (res.status !== 200) {
+                    log(res.data?.error || `Failed to save workspace.`, RED);
+                    process.exit(1);
+                }
+                const selected = Array.isArray(res.data?.selected) ? res.data.selected : [];
+                log(`Workspace "${nameArg}" saved with ${selected.length} session(s).`, GREEN);
             } else {
-                const snapshot = saveWorkspaceFile(nameArg);
-                if (!snapshot) {
+                const snapshot = await listAllSessionEntriesRuntimeFirst();
+                const liveEntries = snapshot.entries.filter((entry) => entry && entry.type === 'terminal' && entry.live === true);
+                const selection = await promptForWorkspaceSnapshotSelection(liveEntries);
+                if (selection.cancelled) {
+                    log(`Workspace save cancelled.`, YELLOW);
+                    process.exit(0);
+                }
+                const result = await snapshotWorkspaceFile(nameArg, selection.selectedInternalNames);
+                if (!result || result.error === 'invalid-workspace') {
                     log(`Invalid workspace name.`, RED);
                     process.exit(1);
                 }
+                if (result.error === 'no-live-sessions') {
+                    log(`No live terminal sessions to save.`, RED);
+                    process.exit(1);
+                }
+                log(`Workspace "${nameArg}" saved with ${result.selected.length} session(s).`, GREEN);
             }
-            log(`Workspace "${nameArg}" saved.`, GREEN);
             process.exit(0);
         }
 
@@ -7616,37 +8567,39 @@ async function main() {
             process.exit(0);
         }
 
-        if (subcommand === 'use') {
+        if (subcommand === 'delete' || subcommand === 'remove' || subcommand === 'rm') {
             if (!nameArg) {
-                log(`Usage: hop workspace use <name>`, RED);
+                log(`Usage: hop workspace delete <name>`, RED);
                 process.exit(1);
             }
             if (existing) {
-                const res = await callLocalApi(existing, '/api/workspaces/use', 'POST', { name: nameArg });
+                const res = await callLocalApi(existing, '/api/workspaces/delete', 'POST', { name: nameArg });
                 if (res.status !== 200) {
-                    log(`Failed to set default workspace.`, RED);
+                    log(res.data?.error || `Failed to delete workspace.`, RED);
                     process.exit(1);
                 }
             } else {
-                const workspace = loadWorkspaceFile(nameArg);
-                if (!workspace) {
-                    log(`Workspace not found: ${nameArg}`, RED);
-                    process.exit(1);
-                }
-                if (!setDefaultWorkspace(nameArg)) {
+                const deleted = deleteWorkspaceFile(nameArg);
+                if (deleted === null) {
                     log(`Invalid workspace name.`, RED);
                     process.exit(1);
                 }
+                if (deleted === false) {
+                    log(`Workspace not found: ${nameArg}`, RED);
+                    process.exit(1);
+                }
             }
-            log(`Default workspace set to "${nameArg}".`, GREEN);
+            log(`Workspace "${nameArg}" deleted.`, GREEN);
             process.exit(0);
         }
 
         log(`\n${BOLD}Workspace commands:${RESET}\n`, CYAN);
         log(`  hop workspace list           List workspaces`, RESET);
-        log(`  hop workspace save <name>    Save current sessions as a workspace`, RESET);
-        log(`  hop workspace load <name>    Load workspace (merge + start)`, RESET);
-        log(`  hop workspace use <name>     Set default workspace on startup`, RESET);
+        log(`  hop workspace create <name>  Create an empty workspace`, RESET);
+        log(`  hop workspace show <name>    Show saved definitions in a workspace`, RESET);
+        log(`  hop workspace save <name>    Save selected live sessions into a workspace`, RESET);
+        log(`  hop workspace load <name>    Start sessions defined in a workspace`, RESET);
+        log(`  hop workspace delete <name>  Delete a workspace`, RESET);
         process.exit(0);
     }
 
@@ -7657,18 +8610,63 @@ async function main() {
         const nameArg = process.argv[4];
 
         if (!subcommand || subcommand === 'list') {
+            const includeAll = process.argv.includes('--all') || process.argv.includes('-a');
             const snapshot = await listAllSessionEntriesRuntimeFirst();
-            const sessions = snapshot.entries;
+            let sessions;
+            if (includeAll) {
+                const liveSessions = snapshot.entries.filter((session) => session && session.live === true);
+                const workspaceDefs = listWorkspaceSessionDefinitions();
+                const liveByName = new Map(liveSessions.map((session) => [
+                    session.internalName,
+                    { ...session, workspaceNames: [] }
+                ]));
+                const savedOnly = new Map();
+
+                for (const def of workspaceDefs) {
+                    if (liveByName.has(def.internalName)) {
+                        const entry = liveByName.get(def.internalName);
+                        entry.workspaceNames.push(def.workspaceName);
+                        liveByName.set(def.internalName, entry);
+                        continue;
+                    }
+                    const existing = savedOnly.get(def.internalName);
+                    if (existing) {
+                        existing.workspaceNames.push(def.workspaceName);
+                        savedOnly.set(def.internalName, existing);
+                    } else {
+                        savedOnly.set(def.internalName, {
+                            ...def,
+                            live: false,
+                            workspaceNames: [def.workspaceName]
+                        });
+                    }
+                }
+
+                sessions = [
+                    ...liveByName.values(),
+                    ...savedOnly.values()
+                ];
+            } else {
+                sessions = snapshot.entries.filter((session) => session && session.type === 'terminal' && session.live === true);
+            }
             if (sessions.length === 0) {
-                log(`No sessions configured.`, YELLOW);
+                log(includeAll ? `No sessions configured.` : `No live sessions.`, YELLOW);
                 process.exit(0);
             }
             log(`\n${BOLD}Sessions:${RESET}\n`, CYAN);
             sessions.forEach(s => {
                 if (s.type === 'port') {
-                    log(`  ${BOLD}${s.displayName}${RESET}  ${YELLOW}[PORT ${s.port}]${RESET}`, RESET);
+                    const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
+                        ? `, WORKSPACE ${s.workspaceNames.join(',')}`
+                        : '';
+                    log(`  ${BOLD}${s.displayName}${RESET}  ${YELLOW}[PORT ${s.port}${workspaceSuffix}]${RESET}`, RESET);
                 } else {
-                    const stateLabel = s.live ? `${GREEN}[TERMINAL, LIVE]${RESET}` : `${YELLOW}[TERMINAL, SAVED]${RESET}`;
+                    const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
+                        ? `, WORKSPACE ${s.workspaceNames.join(',')}`
+                        : '';
+                    const stateLabel = s.live
+                        ? `${GREEN}[TERMINAL, LIVE${workspaceSuffix}]${RESET}`
+                        : `${YELLOW}[TERMINAL${workspaceSuffix}]${RESET}`;
                     log(`  ${BOLD}${s.displayName}${RESET}  ${stateLabel}`, RESET);
                 }
             });
@@ -7677,12 +8675,21 @@ async function main() {
 
         if (subcommand === 'add') {
             if (!nameArg) {
-                log(`Usage: hop session add <name> [--port <number>] [--cwd <path>]`, RED);
+                log(`Usage: hop session add <name> [--port <number>] [--cwd <path>] --workspace <name>`, RED);
                 process.exit(1);
             }
             const existingTunnel = isServerRunning();
             const displayName = nameArg;
             const name = toInternalSessionName(displayName);
+            const workspaceArgIndex = process.argv.indexOf('--workspace');
+            const explicitWorkspaceName = workspaceArgIndex !== -1
+                ? normalizeWorkspaceName(process.argv[workspaceArgIndex + 1])
+                : null;
+            if (!explicitWorkspaceName) {
+                log(`Session definitions are no longer saved to an ambient workspace.`, YELLOW);
+                log(`Use ${CYAN}hop workspace save <name>${RESET} to snapshot live sessions, or pass ${CYAN}--workspace <name>${RESET}.`, RESET);
+                process.exit(1);
+            }
             if (!name) {
                 log(`Invalid session name.`, RED);
                 process.exit(1);
@@ -7691,7 +8698,7 @@ async function main() {
                 log(`Session name already in use.`, RED);
                 process.exit(1);
             }
-            if (sessionStore.sessions[name]) {
+            if (hasSavedSessionConfig(name)) {
                 log(`Session internal name already exists.`, RED);
                 process.exit(1);
             }
@@ -7727,10 +8734,11 @@ async function main() {
                             name: displayName,
                             type: 'port',
                             port: portArg,
-                            startRuntime: false
+                            startRuntime: false,
+                            workspace: explicitWorkspaceName
                         });
                         if (res.status >= 200 && res.status < 300) {
-                            log(`Added port session "${displayName}" → localhost:${portArg}`, GREEN);
+                            log(`Saved port session "${displayName}" → localhost:${portArg} to workspace "${explicitWorkspaceName}".`, GREEN);
                             process.exit(0);
                         }
                     } catch (e) { }
@@ -7739,12 +8747,25 @@ async function main() {
                     log(`Terminal session already exists with this name.`, RED);
                     process.exit(1);
                 }
-                setPortSessionConfig(name, portArg);
-                log(`Added port session "${displayName}" → localhost:${portArg}`, GREEN);
+                const saved = upsertWorkspaceSessionDefinition(explicitWorkspaceName, name, {
+                    type: 'port',
+                    port: portArg,
+                    displayName,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    createdBy: 'user',
+                    agentPermitted: false,
+                    workspaceName: explicitWorkspaceName
+                });
+                if (!saved) {
+                    log(`Failed to save port session definition.`, RED);
+                    process.exit(1);
+                }
+                log(`Saved port session "${displayName}" → localhost:${portArg} to workspace "${explicitWorkspaceName}".`, GREEN);
                 process.exit(0);
             }
 
-            const existingConfig = getSessionConfig(name);
+            const existingConfig = getEffectiveSessionConfig(name);
             if (existingConfig && existingConfig.type === 'port') {
                 log(`Port session already exists with this name.`, RED);
                 process.exit(1);
@@ -7755,16 +8776,30 @@ async function main() {
                         name: displayName,
                         type: 'terminal',
                         cwd: cwdPath,
-                        startRuntime: false
+                        startRuntime: false,
+                        workspace: explicitWorkspaceName
                     });
                     if (res.status >= 200 && res.status < 300) {
-                        log(`Added terminal session "${displayName}".`, GREEN);
+                        log(`Saved terminal session "${displayName}" to workspace "${explicitWorkspaceName}".`, GREEN);
                         process.exit(0);
                     }
                 } catch (e) { }
             }
-            ensureTerminalSessionConfig(name, cwdPath, displayName);
-            log(`Added terminal session "${displayName}".`, GREEN);
+            const saved = upsertWorkspaceSessionDefinition(explicitWorkspaceName, name, {
+                type: 'terminal',
+                cwd: cwdPath,
+                displayName,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                createdBy: 'user',
+                agentPermitted: false,
+                workspaceName: explicitWorkspaceName
+            });
+            if (!saved) {
+                log(`Failed to save terminal session definition.`, RED);
+                process.exit(1);
+            }
+            log(`Saved terminal session "${displayName}" to workspace "${explicitWorkspaceName}".`, GREEN);
             process.exit(0);
         }
 
@@ -7792,7 +8827,8 @@ async function main() {
                 } catch (e) { }
             }
 
-            const config = getSessionConfig(internalName);
+            const savedConfig = getSessionConfig(internalName);
+            const config = getEffectiveSessionConfig(internalName);
             if (!config || config.type === 'port') {
                 log(`Session not found or not a terminal.`, RED);
                 process.exit(1);
@@ -7800,7 +8836,11 @@ async function main() {
             config.agentPermitted = allowed;
             if (!config.createdBy) config.createdBy = 'user';
             config.updatedAt = new Date().toISOString();
-            setSessionConfig(internalName, config);
+            if (savedConfig) {
+                setSessionConfig(internalName, config);
+            } else {
+                rememberRuntimeSessionMetadata(internalName, config);
+            }
             log(`${allowed ? 'Allowed' : 'Blocked'} agent access for "${displayName}".`, GREEN);
             process.exit(0);
         }
@@ -7849,9 +8889,9 @@ async function main() {
             }
             const displayName = nameArg;
             const resolvedDisplayName = resolveDisplayNameAlias(displayName);
-            const name = sessionStore.sessions[displayName]
+            const name = hasSavedSessionConfig(displayName)
                 ? displayName
-                : (findInternalSessionName(resolvedDisplayName) || null);
+                : (findInternalSessionName(resolvedDisplayName) || toInternalSessionName(resolvedDisplayName));
             if (!name) {
                 log(`Session not found.`, RED);
                 process.exit(1);
@@ -7872,9 +8912,11 @@ async function main() {
                     }
                 } catch (e) { }
             }
-            const config = getSessionConfig(name);
+            const savedConfig = getSessionConfig(name);
+            const config = getEffectiveSessionConfig(name);
             if (config && config.type === 'port') {
                 deleteSessionConfig(name);
+                clearRuntimeSessionMetadata(name);
                 log(`Removed port session "${displayName}".`, GREEN);
                 process.exit(0);
             }
@@ -7887,15 +8929,18 @@ async function main() {
             if (activeSessions[name]) {
                 delete activeSessions[name];
             }
-            deleteSessionConfig(name);
+            clearRuntimeSessionMetadata(name);
+            if (savedConfig) {
+                deleteSessionConfig(name);
+            }
             log(`Removed terminal session "${displayName}".`, GREEN);
             process.exit(0);
         }
 
         log(`\n${BOLD}Session commands:${RESET}\n`, CYAN);
-        log(`  hop session list                 List sessions`, RESET);
-        log(`  hop session add <name> [--cwd P] Add terminal session`, RESET);
-        log(`  hop session add <name> --port N  Add port session`, RESET);
+        log(`  hop session list [--all]         List live sessions (use --all for workspace defs across all workspaces)`, RESET);
+        log(`  hop session add <name> [--cwd P] --workspace W  Save a terminal definition to a workspace`, RESET);
+        log(`  hop session add <name> --port N --workspace W   Save a port definition to a workspace`, RESET);
         log(`  hop session rename <old> <new>   Rename a session`, RESET);
         log(`  hop session remove <name>        Remove a session`, RESET);
         log(`  hop session permit <name>        Allow agent access`, RESET);
@@ -7903,7 +8948,7 @@ async function main() {
         process.exit(0);
     }
 
-    // Handle `hop wipe` command - removes saved sessions by default
+    // Handle `hop wipe` command - removes workspace-defined sessions by default
     if (process.argv[2] === 'wipe') {
         const wipeAll = process.argv.includes('--all');
         const wipeAgent = process.argv.includes('--agent');
@@ -8001,7 +9046,7 @@ async function main() {
                     log(`No hop sessions to clean up.`, GREEN);
                 } else {
                     if (liveSessions.length > 0 || unknownTerminalSessions.length > 0) {
-                        log(`No saved sessions to clean up.`, GREEN);
+                        log(`No workspace-defined sessions to clean up.`, GREEN);
                         if (liveSessions.length > 0) {
                             log(`Use ${CYAN}hop wipe --all${RESET} to also kill ${liveSessions.length} live session(s).`, RESET);
                         }
@@ -8019,7 +9064,7 @@ async function main() {
                 log(`Killing ${targets.length} hop session(s)...`, YELLOW);
             } else {
                 const skippedLive = liveSessions.length;
-                log(`Removing ${targets.length} saved session(s)...`, YELLOW);
+                log(`Removing ${targets.length} workspace-defined session(s)...`, YELLOW);
                 if (skippedLive > 0) {
                     log(`Keeping ${skippedLive} live session(s). Use ${CYAN}hop wipe --all${RESET} to kill them.`, RESET);
                 }
@@ -8126,7 +9171,6 @@ async function main() {
     await ensureHayLoaded();
     await ensureExternalHayHostReady();
     await reconcileExternalRuntimeSessions();
-    await loadDefaultWorkspace(true);
     const authEmitter = new EventEmitter();
 
     const proxyServer = startAuthProxy(authEmitter);

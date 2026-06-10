@@ -299,7 +299,11 @@ const getLocalMetrics = () => {
   const rows = process.stdout.rows || 24;
   const hasNotice = !!notice && notice.expiresAt > Date.now();
   const showBottomBar = showStatusBar && rows >= 2;
-  const showHintBar = (showHints || hasNotice) && rows >= (showBottomBar ? 3 : 2);
+  // The persistent hint/controls line is subordinate to the status bar, so Opt+B
+  // clears the whole bottom chrome (both lines), not just the status line. A
+  // transient notice still flashes even with the status bar hidden; Ctrl+T still
+  // toggles just the hint line while the status bar is shown.
+  const showHintBar = ((showHints && showBottomBar) || hasNotice) && rows >= (showBottomBar ? 3 : 2);
   const barRows = (showBottomBar ? 1 : 0) + (showHintBar ? 1 : 0);
   return {
     cols,

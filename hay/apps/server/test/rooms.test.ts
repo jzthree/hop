@@ -147,6 +147,39 @@ describe("Room", () => {
     expect(rejected.length).toBeGreaterThan(0);
   });
 
+  it("active PTY size follows the active typer, not the last resizer", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("resize", { cols: 80, rows: 24 }, "/tmp");
+    const socketA = new FakeSocket();
+    const socketB = new FakeSocket();
+
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socketA);
+    room.attachClient({ id: "b", name: "Blake", colorIndex: 1, cols: 80, rows: 24 }, socketB);
+
+    // Alex types — Alex is now the active typer / size source.
+    socketA.emitMessage({ type: "input", data: "ls" });
+
+    // Blake (passive viewer) resizes their window — must NOT move the PTY size.
+    const beforePassive = ptyInstance!.resizes.length;
+    socketB.emitMessage({ type: "resize", cols: 100, rows: 30 });
+    expect(ptyInstance!.resizes.length).toBe(beforePassive);
+
+    // Alex (the active typer) resizes — this one applies.
+    socketA.emitMessage({ type: "resize", cols: 120, rows: 40 });
+    expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 120, rows: 40 });
+
+    // Once Blake types, Blake becomes the active typer and his size wins.
+    socketB.emitMessage({ type: "input", data: "x" });
+    socketB.emitMessage({ type: "resize", cols: 90, rows: 20 });
+    expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 90, rows: 20 });
+  });
+
   it("updates presence on disconnect", () => {
     const manager = new RoomManager(() => new FakePty() as any);
     const room = manager.getRoom("charlie", { cols: 80, rows: 24 }, "/tmp");

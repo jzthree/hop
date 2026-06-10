@@ -67,6 +67,10 @@ class ClientState {
   color: string;
   typing = false;
   lastActive = now();
+  // Timestamp of this client's last real keystroke input (not resize, not the
+  // typing indicator, not connect). 0 = has never typed. Drives the active PTY
+  // size election so size follows the active typer, not whoever last resized.
+  lastInputAt = 0;
   socket: SocketAdapter;
   source: string;
   cols: number;
@@ -465,6 +469,7 @@ export class Room extends EventEmitter {
       return;
     }
     client.lastActive = now();
+    client.lastInputAt = now();
     this.pty.write(data);
     this.emit("pty_input", { roomId: this.id, clientId: client.id, data, timestamp: now() });
   }
@@ -475,11 +480,16 @@ export class Room extends EventEmitter {
 
     client.cols = cols;
     client.rows = rows;
-    // Treat resize as activity so the resizer becomes the active size source.
-    client.lastActive = now();
-    // Only resize PTY if this client is the most recently active (was typing)
-    // This prevents disrupting the active typer when others resize their windows
-    const isActive = [...this.clients.values()].every(c => c.lastActive <= client.lastActive);
+    // The active PTY size follows whoever is actively typing — not whoever last
+    // resized. Previously a resize bumped lastActive and then checked "am I the
+    // most active?", which was trivially true for the resizer, so every resize
+    // won: a passive viewer resizing their window yanked the size from the
+    // active typer, and two differently-sized clients flapped. Elect on typing
+    // recency (lastInputAt) instead. A client that has never typed (lastInputAt
+    // 0) only wins when no one else has typed either — so the first/sole client
+    // can still size the PTY before typing.
+    const maxInputAt = Math.max(...[...this.clients.values()].map((c) => c.lastInputAt));
+    const isActive = client.lastInputAt >= maxInputAt;
     if (isActive) {
       this.pty.resize(cols, rows);
       this.activeCols = cols;

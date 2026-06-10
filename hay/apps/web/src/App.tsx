@@ -206,6 +206,12 @@ const App = () => {
   const [terminalReady, setTerminalReady] = useState(false);
   const [reconnectToken, setReconnectToken] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [searchActive, setSearchActive] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchInfo, setSearchInfo] = useState({ index: 0, total: 0 });
+  const searchMatchesRef = useRef<Array<{ row: number; col: number }>>([]);
+  const searchIndexRef = useRef(-1);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [fabPosition, setFabPosition] = useState({ x: 20, y: window.innerHeight - 80 });
   const fabDragRef = useRef<{ dragging: boolean; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
   const [isMobile] = useState(() => isMobileDevice());
@@ -351,6 +357,74 @@ const App = () => {
       lines.push(buffer.getLine(i)?.translateToString(true) ?? "");
     }
     return lines.join("\n").trimEnd();
+  };
+
+  // ── Scrollback search ──
+  const jumpToSearchMatch = (idx: number, len: number) => {
+    const terminal = termRef.current;
+    const matches = searchMatchesRef.current;
+    if (!terminal || matches.length === 0) return;
+    const i = ((idx % matches.length) + matches.length) % matches.length;
+    searchIndexRef.current = i;
+    const m = matches[i];
+    terminal.select(m.col, m.row, len);
+    const target = Math.max(0, m.row - Math.floor(terminal.rows / 2));
+    const scrollable = terminal as unknown as { scrollToLine?: (line: number) => void };
+    scrollable.scrollToLine?.(target);
+    userScrolledUpRef.current = true; // keep the match in view; don't snap to bottom on output
+    setSearchInfo({ index: i + 1, total: matches.length });
+  };
+
+  const runSearch = (query: string) => {
+    const terminal = termRef.current;
+    searchMatchesRef.current = [];
+    searchIndexRef.current = -1;
+    if (!terminal || !query) {
+      setSearchInfo({ index: 0, total: 0 });
+      terminal?.clearSelection();
+      return;
+    }
+    const buffer = terminal.buffer.active;
+    const needle = query.toLowerCase();
+    const matches: Array<{ row: number; col: number }> = [];
+    const MAX = 2000;
+    for (let row = 0; row < buffer.length && matches.length < MAX; row++) {
+      const text = (buffer.getLine(row)?.translateToString(true) ?? "").toLowerCase();
+      let from = 0;
+      while (matches.length < MAX) {
+        const idx = text.indexOf(needle, from);
+        if (idx === -1) break;
+        matches.push({ row, col: idx });
+        from = idx + needle.length;
+      }
+    }
+    searchMatchesRef.current = matches;
+    if (matches.length > 0) {
+      jumpToSearchMatch(0, query.length);
+    } else {
+      setSearchInfo({ index: 0, total: 0 });
+      terminal.clearSelection();
+    }
+  };
+
+  const searchStep = (dir: number) => {
+    if (searchMatchesRef.current.length === 0) return;
+    jumpToSearchMatch(searchIndexRef.current + dir, searchQuery.length);
+  };
+
+  const openSearch = () => {
+    setSearchActive(true);
+    setTimeout(() => searchInputRef.current?.focus(), 0);
+  };
+
+  const closeSearch = () => {
+    setSearchActive(false);
+    setSearchQuery("");
+    searchMatchesRef.current = [];
+    searchIndexRef.current = -1;
+    setSearchInfo({ index: 0, total: 0 });
+    termRef.current?.clearSelection();
+    if (!isMobile) termRef.current?.focus();
   };
 
   const copyToClipboard = async (text: string, label: string) => {
@@ -1739,11 +1813,43 @@ const App = () => {
               <div className="terminal-scroll">
                 <div className="terminal-inner" ref={containerRef} />
               </div>
+              {searchActive && (
+                <div className="terminal-find" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    ref={searchInputRef}
+                    className="terminal-find-input"
+                    placeholder="Find in scrollback…"
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      runSearch(e.target.value);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        searchStep(e.shiftKey ? -1 : 1);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        closeSearch();
+                      }
+                    }}
+                  />
+                  <span className="terminal-find-count">
+                    {searchInfo.total > 0 ? `${searchInfo.index}/${searchInfo.total}` : searchQuery ? "0/0" : ""}
+                  </span>
+                  <button type="button" className="terminal-find-btn" onClick={() => searchStep(-1)} aria-label="Previous match">↑</button>
+                  <button type="button" className="terminal-find-btn" onClick={() => searchStep(1)} aria-label="Next match">↓</button>
+                  <button type="button" className="terminal-find-btn" onClick={closeSearch} aria-label="Close search">✕</button>
+                </div>
+              )}
             </div>
             <div className="terminal-footer">
               {status === "connected" ? (
                 <>
                   <span>Live</span>
+                  <button type="button" className="footer-find-toggle" onClick={openSearch}>
+                    🔍 Find
+                  </button>
                   <span>
                     {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
                   </span>

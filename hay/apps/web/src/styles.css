@@ -771,6 +771,70 @@ button.primary {
   background: rgba(180, 83, 9, 0.1);
 }
 
+.footer-find-toggle {
+  font: inherit;
+  color: var(--ink-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0 6px;
+}
+
+.footer-find-toggle:hover {
+  color: var(--ink);
+}
+
+.terminal-frame {
+  position: relative;
+}
+
+.terminal-find {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(24, 24, 27, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+
+.terminal-find-input {
+  font: inherit;
+  font-size: 13px;
+  color: #fafafa;
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 180px;
+}
+
+.terminal-find-count {
+  font-size: 12px;
+  color: #a1a1aa;
+  min-width: 36px;
+  text-align: right;
+}
+
+.terminal-find-btn {
+  font: inherit;
+  font-size: 13px;
+  color: #d4d4d8;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.terminal-find-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 @media (max-width: 960px) {
   .topbar {
     flex-direction: column;

@@ -1149,6 +1149,21 @@ function ensurePrivateWritableFile(filePath) {
     ensurePrivateFile(filePath);
 }
 
+const MAX_LOG_BYTES = 5 * 1024 * 1024; // rotate a log once it passes 5 MB
+
+// Open a log file for appending, first rotating it to <path>.1 if it has grown
+// past maxBytes (single-generation rotation is enough for our purposes). Returns
+// an fd; the caller is responsible for closing its copy after spawn.
+function rotateAndOpenLogFd(logPath, maxBytes = MAX_LOG_BYTES) {
+    ensurePrivateWritableFile(logPath);
+    try {
+        if (fs.statSync(logPath).size > maxBytes) {
+            try { fs.renameSync(logPath, `${logPath}.1`); } catch (e) { }
+        }
+    } catch (e) { }
+    return fs.openSync(logPath, 'a');
+}
+
 function ensureWorkspaceDataDirs(workspaceName) {
     const normalized = normalizeWorkspaceName(workspaceName);
     const workspaceDir = normalized
@@ -2502,6 +2517,13 @@ const DIM = "\x1b[2m";
 const MAGENTA = "\x1b[35m";
 
 function log(msg, color = RESET) {
+    if (DAEMON_FLAG) {
+        // The daemon's stdout/stderr are redirected to logs/hop-daemon.log.
+        // Timestamp each line and drop the wrapping color codes so the file
+        // stays grep-friendly.
+        console.log(`[${new Date().toISOString()}] ${msg}`);
+        return;
+    }
     console.log(`${color}${msg}${RESET}`);
 }
 
@@ -4108,8 +4130,7 @@ async function ensureExternalHayHostReady() {
         ? requestedPort
         : await allocateLocalPort('127.0.0.1');
     const hayHostLogFile = path.join(LOG_DIR, 'hay-host.log');
-    ensurePrivateWritableFile(hayHostLogFile);
-    const hayHostLogFd = fs.openSync(hayHostLogFile, 'a');
+    const hayHostLogFd = rotateAndOpenLogFd(hayHostLogFile);
     let child;
     try {
         child = spawn(process.execPath, [hostScript, HAY_HOST_HOME_FLAG], {
@@ -6895,12 +6916,16 @@ function showAuthQrCode(label = 'Hop') {
 function startDaemon() {
     const node = process.execPath;
     const script = __filename;
+    // Capture the daemon's stdout/stderr to a log file instead of discarding it,
+    // so tunnel restarts, health failures, and crashes leave a forensic trail.
+    const logFd = rotateAndOpenLogFd(path.join(LOG_DIR, 'hop-daemon.log'));
     const child = spawn(node, [script, '--daemon'], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', logFd, logFd],
         env: process.env
     });
     child.unref();
+    try { fs.closeSync(logFd); } catch (e) { } // child keeps its own dup
 }
 
 function waitForDaemonReady(timeoutMs = 20000) {
@@ -8022,6 +8047,27 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop logs [-f] [hay-host]` command - view daemon/host logs
+    if (process.argv[2] === 'logs') {
+        const follow = process.argv.includes('-f') || process.argv.includes('--follow');
+        const wantHayHost = process.argv.includes('hay-host') || process.argv.includes('hayhost');
+        const logPath = path.join(LOG_DIR, wantHayHost ? 'hay-host.log' : 'hop-daemon.log');
+        if (!fs.existsSync(logPath)) {
+            log(`No log yet at ${logPath}`, YELLOW);
+            log(`(start hop to create it)`, RESET);
+            process.exit(0);
+        }
+        // -F follows across rotation; falls back to a one-shot dump if tail is absent.
+        const tailArgs = follow ? ['-n', '100', '-F', logPath] : ['-n', '200', logPath];
+        const tailProc = spawn('tail', tailArgs, { stdio: 'inherit' });
+        tailProc.on('error', () => {
+            try { process.stdout.write(fs.readFileSync(logPath, 'utf8')); } catch (e) { }
+            process.exit(0);
+        });
+        tailProc.on('close', (code) => process.exit(code || 0));
+        return;
+    }
+
     // Handle `hop --help` or `hop help`
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
@@ -8032,6 +8078,7 @@ async function main() {
         log(`  hop attach all            Attach sequentially to all sessions`, RESET);
         log(`  hop local [session]       Start daemonless local terminal ([session] attaches if present)`, RESET);
         log(`  hop stop                  Stop hop daemon`, RESET);
+        log(`  hop logs [-f] [hay-host]  Show daemon logs (-f to follow)`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');
         log(`${BOLD}URL & QR:${RESET}`, RESET);

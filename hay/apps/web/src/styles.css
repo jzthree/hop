@@ -745,6 +745,32 @@ button.primary {
   padding: 0 4px;
 }
 
+.terminal-footer .reconnecting {
+  color: #b45309; /* amber */
+  font-weight: 600;
+  animation: hop-reconnect-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes hop-reconnect-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.footer-reconnect {
+  font: inherit;
+  font-weight: 600;
+  color: #b45309;
+  background: transparent;
+  border: 1px solid #b45309;
+  border-radius: 6px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.footer-reconnect:hover {
+  background: rgba(180, 83, 9, 0.1);
+}
+
 @media (max-width: 960px) {
   .topbar {
     flex-direction: column;

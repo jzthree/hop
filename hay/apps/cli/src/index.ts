@@ -207,6 +207,8 @@ let status: "connecting" | "connected" | "reconnecting" | "disconnected" = "conn
 let shouldReconnect = true;
 let reconnectAttempt = 0;
 let reconnectTimer: NodeJS.Timeout | null = null;
+let nextReconnectAt = 0;
+let reconnectTicker: NodeJS.Timeout | null = null;
 let typingTimeout: NodeJS.Timeout | null = null;
 let noticeTimer: NodeJS.Timeout | null = null;
 let daemonPollTimer: NodeJS.Timeout | null = null;
@@ -302,8 +304,10 @@ const getLocalMetrics = () => {
   // The persistent hint/controls line is subordinate to the status bar, so Opt+B
   // clears the whole bottom chrome (both lines), not just the status line. A
   // transient notice still flashes even with the status bar hidden; Ctrl+T still
-  // toggles just the hint line while the status bar is shown.
-  const showHintBar = ((showHints && showBottomBar) || hasNotice) && rows >= (showBottomBar ? 3 : 2);
+  // toggles just the hint line while the status bar is shown. The reconnect
+  // banner forces the line on regardless, so a dropped connection is never silent.
+  const reconnecting = !connected && reconnectAttempt > 0;
+  const showHintBar = ((showHints && showBottomBar) || hasNotice || reconnecting) && rows >= (showBottomBar ? 3 : 2);
   const barRows = (showBottomBar ? 1 : 0) + (showHintBar ? 1 : 0);
   return {
     cols,
@@ -1162,6 +1166,7 @@ const BAR_ACCENT = "\x1b[38;5;93m";
 const BAR_DIM = "\x1b[38;5;245m";
 const BAR_BOLD = "\x1b[1m";
 const BAR_RESET_FG = "\x1b[22m\x1b[38;5;234m";
+const BAR_RECONNECT = "\x1b[1m\x1b[38;5;130m"; // bold amber — reconnect banner
 
 const renderBar = (text: string, variant: "top" | "bottom") =>
   `${variant === "top" ? BAR_TOP_BG : BAR_BOTTOM_BG}${BAR_FG}${text}\x1b[0m`;
@@ -1447,8 +1452,17 @@ const render = () => {
     ? ` ${notice.message} `
     : "";
   const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, B status ${showStatusBar ? "on" : "off"}, M mouse ${mouseCapture ? "on" : "off"} | Ctrl: T hints, G detach, Q kill`;
+  const reconnecting = !connected && reconnectAttempt > 0;
+  let hintInner: string;
+  if (reconnecting) {
+    const secsLeft = nextReconnectAt > Date.now() ? Math.ceil((nextReconnectAt - Date.now()) / 1000) : 0;
+    const detail = secsLeft > 0 ? `next attempt in ${secsLeft}s` : "connecting…";
+    hintInner = `${BAR_RECONNECT} ⟳ Reconnecting — ${detail} · Ctrl+Q to quit ${BAR_RESET_FG}`;
+  } else {
+    hintInner = noticeText || `${BAR_DIM}${controls}${BAR_RESET_FG}`;
+  }
   const hintLine = renderBar(
-    composeBar(noticeText || `${BAR_DIM}${controls}${BAR_RESET_FG}`, "", localMetrics.cols),
+    composeBar(hintInner, "", localMetrics.cols),
     "bottom"
   );
 
@@ -1478,7 +1492,14 @@ const scheduleReconnect = () => {
 
   const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000);
   reconnectAttempt += 1;
-  pushNotice(`Reconnecting in ${Math.round(delay / 1000)}s...`);
+  nextReconnectAt = Date.now() + delay;
+  // Keep a live countdown on screen for the whole backoff (up to 30s), not just
+  // the 3.5s notice flash, so the frozen viewport is obviously not live.
+  if (!reconnectTicker) {
+    reconnectTicker = setInterval(() => scheduleRender(), 1000);
+    reconnectTicker.unref?.();
+  }
+  scheduleRender();
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -1486,6 +1507,14 @@ const scheduleReconnect = () => {
       connect();
     }
   }, delay);
+};
+
+const clearReconnectTicker = () => {
+  if (reconnectTicker) {
+    clearInterval(reconnectTicker);
+    reconnectTicker = null;
+  }
+  nextReconnectAt = 0;
 };
 
 const connect = () => {
@@ -1508,6 +1537,7 @@ const connect = () => {
     replayingSnapshot = false;
     shortcutsEnabledAt = Date.now() + 400;
     reconnectAttempt = 0;
+    clearReconnectTicker();
     setStatus("connected");
     initUi();
     if (process.stdin.isTTY) {
@@ -1641,6 +1671,7 @@ const cleanupAndExit = () => {
     clearTimeout(typingTimeout);
   }
   stopDaemonPolling();
+  clearReconnectTicker();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
   }

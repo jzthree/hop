@@ -1741,10 +1741,29 @@ const App = () => {
               </div>
             </div>
             <div className="terminal-footer">
-              <span>{status === "connected" ? "Live" : "Awaiting connection"}</span>
-              <span>
-                {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
-              </span>
+              {status === "connected" ? (
+                <>
+                  <span>Live</span>
+                  <span>
+                    {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
+                  </span>
+                </>
+              ) : status === "idle" ? (
+                <span>Awaiting connection</span>
+              ) : (
+                <>
+                  <span className="reconnecting">
+                    ⟳ {status === "connecting" ? "Connecting…" : "Reconnecting…"}
+                  </span>
+                  <button
+                    type="button"
+                    className="footer-reconnect"
+                    onClick={() => setReconnectToken((value) => value + 1)}
+                  >
+                    Reconnect now
+                  </button>
+                </>
+              )}
             </div>
           </section>
           {isMobile && (

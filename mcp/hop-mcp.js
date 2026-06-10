@@ -2687,6 +2687,7 @@ class HopMCPServer {
             wait_id: { type: 'string' },
             wait: { type: 'boolean', description: 'If true, block until job finishes or max_wait_ms elapses.' },
             max_wait_ms: { type: 'number', description: 'Max time to block when wait=true (default: 30000).' },
+            cancel: { type: 'boolean', description: 'If true, abort the still-running wait (status becomes "aborted") and return its final state. Does not touch the terminal.' },
             consume: { type: 'boolean', description: 'If true, remove completed job after returning payload.' }
           },
           required: ['wait_id']
@@ -3456,13 +3457,14 @@ class HopMCPServer {
       status: 'pending',
       result: null,
       error: null,
+      aborted: false,
       promise: null,
       metadata: metadata && typeof metadata === 'object' ? { ...metadata } : null
     };
 
     job.promise = (async () => {
       try {
-        const outcome = await this.runWaitTerminal(waitArgs);
+        const outcome = await this.runWaitTerminal(waitArgs, { isAborted: () => job.aborted });
         if (outcome.errorResponse) {
           job.status = 'error';
           job.error = extractToolErrorText(outcome.errorResponse);
@@ -3524,6 +3526,16 @@ class HopMCPServer {
         content: [{ type: 'text', text: `Error: wait job not found (${waitId}). It may be stale after daemon or MCP restart.` }],
         isError: true
       };
+    }
+
+    // Cancel a still-running wait: signal the loop to abort and let it settle so
+    // a hung/long async wait can be reclaimed instead of running to its timeout.
+    if (args.cancel === true && !job.done) {
+      job.aborted = true;
+      await Promise.race([
+        job.promise,
+        new Promise((resolve) => setTimeout(resolve, 1000))
+      ]);
     }
 
     if (args.wait === true && !job.done) {
@@ -3813,6 +3825,9 @@ class HopMCPServer {
         : requestedTerminalId;
 
       if (controlMode === 'interrupt' || controlMode === 'terminate') {
+        // Interrupting the turn also cancels its background wait, so the job is
+        // reclaimed immediately instead of running on to its timeout.
+        if (!job.done) job.aborted = true;
         const interruptOutcome = await this.sendHopxControlInput(
           terminalIdFromJob,
           this.getHopxInterruptKey(args),
@@ -4402,7 +4417,8 @@ class HopMCPServer {
     return this.wrapJson(result);
   }
 
-  async runWaitTerminal(args) {
+  async runWaitTerminal(args, options = {}) {
+    const isAborted = typeof options.isAborted === 'function' ? options.isAborted : null;
     const requestedTerminalId = args.terminal_id;
     if (!requestedTerminalId) {
       return { errorResponse: { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true } };
@@ -4560,6 +4576,10 @@ class HopMCPServer {
     let recoveredInLoop = false;
 
     while (true) {
+      if (isAborted && isAborted()) {
+        status = 'aborted';
+        break;
+      }
       const readResult = this.streamManager.readEvents(terminalId, cursor, 0, captureMaxEvents || 200);
       lastRead = readResult;
       if (this.isTerminalNotFoundStreamError(readResult.error)) {

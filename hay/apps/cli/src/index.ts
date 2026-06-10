@@ -151,6 +151,7 @@ Keyboard shortcuts:
   ${keyLabelLong}+A             Toggle autofit (saved)
   ${keyLabelLong}+B             Toggle status bar (saved)
   ${keyLabelLong}+M             Toggle mouse capture (saved)
+  ${keyLabelLong}+C             Take/release exclusive control
 
 Examples:
   hay -r my-room
@@ -1410,7 +1411,10 @@ const render = () => {
     lastRenderRows = localMetrics.rows;
   }
 
-  const presenceNames = presence.filter((client) => client.id !== clientId).map((client) => client.name);
+  const others = presence.filter((client) => client.id !== clientId);
+  const controllerName = controllerId
+    ? (controllerId === clientId ? "you" : (presence.find((c) => c.id === controllerId)?.name || "peer"))
+    : null;
   const statusLabel = status === "connected" ? "" : status;
   const shareUrl = buildShareUrl();
   const hopDaemonLabel = buildHopDaemonLabel();
@@ -1420,7 +1424,11 @@ const render = () => {
   const bottomLeft = `● ${sessionLabel}${cwdText}`;
   const autofitLabel = syncSize ? "fit" : "manual";
   const persistenceLabel = "persists";
-  const peerLabel = `peers ${presenceNames.length}`;
+  // Show peer names (with a * typing marker) instead of just a count, and a
+  // control-lock indicator when collaborative typing is off — parity with web.
+  const peerNames = others.map((c) => (c.typing ? `${c.name}*` : c.name)).join(", ");
+  const peerLabel = others.length ? `peers: ${peerNames}` : "";
+  const controlLabel = (!collabMode && controllerName) ? `locked: ${controllerName}` : "";
   const rightSegments = fitBarSegments(
     bottomLeft,
     [
@@ -1429,7 +1437,8 @@ const render = () => {
       !statusLabel && shareUrl ? { text: shareUrl, secondary: true, dropPriority: 0 } : null,
       { text: persistenceLabel, secondary: true, dropPriority: 2 },
       { text: autofitLabel, secondary: true, dropPriority: 3 },
-      { text: peerLabel, secondary: true, dropPriority: 4 }
+      peerLabel ? { text: peerLabel, secondary: true, dropPriority: 4 } : null,
+      controlLabel ? { text: controlLabel, secondary: true, dropPriority: 6 } : null
     ].filter((segment): segment is BarSegment => !!segment),
     localMetrics.cols
   );
@@ -1451,7 +1460,7 @@ const render = () => {
   const noticeText = notice && notice.expiresAt > Date.now()
     ? ` ${notice.message} `
     : "";
-  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, B status ${showStatusBar ? "on" : "off"}, M mouse ${mouseCapture ? "on" : "off"} | Ctrl: T hints, G detach, Q kill`;
+  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, B status ${showStatusBar ? "on" : "off"}, M mouse ${mouseCapture ? "on" : "off"}, C control | Ctrl: T hints, G detach, Q kill`;
   const reconnecting = !connected && reconnectAttempt > 0;
   let hintInner: string;
   if (reconnecting) {
@@ -1817,6 +1826,21 @@ const handleLocalShortcut = (input: string) => {
   if (altKey("0") || optionChar("º")) {
     ensureCursorVisible(true);
     pushNotice("Centered on cursor");
+    return true;
+  }
+  if (altKey("c") || altKey("C") || optionChar("ç")) {
+    // Toggle exclusive control, mirroring the web Take/Release controls so a CLI
+    // user on a locked shared session isn't stuck.
+    if (!collabMode && controllerId === clientId) {
+      sendMessage({ type: "release_control" });
+      pushNotice("Releasing control (collaborative typing)…");
+    } else if (collabMode) {
+      sendMessage({ type: "take_control" });
+      pushNotice("Taking exclusive control…");
+    } else {
+      sendMessage({ type: "take_control" });
+      pushNotice("Seizing control…");
+    }
     return true;
   }
 

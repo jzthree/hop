@@ -2527,6 +2527,25 @@ function log(msg, color = RESET) {
     console.log(`${color}${msg}${RESET}`);
 }
 
+// Process-level crash guards. Without these, a single stray throw or rejected
+// promise anywhere in the daemon's async paths kills the process — and with it
+// the cloudflared tunnel and every remote user's session. In the daemon we log
+// and stay alive (no supervisor restarts us, so dying is the worse outcome);
+// in an interactive CLI invocation we preserve fail-fast and exit non-zero.
+function describeError(value) {
+    if (value && value.stack) return value.stack;
+    if (value instanceof Error) return `${value.name}: ${value.message}`;
+    return String(value);
+}
+process.on('uncaughtException', (err) => {
+    try { log(`[uncaughtException] ${describeError(err)}`); } catch (e) { }
+    if (!DAEMON_FLAG) process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+    try { log(`[unhandledRejection] ${describeError(reason)}`); } catch (e) { }
+    if (!DAEMON_FLAG) process.exit(1);
+});
+
 async function runCommand(command, args, opts = {}) {
     return new Promise((resolve, reject) => {
         const proc = spawn(command, args, { stdio: 'inherit', ...opts });

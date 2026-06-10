@@ -61,6 +61,14 @@ const WAIT_JOB_TTL_MS = 15 * 60 * 1000;
 const WAIT_JOB_MAX_ENTRIES = 256;
 const WAIT_TEXT_WINDOW_MAX_CHARS = 65536;
 const DEFAULT_WAIT_PROMPT_REGEX = '(?:^|\\r?\\n)[^\\r\\n]*[#$>%] ?$';
+// Where until_regex/until_prompt look for a match:
+//   stream = the linear output event stream (default for shells; correct when
+//            the byte stream equals the screen)
+//   screen = the reconstructed virtual screen text (correct for full-screen/TUI
+//            apps that repaint in place; caveat: also sees your echoed input)
+//   auto   = stream, plus screen when the terminal is in alternate-screen mode
+const WAIT_MATCH_TARGETS = ['stream', 'screen', 'auto'];
+const DEFAULT_WAIT_MATCH_TARGET = 'auto';
 const STRUCTURAL_READABLE_CONTROL_KINDS = new Set([
   'backspace',
   'cursor',
@@ -332,6 +340,17 @@ function slimWaitPayload(waitPayload, sentData) {
   // Remove error when null/undefined
   if (out.error === null || out.error === undefined) {
     delete out.error;
+  }
+
+  // Remove match diagnostics when uninformative
+  if (out.matchVia === null || out.matchVia === undefined) {
+    delete out.matchVia;
+  }
+  if (out.matchTarget === DEFAULT_WAIT_MATCH_TARGET || out.matchTarget === undefined) {
+    delete out.matchTarget;
+  }
+  if (out.hint === null || out.hint === undefined) {
+    delete out.hint;
   }
 
   // Strip echoed command from the start of text.
@@ -1647,6 +1666,26 @@ class TerminalStreamManager {
     await Promise.race([state.parseQueue.catch(() => {}), timeout]);
   }
 
+  // Full rendered viewport of the virtual screen as plain text (one line per
+  // row, trailing blank rows trimmed), or null if the screen isn't available.
+  // Used by until_regex/until_prompt screen-matching, where the linear output
+  // stream doesn't contain what a redraw-heavy TUI actually renders.
+  getScreenText(terminalId) {
+    const state = this.streams.get(terminalId);
+    if (!state || !state.virtualScreen) return null;
+    const buffer = state.virtualScreen.buffer.active;
+    const viewportStart = buffer.baseY;
+    const lines = [];
+    for (let row = viewportStart; row < viewportStart + state.rows; row++) {
+      const line = buffer.getLine(row);
+      lines.push(line ? line.translateToString(true) : '');
+    }
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+      lines.pop();
+    }
+    return lines.join('\n');
+  }
+
   getUiSnapshot(terminalId, options = {}) {
     const state = this.streams.get(terminalId);
     if (!state) {
@@ -2473,6 +2512,7 @@ class HopMCPServer {
             },
             until_regex: { type: 'string' },
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
+            match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
@@ -2532,6 +2572,7 @@ class HopMCPServer {
             },
             until_regex: { type: 'string' },
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
+            match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
@@ -2573,6 +2614,7 @@ class HopMCPServer {
             },
             until_regex: { type: 'string' },
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
+            match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
@@ -2784,6 +2826,7 @@ class HopMCPServer {
             },
             until_regex: { type: 'string' },
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
+            match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex.' },
@@ -3838,6 +3881,7 @@ class HopMCPServer {
           start_from: waitStartFrom,
           until_regex: args.until_regex,
           regex_flags: args.regex_flags,
+          match_target: args.match_target,
           until_prompt: args.until_prompt,
           until_agent_done: args.until_agent_done,
           prompt_regex: args.prompt_regex,
@@ -3936,6 +3980,7 @@ class HopMCPServer {
         start_from: args.start_from,
         until_regex: args.until_regex,
         regex_flags: args.regex_flags,
+        match_target: args.match_target,
         until_prompt: args.until_prompt,
         until_agent_done: args.until_agent_done,
         prompt_regex: args.prompt_regex,
@@ -3993,6 +4038,7 @@ class HopMCPServer {
       start_from: args.start_from,
       until_regex: args.until_regex,
       regex_flags: args.regex_flags,
+      match_target: args.match_target,
       until_prompt: args.until_prompt,
       until_agent_done: args.until_agent_done,
       prompt_regex: args.prompt_regex,
@@ -4332,6 +4378,13 @@ class HopMCPServer {
       return { errorResponse: { content: [{ type: 'text', text: 'Error: capture must be "raw" or "readable_raw".' }], isError: true } };
     }
 
+    const matchTarget = typeof args.match_target === 'string'
+      ? String(args.match_target).toLowerCase()
+      : DEFAULT_WAIT_MATCH_TARGET;
+    if (!WAIT_MATCH_TARGETS.includes(matchTarget)) {
+      return { errorResponse: { content: [{ type: 'text', text: `Error: match_target must be one of "${WAIT_MATCH_TARGETS.join('", "')}".` }], isError: true } };
+    }
+
     const untilRegexPattern = typeof args.until_regex === 'string' && args.until_regex.length > 0
       ? args.until_regex
       : null;
@@ -4463,6 +4516,7 @@ class HopMCPServer {
     const capturedEvents = [];
     let matched = null;
     let matchedText = null;
+    let matchVia = null;
     let status = 'timed_out';
     let lastRead = null;
     let sawOutputLike = false;
@@ -4517,11 +4571,34 @@ class HopMCPServer {
         }
       }
 
+      // Decide whether to also match the rendered screen this iteration. For a
+      // redraw-heavy TUI the output stream never linearly contains what's on
+      // screen; the reconstructed virtual screen does.
+      let screenText = null;
+      if (untilRegex || promptRegex) {
+        let screenEnabled = matchTarget === 'screen';
+        if (!screenEnabled && matchTarget === 'auto') {
+          const f = this.streamManager.getTerminalFlags(terminalId);
+          screenEnabled = !!(f.exists && f.alternateScreen);
+        }
+        if (screenEnabled) {
+          screenText = this.streamManager.getScreenText(terminalId);
+        }
+      }
+
       if (untilRegex) {
-        const match = untilRegex.exec(textWindow);
+        untilRegex.lastIndex = 0;
+        let match = untilRegex.exec(textWindow);
+        let via = 'stream';
+        if (!match && screenText) {
+          untilRegex.lastIndex = 0;
+          match = untilRegex.exec(screenText);
+          via = 'screen';
+        }
         if (match) {
           matched = 'regex';
           matchedText = typeof match[0] === 'string' ? match[0] : null;
+          matchVia = via;
           status = 'matched';
           break;
         }
@@ -4532,12 +4609,22 @@ class HopMCPServer {
         // tail (text after the last newline), so a mid-stream line ending in
         // %/$/>/# — e.g. a "100%" progress line that has already scrolled past —
         // doesn't spuriously satisfy the prompt condition and truncate output.
-        const lastNl = textWindow.lastIndexOf('\n');
-        const tail = lastNl === -1 ? textWindow : textWindow.slice(lastNl + 1);
-        const match = promptRegex.exec(tail);
+        const tailOf = (s) => {
+          const nl = s.lastIndexOf('\n');
+          return nl === -1 ? s : s.slice(nl + 1);
+        };
+        promptRegex.lastIndex = 0;
+        let match = promptRegex.exec(tailOf(textWindow));
+        let via = 'stream';
+        if (!match && screenText) {
+          promptRegex.lastIndex = 0;
+          match = promptRegex.exec(tailOf(screenText));
+          via = 'screen';
+        }
         if (match) {
           matched = 'prompt';
           matchedText = typeof match[0] === 'string' ? match[0] : null;
+          matchVia = via;
           status = 'matched';
           break;
         }
@@ -4574,12 +4661,40 @@ class HopMCPServer {
       await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_INTERVAL_MS));
     }
 
+    // On a stream-match timeout, detect the classic TUI trap: the pattern is on
+    // the rendered screen but never appeared in the output stream. Surface an
+    // actionable hint instead of a silent 30s/90s timeout.
+    let hint = null;
+    if (status === 'timed_out' && matchTarget !== 'screen' && (untilRegex || promptRegex)) {
+      const screenText = this.streamManager.getScreenText(terminalId);
+      const flags = this.streamManager.getTerminalFlags(terminalId);
+      let screenWouldMatch = false;
+      if (screenText) {
+        if (untilRegex) {
+          untilRegex.lastIndex = 0;
+          screenWouldMatch = untilRegex.test(screenText);
+        }
+        if (!screenWouldMatch && promptRegex) {
+          const nl = screenText.lastIndexOf('\n');
+          const tail = nl === -1 ? screenText : screenText.slice(nl + 1);
+          promptRegex.lastIndex = 0;
+          screenWouldMatch = promptRegex.test(tail);
+        }
+      }
+      if (screenWouldMatch || (flags.exists && flags.alternateScreen)) {
+        hint = "Timed out scanning the output stream, but the pattern appears on the rendered screen — this terminal looks like a full-screen/TUI app that repaints in place. until_regex/until_prompt scan the byte stream by default. Retry with match_target:\"screen\", or use until_agent_done for interactive agents.";
+      }
+    }
+
     return {
       payload: {
       ok: status === 'matched',
       status,
       matched,
       matchedText,
+      matchVia,
+      matchTarget,
+      hint,
       cursorStart,
       cursorEnd: cursor,
       next_cursor: cursor,

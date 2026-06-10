@@ -4948,6 +4948,7 @@ function startAuthProxy(authEmitter) {
                 lastUpdateAt: tunnelStatus.lastUpdateAt,
                 lastConnectedAt: tunnelStatus.lastConnectedAt,
                 lastRestartAt: tunnelStatus.lastRestartAt,
+                consecutiveFailures: tunnelStatus.consecutiveFailures,
                 tunnelPid,
                 tunnelRunning
             }));
@@ -6318,12 +6319,43 @@ const tunnelStatus = {
     lastError: null,
     lastUpdateAt: null,
     lastConnectedAt: null,
-    lastRestartAt: null
+    lastRestartAt: null,
+    consecutiveFailures: 0
 };
 
 function updateTunnelStatus(update) {
     Object.assign(tunnelStatus, update);
     tunnelStatus.lastUpdateAt = Date.now();
+    // Any time the tunnel reports a live connection, clear the restart backoff
+    // so the next outage starts retrying quickly again.
+    if (update.connected === true) {
+        tunnelRestartAttempts = 0;
+        tunnelStatus.consecutiveFailures = 0;
+    }
+}
+
+// Exponential backoff for tunnel restarts. Previously every close/error retried
+// on a flat 3s loop forever (and could double-schedule), so a persistently
+// broken tunnel (bad creds, network down) hammered `spawn('cloudflared')` and
+// flooded the log at a constant rate. Back off 3s -> 60s with jitter, deduped,
+// reset on a verified connection (see updateTunnelStatus).
+const TUNNEL_BACKOFF_BASE_MS = 3000;
+const TUNNEL_BACKOFF_MAX_MS = 60000;
+let tunnelRestartAttempts = 0;
+let tunnelBackoffTimer = null;
+
+function scheduleTunnelRestart() {
+    if (shuttingDown) return;
+    if (tunnelBackoffTimer || tunnelRestartInProgress) return; // don't stack restarts
+    const exp = Math.min(TUNNEL_BACKOFF_BASE_MS * Math.pow(2, tunnelRestartAttempts), TUNNEL_BACKOFF_MAX_MS);
+    const delay = exp + Math.floor(Math.random() * 1000); // 0-1s jitter
+    tunnelRestartAttempts += 1;
+    updateTunnelStatus({ consecutiveFailures: tunnelRestartAttempts });
+    log(`[Tunnel] Restart attempt ${tunnelRestartAttempts} in ${Math.round(delay / 1000)}s`, YELLOW);
+    tunnelBackoffTimer = setTimeout(() => {
+        tunnelBackoffTimer = null;
+        if (!shuttingDown) startTunnelWithRestart();
+    }, delay);
 }
 
 function isPlannedTunnelShutdown(tunnel) {
@@ -6396,10 +6428,8 @@ tunnel: ${domainConfig.tunnelName}
             lastError: planned ? null : `cloudflared exited (code ${code})`
         });
         if (planned) return;
-        log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
-        setTimeout(() => {
-            if (!shuttingDown) startTunnelWithRestart();
-        }, 3000);
+        log(`[Tunnel] Disconnected (code ${code}).`, YELLOW);
+        scheduleTunnelRestart();
     });
 
     tunnel.on('error', (err) => {
@@ -6412,10 +6442,8 @@ tunnel: ${domainConfig.tunnelName}
             lastError: planned ? null : err.message
         });
         if (planned) return;
-        log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
-        setTimeout(() => {
-            if (!shuttingDown) startTunnelWithRestart();
-        }, 3000);
+        log(`[Tunnel] Error: ${err.message}.`, RED);
+        scheduleTunnelRestart();
     });
 
     // For named tunnels, resolve immediately with the known URL
@@ -6547,10 +6575,8 @@ credentials-file: ${path.resolve(credentialsPath)}
             lastError: planned ? null : `cloudflared exited (code ${code})`
         });
         if (planned) return;
-        log(`[Tunnel] Disconnected (code ${code}). Restarting in 3s...`, YELLOW);
-        setTimeout(() => {
-            if (!shuttingDown) startTunnelWithRestart();
-        }, 3000);
+        log(`[Tunnel] Disconnected (code ${code}).`, YELLOW);
+        scheduleTunnelRestart();
     });
 
     tunnel.on('error', (err) => {
@@ -6563,10 +6589,8 @@ credentials-file: ${path.resolve(credentialsPath)}
             lastError: planned ? null : err.message
         });
         if (planned) return;
-        log(`[Tunnel] Error: ${err.message}. Restarting in 3s...`, RED);
-        setTimeout(() => {
-            if (!shuttingDown) startTunnelWithRestart();
-        }, 3000);
+        log(`[Tunnel] Error: ${err.message}.`, RED);
+        scheduleTunnelRestart();
     });
 
     currentTunnelProc = tunnel;
@@ -6630,7 +6654,7 @@ async function startTunnelWithRestart() {
     tunnelRestartInProgress = true;
     updateTunnelStatus({ lastRestartAt: Date.now(), lastEvent: 'restarting' });
 
-    let retryDelay = null;
+    let shouldReschedule = false;
     try {
         const { tunnel, publicUrl } = CLIENT_TUNNEL_CONFIG
             ? await startClientTunnel(true)
@@ -6672,12 +6696,12 @@ async function startTunnelWithRestart() {
             } catch (e) { }
         }
     } catch (e) {
-        log(`[Tunnel] Failed to restart: ${e.message}. Retrying in 5s...`, RED);
-        retryDelay = 5000;
+        log(`[Tunnel] Failed to restart: ${e.message}.`, RED);
+        shouldReschedule = true;
     } finally {
         tunnelRestartInProgress = false;
-        if (retryDelay) {
-            setTimeout(startTunnelWithRestart, retryDelay);
+        if (shouldReschedule) {
+            scheduleTunnelRestart();
             return;
         }
         if (tunnelRestartQueued) {

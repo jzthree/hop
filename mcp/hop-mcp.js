@@ -30,10 +30,46 @@ const DEFAULT_HOPX_TEXT_ONLY_READABLE = true;
 const DEFAULT_HOPX_UI_BUSY_GUARD_MAX_WAIT_MS = 12000;
 const DEFAULT_HOPX_UI_BUSY_GUARD_POLL_MS = 500;
 const HOPX_UI_BUSY_LINE_PATTERNS = [
-  /\besc to interrupt\b/i,
-  /\bwaiting for process\b/i,
-  /^\s*[•*]\s+.*\b(working|starting|thinking|running|processing)\b/i
+  /\besc to (?:interrupt|cancel|stop)\b/i,
+  /\bctrl\+c to (?:interrupt|cancel|stop)\b/i,
+  /\bwaiting for (?:process|response|model|tool)\b/i,
+  /\b(?:thinking|working|generating|processing|running|compiling|building|loading)[…\.]{1,3}/i,
+  /^\s*[•*]\s+.*\b(working|starting|thinking|running|processing|generating)\b/i
 ];
+
+// Busy-line patterns = the built-ins plus any from HOP_MCP_BUSY_PATTERNS (one
+// regex per line). Parsed once; invalid patterns are skipped. Lets users teach
+// the matcher about other agents' "working…" indicators without code changes.
+let __extraBusyPatterns = null;
+function getBusyLinePatterns() {
+  if (__extraBusyPatterns === null) {
+    __extraBusyPatterns = [];
+    const raw = process.env.HOP_MCP_BUSY_PATTERNS;
+    if (typeof raw === 'string' && raw.trim()) {
+      for (const part of raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+        try { __extraBusyPatterns.push(new RegExp(part, 'i')); } catch (e) { }
+      }
+    }
+  }
+  return __extraBusyPatterns.length
+    ? HOPX_UI_BUSY_LINE_PATTERNS.concat(__extraBusyPatterns)
+    : HOPX_UI_BUSY_LINE_PATTERNS;
+}
+
+// Does the tail of the rendered screen show an agent "busy" indicator? Returns
+// the matching line or null. Used to keep until_agent_done from firing while an
+// inline TUI is still working, in every capture mode (not just mode:ui).
+function screenTextLooksBusy(screenText) {
+  if (typeof screenText !== 'string' || !screenText) return null;
+  const lines = screenText.split('\n').map((l) => l.trim()).filter(Boolean).slice(-8);
+  const patterns = getBusyLinePatterns();
+  for (const line of lines) {
+    for (const pattern of patterns) {
+      if (pattern.test(line)) return line;
+    }
+  }
+  return null;
+}
 const READABLE_NOISE_REWRITE_WINDOW_MS = 1000;
 const READABLE_NOISE_STABLE_MS = 800;
 const READABLE_NOISE_MIN_REWRITES = 2;
@@ -55,7 +91,7 @@ const DEFAULT_SEND_KEY_REPEAT = 1;
 const WAIT_POLL_INTERVAL_MS = 40;
 const DEFAULT_WAIT_MAX_MS = 30000;
 const DEFAULT_WAIT_CAPTURE_MAX_EVENTS = 120;
-const DEFAULT_WAIT_AGENT_DONE_IDLE_MS = 1200;
+const DEFAULT_WAIT_AGENT_DONE_IDLE_MS = 2500;
 const DEFAULT_WAIT_POLL_MAX_MS = 30000;
 const WAIT_JOB_TTL_MS = 15 * 60 * 1000;
 const WAIT_JOB_MAX_ENTRIES = 256;
@@ -402,8 +438,9 @@ function extractUiBusyLine(uiPayload) {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .slice(-8);
+  const patterns = getBusyLinePatterns();
   for (const line of recentNonEmpty) {
-    for (const pattern of HOPX_UI_BUSY_LINE_PATTERNS) {
+    for (const pattern of patterns) {
       if (pattern.test(line)) {
         return line;
       }
@@ -2514,7 +2551,7 @@ class HopMCPServer {
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
             match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
-            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
+            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, the terminal is quiet, the interactive cursor is visible, and no busy indicator (e.g. "esc to interrupt") is showing.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
             idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
             max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
@@ -2574,7 +2611,7 @@ class HopMCPServer {
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
             match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
-            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
+            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, the terminal is quiet, the interactive cursor is visible, and no busy indicator (e.g. "esc to interrupt") is showing.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
             idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
             max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
@@ -2616,7 +2653,7 @@ class HopMCPServer {
             regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
             match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
-            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, terminal is quiet, and interactive cursor is visible.' },
+            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, the terminal is quiet, the interactive cursor is visible, and no busy indicator (e.g. "esc to interrupt") is showing.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
             idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
             max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
@@ -4633,7 +4670,15 @@ class HopMCPServer {
       const now = Date.now();
       if (untilAgentDone && agentDoneIdleMs !== null && sawOutputLike && (now - lastOutputAt) >= agentDoneIdleMs) {
         const flags = this.streamManager.getTerminalFlags(terminalId);
-        if (flags.exists && !flags.closed && !flags.alternateScreen && !flags.cursorHidden) {
+        // Don't declare done while the agent's own UI still shows a busy
+        // indicator (e.g. "esc to interrupt"), even if output paused. Previously
+        // this check only ran in mode:ui after the wait returned; folding it into
+        // the core predicate covers readable_raw/auto (the defaults) too, so a
+        // mid-turn streaming/tool pause no longer reads as completion.
+        const busyLine = flags.exists && !flags.closed
+          ? screenTextLooksBusy(this.streamManager.getScreenText(terminalId))
+          : null;
+        if (flags.exists && !flags.closed && !flags.alternateScreen && !flags.cursorHidden && !busyLine) {
           matched = 'agent_done';
           matchedText = null;
           status = 'matched';

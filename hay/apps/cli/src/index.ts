@@ -152,6 +152,7 @@ Keyboard shortcuts:
   ${keyLabelLong}+B             Toggle status bar (saved)
   ${keyLabelLong}+M             Toggle mouse capture (saved)
   ${keyLabelLong}+C             Take/release exclusive control
+  ${keyLabelLong}+F             Search scrollback (Enter: next, Esc: exit)
 
 Examples:
   hay -r my-room
@@ -241,6 +242,14 @@ let selectionScrollTimer: NodeJS.Timeout | null = null;
 const SELECTION_SCROLL_INTERVAL = 50;
 const SELECTION_SCROLL_SPEED = 1;
 
+// Scrollback search state (Opt+F). searchMatches are absolute buffer coords;
+// col is the match start in the line's collapsed text (≈ buffer column for ASCII).
+let searchMode = false;
+let searchQuery = "";
+let searchMatches: Array<{ row: number; col: number }> = [];
+let searchIndex = -1;
+const SEARCH_MAX_MATCHES = 2000;
+
 let configFile = loadConfig();
 const persistConfig = (patch: Partial<CliConfig>) => {
   configFile = { ...configFile, ...patch };
@@ -309,7 +318,7 @@ const getLocalMetrics = () => {
   // toggles just the hint line while the status bar is shown. The reconnect
   // banner forces the line on regardless, so a dropped connection is never silent.
   const reconnecting = !connected && reconnectAttempt > 0;
-  const showHintBar = ((showHints && showBottomBar) || hasNotice || reconnecting) && rows >= (showBottomBar ? 3 : 2);
+  const showHintBar = ((showHints && showBottomBar) || hasNotice || reconnecting || searchMode) && rows >= (showBottomBar ? 3 : 2);
   const barRows = (showBottomBar ? 1 : 0) + (showHintBar ? 1 : 0);
   return {
     cols,
@@ -725,6 +734,88 @@ const scheduleRender = () => {
     renderScheduled = false;
     render();
   }, RENDER_THROTTLE_MS);
+};
+
+// ── Scrollback search ──
+
+const isCellInSearchMatch = (row: number, col: number): boolean => {
+  const m = searchMatches[searchIndex];
+  if (!m || row !== m.row) return false;
+  return col >= m.col && col < m.col + searchQuery.length;
+};
+
+const computeSearchMatches = () => {
+  searchMatches = [];
+  searchIndex = -1;
+  if (!searchQuery) return;
+  const buffer = terminal.buffer.active;
+  const needle = searchQuery.toLowerCase();
+  for (let row = 0; row < buffer.length && searchMatches.length < SEARCH_MAX_MATCHES; row++) {
+    const line = buffer.getLine(row);
+    if (!line) continue;
+    const text = line.translateToString(true).toLowerCase();
+    let from = 0;
+    while (searchMatches.length < SEARCH_MAX_MATCHES) {
+      const idx = text.indexOf(needle, from);
+      if (idx === -1) break;
+      searchMatches.push({ row, col: idx });
+      from = idx + needle.length;
+    }
+  }
+};
+
+const jumpToMatch = (index: number) => {
+  if (searchMatches.length === 0) { searchIndex = -1; return; }
+  searchIndex = ((index % searchMatches.length) + searchMatches.length) % searchMatches.length;
+  const m = searchMatches[searchIndex];
+  followOutput = false;
+  releaseScrollAnchor();
+  viewY = m.row - Math.floor(localMetrics.viewportRows / 2);
+  clampView();
+  scheduleRender();
+};
+
+const enterSearch = () => {
+  searchMode = true;
+  searchQuery = "";
+  searchMatches = [];
+  searchIndex = -1;
+  scheduleRender();
+};
+
+const exitSearch = () => {
+  searchMode = false;
+  searchMatches = [];
+  searchIndex = -1;
+  scheduleRender();
+};
+
+// Handle a stdin chunk while in search mode. Consumes the input (never forwarded
+// to the remote): Esc exits, Enter jumps to the next match, Backspace edits, and
+// printable characters extend the query (which live-jumps to the first match).
+const handleSearchInput = (input: string) => {
+  if (input === "\x1b") { exitSearch(); return; }
+  // Ignore escape sequences (arrows, alt-combos) so their bytes don't pollute the query.
+  if (input.startsWith("\x1b") && input.length > 1) { return; }
+  if (input === "\r" || input === "\n") {
+    if (searchMatches.length > 0) jumpToMatch(searchIndex + 1);
+    else scheduleRender();
+    return;
+  }
+  if (input === "\x7f" || input === "\b") {
+    searchQuery = searchQuery.slice(0, -1);
+    computeSearchMatches();
+    if (searchMatches.length > 0) jumpToMatch(0);
+    else scheduleRender();
+    return;
+  }
+  // Append only printable characters; ignore control/escape sequences (arrows etc.).
+  const printable = Array.from(input).filter((ch) => ch >= " " && ch !== "\x7f").join("");
+  if (!printable) { scheduleRender(); return; }
+  searchQuery += printable;
+  computeSearchMatches();
+  if (searchMatches.length > 0) jumpToMatch(0);
+  else scheduleRender();
 };
 
 const setCursorVisible = (visible: boolean) => {
@@ -1381,10 +1472,14 @@ const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => 
       continue;
     }
 
-    const style = styleKeyForCell(
-      cellData as ReturnType<typeof terminal.buffer.active.getNullCell>,
-      isCursorCell || isSelected
-    );
+    // Search hit gets a distinct yellow highlight (cursor still wins so it stays
+    // visible on a match).
+    const style = (!isCursorCell && isCellInSearchMatch(bufferRow, remoteCol))
+      ? { key: "search", ansi: "\x1b[43m\x1b[30m" }
+      : styleKeyForCell(
+        cellData as ReturnType<typeof terminal.buffer.active.getNullCell>,
+        isCursorCell || isSelected
+      );
     if (style.key !== currentKey) {
       output += style.ansi;
       currentKey = style.key;
@@ -1468,10 +1563,15 @@ const render = () => {
   const noticeText = notice && notice.expiresAt > Date.now()
     ? ` ${notice.message} `
     : "";
-  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, B status ${showStatusBar ? "on" : "off"}, M mouse ${mouseCapture ? "on" : "off"}, C control | Ctrl: T hints, G detach, Q kill`;
+  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, B status ${showStatusBar ? "on" : "off"}, M mouse ${mouseCapture ? "on" : "off"}, F find, C control | Ctrl: T hints, G detach, Q kill`;
   const reconnecting = !connected && reconnectAttempt > 0;
   let hintInner: string;
-  if (reconnecting) {
+  if (searchMode) {
+    const count = searchQuery
+      ? (searchMatches.length > 0 ? `${searchIndex + 1}/${searchMatches.length}` : "no matches")
+      : "";
+    hintInner = `${BAR_ACCENT} /${searchQuery}${BAR_RESET_FG}${BAR_DIM}  ${count} · Enter next · Esc exit${BAR_RESET_FG}`;
+  } else if (reconnecting) {
     const secsLeft = nextReconnectAt > Date.now() ? Math.ceil((nextReconnectAt - Date.now()) / 1000) : 0;
     const detail = secsLeft > 0 ? `next attempt in ${secsLeft}s` : "connecting…";
     hintInner = `${BAR_RECONNECT} ⟳ Reconnecting — ${detail} · Ctrl+Q to quit ${BAR_RESET_FG}`;
@@ -1851,6 +1951,10 @@ const handleLocalShortcut = (input: string) => {
     pushNotice("Centered on cursor");
     return true;
   }
+  if (altKey("f") || altKey("F") || optionChar("ƒ")) {
+    enterSearch();
+    return true;
+  }
   if (altKey("c") || altKey("C") || optionChar("ç")) {
     // Toggle exclusive control, mirroring the web Take/Release controls so a CLI
     // user on a locked shared session isn't stuck.
@@ -1949,6 +2053,12 @@ process.stdin.on("data", (data) => {
   const mouseResult = stripMouseSequences(input);
   input = mouseResult.cleaned;
   if (!input) return;
+
+  // While searching, all keys edit the query / navigate matches (never forwarded).
+  if (searchMode) {
+    handleSearchInput(input);
+    return;
+  }
 
   // Fast path: a single keypress chunk that is a shortcut (the common case).
   if (handleLocalShortcut(input)) return;

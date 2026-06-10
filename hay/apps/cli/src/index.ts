@@ -256,6 +256,7 @@ let uiInitialized = false;
 let renderScheduled = false;
 let lastRenderCols = 0;
 let lastRenderRows = 0;
+let lastRenderedLines: string[] = []; // previous frame's lines, for dirty-line diffing
 
 const hopHomeDir = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
 const hopTunnelStateFile = path.join(hopHomeDir, ".tunnel-state");
@@ -713,13 +714,17 @@ const ensureCursorVisible = (_force: boolean) => {
   releaseScrollAnchor();
 };
 
+// Coalesce a burst of output chunks into one repaint per frame (~60fps) instead
+// of one per chunk. Imperceptible locally; meaningfully less work and wire
+// traffic over a slow remote link.
+const RENDER_THROTTLE_MS = 16;
 const scheduleRender = () => {
   if (renderScheduled) return;
   renderScheduled = true;
   setTimeout(() => {
     renderScheduled = false;
     render();
-  }, 0);
+  }, RENDER_THROTTLE_MS);
 };
 
 const setCursorVisible = (visible: boolean) => {
@@ -1405,10 +1410,13 @@ const render = () => {
   localMetrics = getLocalMetrics();
   clampView();
 
+  let forceFull = false;
   if (localMetrics.cols !== lastRenderCols || localMetrics.rows !== lastRenderRows) {
     process.stdout.write("\x1b[2J");
     lastRenderCols = localMetrics.cols;
     lastRenderRows = localMetrics.rows;
+    lastRenderedLines = []; // dimensions changed — repaint everything
+    forceFull = true;
   }
 
   const others = presence.filter((client) => client.id !== clientId);
@@ -1492,8 +1500,23 @@ const render = () => {
     lines.push(hintLine);
   }
 
-  const output = "\x1b[?25l\x1b[H" + lines.join("\n");
-  process.stdout.write(output);
+  // Dirty-line diff: position to and rewrite only the rows that changed since
+  // the last frame. Each rendered line already pads/clears to the row width
+  // (renderLine ends with \x1b[K; bars are width-padded), so a positioned write
+  // fully replaces the old content. Typing one character now repaints ~1-2 rows
+  // instead of the whole screen.
+  let output = "\x1b[?25l";
+  let changed = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (forceFull || lines[i] !== lastRenderedLines[i]) {
+      output += `\x1b[${i + 1};1H` + lines[i];
+      changed += 1;
+    }
+  }
+  lastRenderedLines = lines;
+  if (changed > 0) {
+    process.stdout.write(output);
+  }
 };
 
 const scheduleReconnect = () => {

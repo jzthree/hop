@@ -2558,22 +2558,12 @@ class HopMCPServer {
             capture: { type: 'string', enum: ['raw', 'readable_raw'], description: 'Capture format for returned events (default: readable_raw).' },
             capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 60 for hopx helper).' },
             text_only: { type: 'boolean', description: 'If true and capture="readable_raw", return concatenated wait.text and omit wait.events for smaller payloads. Default is true for readable_raw capture.' },
-            clean_text: { type: 'boolean', description: 'If true, strip ANSI escape codes from wait.text for plain text output (default: false).' },
-            maxControlOps: { type: 'number', description: 'In readable_raw capture, max parsed control ops per event (default: 200).' },
-            includeRawData: { type: 'boolean', description: 'In readable_raw capture, include original event data.' },
-            includeMetaEvents: { type: 'boolean', description: 'In readable_raw capture, include non-output meta events (default: false).' },
-            control_level: {
-              type: 'string',
-              enum: READABLE_CONTROL_LEVELS,
-              description: 'In readable_raw capture, control detail level: full, structural, or none.'
-            },
-            noise_filter: {
-              type: 'string',
-              enum: READABLE_NOISE_FILTERS,
-              description: 'In readable_raw capture, text noise filter mode: balanced (default) or off.'
-            },
-            coalesce_ms: { type: 'number', description: 'In readable_raw capture, merge adjacent text frames within this time window (ms).' },
-            coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
+            clean_text: { type: 'boolean', description: 'If true, strip ANSI escape codes from wait.text for plain text output (default: false).' }
+            // Advanced readable_raw tuning (maxControlOps, includeRawData,
+            // includeMetaEvents, control_level, noise_filter, coalesce_ms,
+            // coalesce_max_chars) is still accepted as pass-through but omitted
+            // here to keep the helper schema lean; use hop_wait_terminal for full
+            // control.
           },
           required: ['terminal_id']
         }
@@ -2638,7 +2628,7 @@ class HopMCPServer {
       },
       {
         name: 'hop_wait_start',
-        description: 'Start a background terminal wait job and return wait_id immediately.',
+        description: 'Deprecated: prefer hop_wait_terminal with async:true. Start a background terminal wait job and return wait_id immediately.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2873,13 +2863,10 @@ class HopMCPServer {
             capture_max_events: { type: 'number', description: 'Max captured wait events (default: 60 for hopx helper; 0 when selected mode is ui unless overridden).' },
             text_only: { type: 'boolean', description: 'If true, condense readable waits to wait.text + metadata. Ignored for mode="ui" output snapshots. Default is true for readable modes.' },
             clean_text: { type: 'boolean', description: 'If true, strip ANSI escape codes from text output (default: false).' },
-            maxControlOps: { type: 'number' },
-            includeRawData: { type: 'boolean' },
-            includeMetaEvents: { type: 'boolean' },
-            control_level: { type: 'string', enum: READABLE_CONTROL_LEVELS },
-            noise_filter: { type: 'string', enum: READABLE_NOISE_FILTERS },
-            coalesce_ms: { type: 'number' },
-            coalesce_max_chars: { type: 'number' },
+            // Advanced readable_raw tuning (maxControlOps, includeRawData,
+            // includeMetaEvents, control_level, noise_filter, coalesce_ms,
+            // coalesce_max_chars) still works as pass-through; omitted from the
+            // helper schema for clarity. Use hop_wait_terminal for full control.
             uiMaxLines: { type: 'number', description: 'For mode=ui, max visible lines to include.' },
             includeRawTail: { type: 'boolean', description: 'For mode=ui, include raw output tail (default: false in hopx helper).' },
             rawTailMaxEvents: { type: 'number', description: 'For mode=ui, max raw tail events.' }

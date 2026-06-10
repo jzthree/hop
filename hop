@@ -141,8 +141,27 @@ function ensurePrivateFile(filePath, mode = PRIVATE_FILE_MODE) {
     } catch (e) { }
 }
 
+let __atomicWriteCounter = 0;
 function writePrivateFile(filePath, data, mode = PRIVATE_FILE_MODE) {
-    fs.writeFileSync(filePath, data, { mode });
+    // Atomic write: write to a sibling temp file, fsync, then rename over the
+    // target. A crash or concurrent writer can then never leave a half-written
+    // or truncated file — which would make a state file unparseable and, e.g.,
+    // make a live daemon look dead (isServerRunning swallows the parse error)
+    // and let a second daemon spawn. Falls back to a direct write on odd FSes.
+    const tmpPath = `${filePath}.tmp-${process.pid}-${++__atomicWriteCounter}`;
+    let fd;
+    try {
+        fd = fs.openSync(tmpPath, 'wx', mode);
+        fs.writeFileSync(fd, data);
+        try { fs.fsyncSync(fd); } catch (e) { /* best-effort durability */ }
+        fs.closeSync(fd);
+        fd = undefined;
+        fs.renameSync(tmpPath, filePath);
+    } catch (err) {
+        if (fd !== undefined) { try { fs.closeSync(fd); } catch (e) { } }
+        try { fs.unlinkSync(tmpPath); } catch (e) { }
+        fs.writeFileSync(filePath, data, { mode });
+    }
     ensurePrivateFile(filePath, mode);
 }
 

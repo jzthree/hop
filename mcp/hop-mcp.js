@@ -4271,6 +4271,12 @@ class HopMCPServer {
     const waited = await this.runWaitTerminal(this.applyHopxWaitDefaults(waitArgs));
     if (waited.errorResponse) return waited.errorResponse;
 
+    // How the wait ended ('prompt' | 'agent_done' | 'regex' | 'idle' | null);
+    // only a prompt/agent-done return means a fresh shell prompt is at the tail.
+    const matchKind = waited.payload && typeof waited.payload === 'object'
+      ? waited.payload.matched
+      : null;
+
     // Condense to single text blob
     let waitPayload = condenseReadableWaitPayload(waited.payload);
     // Strip echo and slim
@@ -4280,15 +4286,19 @@ class HopMCPServer {
     let stdout = typeof waitPayload.text === 'string' ? waitPayload.text : '';
     stdout = stripAnsi(stdout);
 
-    // Strip trailing prompt line (the prompt that triggered the match)
-    // The last line is typically the next shell prompt — remove it
+    // Remove only the single trailing shell prompt line, and only when the wait
+    // actually returned to a prompt. Greedily popping every line that ends in
+    // %/$/>/# would eat real output (e.g. "Download complete: 100%").
     const lines = stdout.split('\n');
-    while (lines.length > 0) {
-      const last = lines[lines.length - 1].trim();
-      if (!last || isLikelyPrompt(last)) {
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+      lines.pop();
+    }
+    if ((matchKind === 'prompt' || matchKind === 'agent_done')
+        && lines.length > 0
+        && isLikelyPrompt(lines[lines.length - 1])) {
+      lines.pop();
+      while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
         lines.pop();
-      } else {
-        break;
       }
     }
     stdout = lines.join('\n').trimEnd();
@@ -4518,7 +4528,13 @@ class HopMCPServer {
       }
 
       if (promptRegex) {
-        const match = promptRegex.exec(textWindow);
+        // The shell prompt is always the final line of output. Match only the
+        // tail (text after the last newline), so a mid-stream line ending in
+        // %/$/>/# — e.g. a "100%" progress line that has already scrolled past —
+        // doesn't spuriously satisfy the prompt condition and truncate output.
+        const lastNl = textWindow.lastIndexOf('\n');
+        const tail = lastNl === -1 ? textWindow : textWindow.slice(lastNl + 1);
+        const match = promptRegex.exec(tail);
         if (match) {
           matched = 'prompt';
           matchedText = typeof match[0] === 'string' ? match[0] : null;

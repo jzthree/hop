@@ -1009,25 +1009,77 @@ const restoreUi = () => {
 
 const ANSI_REGEX = /\x1b\[[0-9;]*m/g;
 
-const visibleLength = (text: string) => text.replace(ANSI_REGEX, "").length;
+// Display width of a single code point in terminal cells. Wide (CJK/emoji) = 2,
+// combining marks / zero-width / control = 0, everything else = 1. Without this
+// the status bar measures user data (session name, cwd) in UTF-16 code units, so
+// a CJK path over-pads past the terminal width and wraps/garbles the bottom row.
+const isWideCodePoint = (cp: number): boolean =>
+  cp >= 0x1100 && (
+    cp <= 0x115f ||                       // Hangul Jamo
+    cp === 0x2329 || cp === 0x232a ||
+    (cp >= 0x2e80 && cp <= 0x303e) ||     // CJK Radicals .. Kangxi
+    (cp >= 0x3041 && cp <= 0x33ff) ||     // Hiragana .. CJK compat symbols
+    (cp >= 0x3400 && cp <= 0x4dbf) ||     // CJK Ext A
+    (cp >= 0x4e00 && cp <= 0x9fff) ||     // CJK Unified
+    (cp >= 0xa000 && cp <= 0xa4cf) ||     // Yi
+    (cp >= 0xac00 && cp <= 0xd7a3) ||     // Hangul Syllables
+    (cp >= 0xf900 && cp <= 0xfaff) ||     // CJK Compatibility Ideographs
+    (cp >= 0xfe10 && cp <= 0xfe19) ||     // Vertical forms
+    (cp >= 0xfe30 && cp <= 0xfe6f) ||     // CJK Compatibility forms
+    (cp >= 0xff00 && cp <= 0xff60) ||     // Fullwidth forms
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff) ||   // emoji & symbols
+    (cp >= 0x20000 && cp <= 0x3fffd)      // CJK Ext B and beyond
+  );
+
+const isZeroWidthCodePoint = (cp: number): boolean =>
+  cp === 0x200d ||                        // zero-width joiner
+  (cp >= 0x0300 && cp <= 0x036f) ||       // combining diacritical marks
+  (cp >= 0x1ab0 && cp <= 0x1aff) ||
+  (cp >= 0x1dc0 && cp <= 0x1dff) ||
+  (cp >= 0x20d0 && cp <= 0x20ff) ||       // combining marks for symbols
+  (cp >= 0xfe00 && cp <= 0xfe0f) ||       // variation selectors
+  (cp >= 0xfe20 && cp <= 0xfe2f);         // combining half marks
+
+const charDisplayWidth = (cp: number): number => {
+  if (cp === 0) return 0;
+  if (cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0; // C0/C1 control
+  if (isZeroWidthCodePoint(cp)) return 0;
+  return isWideCodePoint(cp) ? 2 : 1;
+};
+
+const stringWidth = (text: string): number => {
+  let width = 0;
+  for (const ch of text) {
+    width += charDisplayWidth(ch.codePointAt(0) ?? 0);
+  }
+  return width;
+};
+
+const visibleLength = (text: string) => stringWidth(text.replace(ANSI_REGEX, ""));
 
 const truncateAnsi = (text: string, cols: number) => {
   if (cols <= 0) return "";
   let out = "";
-  let visible = 0;
-  for (let i = 0; i < text.length && visible < cols; i += 1) {
-    const char = text[i];
-    if (char === "\x1b" && text[i + 1] === "[") {
+  let width = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\x1b" && text[i + 1] === "[") {
       const end = text.indexOf("m", i + 2);
       if (end === -1) {
         break;
       }
       out += text.slice(i, end + 1);
-      i = end;
+      i = end + 1;
       continue;
     }
-    out += char;
-    visible += 1;
+    const cp = text.codePointAt(i) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    const cw = charDisplayWidth(cp);
+    if (width + cw > cols) break;
+    out += ch;
+    width += cw;
+    i += ch.length; // advance past surrogate pairs
   }
   return out;
 };
@@ -1671,7 +1723,9 @@ const handleLocalShortcut = (input: string) => {
 
   const altKey = (key: string) => input === `\x1b${key}`;
   const altArrow = (seq: string) => input === seq;
-  const optionChar = (char: string) => input === char;
+  // Option+letter shortcuts only on macOS — elsewhere these glyphs (å, µ, º…)
+  // are real AltGr characters and the ESC-prefixed altKey forms cover the keys.
+  const optionChar = (char: string) => isMac && input === char;
 
   if (altKey("h") || altKey("H") || altArrow("\x1b[1;3D") || altArrow("\x1b\x1b[D")) {
     const step = altKey("H") ? PAN_FAST_STEP : PAN_STEP;
@@ -1734,6 +1788,60 @@ const handleLocalShortcut = (input: string) => {
   return false;
 };
 
+// Split a stdin chunk into atomic key tokens (ESC/CSI/SS3 sequences and single
+// code points). Each token is a verbatim substring, so concatenating the tokens
+// that aren't shortcuts reproduces the exact bytes to forward. This lets batched
+// keypresses (key autorepeat, SSH coalescing) match shortcuts per-key instead of
+// the whole chunk matching nothing and leaking raw escape sequences to the shell.
+const tokenizeInput = (input: string): string[] => {
+  const tokens: string[] = [];
+  const n = input.length;
+  let i = 0;
+  const consumeCsi = (start: number) => {
+    let j = start;
+    while (j < n && input.charCodeAt(j) >= 0x20 && input.charCodeAt(j) <= 0x3f) j += 1;
+    if (j < n) j += 1; // include the final byte (0x40-0x7e)
+    return j;
+  };
+  while (i < n) {
+    if (input[i] === "\x1b") {
+      if (input[i + 1] === "\x1b" && input[i + 2] === "[") {
+        const j = consumeCsi(i + 3); // ESC ESC CSI (e.g. Alt+Arrow "\x1b\x1b[D")
+        tokens.push(input.slice(i, j));
+        i = j;
+        continue;
+      }
+      if (input[i + 1] === "[") {
+        const j = consumeCsi(i + 2); // CSI
+        tokens.push(input.slice(i, j));
+        i = j;
+        continue;
+      }
+      if (input[i + 1] === "O") {
+        const j = Math.min(i + 3, n); // SS3
+        tokens.push(input.slice(i, j));
+        i = j;
+        continue;
+      }
+      if (i + 1 < n) {
+        const cp = input.codePointAt(i + 1) ?? 0; // ESC + single code point (alt-letter)
+        const len = 1 + String.fromCodePoint(cp).length;
+        tokens.push(input.slice(i, i + len));
+        i += len;
+        continue;
+      }
+      tokens.push("\x1b"); // lone trailing ESC
+      i += 1;
+      continue;
+    }
+    const cp = input.codePointAt(i) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    tokens.push(ch);
+    i += ch.length;
+  }
+  return tokens;
+};
+
 process.stdin.on("data", (data) => {
   let input = pendingInput + data.toString();
   pendingInput = "";
@@ -1759,9 +1867,21 @@ process.stdin.on("data", (data) => {
   const mouseResult = stripMouseSequences(input);
   input = mouseResult.cleaned;
   if (!input) return;
+
+  // Fast path: a single keypress chunk that is a shortcut (the common case).
   if (handleLocalShortcut(input)) return;
 
-  const sanitized = filterFocusSequences(input);
+  // Otherwise split into individual key tokens so a batched chunk can have its
+  // shortcut keys handled locally while the rest is forwarded to the shell.
+  const tokens = tokenizeInput(input);
+  let remote = "";
+  for (const token of tokens) {
+    if (handleLocalShortcut(token)) continue;
+    remote += token;
+  }
+  if (!remote) return;
+
+  const sanitized = filterFocusSequences(remote);
   if (!sanitized) return;
 
   if (syncSize) {

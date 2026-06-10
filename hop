@@ -8109,6 +8109,124 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop status` command - concise daemon/tunnel/session overview
+    if (process.argv[2] === 'status') {
+        const state = isServerRunning();
+        log(`\n${BOLD}Hop Status${RESET}`, CYAN);
+        if (!state) {
+            log(`  Daemon:    ${RED}not running${RESET}`, RESET);
+            log(`  Logs:      ${LOG_DIR}`, RESET);
+            log(`\n  Start with: ${CYAN}hop${RESET}\n`, RESET);
+            process.exit(0);
+        }
+        const fmtUptime = (ms) => {
+            if (!Number.isFinite(ms) || ms < 0) return 'unknown';
+            const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+            return h > 0 ? `${h}h ${m}m` : `${m}m`;
+        };
+        const uptime = state.startTime ? fmtUptime(Date.now() - state.startTime) : 'unknown';
+        log(`  Daemon:    ${GREEN}running${RESET}  pid ${state.pid}  up ${uptime}  port ${state.port}`, RESET);
+
+        let tunnel = null;
+        try {
+            const r = await callLocalApi(state, '/api/tunnel/status', 'GET');
+            if (r && r.status === 200) tunnel = r.data;
+        } catch (e) { }
+        if (tunnel) {
+            const conn = tunnel.connected ? `${GREEN}connected${RESET}` : `${RED}disconnected${RESET}`;
+            log(`  Tunnel:    ${conn}  ${tunnel.url || state.url || ''}`, RESET);
+            const failNote = tunnel.consecutiveFailures ? `, failures: ${tunnel.consecutiveFailures}` : '';
+            if (tunnel.lastEvent) log(`             event: ${tunnel.lastEvent}${failNote}`, RESET);
+            if (tunnel.lastError) log(`             ${YELLOW}last error: ${tunnel.lastError}${RESET}`, RESET);
+        } else {
+            log(`  Tunnel:    ${state.url || '(unknown)'}  ${YELLOW}(status unavailable)${RESET}`, RESET);
+        }
+
+        const hh = readHayHostStateFile();
+        if (hh && hh.pid) {
+            let alive = false;
+            try { process.kill(hh.pid, 0); alive = true; } catch (e) { }
+            log(`  Hay-host:  ${alive ? GREEN + 'running' + RESET : RED + 'dead' + RESET}  pid ${hh.pid}  port ${hh.port}`, RESET);
+        } else {
+            log(`  Hay-host:  ${YELLOW}none${RESET}`, RESET);
+        }
+
+        try {
+            const sessionsRes = await fetchSessionList(state);
+            const count = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions.length : 0;
+            const active = Array.isArray(sessionsRes?.active) ? sessionsRes.active.length : 0;
+            log(`  Sessions:  ${count} (${active} active)`, RESET);
+        } catch (e) {
+            log(`  Sessions:  ${YELLOW}unavailable${RESET}`, RESET);
+        }
+
+        log(`  Logs:      ${LOG_DIR}  (hop logs -f)`, RESET);
+        log('');
+        process.exit(0);
+    }
+
+    // Handle `hop doctor` command - read-only environment/health checks
+    if (process.argv[2] === 'doctor') {
+        log(`\n${BOLD}Hop Doctor${RESET}\n`, CYAN);
+        let problems = 0;
+        const ok = (m) => log(`  ${GREEN}✓${RESET} ${m}`, RESET);
+        const warn = (m) => log(`  ${YELLOW}!${RESET} ${m}`, RESET);
+        const bad = (m) => { problems++; log(`  ${RED}✗${RESET} ${m}`, RESET); };
+
+        let cfInstalled = false;
+        try { execSync('command -v cloudflared', { stdio: 'ignore' }); cfInstalled = true; } catch (e) { }
+        cfInstalled ? ok('cloudflared installed') : bad('cloudflared not found (brew install cloudflared)');
+
+        const domain = getDomainConfig();
+        if (domain && domain.hostname) {
+            isCloudflaredLoggedIn()
+                ? ok(`custom domain ${domain.hostname} (cloudflared logged in)`)
+                : bad(`custom domain ${domain.hostname} but cloudflared is not logged in (cloudflared tunnel login)`);
+            isPasswordEnabled()
+                ? ok('password set (required for custom domain)')
+                : bad('custom domain requires a password (hop password set)');
+        } else {
+            ok('quick tunnel mode (random URLs)');
+        }
+
+        fs.existsSync(SECRET_FILE_PATH)
+            ? ok('2FA secret configured')
+            : warn('2FA secret not yet created (created on first start)');
+
+        const webOk = fs.existsSync(path.join(HAY_ROOT, 'apps/web/dist/index.html'));
+        const serverOk = fs.existsSync(path.join(HAY_ROOT, 'apps/server/dist/lib.js'));
+        const cliOk = fs.existsSync(path.join(HAY_ROOT, 'apps/cli/dist/index.js'));
+        if (webOk && serverOk && cliOk) {
+            ok('hay client/server/cli built');
+        } else {
+            const missing = [!webOk && 'web', !serverOk && 'server', !cliOk && 'cli'].filter(Boolean).join(', ');
+            bad(`hay build missing (${missing}) — run hop once to build`);
+        }
+
+        if (fs.existsSync(STATE_FILE)) {
+            try { JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); ok('state file is valid JSON'); }
+            catch (e) { bad(`state file is corrupt: ${STATE_FILE}`); }
+        }
+
+        const running = isServerRunning();
+        if (running) {
+            const result = await probeTunnelHealth(running.url, TUNNEL_HEALTH_TIMEOUT);
+            result.ok
+                ? ok(`daemon running and tunnel healthy (${result.time}ms)`)
+                : bad(`daemon running but tunnel unhealthy: ${result.error || ('HTTP ' + result.status)} (hop health --restart)`);
+        } else {
+            warn('daemon not running (start with hop)');
+        }
+
+        log('');
+        if (problems === 0) {
+            log(`  ${GREEN}All checks passed.${RESET}\n`, RESET);
+            process.exit(0);
+        }
+        log(`  ${RED}${problems} problem(s) found.${RESET}\n`, RESET);
+        process.exit(1);
+    }
+
     // Handle `hop logs [-f] [hay-host]` command - view daemon/host logs
     if (process.argv[2] === 'logs') {
         const follow = process.argv.includes('-f') || process.argv.includes('--follow');
@@ -8140,6 +8258,8 @@ async function main() {
         log(`  hop attach all            Attach sequentially to all sessions`, RESET);
         log(`  hop local [session]       Start daemonless local terminal ([session] attaches if present)`, RESET);
         log(`  hop stop                  Stop hop daemon`, RESET);
+        log(`  hop status                Show daemon, tunnel, and session status`, RESET);
+        log(`  hop doctor                Run environment/health checks`, RESET);
         log(`  hop logs [-f] [hay-host]  Show daemon logs (-f to follow)`, RESET);
         log(`  hop --help                Show this help message`, RESET);
         log('');

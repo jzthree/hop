@@ -215,6 +215,8 @@ let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
 const WORKSPACES_DIR = path.join(HOME_DIR, 'workspaces');
 const RUNTIME_DATA_DIR = path.join(HOME_DIR, 'runtime');
 const HAY_HOST_STATE_FILE = path.join(HOME_DIR, '.hay-host-state');
+// Marker so the authenticator setup QR is only shown on first run (UX only; no auth logic).
+const AUTH_QR_SHOWN_FILE = path.join(HOME_DIR, '.auth_qr_shown');
 const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 5000);
 const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_CACHE_MS', 1500);
 const HAY_HOST_HOME_HASH = crypto.createHash('sha256').update(path.resolve(HOME_DIR)).digest('hex').slice(0, 24);
@@ -1771,21 +1773,37 @@ async function promptNamingTheme() {
     console.log('');
 
     const readline = require('readline');
-    return await new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ask = (q) => new Promise((resolve) => rl.question(q, resolve));
+    let selected = null;
+    for (let attempt = 0; attempt < 2 && !selected; attempt++) {
+        const answer = await ask(`  Select [1-${choices.length}]: `);
+        const num = parseInt(String(answer || '').trim(), 10);
+        if (num >= 1 && num <= choices.length) {
+            selected = choices[num - 1].id;
+        } else if (attempt === 0) {
+            console.log(`  Invalid choice. Enter a number from 1 to ${choices.length} (${choices.map((c) => c.id).join(', ')}).`);
+        }
+    }
+    rl.close();
+    if (selected) {
+        setNamingTheme(selected);
+        console.log(`\n  ${GREEN}Theme set to "${selected}".${RESET}\n`);
+        return selected;
+    }
+    setNamingTheme(DEFAULT_THEME);
+    console.log(`\n  Invalid choice. Using default theme "${DEFAULT_THEME}". Change it later with ${CYAN}hop config theme <name>${RESET}.\n`);
+    return DEFAULT_THEME;
+}
+
+// Shared y/N confirmation for destructive commands. Callers must handle non-TTY themselves.
+function promptYesNo(question) {
+    const readline = require('readline');
+    return new Promise((resolve) => {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        rl.question(`  Select [1-${choices.length}]: `, (answer) => {
+        rl.question(question, (answer) => {
             rl.close();
-            const num = parseInt(String(answer || '').trim(), 10);
-            if (num >= 1 && num <= choices.length) {
-                const selected = choices[num - 1].id;
-                setNamingTheme(selected);
-                console.log(`\n  ${GREEN}Theme set to "${selected}".${RESET}\n`);
-                resolve(selected);
-            } else {
-                setNamingTheme(DEFAULT_THEME);
-                console.log(`\n  Using default theme "${DEFAULT_THEME}".\n`);
-                resolve(DEFAULT_THEME);
-            }
+            resolve(/^y(es)?$/i.test(String(answer || '').trim()));
         });
     });
 }
@@ -2583,11 +2601,17 @@ async function checkAndInstallDependencies() {
     } catch (e) {
         log(`  - Homebrew not found.`, YELLOW);
 
+        // Never block on a prompt without a terminal (e.g. daemon mode).
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+            log(`Error: Homebrew required. Install from https://brew.sh and re-run hop.`, RED);
+            process.exit(1);
+        }
+
         const readline = require('readline');
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
         const answer = await new Promise(resolve => {
-            rl.question(`  Install Homebrew now? (y/n) `, resolve);
+            rl.question(`  Install Homebrew now? (y/N) `, resolve);
         });
         rl.close();
 
@@ -2623,7 +2647,23 @@ async function checkAndInstallDependencies() {
             await runCommand('which', [dep], { stdio: 'ignore' });
             log(`  - ${dep} found.`, GREEN);
         } catch (e) {
-            log(`  - ${dep} NOT found. Installing...`, YELLOW);
+            log(`  - ${dep} NOT found.`, YELLOW);
+            // Ask before installing anything; without a terminal, print manual instructions instead.
+            if (!process.stdin.isTTY || !process.stdout.isTTY) {
+                log(`Error: ${dep} is required. Install it manually: brew install ${dep}`, RED);
+                process.exit(1);
+            }
+            const readline = require('readline');
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            const answer = await new Promise(resolve => {
+                rl.question(`  Install ${dep} via Homebrew now? (y/N) `, resolve);
+            });
+            rl.close();
+            if (answer.toLowerCase() !== 'y') {
+                log(`Error: ${dep} is required. Install it manually: brew install ${dep}`, RED);
+                process.exit(1);
+            }
+            log(`  - Installing ${dep}...`, YELLOW);
             try {
                 await runCommand('brew', ['install', dep]);
                 log(`  - ${dep} installed.`, GREEN);
@@ -6823,7 +6863,7 @@ function stopTunnelHealthMonitor() {
 
 function waitForStart(authEmitter, publicUrl, label) {
     return new Promise((resolve) => {
-        console.clear();
+        if (process.stdout.isTTY) console.clear();
         log(`\n==================================================`, MAGENTA);
         log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
         log(`==================================================\n`, MAGENTA);
@@ -6837,8 +6877,7 @@ function waitForStart(authEmitter, publicUrl, label) {
 
         log(`\n--------------------------------------------------`, RESET);
 
-        // Standardized TOTP QR Code using the helper function
-        showAuthQrCode(label || 'Hop');
+        printStartupAuthSection(label);
 
         log(`\n--------------------------------------------------`, RESET);
 
@@ -6864,7 +6903,7 @@ function waitForStart(authEmitter, publicUrl, label) {
 }
 
 function printStartupInfo(publicUrl, label) {
-    console.clear();
+    if (process.stdout.isTTY) console.clear();
     log(`\n==================================================`, MAGENTA);
     log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
     log(`==================================================\n`, MAGENTA);
@@ -6876,7 +6915,7 @@ function printStartupInfo(publicUrl, label) {
     qrcode.generate(publicUrl, { small: true });
 
     log(`\n--------------------------------------------------`, RESET);
-    showAuthQrCode(label || 'Hop');
+    printStartupAuthSection(label);
     log(`\n--------------------------------------------------`, RESET);
     log(`\n[READY]`, GREEN + BOLD);
         log(`Daemon started. Run ${CYAN}hop${RESET} to open a local session. Busy local sessions are not reused for unnamed launches.`, RESET);
@@ -6884,7 +6923,7 @@ function printStartupInfo(publicUrl, label) {
 
 function waitForStartPolling(state, label) {
     return new Promise((resolve) => {
-        console.clear();
+        if (process.stdout.isTTY) console.clear();
         log(`\n==================================================`, MAGENTA);
         log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
         log(`==================================================\n`, MAGENTA);
@@ -6895,7 +6934,7 @@ function waitForStartPolling(state, label) {
         qrcode.generate(state.url, { small: true });
 
         log(`\n--------------------------------------------------`, RESET);
-        showAuthQrCode(label || 'Hop');
+        printStartupAuthSection(label);
         log(`\n--------------------------------------------------`, RESET);
 
         const readline = require('readline');
@@ -6965,14 +7004,31 @@ function getAuthQrLabel() {
 
 // Generate QR code and prompt for authenticator setup
 function showAuthQrCode(label = 'Hop') {
-    log(`[3/4] Setup Authenticator...`, BOLD);
-
     // Manually construct URL for minimalist "Hop" label without username
     const otpauth = `otpauth://totp/${encodeURIComponent(label)}?secret=${AUTH_SECRET}&issuer=${encodeURIComponent(label)}`;
 
     qrcode.generate(otpauth, { small: true });
 
     log(`Scan this QR code with your Authenticator app.`, CYAN);
+}
+
+function hasShownAuthQr() {
+    return fs.existsSync(AUTH_QR_SHOWN_FILE);
+}
+
+function markAuthQrShown() {
+    try { writePrivateFile(AUTH_QR_SHOWN_FILE, String(Date.now())); } catch (e) { }
+}
+
+// Startup banner: full QR only on first run; one-liner afterwards.
+function printStartupAuthSection(label) {
+    if (hasShownAuthQr()) {
+        log(`Authenticator already configured — run ${CYAN}hop qr auth${RESET} to re-scan.`, RESET);
+        return;
+    }
+    log(`Setup Authenticator (first run):`, BOLD);
+    showAuthQrCode(label || 'Hop');
+    markAuthQrShown();
 }
 
 function startDaemon() {
@@ -6991,14 +7047,24 @@ function startDaemon() {
 }
 
 function waitForDaemonReady(timeoutMs = 20000) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         const start = Date.now();
         const check = () => {
             const state = isServerRunning();
             // State file now written early, so also check that URL is populated
             if (state && state.url) return resolve(state);
             if (Date.now() - start > timeoutMs) {
-                return reject(new Error('Timed out waiting for hop daemon'));
+                log(`Timed out waiting for the hop daemon to start.`, RED);
+                const daemonLogPath = path.join(LOG_DIR, 'hop-daemon.log');
+                try {
+                    const tail = fs.readFileSync(daemonLogPath, 'utf8').trimEnd().split('\n').slice(-10);
+                    if (tail.length && tail[0] !== '') {
+                        log(`Last ${tail.length} line(s) of ${daemonLogPath}:`, YELLOW);
+                        tail.forEach((line) => log(`  ${line}`, RESET));
+                    }
+                } catch (e) { }
+                log(`See ${CYAN}hop logs${RESET} for the full daemon log.`, RESET);
+                process.exit(1);
             }
             setTimeout(check, 250);
         };
@@ -7107,7 +7173,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     };
 
     runLocalSessionLoop().then((code) => {
-        // Ctrl+D (detach) exits hay CLI with code 10; keep tunnel alive.
+        // Ctrl+G (detach) exits hay CLI with code 10; keep tunnel alive.
         if (code === 10) {
             log(`\nDetached from local session. Tunnel is still running.`, YELLOW);
             log(`Press Ctrl+C to shut down.`, RESET);
@@ -7793,11 +7859,31 @@ async function runLocalOnlyTerminal(nameArg) {
     process.exit(code || 0);
 }
 
+function listAttachableSessionNames(sessionsRes) {
+    return (sessionsRes.sessions || [])
+        .filter((s) => s && s.type !== 'port' && typeof s.displayName === 'string' && s.displayName)
+        .map((s) => s.displayName)
+        .sort();
+}
+
+function printAvailableSessionNames(sessionsRes) {
+    const names = listAttachableSessionNames(sessionsRes);
+    if (names.length) {
+        log(`Available sessions:`, RESET);
+        names.forEach((name) => log(`  ${name}`, RESET));
+        log(`Attach with ${CYAN}hop attach <name>${RESET} (see ${CYAN}hop session list${RESET}).`, RESET);
+    } else {
+        log(`No terminal sessions are running. Run ${CYAN}hop${RESET} to start one.`, RESET);
+    }
+}
+
 async function attachToNamedSession(existingTunnel, displayName) {
     const sessionsRes = await fetchSessionList(existingTunnel);
     const target = resolveSessionTargetByDisplay(sessionsRes, displayName);
     if (!target) {
-        throw new Error(`Session not found: ${displayName}`);
+        log(`Session not found: ${displayName}`, RED);
+        printAvailableSessionNames(sessionsRes);
+        process.exit(1);
     }
     const targetDisplayName = target.displayName || displayName;
     log(`Attaching to ${targetDisplayName}...`, RESET);
@@ -7821,7 +7907,9 @@ async function attachToSessionForDir(existingTunnel) {
     const cwdName = getCwdSessionBaseName();
     const target = pickSessionForCwd(sessions, process.cwd(), cwdName);
     if (!target) {
-        throw new Error(`No existing session for ${cwdName}`);
+        log(`No existing session for ${cwdName}.`, RED);
+        printAvailableSessionNames(sessionsRes);
+        process.exit(1);
     }
     return attachToNamedSession(existingTunnel, target.displayName);
 }
@@ -7832,7 +7920,7 @@ async function attachToAllSessions(existingTunnel) {
         .filter((s) => s && s.type !== 'port' && typeof s.displayName === 'string' && s.displayName);
 
     if (sessions.length === 0) {
-        log(`No terminal sessions found.`, YELLOW);
+        log(`No terminal sessions to attach. Run ${CYAN}hop${RESET} to start one.`, YELLOW);
         process.exit(1);
     }
 
@@ -7867,14 +7955,84 @@ async function attachToAllSessions(existingTunnel) {
     process.exit(0);
 }
 
+const KNOWN_COMMANDS = [
+    'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
+    'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
+    'password', 'user', 'workspace', 'session', 'wipe'
+];
+
+// Suggest the closest known command for typos (small edit distances only).
+function suggestNearestCommand(input) {
+    const editDistance = (a, b) => {
+        const dp = Array.from({ length: a.length + 1 }, (_, i) => {
+            const row = new Array(b.length + 1).fill(0);
+            row[0] = i;
+            return row;
+        });
+        for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+        for (let i = 1; i <= a.length; i++) {
+            for (let j = 1; j <= b.length; j++) {
+                dp[i][j] = Math.min(
+                    dp[i - 1][j] + 1,
+                    dp[i][j - 1] + 1,
+                    dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+                );
+            }
+        }
+        return dp[a.length][b.length];
+    };
+    let best = null;
+    let bestDistance = 3; // only suggest near misses
+    for (const cmd of KNOWN_COMMANDS) {
+        const d = editDistance(String(input).toLowerCase(), cmd);
+        if (d < bestDistance) {
+            bestDistance = d;
+            best = cmd;
+        }
+    }
+    return best;
+}
+
 async function main() {
     // Handle `hop client` - run as a user with exported credentials
     if (process.argv[2] === 'client') {
-        const credentialsArg = process.argv[3];
-        const hostnameArgIndex = process.argv.indexOf('--hostname');
-        const hostnameOverride = hostnameArgIndex !== -1 ? process.argv[hostnameArgIndex + 1] : null;
+        // Separate flags from positionals so flag order doesn't matter.
+        const clientArgs = process.argv.slice(3);
+        let credentialsArg = null;
+        let hostnameOverride = null;
+        let wantClientHelp = false;
+        let clientUsageError = null;
+        for (let i = 0; i < clientArgs.length; i++) {
+            const arg = clientArgs[i];
+            if (arg === '--help' || arg === '-h') { wantClientHelp = true; continue; }
+            if (arg === '--hostname') {
+                const value = clientArgs[i + 1];
+                if (!value || value.startsWith('-')) {
+                    clientUsageError = 'Missing value after --hostname.';
+                    break;
+                }
+                hostnameOverride = value;
+                i++;
+                continue;
+            }
+            if (arg.startsWith('-')) {
+                clientUsageError = `Unknown option: ${arg}`;
+                break;
+            }
+            if (credentialsArg === null) {
+                credentialsArg = arg;
+                continue;
+            }
+            clientUsageError = `Unexpected argument: ${arg}`;
+            break;
+        }
+        if (clientUsageError) {
+            log(clientUsageError, RED);
+            log(`Usage: hop client <credentials.json|folder> [--hostname <name>]`, RESET);
+            process.exit(1);
+        }
 
-        if (!credentialsArg || credentialsArg === '--help' || credentialsArg === '-h') {
+        if (!credentialsArg || wantClientHelp) {
             log(`\n${BOLD}Hop Client Mode${RESET}\n`, CYAN);
             log(`Run hop with credentials from your admin.\n`, RESET);
             log(`${BOLD}Usage:${RESET}`, RESET);
@@ -8005,6 +8163,7 @@ async function main() {
                 log(`\n${BOLD}Scan this QR code with your authenticator app:${RESET}\n`, CYAN);
                 const label = hostname ? `Hop-${hostname}` : `Hop-${tunnelId.slice(0, 8)}`;
                 showAuthQrCode(label);
+                markAuthQrShown();
             }
 
             log(`\n${GREEN}✓ Setup complete!${RESET}\n`, GREEN);
@@ -8092,19 +8251,78 @@ async function main() {
         return;
     }
 
-    // Handle `hop stop` command - stop daemon
+    // Handle `hop stop [--all]` command - stop daemon (and hay-host + sessions with --all)
     if (process.argv[2] === 'stop') {
+        const stopAll = process.argv.includes('--all');
         const state = isServerRunning();
-        if (!state) {
+        const hayHost = readHayHostStateFile();
+        const hayHostAlive = !!(hayHost && isProcessAlive(hayHost.pid));
+
+        if (!state && !(stopAll && hayHostAlive)) {
             log(`Hop is not running.`, RED);
             process.exit(1);
         }
+
+        if (stopAll) {
+            // Order matters: session deletion needs the daemon, so close sessions
+            // first, then stop the daemon, then kill the hay-host process.
+            if (state) {
+                try {
+                    const sessionsRes = await fetchSessionList(state);
+                    const sessions = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : [];
+                    for (const s of sessions) {
+                        try {
+                            await callLocalApi(state, '/api/sessions/delete', 'POST', { name: s.name || s.internalName });
+                        } catch (e) { }
+                    }
+                    if (sessions.length > 0) {
+                        log(`Closed ${sessions.length} session(s).`, GREEN);
+                    }
+                } catch (e) {
+                    log(`Warning: could not close sessions via daemon: ${e.message}`, YELLOW);
+                }
+                try {
+                    process.kill(state.pid, 'SIGTERM');
+                    log(`Hop daemon stopped.`, GREEN);
+                } catch (e) {
+                    log(`Failed to stop hop daemon: ${e.message}`, RED);
+                    process.exit(1);
+                }
+            }
+            if (hayHostAlive) {
+                const stopped = await stopExternalHayHostProcess(hayHost);
+                if (!stopped) {
+                    log(`Failed to stop hay-host (pid ${hayHost.pid}).`, RED);
+                    process.exit(1);
+                }
+                clearHayHostStateFile();
+                log(`Hay-host stopped. All terminal sessions ended.`, GREEN);
+            } else if (hayHost) {
+                clearHayHostStateFile();
+            }
+            process.exit(0);
+        }
+
+        // Count live sessions before killing the daemon so we can report them.
+        let liveCount = 0;
+        try {
+            const sessionsRes = await fetchSessionList(state);
+            liveCount = (sessionsRes.sessions || [])
+                .filter((s) => s && s.type === 'terminal' && s.live === true).length;
+        } catch (e) { }
         try {
             process.kill(state.pid, 'SIGTERM');
             log(`Hop stopped.`, GREEN);
         } catch (e) {
             log(`Failed to stop hop: ${e.message}`, RED);
             process.exit(1);
+        }
+        if (liveCount > 0) {
+            log(`${liveCount} terminal session(s) keep running in the background (hop status).`, YELLOW);
+            log(`Use ${CYAN}hop stop --all${RESET} to end them.`, RESET);
+        } else if (hayHostAlive) {
+            log(`The hay-host process keeps running in the background (hop status).`, YELLOW);
+            log(`Use ${CYAN}hop stop --all${RESET} to end it.`, RESET);
         }
         process.exit(0);
     }
@@ -8257,7 +8475,8 @@ async function main() {
         log(`  hop attach [session]      Attach to an existing session`, RESET);
         log(`  hop attach all            Attach sequentially to all sessions`, RESET);
         log(`  hop local [session]       Start daemonless local terminal ([session] attaches if present)`, RESET);
-        log(`  hop stop                  Stop hop daemon`, RESET);
+        log(`  hop stop                  Stop hop daemon (terminal sessions keep running)`, RESET);
+        log(`  hop stop --all            Stop daemon, hay-host, and all terminal sessions`, RESET);
         log(`  hop status                Show daemon, tunnel, and session status`, RESET);
         log(`  hop doctor                Run environment/health checks`, RESET);
         log(`  hop logs [-f] [hay-host]  Show daemon logs (-f to follow)`, RESET);
@@ -8267,6 +8486,10 @@ async function main() {
         log(`  hop url                   Print current tunnel URL`, RESET);
         log(`  hop qr                    Show tunnel URL as QR code`, RESET);
         log(`  hop qr auth               Show authenticator setup QR code`, RESET);
+        log('');
+        log(`${BOLD}Config:${RESET}`, RESET);
+        log(`  hop config                Show hop config`, RESET);
+        log(`  hop config theme [name]   Show or set the session naming theme`, RESET);
         log('');
         log(`${BOLD}Custom Domain:${RESET}`, RESET);
         log(`  hop domain                Show current domain config`, RESET);
@@ -8285,7 +8508,7 @@ async function main() {
         log(`  hop user export <name>    Export credentials for a user`, RESET);
         log('');
         log(`${BOLD}Sessions:${RESET}`, RESET);
-        log(`  hop session list [--all]         List live sessions (use --all for workspace defs across all workspaces)`, RESET);
+        log(`  hop session list [--all|-a]      List live sessions (--all/-a adds workspace defs across all workspaces)`, RESET);
         log(`  hop session add <name> [--cwd P] --workspace W  Save a terminal definition to a workspace`, RESET);
         log(`  hop session add <name> --port N --workspace W   Save a port definition to a workspace`, RESET);
         log(`  hop session rename <old> <new>   Rename a session`, RESET);
@@ -8299,13 +8522,14 @@ async function main() {
         log(`  hop workspace show <name>     Show saved definitions in a workspace`, RESET);
         log(`  hop workspace save <name>     Save selected live sessions into a workspace`, RESET);
         log(`  hop workspace load <name>     Start sessions defined in a workspace`, RESET);
-        log(`  hop workspace delete <name>   Delete a workspace`, RESET);
+        log(`  hop workspace delete <name> [--yes]  Delete a workspace (asks before deleting a non-empty one)`, RESET);
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
         log('');
         log(`${BOLD}Maintenance:${RESET}`, RESET);
-        log(`  hop wipe [--all]          Remove workspace-defined sessions (use --all to kill live)`, RESET);
+        log(`  hop health [--restart]    Check tunnel health (--restart forces a tunnel restart)`, RESET);
+        log(`  hop wipe [--all] [--yes]  Remove workspace-defined sessions (--all kills live; --yes skips confirmation)`, RESET);
         log(`  hop wipe --agent          Close all agent-created terminal API sessions`, RESET);
         log('');
         process.exit(0);
@@ -8585,12 +8809,15 @@ async function main() {
             process.exit(0);
         }
 
-        // Unknown subcommand
+        const unknownPasswordSub = subcommand && subcommand !== 'help' && subcommand !== '--help';
+        if (unknownPasswordSub) {
+            log(`Unknown subcommand: ${subcommand}`, RED);
+        }
         log(`\n${BOLD}Password commands:${RESET}\n`, CYAN);
         log(`  hop password           Show password status`, RESET);
         log(`  hop password set       Set or change password`, RESET);
         log(`  hop password clear     Remove password protection`, RESET);
-        process.exit(0);
+        process.exit(unknownPasswordSub ? 1 : 0);
     }
 
     // Handle `hop user` commands - multi-user management
@@ -8630,13 +8857,16 @@ async function main() {
             process.exit(0);
         }
 
-        // Unknown subcommand - show help
+        const unknownUserSub = subcommand && subcommand !== 'help' && subcommand !== '--help';
+        if (unknownUserSub) {
+            log(`Unknown subcommand: ${subcommand}`, RED);
+        }
         log(`\n${BOLD}User management commands:${RESET}\n`, CYAN);
         log(`  hop user list              List all users`, RESET);
         log(`  hop user add <username>    Add a new user`, RESET);
         log(`  hop user remove <username> Remove a user`, RESET);
         log(`  hop user export <username> Export credentials for a user`, RESET);
-        process.exit(0);
+        process.exit(unknownUserSub ? 1 : 0);
     }
 
     // Handle `hop workspace` commands
@@ -8812,8 +9042,36 @@ async function main() {
 
         if (subcommand === 'delete' || subcommand === 'remove' || subcommand === 'rm') {
             if (!nameArg) {
-                log(`Usage: hop workspace delete <name>`, RED);
+                log(`Usage: hop workspace delete <name> [--yes]`, RED);
                 process.exit(1);
+            }
+            // Confirm before deleting a workspace that still has saved definitions.
+            const skipDeleteConfirm = process.argv.includes('--yes') || process.argv.includes('-y');
+            if (!skipDeleteConfirm) {
+                let savedCount = 0;
+                if (existing) {
+                    try {
+                        const showRes = await callLocalApi(existing, `/api/workspaces/show?name=${encodeURIComponent(nameArg)}`, 'GET');
+                        if (showRes.status === 200) {
+                            savedCount = Object.keys(showRes.data?.workspace?.sessions || {}).length;
+                        }
+                    } catch (e) { }
+                } else {
+                    const workspace = loadWorkspaceFile(nameArg);
+                    savedCount = Object.keys(workspace?.sessions || {}).length;
+                }
+                if (savedCount > 0) {
+                    log(`Workspace "${nameArg}" contains ${savedCount} saved session definition(s).`, YELLOW);
+                    if (!process.stdin.isTTY) {
+                        log(`Refusing to delete a non-empty workspace without confirmation. Re-run with --yes.`, RED);
+                        process.exit(1);
+                    }
+                    const confirmed = await promptYesNo(`Delete workspace "${nameArg}" and its saved definitions? [y/N] `);
+                    if (!confirmed) {
+                        log(`Aborted. Workspace was not deleted.`, YELLOW);
+                        process.exit(1);
+                    }
+                }
             }
             if (existing) {
                 const res = await callLocalApi(existing, '/api/workspaces/delete', 'POST', { name: nameArg });
@@ -8836,14 +9094,18 @@ async function main() {
             process.exit(0);
         }
 
+        const unknownWorkspaceSub = subcommand && subcommand !== 'help' && subcommand !== '--help';
+        if (unknownWorkspaceSub) {
+            log(`Unknown subcommand: ${subcommand}`, RED);
+        }
         log(`\n${BOLD}Workspace commands:${RESET}\n`, CYAN);
         log(`  hop workspace list           List workspaces`, RESET);
         log(`  hop workspace create <name>  Create an empty workspace`, RESET);
         log(`  hop workspace show <name>    Show saved definitions in a workspace`, RESET);
         log(`  hop workspace save <name>    Save selected live sessions into a workspace`, RESET);
         log(`  hop workspace load <name>    Start sessions defined in a workspace`, RESET);
-        log(`  hop workspace delete <name>  Delete a workspace`, RESET);
-        process.exit(0);
+        log(`  hop workspace delete <name> [--yes]  Delete a workspace`, RESET);
+        process.exit(unknownWorkspaceSub ? 1 : 0);
     }
 
     // Handle `hop session` commands
@@ -8929,8 +9191,9 @@ async function main() {
                 ? normalizeWorkspaceName(process.argv[workspaceArgIndex + 1])
                 : null;
             if (!explicitWorkspaceName) {
-                log(`Session definitions are no longer saved to an ambient workspace.`, YELLOW);
-                log(`Use ${CYAN}hop workspace save <name>${RESET} to snapshot live sessions, or pass ${CYAN}--workspace <name>${RESET}.`, RESET);
+                log(`session add requires --workspace <name> to choose where the definition is saved.`, RED);
+                log(`Example: ${CYAN}hop session add ${displayName} --port 3000 --workspace dev${RESET}`, RESET);
+                log(`Tip: ${CYAN}hop workspace save <name>${RESET} snapshots live sessions instead.`, RESET);
                 process.exit(1);
             }
             if (!name) {
@@ -8972,19 +9235,26 @@ async function main() {
                     process.exit(1);
                 }
                 if (existingTunnel) {
+                    let res = null;
                     try {
-                        const res = await callLocalApi(existingTunnel, '/api/sessions', 'POST', {
+                        res = await callLocalApi(existingTunnel, '/api/sessions', 'POST', {
                             name: displayName,
                             type: 'port',
                             port: portArg,
                             startRuntime: false,
                             workspace: explicitWorkspaceName
                         });
+                    } catch (e) {
+                        res = null; // daemon unreachable; fall back to direct file edit
+                    }
+                    if (res) {
                         if (res.status >= 200 && res.status < 300) {
                             log(`Saved port session "${displayName}" → localhost:${portArg} to workspace "${explicitWorkspaceName}".`, GREEN);
                             process.exit(0);
                         }
-                    } catch (e) { }
+                        log(res.data?.error || `Request failed (status ${res.status})`, RED);
+                        process.exit(1);
+                    }
                 }
                 if (await runtimeTerminalSessionExists(name)) {
                     log(`Terminal session already exists with this name.`, RED);
@@ -9014,19 +9284,26 @@ async function main() {
                 process.exit(1);
             }
             if (existingTunnel) {
+                let res = null;
                 try {
-                    const res = await callLocalApi(existingTunnel, '/api/sessions', 'POST', {
+                    res = await callLocalApi(existingTunnel, '/api/sessions', 'POST', {
                         name: displayName,
                         type: 'terminal',
                         cwd: cwdPath,
                         startRuntime: false,
                         workspace: explicitWorkspaceName
                     });
+                } catch (e) {
+                    res = null; // daemon unreachable; fall back to direct file edit
+                }
+                if (res) {
                     if (res.status >= 200 && res.status < 300) {
                         log(`Saved terminal session "${displayName}" to workspace "${explicitWorkspaceName}".`, GREEN);
                         process.exit(0);
                     }
-                } catch (e) { }
+                    log(res.data?.error || `Request failed (status ${res.status})`, RED);
+                    process.exit(1);
+                }
             }
             const saved = upsertWorkspaceSessionDefinition(explicitWorkspaceName, name, {
                 type: 'terminal',
@@ -9058,16 +9335,23 @@ async function main() {
 
             const existingTunnel = isServerRunning();
             if (existingTunnel) {
+                let res = null;
                 try {
-                    const res = await callLocalApi(existingTunnel, '/api/sessions/agent-permission', 'POST', {
+                    res = await callLocalApi(existingTunnel, '/api/sessions/agent-permission', 'POST', {
                         internalName,
                         allowed
                     });
+                } catch (e) {
+                    res = null; // daemon unreachable; fall back to direct file edit
+                }
+                if (res) {
                     if (res.status >= 200 && res.status < 300) {
                         log(`${allowed ? 'Allowed' : 'Blocked'} agent access for "${displayName}".`, GREEN);
                         process.exit(0);
                     }
-                } catch (e) { }
+                    log(res.data?.error || `Request failed (status ${res.status})`, RED);
+                    process.exit(1);
+                }
             }
 
             const savedConfig = getSessionConfig(internalName);
@@ -9099,20 +9383,23 @@ async function main() {
 
             const existingTunnel = isServerRunning();
             if (existingTunnel) {
+                let res = null;
                 try {
-                    const res = await callLocalApi(existingTunnel, '/api/sessions/rename', 'POST', {
+                    res = await callLocalApi(existingTunnel, '/api/sessions/rename', 'POST', {
                         oldName: oldDisplayName,
                         newName: newDisplayName
                     });
+                } catch (e) {
+                    res = null; // daemon unreachable; fall back to direct file edit
+                }
+                if (res) {
                     if (res.status >= 200 && res.status < 300) {
                         log(`Renamed session "${oldDisplayName}" to "${newDisplayName}".`, GREEN);
                         process.exit(0);
                     }
-                    if (res.data?.error) {
-                        log(res.data.error, RED);
-                        process.exit(1);
-                    }
-                } catch (e) { }
+                    log(res.data?.error || `Request failed (status ${res.status})`, RED);
+                    process.exit(1);
+                }
             }
 
             try {
@@ -9141,10 +9428,15 @@ async function main() {
             }
             const existingTunnel = isServerRunning();
             if (existingTunnel) {
+                let res = null;
                 try {
-                    const res = await callLocalApi(existingTunnel, '/api/sessions/delete', 'POST', {
+                    res = await callLocalApi(existingTunnel, '/api/sessions/delete', 'POST', {
                         internalName: name
                     });
+                } catch (e) {
+                    res = null; // daemon unreachable; fall back to direct file edit
+                }
+                if (res) {
                     if (res.status >= 200 && res.status < 300) {
                         if (res.data?.type === 'port') {
                             log(`Removed port session "${displayName}".`, GREEN);
@@ -9153,7 +9445,9 @@ async function main() {
                         }
                         process.exit(0);
                     }
-                } catch (e) { }
+                    log(res.data?.error || `Request failed (status ${res.status})`, RED);
+                    process.exit(1);
+                }
             }
             const savedConfig = getSessionConfig(name);
             const config = getEffectiveSessionConfig(name);
@@ -9180,15 +9474,19 @@ async function main() {
             process.exit(0);
         }
 
+        const unknownSessionSub = subcommand && subcommand !== 'help' && subcommand !== '--help';
+        if (unknownSessionSub) {
+            log(`Unknown subcommand: ${subcommand}`, RED);
+        }
         log(`\n${BOLD}Session commands:${RESET}\n`, CYAN);
-        log(`  hop session list [--all]         List live sessions (use --all for workspace defs across all workspaces)`, RESET);
+        log(`  hop session list [--all|-a]      List live sessions (--all/-a adds workspace defs across all workspaces)`, RESET);
         log(`  hop session add <name> [--cwd P] --workspace W  Save a terminal definition to a workspace`, RESET);
         log(`  hop session add <name> --port N --workspace W   Save a port definition to a workspace`, RESET);
         log(`  hop session rename <old> <new>   Rename a session`, RESET);
         log(`  hop session remove <name>        Remove a session`, RESET);
         log(`  hop session permit <name>        Allow agent access`, RESET);
         log(`  hop session block <name>         Block agent access`, RESET);
-        process.exit(0);
+        process.exit(unknownSessionSub ? 1 : 0);
     }
 
     // Handle `hop wipe` command - removes workspace-defined sessions by default
@@ -9304,6 +9602,21 @@ async function main() {
             }
 
             if (wipeAll) {
+                // Killing live sessions is destructive; confirm unless --yes was passed.
+                const skipWipeConfirm = process.argv.includes('--yes') || process.argv.includes('-y');
+                if (!skipWipeConfirm) {
+                    log(`About to kill ${targets.length} session(s):`, YELLOW);
+                    targets.forEach((s) => log(`  - ${s.displayName || s.name}`, RESET));
+                    if (!process.stdin.isTTY) {
+                        log(`Refusing to kill sessions without confirmation (non-interactive). Re-run with --yes.`, RED);
+                        process.exit(1);
+                    }
+                    const confirmed = await promptYesNo(`Kill these ${targets.length} session(s)? [y/N] `);
+                    if (!confirmed) {
+                        log(`Aborted. No sessions were killed.`, YELLOW);
+                        process.exit(1);
+                    }
+                }
                 log(`Killing ${targets.length} hop session(s)...`, YELLOW);
             } else {
                 const skippedLive = liveSessions.length;
@@ -9361,7 +9674,20 @@ async function main() {
         process.exit(0);
     }
 
-    process.stdout.write('\x1Bc'); // Clear screen
+    // Every known command returned or exited above; anything else here is a typo.
+    // Only bare `hop` (or the internal --daemon flag) may reach the default flow.
+    if (process.argv[2] && process.argv[2] !== '--daemon') {
+        const badCommand = process.argv[2];
+        log(`Unknown command: ${badCommand}`, RED);
+        const suggestion = suggestNearestCommand(badCommand);
+        if (suggestion) {
+            log(`Did you mean ${CYAN}hop ${suggestion}${RESET}?`, RESET);
+        }
+        log(`Run ${CYAN}hop --help${RESET} for usage.`, RESET);
+        process.exit(2);
+    }
+
+    if (process.stdout.isTTY) console.clear(); // Clear screen without wiping scrollback
 
     // Only one instance allowed
     if (!DAEMON_FLAG) {

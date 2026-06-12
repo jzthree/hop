@@ -140,21 +140,21 @@ Use one dedicated terminal per subagent.
 2. Start the agent CLI with `hop_write_terminal`.
 3. Wait for readiness with `hop_wait_terminal(until_prompt=true)`.
 4. Prefer `hopx_agent_turn(mode="auto")` or `hopx_send_and_wait(...)` for one turn at a time.
-5. For long waits, use `hopx_agent_turn(async=true, ...)` or the lower-level `hop_wait_start(...)` / `hop_wait_poll(...)`.
+5. For long waits, use `hopx_agent_turn(async=true, ...)` or the lower-level `hop_wait_terminal(async=true, ...)` + `hop_wait_poll(...)` (`hop_wait_start` remains only as a legacy alias).
 6. Interrupt with `hop_send_key(key="ctrl_c")` and close with `hop_close_terminal`.
 
 Safety tips:
 
 - Keep one subagent per terminal.
 - Do not queue a second instruction before reading the first response.
-- For attached user sessions, confirm `agentPermitted` before sending input.
+- For attached user sessions, confirm `agentPermitted` before sending input (grant it with `hop session permit <name>`).
 
 ### Share a Local Web App
 
 Expose a local HTTP or WebSocket service through your Hop tunnel:
 
 ```bash
-hop session add myapp --port 3000
+hop session add myapp --port 3000 --workspace dev
 ```
 
 Result:
@@ -265,11 +265,20 @@ Hop uses the external Hay host runtime for PTY hosting and session recovery.
 | Command | Description |
 |---------|-------------|
 | `hop` | Start hop daemon/tunnel if needed, then launch a local terminal. Unnamed launches do not reuse a session that already has a local CLI attached. |
+| `hop start` | Start the hop daemon and print QR codes |
+| `hop attach [session]` | Attach to an existing terminal session |
 | `hop attach all` | Attach sequentially to all terminal sessions |
 | `hop local [session]` | Start a daemonless local terminal (`[session]` attaches if it exists) |
+| `hop stop` | Stop the hop daemon (terminal sessions keep running) |
+| `hop stop --all` | Stop the daemon, the hay-host, and all terminal sessions |
+| `hop status` | Show daemon, tunnel, and session status |
+| `hop doctor` | Run environment/health checks |
+| `hop logs [-f]` | Show daemon logs (`-f` to follow) |
+| `hop health [--restart]` | Check tunnel health (`--restart` forces a tunnel restart) |
 | `hop url` | Print current tunnel URL |
 | `hop qr` | Show QR code for current tunnel URL |
 | `hop qr auth` | Show QR code for authenticator app setup |
+| `hop config theme [name]` | Show or set the session naming theme |
 | `hop domain <hostname>` | Set custom domain (named tunnel) |
 | `hop domain-clear` | Remove custom domain, use random URLs |
 | `hop password set` | Set/change password |
@@ -279,19 +288,22 @@ Hop uses the external Hay host runtime for PTY hosting and session recovery.
 | `hop user remove <name>` | Remove user |
 | `hop user export <name>` | Export user credentials |
 | `hop session list` | List live terminal sessions |
-| `hop session list --all` | Include saved definitions from all workspaces alongside live sessions |
+| `hop session list --all` | Include saved definitions from all workspaces alongside live sessions (`-a` is shorthand) |
 | `hop session add <name> [--cwd P] --workspace W` | Save a terminal session definition to a named workspace |
 | `hop session add <name> --port N --workspace W` | Save a port session definition to a named workspace |
+| `hop session permit <name>` | Allow agent access to a session |
+| `hop session block <name>` | Block agent access to a session |
+| `hop workspace list` | List workspaces |
 | `hop workspace create <name>` | Create an empty workspace |
 | `hop workspace show <name>` | Show saved definitions in a workspace |
 | `hop workspace save <name>` | Save selected live terminal sessions into a workspace |
 | `hop workspace load <name>` | Start sessions defined in a workspace |
-| `hop workspace delete <name>` | Delete a workspace |
+| `hop workspace delete <name> [--yes]` | Delete a workspace (asks before deleting a non-empty one) |
 | `hop session rename <old> <new>` | Rename a session |
 | `hop session remove <name>` | Remove a session |
 | `hop client <credentials>` | Run hop with exported credentials |
-| `hop wipe [--all]` | Remove workspace-defined sessions (`--all` also kills live sessions) |
-| `quit` | Type at exit prompt to shut down the tunnel |
+| `hop wipe [--all] [--yes]` | Remove workspace-defined sessions (`--all` also kills live sessions after a confirmation; `--yes` skips it) |
+| `hop wipe --agent` | Close all agent-created terminal API sessions |
 
 Local CLI mouse capture is off by default so terminal-native selection and context menus keep working. Use Option+M / Alt+M inside the local Hop view to toggle Hop mouse selection when needed. Use Option+B / Alt+B to toggle the status bar. CLI defaults live under `hay-cli` in `~/.hop.json`.
 

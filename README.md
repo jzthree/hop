@@ -13,7 +13,7 @@ Hop gives you secure browser access to local terminals and a built-in MCP server
 ```
 
 <p align="center">
-  <img src="docs/hero.svg" width="980" alt="The hop terminal UI, annotated: a session chip pinned flush-left, a live state dot (green connected, amber reconnecting, red dropped, purple locked), a scrollback position indicator, keycap-style hints, adaptive light/dark themes, and scrollback search with toast notices." />
+  <img src="docs/hero-overview.svg" width="980" alt="One hop runtime, three surfaces: a browser window, an MCP agent panel, and a CLI window all attached to the same live terminal session. Web sharing with presence and take/release control; MCP agents that create, drive, and read sessions; and a CLI that attaches from any terminal." />
 </p>
 
 ## Why Hop
@@ -176,7 +176,13 @@ hop attach <session>
 ```
 
 This is useful when you want a browser, an MCP client, and a local shell to converge on the same named session.
-Local terminal sessions are persistent by default: they keep running in the Hay host if the local CLI detaches or the Hop daemon restarts. The local CLI status line shows `persists`; use `Ctrl+Q` inside the local Hop view to kill the session.
+Local terminal sessions are persistent by default: they keep running in the Hay host if the local CLI detaches or the Hop daemon restarts. Press `Ctrl+Q` twice inside the local Hop view to kill a session for everyone; `Ctrl+G` detaches and leaves it running.
+
+The attached-terminal UI adapts light/dark themes to your terminal and puts the session state at a glance:
+
+<p align="center">
+  <img src="docs/hero.svg" width="980" alt="The hop terminal UI, annotated: a session chip pinned flush-left, a live state dot (green connected, amber reconnecting, red dropped, purple locked), a scrollback position indicator, keycap-style hints, adaptive light/dark themes, and scrollback search with toast notices." />
+</p>
 
 ### Use Hop on Mobile
 

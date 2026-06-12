@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { execFile } from "node:child_process";
 import { readlink } from "node:fs";
 import type { IPty } from "node-pty-prebuilt-multiarch";
-import { pickPresenceColor, safeParseClientMessage } from "hay-shared";
+import { clientMessageSchema, pickPresenceColor, safeParseClientMessage } from "hay-shared";
 import type { ClientMessage, PresenceClient, ServerMessage } from "hay-shared";
 import type { PtyFactory } from "./pty";
 
@@ -38,7 +38,14 @@ export type RoomSummary = {
   localCliCount: number;
 };
 
-const MAX_BUFFER_SIZE = 200_000;
+// Raw output retained for reattach snapshots. ~2MB of raw stream reconstructs
+// roughly a full client scrollback (2000-5000 lines) of plain output; TUI
+// streams are escape-dense and reconstruct less. Override with
+// HAY_SNAPSHOT_BUFFER_BYTES (bytes of raw stream kept per room).
+const MAX_BUFFER_SIZE = (() => {
+  const env = Number(process.env.HAY_SNAPSHOT_BUFFER_BYTES);
+  return Number.isFinite(env) && env > 0 ? env : 2_000_000;
+})();
 // Keep rooms alive indefinitely; only explicit kill/remove should end a session.
 const CLEANUP_DELAY_MS = 0;
 const CONTROL_SEQUENCE_TAIL = 32;
@@ -51,6 +58,31 @@ const clampBuffer = (value: string) => {
     return value;
   }
   return value.slice(value.length - MAX_BUFFER_SIZE);
+};
+
+// Build a useful error for a payload that failed schema validation: name the
+// message type and the offending field instead of a bare "Invalid message".
+const describeInvalidMessage = (payload: string): string => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return "Invalid message: not valid JSON";
+  }
+  const type = typeof (parsed as { type?: unknown })?.type === "string" ? (parsed as { type: string }).type : null;
+  if (!type) {
+    return "Invalid message: missing type";
+  }
+  const result = clientMessageSchema.safeParse(parsed);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const field = issue?.path?.filter((part) => typeof part === "string").join(".");
+    if (field) {
+      return `Invalid ${type} message: ${field} ${issue.message.toLowerCase()}`;
+    }
+    return `Invalid ${type} message`;
+  }
+  return "Invalid message";
 };
 
 const toPresence = (client: ClientState): PresenceClient => ({
@@ -106,6 +138,9 @@ export class Room extends EventEmitter {
   private cleanupTimer: NodeJS.Timeout | null = null;
   private ended = false;
   private cwdPollTimer: NodeJS.Timeout | null = null;
+  // False until the first client attaches: that client is the one whose
+  // connect created the room, so its hello carries created=true.
+  private hasHadClient = false;
 
   constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, options: RoomCreateOptions) {
     super();
@@ -167,6 +202,8 @@ export class Room extends EventEmitter {
 
     const client = new ClientState(info, socket);
     this.clients.set(client.id, client);
+    const created = !this.hasHadClient;
+    this.hasHadClient = true;
 
     socket.send(
       JSON.stringify({
@@ -175,7 +212,8 @@ export class Room extends EventEmitter {
         roomId: this.id,
         color: client.color,
         collabMode: this.collabMode,
-        controllerId: this.controllerId
+        controllerId: this.controllerId,
+        created
       } satisfies ServerMessage)
     );
 
@@ -208,7 +246,7 @@ export class Room extends EventEmitter {
     socket.onMessage((payload) => {
       const message = safeParseClientMessage(payload);
       if (!message) {
-        socket.send(JSON.stringify({ type: "error", message: "Invalid message" } satisfies ServerMessage));
+        socket.send(JSON.stringify({ type: "error", message: describeInvalidMessage(payload) } satisfies ServerMessage));
         return;
       }
       this.handleMessage(client.id, message);
@@ -262,7 +300,7 @@ export class Room extends EventEmitter {
         client.socket.send(JSON.stringify({ type: "pong", t: message.t } satisfies ServerMessage));
         break;
       case "kill_session":
-        this.kill();
+        this.kill(client.name);
         break;
       default:
         break;
@@ -430,7 +468,7 @@ export class Room extends EventEmitter {
     }
   }
 
-  kill() {
+  kill(by?: string) {
     this.stopCwdPolling();
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
@@ -441,7 +479,7 @@ export class Room extends EventEmitter {
     } catch (e) {
       /* swallow – PTY may already be dead */
     }
-    this.endSession({ exitCode: null, signal: null, message: "Session terminated" });
+    this.endSession({ exitCode: null, signal: null, message: "Session terminated", by });
   }
 
   notifySessionRenamed(displayName: string) {
@@ -561,7 +599,7 @@ export class Room extends EventEmitter {
     }, CLEANUP_DELAY_MS);
   }
 
-  private endSession(payload: { exitCode: number | null; signal: string | null; message: string }) {
+  private endSession(payload: { exitCode: number | null; signal: string | null; message: string; by?: string }) {
     if (this.ended) return;
     this.ended = true;
     this.stopCwdPolling();

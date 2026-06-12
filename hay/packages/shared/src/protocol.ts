@@ -28,7 +28,10 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     roomId: z.string(),
     color: z.string(),
     collabMode: z.boolean(),
-    controllerId: z.string().nullable()
+    controllerId: z.string().nullable(),
+    // True when this attach created the room (vs joining an existing session).
+    // Optional so older clients keep working.
+    created: z.boolean().optional()
   }),
   z.object({
     type: z.literal("presence"),
@@ -48,7 +51,10 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("session_ended"),
     exitCode: z.number().int().nullable(),
     signal: z.string().nullable(),
-    message: z.string()
+    message: z.string(),
+    // Display name of the client that killed the session, when ended by an
+    // explicit kill_session. Optional so older clients keep working.
+    by: z.string().optional()
   }),
   z.object({
     type: z.literal("session_renamed"),

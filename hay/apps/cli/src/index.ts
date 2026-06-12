@@ -12,12 +12,14 @@ const isMac = process.platform === "darwin";
 const keyLabelShort = isMac ? "Opt" : "Alt";
 const keyLabelLong = isMac ? "Option" : "Alt";
 
+type ThemeName = "auto" | "light" | "dark";
 type CliConfig = {
   showHints?: boolean;
   showStatusBar?: boolean;
   mouseCapture?: boolean;
   syncSize?: boolean;
   scrollOff?: number;
+  theme?: ThemeName;
 };
 type HopConfig = { "hay-cli"?: CliConfig };
 const DEFAULT_SCROLL_OFF = 3;
@@ -121,6 +123,7 @@ function parseArgs() {
   let server = "ws://localhost:4001/ws";
   let room = "";
   let name = process.env.USER || "cli-user";
+  let theme: ThemeName | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -130,6 +133,13 @@ function parseArgs() {
       room = args[++i] || room;
     } else if (arg === "--name" || arg === "-n") {
       name = args[++i] || name;
+    } else if (arg === "--theme") {
+      const value = (args[++i] || "").toLowerCase();
+      if (value !== "auto" && value !== "light" && value !== "dark") {
+        console.error(`Invalid --theme value: ${value || "(none)"}. Use auto, light, or dark.`);
+        process.exit(1);
+      }
+      theme = value;
     } else if (arg === "--help" || arg === "-h") {
       console.log(`
 hay-cli - Connect to a hay room from your terminal
@@ -141,30 +151,50 @@ Options:
   -s, --server <url>   WebSocket server URL (default: ws://localhost:4001/ws)
   -r, --room <name>    Room name (required)
   -n, --name <name>    Display name (default: $USER)
+  --theme <mode>       Bar theme: auto (default; matches the terminal background),
+                       light, or dark. Persist it in .hop.json:
+                       {"hay-cli": {"theme": "dark"}}
   -h, --help           Show this help
 
 Keyboard shortcuts:
-  Ctrl+G               Detach (session keeps running)
-  Ctrl+Q               Kill session and exit
-  Ctrl+T               Toggle hint bar (saved)
-  ${keyLabelLong}+←/→/↑/↓        Pan viewport (Shift = faster)
-  ${keyLabelLong}+A             Toggle autofit (saved)
+  Ctrl+G               Detach (session keeps running in the background)
+  Ctrl+Q Ctrl+Q        Kill session for ALL participants (press twice to confirm)
+  ${keyLabelLong}+←/→/↑/↓        Pan viewport (add Shift for faster panning)
+  ${keyLabelLong}+H/J/K/L        Pan viewport, vim-style (Shift = faster)
+  ${keyLabelLong}+0             Return to live output (center on cursor)
+  ${keyLabelLong}+A             Toggle autofit of remote size to window (saved)
   ${keyLabelLong}+B             Toggle status bar (saved)
   ${keyLabelLong}+M             Toggle mouse capture (saved)
   ${keyLabelLong}+C             Take/release exclusive control
-  ${keyLabelLong}+F             Search scrollback (Enter: next, Esc: exit)
+  ${keyLabelLong}+F             Search scrollback (Enter/↓ next, ↑ prev, Esc close)
+  ${keyLabelLong}+T             Toggle hint bar (saved)
+  ${keyLabelLong}+\\             Send the next key literally to the remote terminal
+                       (lets reserved keys like Ctrl+Q/G reach remote programs)
+
+${keyLabelLong}+<key> shortcuts arrive as ESC-prefixed keys; on non-macOS terminals
+(and macOS terminals without "Option as Meta") enable option/alt-as-meta or
+ESC-prefix in your terminal settings for them to work.
+
+Sessions persist on the server when you detach or the client exits;
+reattach with: hay -r <room>. Only Ctrl+Q (twice) ends the session itself.
 
 Examples:
   hay -r my-room
   hay -r my-room -n alice -s ws://example.com/ws
 `);
       process.exit(0);
+    } else if (arg.startsWith("-")) {
+      console.error(`Unknown option: ${arg}. Run hay --help`);
+      process.exit(1);
     } else if (!room) {
       room = arg;
+    } else {
+      console.error(`Unexpected argument: ${arg} (room is already '${room}'). Run hay --help`);
+      process.exit(1);
     }
   }
 
-  return { server, room, name };
+  return { server, room, name, theme };
 }
 
 const config = parseArgs();
@@ -180,6 +210,12 @@ let liveCwd: string | null = null;
 
 const DETACH_EXIT_CODE = 10;
 const KILL_EXIT_CODE = 11;
+// Ctrl+Q while the server is unreachable: nothing was killed, so exit on a
+// distinct code instead of pretending the session ended.
+const KILL_UNREACHABLE_EXIT_CODE = 12;
+const KILL_CONFIRM_MS = 2000;
+// Give up if the very first connection never succeeds after this many attempts.
+const MAX_NEVER_CONNECTED_ATTEMPTS = 5;
 const TYPING_IDLE_MS = 1200;
 const NOTICE_MS = 3500;
 const HOP_DAEMON_POLL_MS = 5000;
@@ -217,12 +253,19 @@ let daemonPollTimer: NodeJS.Timeout | null = null;
 let exitCode = 0;
 let exitMessage: string | null = null;
 let shortcutsEnabledAt = 0;
-let persistenceNoticeShown = false;
+let attachNoticeShown = false;
+let pendingAttachNotice = false;
+let everConnected = false;
+let lastWsError: string | null = null;
+let killArmedAt = 0; // Ctrl+Q pressed once; second press before this kills
+let killRequested = false; // we sent kill_session ourselves
+let literalNext = false; // Opt+\ armed: forward the next key verbatim
 
 let collabMode = true;
 let controllerId: string | null = null;
 let presence: PresenceClient[] = [];
-let notice: { message: string; expiresAt: number } | null = null;
+type NoticeKind = "info" | "ok" | "warn";
+let notice: { message: string; kind: NoticeKind; expiresAt: number } | null = null;
 
 let syncSize = true;
 let mouseCapture = false;
@@ -247,6 +290,7 @@ const SELECTION_SCROLL_SPEED = 1;
 let searchMode = false;
 let searchQuery = "";
 let searchMatches: Array<{ row: number; col: number }> = [];
+let searchMatchesByRow = new Map<number, number[]>(); // row → match start cols, for O(1) render lookups
 let searchIndex = -1;
 const SEARCH_MAX_MATCHES = 2000;
 
@@ -266,6 +310,99 @@ let renderScheduled = false;
 let lastRenderCols = 0;
 let lastRenderRows = 0;
 let lastRenderedLines: string[] = []; // previous frame's lines, for dirty-line diffing
+
+// ---- Bar theme -------------------------------------------------------------
+// The bars adapt to the terminal: "auto" (default) resolves light/dark from the
+// terminal's reported background (OSC 11 query, with $COLORFGBG as an immediate
+// guess until the reply arrives); "light"/"dark" pin a palette. Configure with
+// --theme or {"hay-cli": {"theme": "dark"}} in .hop.json. Colors are truecolor
+// when $COLORTERM advertises it, with 256-color fallbacks otherwise.
+type BarColor = { rgb: [number, number, number]; c256: number };
+type BarPalette = {
+  statusBg: BarColor; // status line surface
+  hintBg: BarColor; // hint line surface (one step fainter, for hierarchy)
+  fg: BarColor;
+  dim: BarColor;
+  accent: BarColor;
+  accentFg: BarColor; // text on accent (the session chip)
+  ok: BarColor;
+  warn: BarColor;
+  err: BarColor;
+};
+
+const LIGHT_PALETTE: BarPalette = {
+  statusBg: { rgb: [233, 233, 237], c256: 254 },
+  hintBg: { rgb: [242, 242, 247], c256: 255 },
+  fg: { rgb: [29, 29, 31], c256: 234 },
+  dim: { rgb: [110, 110, 115], c256: 242 },
+  accent: { rgb: [124, 58, 237], c256: 93 },
+  accentFg: { rgb: [255, 255, 255], c256: 15 },
+  ok: { rgb: [26, 127, 55], c256: 28 },
+  warn: { rgb: [180, 83, 9], c256: 130 },
+  err: { rgb: [207, 34, 46], c256: 160 }
+};
+
+const DARK_PALETTE: BarPalette = {
+  statusBg: { rgb: [42, 42, 46], c256: 236 },
+  hintBg: { rgb: [35, 35, 39], c256: 235 },
+  fg: { rgb: [230, 230, 233], c256: 252 },
+  dim: { rgb: [147, 147, 155], c256: 245 },
+  accent: { rgb: [167, 139, 250], c256: 141 },
+  accentFg: { rgb: [29, 29, 31], c256: 234 },
+  ok: { rgb: [63, 185, 80], c256: 71 },
+  warn: { rgb: [210, 153, 34], c256: 178 },
+  err: { rgb: [248, 81, 73], c256: 203 }
+};
+
+const supportsTruecolor = /truecolor|24bit/i.test(process.env.COLORTERM || "");
+const fgAnsi = (color: BarColor) =>
+  supportsTruecolor ? `\x1b[38;2;${color.rgb.join(";")}m` : `\x1b[38;5;${color.c256}m`;
+const bgAnsi = (color: BarColor) =>
+  supportsTruecolor ? `\x1b[48;2;${color.rgb.join(";")}m` : `\x1b[48;5;${color.c256}m`;
+
+const makeBarStyles = (p: BarPalette) => ({
+  statusBg: bgAnsi(p.statusBg),
+  hintBg: bgAnsi(p.hintBg),
+  fg: fgAnsi(p.fg),
+  dim: fgAnsi(p.dim),
+  accent: fgAnsi(p.accent),
+  ok: fgAnsi(p.ok),
+  warn: fgAnsi(p.warn),
+  err: fgAnsi(p.err),
+  bold: "\x1b[1m",
+  // Restore default bar text after a bold/colored token (keeps the bar bg).
+  resetFg: `\x1b[22m${fgAnsi(p.fg)}`,
+  // Session chip: accent pill; callers restore statusBg+fg afterwards.
+  chip: `${bgAnsi(p.accent)}${fgAnsi(p.accentFg)}\x1b[1m`,
+  reconnect: `\x1b[1m${fgAnsi(p.warn)}`
+});
+
+let BAR = makeBarStyles(LIGHT_PALETTE);
+const applyResolvedTheme = (resolved: "light" | "dark") => {
+  BAR = makeBarStyles(resolved === "dark" ? DARK_PALETTE : LIGHT_PALETTE);
+  if (uiInitialized) {
+    lastRenderedLines = [];
+    scheduleRender();
+  }
+};
+
+// $COLORFGBG looks like "15;0" (fg;bg) — bg 0-6 and 8 mean a dark background.
+const guessThemeFromEnv = (): "light" | "dark" | null => {
+  const raw = process.env.COLORFGBG;
+  if (!raw) return null;
+  const bg = Number(raw.split(";").pop());
+  if (!Number.isFinite(bg)) return null;
+  return bg <= 6 || bg === 8 ? "dark" : "light";
+};
+
+const themePref: ThemeName = config.theme ?? configFile.theme ?? "auto";
+let themeQueryDeadline = 0; // OSC 11 reply capture window (auto detection)
+let themeQueryAsked = false;
+if (themePref === "light" || themePref === "dark") {
+  applyResolvedTheme(themePref);
+} else {
+  applyResolvedTheme(guessThemeFromEnv() ?? "light");
+}
 
 const hopHomeDir = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
 const hopTunnelStateFile = path.join(hopHomeDir, ".tunnel-state");
@@ -314,7 +451,7 @@ const getLocalMetrics = () => {
   const showBottomBar = showStatusBar && rows >= 2;
   // The persistent hint/controls line is subordinate to the status bar, so Opt+B
   // clears the whole bottom chrome (both lines), not just the status line. A
-  // transient notice still flashes even with the status bar hidden; Ctrl+T still
+  // transient notice still flashes even with the status bar hidden; Opt+T still
   // toggles just the hint line while the status bar is shown. The reconnect
   // banner forces the line on regardless, so a dropped connection is never silent.
   const reconnecting = !connected && reconnectAttempt > 0;
@@ -339,7 +476,7 @@ let remoteRows = Math.max(1, localMetrics.viewportRows);
 const terminal = new Terminal({
   cols: remoteCols,
   rows: remoteRows,
-  scrollback: 2000,
+  scrollback: 5000,
   allowProposedApi: true
 });
 
@@ -462,7 +599,8 @@ const copySelectionToClipboard = () => {
   // OSC 52: set clipboard. Base64-encode the text.
   const encoded = Buffer.from(text, "utf8").toString("base64");
   process.stdout.write(`\x1b]52;c;${encoded}\x07`);
-  pushNotice(`Copied ${text.split("\n").length} line(s)`);
+  // Hedged wording: OSC 52 is fire-and-forget, the terminal may not support it.
+  pushNotice(`Sent ${text.split("\n").length} line(s) to clipboard (OSC 52)`, "ok");
 };
 
 const clearSelection = () => {
@@ -738,14 +876,23 @@ const scheduleRender = () => {
 
 // ── Scrollback search ──
 
-const isCellInSearchMatch = (row: number, col: number): boolean => {
-  const m = searchMatches[searchIndex];
-  if (!m || row !== m.row) return false;
-  return col >= m.col && col < m.col + searchQuery.length;
+// "active" = the current match (bright), "match" = any other match (dim).
+const getSearchMatchKind = (row: number, col: number): "active" | "match" | null => {
+  if (searchMatches.length === 0) return null;
+  const startCols = searchMatchesByRow.get(row);
+  if (!startCols) return null;
+  for (const start of startCols) {
+    if (col >= start && col < start + searchQuery.length) {
+      const active = searchMatches[searchIndex];
+      return active && active.row === row && active.col === start ? "active" : "match";
+    }
+  }
+  return null;
 };
 
 const computeSearchMatches = () => {
   searchMatches = [];
+  searchMatchesByRow = new Map();
   searchIndex = -1;
   if (!searchQuery) return;
   const buffer = terminal.buffer.active;
@@ -759,6 +906,9 @@ const computeSearchMatches = () => {
       const idx = text.indexOf(needle, from);
       if (idx === -1) break;
       searchMatches.push({ row, col: idx });
+      const rowCols = searchMatchesByRow.get(row);
+      if (rowCols) rowCols.push(idx);
+      else searchMatchesByRow.set(row, [idx]);
       from = idx + needle.length;
     }
   }
@@ -779,6 +929,7 @@ const enterSearch = () => {
   searchMode = true;
   searchQuery = "";
   searchMatches = [];
+  searchMatchesByRow = new Map();
   searchIndex = -1;
   scheduleRender();
 };
@@ -786,16 +937,32 @@ const enterSearch = () => {
 const exitSearch = () => {
   searchMode = false;
   searchMatches = [];
+  searchMatchesByRow = new Map();
   searchIndex = -1;
+  // Keep the scrollback position (less/tmux convention) but anchor it so output
+  // doesn't drag it, and point the way back to the live view.
+  if (!followOutput) {
+    updateScrollAnchor();
+    pushNotice(`${keyLabelShort}+0 to return to live output`);
+  }
   scheduleRender();
 };
 
 // Handle a stdin chunk while in search mode. Consumes the input (never forwarded
-// to the remote): Esc exits, Enter jumps to the next match, Backspace edits, and
-// printable characters extend the query (which live-jumps to the first match).
+// to the remote): Esc exits, Enter/↓ jumps to the next match, ↑ to the previous,
+// Backspace edits, and printable characters extend the query (which live-jumps
+// to the first match).
 const handleSearchInput = (input: string) => {
   if (input === "\x1b") { exitSearch(); return; }
-  // Ignore escape sequences (arrows, alt-combos) so their bytes don't pollute the query.
+  if (input === "\x1b[A" || input === "\x1bOA") {
+    if (searchMatches.length > 0) jumpToMatch(searchIndex - 1);
+    return;
+  }
+  if (input === "\x1b[B" || input === "\x1bOB") {
+    if (searchMatches.length > 0) jumpToMatch(searchIndex + 1);
+    return;
+  }
+  // Ignore other escape sequences (alt-combos etc.) so their bytes don't pollute the query.
   if (input.startsWith("\x1b") && input.length > 1) { return; }
   if (input === "\r" || input === "\n") {
     if (searchMatches.length > 0) jumpToMatch(searchIndex + 1);
@@ -885,8 +1052,8 @@ terminal.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
   return false;
 });
 
-const pushNotice = (message: string) => {
-  notice = { message, expiresAt: Date.now() + NOTICE_MS };
+const pushNotice = (message: string, kind: NoticeKind = "info") => {
+  notice = { message, kind, expiresAt: Date.now() + NOTICE_MS };
   if (noticeTimer) {
     clearTimeout(noticeTimer);
   }
@@ -959,7 +1126,7 @@ const getUrl = () => {
   const separator = config.server.includes("?") ? "&" : "?";
   return `${config.server}${separator}room=${encodeURIComponent(config.room)}&name=${encodeURIComponent(
     config.name
-  )}&cols=${localMetrics.viewportCols}&rows=${localMetrics.viewportRows}`;
+  )}&cols=${Math.max(2, localMetrics.viewportCols)}&rows=${Math.max(2, localMetrics.viewportRows)}`;
 };
 
 const isPidAlive = (pid: number) => {
@@ -1064,7 +1231,9 @@ const applySyncSize = () => {
   const needsResize = cols !== remoteCols || rows !== remoteRows;
   applyRemoteSize(cols, rows);
   if (needsResize) {
-    sendMessage({ type: "resize", cols, rows });
+    // Protocol rejects resize below 2x2 — clamp so tiny terminals don't send
+    // messages the server refuses.
+    sendMessage({ type: "resize", cols: Math.max(2, cols), rows: Math.max(2, rows) });
   }
 };
 
@@ -1202,7 +1371,7 @@ type BarSegment = {
   dropPriority?: number;
 };
 
-const joinBarSegments = (segments: BarSegment[]) => segments.map((segment) => segment.text).join(" | ");
+const joinBarSegments = (segments: BarSegment[]) => segments.map((segment) => segment.text).join(" · ");
 
 const fitBarSegments = (left: string, segments: BarSegment[], cols: number) => {
   const active = segments.filter((segment) => segment.text);
@@ -1256,39 +1425,32 @@ const formatCwd = (cwdPath: string | null) => {
   return cwdPath;
 };
 
-const BAR_TOP_BG = "\x1b[48;5;254m";
-const BAR_BOTTOM_BG = "\x1b[48;5;254m";
-const BAR_FG = "\x1b[38;5;234m";
-const BAR_ACCENT = "\x1b[38;5;93m";
-const BAR_DIM = "\x1b[38;5;245m";
-const BAR_BOLD = "\x1b[1m";
-const BAR_RESET_FG = "\x1b[22m\x1b[38;5;234m";
-const BAR_RECONNECT = "\x1b[1m\x1b[38;5;130m"; // bold amber — reconnect banner
+const renderBar = (text: string, variant: "status" | "hint") =>
+  `${variant === "status" ? BAR.statusBg : BAR.hintBg}${BAR.fg}${text}\x1b[0m`;
 
-const renderBar = (text: string, variant: "top" | "bottom") =>
-  `${variant === "top" ? BAR_TOP_BG : BAR_BOTTOM_BG}${BAR_FG}${text}\x1b[0m`;
-
-const decorateTop = (text: string, secondaryTokens: string[], boldTokens: string[]) => {
+// Status line decoration: semantic state dot, session chip, dim separators and
+// secondary tokens. Token replacement is best-effort — if composeBar truncated
+// a token away, the replace simply doesn't match.
+const decorateTop = (text: string, secondaryTokens: string[], chipToken: string, dotAnsi: string) => {
   let output = text;
-  output = output.replace("●", `${BAR_ACCENT}●${BAR_RESET_FG}`);
-  output = output.replace(/ \| /g, ` ${BAR_DIM}|${BAR_RESET_FG} `);
-  for (const token of boldTokens) {
-    if (!token) continue;
-    output = output.replace(token, `${BAR_BOLD}${token}${BAR_RESET_FG}`);
+  output = output.replace("●", `${dotAnsi}●${BAR.resetFg}`);
+  if (chipToken) {
+    output = output.replace(chipToken, `${BAR.chip}${chipToken}\x1b[22m${BAR.statusBg}${BAR.fg}`);
   }
+  output = output.replace(/ · /g, ` ${BAR.dim}·${BAR.resetFg} `);
   for (const token of secondaryTokens) {
     if (!token) continue;
-    output = output.replace(token, `${BAR_DIM}${token}${BAR_RESET_FG}`);
+    output = output.replace(token, `${BAR.dim}${token}${BAR.resetFg}`);
   }
   return output;
 };
 
 const decorateBottom = (text: string, secondaryTokens: string[]) => {
   let output = text;
-  output = output.replace(/ \| /g, ` ${BAR_DIM}|${BAR_RESET_FG} `);
+  output = output.replace(/ · /g, ` ${BAR.dim}·${BAR.resetFg} `);
   for (const token of secondaryTokens) {
     if (!token) continue;
-    output = output.replace(token, `${BAR_DIM}${token}${BAR_RESET_FG}`);
+    output = output.replace(token, `${BAR.dim}${token}${BAR.resetFg}`);
   }
   return output;
 };
@@ -1472,10 +1634,13 @@ const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => 
       continue;
     }
 
-    // Search hit gets a distinct yellow highlight (cursor still wins so it stays
-    // visible on a match).
-    const style = (!isCursorCell && isCellInSearchMatch(bufferRow, remoteCol))
-      ? { key: "search", ansi: "\x1b[43m\x1b[30m" }
+    // Search hits: the current match gets a bright yellow highlight, all other
+    // matches a dim grey one (cursor still wins so it stays visible on a match).
+    const searchKind = !isCursorCell ? getSearchMatchKind(bufferRow, remoteCol) : null;
+    const style = searchKind
+      ? (searchKind === "active"
+        ? { key: "search-active", ansi: "\x1b[0m\x1b[43m\x1b[30m" }
+        : { key: "search-match", ansi: "\x1b[0m\x1b[48;5;240m\x1b[37m" })
       : styleKeyForCell(
         cellData as ReturnType<typeof terminal.buffer.active.getNullCell>,
         isCursorCell || isSelected
@@ -1523,26 +1688,45 @@ const render = () => {
   const hopDaemonLabel = buildHopDaemonLabel();
 
   const cwdLabel = formatCwd(liveCwd);
-  const cwdText = cwdLabel ? ` · ${cwdLabel}` : "";
-  const bottomLeft = `● ${sessionLabel}${cwdText}`;
-  const autofitLabel = syncSize ? "fit" : "manual";
-  const persistenceLabel = "persists";
+  // Session name renders as an accent chip at the left edge; the semantic state
+  // dot sits alone in the right corner (clear of the solid chip): green
+  // connected · amber connecting/reconnecting · red disconnected · accent
+  // (purple) when control is locked.
+  const dotAnsi =
+    status === "connected"
+      ? (!collabMode ? BAR.accent : BAR.ok)
+      : status === "disconnected"
+        ? BAR.err
+        : BAR.warn;
+  const chipToken = ` ${sessionLabel} `;
+  // Chip is flush with the left edge, tab-style (its padding is inside the pill).
+  const bottomLeft = `${chipToken}${cwdLabel ? ` ${cwdLabel}` : ""}`;
+  // Only surface the non-default state (GUI convention): autofit is on by default.
+  const autofitLabel = syncSize ? "" : "manual";
+  // Viewport detached from live output: show where we are in the scrollback and
+  // how to get back. No dropPriority — it must survive narrow widths.
+  const bufferLineCount = terminal.buffer.active.length;
+  const scrollLabel = !followOutput
+    ? `scroll ${Math.min(viewY + localMetrics.viewportRows, bufferLineCount)}/${bufferLineCount} · ${keyLabelShort}+0 live`
+    : "";
   // Show peer names (with a * typing marker) instead of just a count, and a
   // control-lock indicator when collaborative typing is off — parity with web.
   const peerNames = others.map((c) => (c.typing ? `${c.name}*` : c.name)).join(", ");
   const peerLabel = others.length ? `peers: ${peerNames}` : "";
   const controlLabel = (!collabMode && controllerName) ? `locked: ${controllerName}` : "";
+  const candidateSegments: Array<BarSegment | null> = [
+    scrollLabel ? { text: scrollLabel } : null,
+    statusLabel ? { text: statusLabel } : null,
+    hopDaemonLabel ? { text: hopDaemonLabel, secondary: true, dropPriority: 1 } : null,
+    !statusLabel && shareUrl ? { text: shareUrl, secondary: true, dropPriority: 0 } : null,
+    autofitLabel ? { text: autofitLabel, secondary: true, dropPriority: 3 } : null,
+    peerLabel ? { text: peerLabel, secondary: true, dropPriority: 4 } : null,
+    controlLabel ? { text: controlLabel, secondary: true, dropPriority: 6 } : null,
+    { text: "● " } // state dot, rightmost; no dropPriority — always visible
+  ];
   const rightSegments = fitBarSegments(
     bottomLeft,
-    [
-      statusLabel ? { text: statusLabel } : null,
-      hopDaemonLabel ? { text: hopDaemonLabel, secondary: true, dropPriority: 1 } : null,
-      !statusLabel && shareUrl ? { text: shareUrl, secondary: true, dropPriority: 0 } : null,
-      { text: persistenceLabel, secondary: true, dropPriority: 2 },
-      { text: autofitLabel, secondary: true, dropPriority: 3 },
-      peerLabel ? { text: peerLabel, secondary: true, dropPriority: 4 } : null,
-      controlLabel ? { text: controlLabel, secondary: true, dropPriority: 6 } : null
-    ].filter((segment): segment is BarSegment => !!segment),
+    candidateSegments.filter((segment): segment is BarSegment => !!segment),
     localMetrics.cols
   );
   const rightPriority = rightSegments
@@ -1553,34 +1737,60 @@ const render = () => {
     rightPriority
   );
   const topPriority = rightSegments
-    .filter((segment) => segment.text === hopDaemonLabel || segment.text === shareUrl || segment.text === persistenceLabel)
-    .map((segment) => segment.text);
+    .filter((segment) => segment.text === hopDaemonLabel || segment.text === shareUrl)
+    .map((segment) => segment.text)
+    .concat(cwdLabel ? [cwdLabel] : []); // cwd is secondary next to the chip
   const bottomPrimary = renderBar(
-    decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), topPriority, [sessionLabel]),
-    "bottom"
+    decorateTop(composeBar(bottomLeft, rightPrimary, localMetrics.cols), topPriority, chipToken, dotAnsi),
+    "status"
   );
 
+  // Notices render as toasts: ✓ confirmations, ! warnings, accent edge for info.
   const noticeText = notice && notice.expiresAt > Date.now()
-    ? ` ${notice.message} `
+    ? (notice.kind === "ok"
+        ? ` ${BAR.ok}✓ ${BAR.resetFg}${notice.message} `
+        : notice.kind === "warn"
+          ? ` ${BAR.warn}${BAR.bold}! ${BAR.resetFg}${notice.message} `
+          : ` ${BAR.accent}▎${BAR.resetFg}${notice.message} `)
     : "";
-  const controls = `${keyLabelShort}: ←→↑↓ pan, 0 center, A fit, B status ${showStatusBar ? "on" : "off"}, M mouse ${mouseCapture ? "on" : "off"}, F find, C control | Ctrl: T hints, G detach, Q kill`;
+  // Keycap-style hints: keys at full strength, labels dim. Exit hints
+  // (detach/kill) lead so right-edge truncation never drops the way out.
+  const kCtrl = (k: string) => (isMac ? `⌃${k}` : `Ctrl+${k}`);
+  const kOpt = (k: string) => (isMac ? `⌥${k}` : `Alt+${k}`);
+  const hintPairs: Array<[string, string]> = [
+    [kCtrl("G"), "detach"],
+    [kCtrl("Q"), "kill"],
+    [kOpt("←→↑↓"), "pan"],
+    [kOpt("0"), "live"],
+    [kOpt("A"), "autofit"],
+    [kOpt("B"), `status ${showStatusBar ? "on" : "off"}`],
+    [kOpt("M"), `mouse ${mouseCapture ? "on" : "off"}`],
+    [kOpt("F"), "find"],
+    [kOpt("C"), "control"],
+    [kOpt("T"), "hints"],
+    [kOpt("\\"), "literal"]
+  ];
+  const controls = ` ${hintPairs.map(([key, label]) => `${BAR.fg}${key} ${BAR.dim}${label}`).join(" · ")}`;
   const reconnecting = !connected && reconnectAttempt > 0;
   let hintInner: string;
   if (searchMode) {
     const count = searchQuery
-      ? (searchMatches.length > 0 ? `${searchIndex + 1}/${searchMatches.length}` : "no matches")
+      ? (searchMatches.length > 0
+          ? `${searchIndex + 1}/${searchMatches.length}`
+          : `${BAR.warn}no matches${BAR.dim}`)
       : "";
-    hintInner = `${BAR_ACCENT} /${searchQuery}${BAR_RESET_FG}${BAR_DIM}  ${count} · Enter next · Esc exit${BAR_RESET_FG}`;
+    hintInner = `${BAR.accent} /${searchQuery}${BAR.resetFg}${BAR.dim}  ${count} · Enter/↓ next · ↑ prev · Esc close${BAR.resetFg}`;
   } else if (reconnecting) {
     const secsLeft = nextReconnectAt > Date.now() ? Math.ceil((nextReconnectAt - Date.now()) / 1000) : 0;
-    const detail = secsLeft > 0 ? `next attempt in ${secsLeft}s` : "connecting…";
-    hintInner = `${BAR_RECONNECT} ⟳ Reconnecting — ${detail} · Ctrl+Q to quit ${BAR_RESET_FG}`;
+    const detail = secsLeft > 0 ? `retry in ${secsLeft}s` : "connecting…";
+    const reason = lastWsError ? ` (${lastWsError})` : "";
+    hintInner = `${BAR.reconnect} ⟳ Reconnecting${reason} — ${detail} · attempt ${reconnectAttempt} · ${kCtrl("G")} detach ${BAR.resetFg}`;
   } else {
-    hintInner = noticeText || `${BAR_DIM}${controls}${BAR_RESET_FG}`;
+    hintInner = noticeText || controls;
   }
   const hintLine = renderBar(
     composeBar(hintInner, "", localMetrics.cols),
-    "bottom"
+    "hint"
   );
 
   const buffer = terminal.buffer.active;
@@ -1622,6 +1832,17 @@ const render = () => {
 const scheduleReconnect = () => {
   if (!shouldReconnect) return;
 
+  // Never managed to connect at all: retrying forever just hides the problem.
+  if (!everConnected && reconnectAttempt >= MAX_NEVER_CONNECTED_ATTEMPTS) {
+    shouldReconnect = false;
+    exitMessage = `Could not connect to ${config.server} after ${reconnectAttempt + 1} attempts${
+      lastWsError ? ` (${lastWsError})` : ""
+    }. Is the server running?`;
+    exitCode = 1;
+    cleanupAndExit();
+    return;
+  }
+
   const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000);
   reconnectAttempt += 1;
   nextReconnectAt = Date.now() + delay;
@@ -1661,6 +1882,8 @@ const connect = () => {
 
   ws.on("open", () => {
     connected = true;
+    everConnected = true;
+    lastWsError = null;
     remoteMouseModes.clear();
     remoteAlternateScreen = false;
     remoteApplicationCursor = false;
@@ -1676,12 +1899,15 @@ const connect = () => {
       process.stdin.setRawMode(true);
     }
     process.stdin.resume();
+    // Auto theme: ask the local terminal for its background color (OSC 11).
+    // The reply arrives on stdin and is captured (and stripped) there.
+    if (themePref === "auto" && process.stdout.isTTY && !themeQueryAsked) {
+      themeQueryAsked = true;
+      themeQueryDeadline = Date.now() + 2000;
+      process.stdout.write("\x1b]11;?\x1b\\");
+    }
     if (syncSize) {
       applySyncSize();
-    }
-    if (!persistenceNoticeShown) {
-      persistenceNoticeShown = true;
-      pushNotice("Session persists if Hop exits; Ctrl+Q kills it");
     }
     scheduleRender();
   });
@@ -1695,10 +1921,28 @@ const connect = () => {
         clientId = message.clientId;
         collabMode = message.collabMode;
         controllerId = message.controllerId;
+        if (!attachNoticeShown) {
+          attachNoticeShown = true;
+          if (message.created === true) {
+            // Surface accidental room creation (e.g. a typo'd room name).
+            pushNotice(`Created new session '${sessionLabel}' — persists until killed (Ctrl+Q twice)`);
+          } else if (message.created === false) {
+            // Wait for the presence roster (sent right after hello) for the count.
+            pendingAttachNotice = true;
+          } else {
+            // Older server without the created flag.
+            pushNotice("Session persists if Hop exits; Ctrl+Q (twice) kills it");
+          }
+        }
         scheduleRender();
         break;
       case "presence":
         presence = message.clients;
+        if (pendingAttachNotice) {
+          pendingAttachNotice = false;
+          const count = presence.length;
+          pushNotice(`Attached to '${sessionLabel}' (${count} participant${count === 1 ? "" : "s"})`, "ok");
+        }
         scheduleRender();
         break;
       case "cwd_changed":
@@ -1750,17 +1994,51 @@ const connect = () => {
       case "collab":
         collabMode = message.enabled;
         controllerId = message.controllerId;
-        pushNotice(message.enabled ? "Collaborative typing enabled" : "Control locked");
+        if (message.enabled) {
+          pushNotice("Control released — everyone can type", "ok");
+        } else if (controllerId === clientId) {
+          pushNotice(`You have exclusive control (${keyLabelShort}+C to release)`, "ok");
+        } else {
+          const takerName = presence.find((c) => c.id === controllerId)?.name || "another user";
+          pushNotice(`${takerName} took control — ${keyLabelShort}+C to take it back`, "warn");
+        }
         break;
-      case "input_rejected":
-        pushNotice(message.reason);
+      case "input_rejected": {
+        let reasonText = message.reason;
+        if (/control is locked/i.test(message.reason)) {
+          const lockerName = (controllerId && controllerId !== clientId
+            ? presence.find((c) => c.id === controllerId)?.name
+            : null) || "another user";
+          reasonText = `Control locked by ${lockerName} — ${keyLabelShort}+C to take control`;
+        }
+        // Rapid rejected keystrokes shouldn't restart the flash on every press.
+        if (!(notice && notice.message === reasonText && notice.expiresAt > Date.now())) {
+          pushNotice(reasonText, "warn");
+        }
         break;
+      }
       case "active_size":
         applyRemoteSize(message.cols, message.rows);
         break;
-      case "session_ended":
+      case "session_ended": {
         shouldReconnect = false;
-        exitMessage = message.message;
+        // Attribute the kill unless we requested it ourselves; surface a
+        // non-zero exit code / signal so crashes aren't indistinguishable
+        // from clean exits.
+        let endText = message.by && !killRequested
+          ? `Session terminated by ${message.by}`
+          : message.message;
+        const endDetails: string[] = [];
+        if (typeof message.exitCode === "number" && message.exitCode !== 0) {
+          endDetails.push(`exit ${message.exitCode}`);
+        }
+        if (message.signal) {
+          endDetails.push(message.signal);
+        }
+        if (endDetails.length > 0) {
+          endText = `${endText} (${endDetails.join(", ")})`;
+        }
+        exitMessage = endText;
         exitCode = 0;
         if (ws?.readyState === WebSocket.OPEN) {
           ws.close();
@@ -1768,9 +2046,10 @@ const connect = () => {
           cleanupAndExit();
         }
         break;
+      }
       case "session_renamed":
         sessionLabel = message.displayName;
-        pushNotice(`Session renamed to ${message.displayName}`);
+        pushNotice(`Session renamed to ${message.displayName}`, "ok");
         scheduleRender();
         break;
       case "error":
@@ -1792,8 +2071,10 @@ const connect = () => {
   });
 
   ws.on("error", (err) => {
+    // Remember why the connection drops so the reconnect banner can say so.
+    lastWsError = err.message;
     if (!shouldReconnect) {
-      pushNotice(`Connection error: ${err.message}`);
+      pushNotice(`Connection error: ${err.message}`, "warn");
     }
   });
 };
@@ -1818,7 +2099,7 @@ const cleanupAndExit = () => {
   if (exitMessage) {
     console.log(`[hay] ${exitMessage}`);
   } else if (exitCode === DETACH_EXIT_CODE) {
-    console.log("[hay] Detaching (session continues in background)...");
+    console.log(`[hay] Detached — session continues in background. Reattach with: hay -r ${config.room}`);
   } else if (exitCode === KILL_EXIT_CODE) {
     console.log("[hay] Session terminated.");
   } else {
@@ -1841,22 +2122,47 @@ const handleLocalShortcut = (input: string) => {
     clearSelection();
   }
 
+  // Opt+\ arms literal mode (consumed in the stdin handler): the next key is
+  // forwarded verbatim so reserved keys (Ctrl+Q/G, Opt+…) can reach remote
+  // programs.
+  if (input === "\x1b\\" || (isMac && input === "«")) {
+    literalNext = true;
+    pushNotice("Next key will be sent to the remote terminal");
+    return true;
+  }
+
   // Anything other than an OPEN socket (CONNECTING included) means we can't
   // round-trip through the server, so the Ctrl+Q/Ctrl+G handlers below exit
   // locally rather than poisoning state and waiting on a close that never comes.
   const ctrlShortcutsReady = Date.now() >= shortcutsEnabledAt;
 
-  // Ctrl+Q to kill session
+  // During the brief post-connect grace window, swallow the reserved Ctrl keys
+  // instead of leaking them to the remote shell.
+  if (!ctrlShortcutsReady && (input === "\x11" || input === "\x07")) {
+    return true;
+  }
+
+  // Ctrl+Q (twice within 2s) to kill the session for everyone
   if (ctrlShortcutsReady && input === "\x11") {
+    if (Date.now() > killArmedAt) {
+      killArmedAt = Date.now() + KILL_CONFIRM_MS;
+      pushNotice("Press Ctrl+Q again to kill the session for ALL participants (Ctrl+G detaches)", "warn");
+      return true;
+    }
+    killArmedAt = 0;
     shouldReconnect = false;
-    exitCode = KILL_EXIT_CODE;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
     if (ws?.readyState === WebSocket.OPEN) {
+      killRequested = true;
+      exitCode = KILL_EXIT_CODE;
       sendMessage({ type: "kill_session" });
       setTimeout(() => ws?.close(), 100);
     } else {
+      // Nothing was killed — don't claim the session ended.
+      exitCode = KILL_UNREACHABLE_EXIT_CODE;
+      exitMessage = `Could not reach server — the session may still be running. Reattach with: hay -r ${config.room}`;
       try { ws?.close(); } catch (e) { /* connecting socket */ }
       cleanupAndExit();
     }
@@ -1879,45 +2185,37 @@ const handleLocalShortcut = (input: string) => {
     return true;
   }
 
-  // Ctrl+T toggles hint bar
-  if (ctrlShortcutsReady && input === "\x14") {
-    showHints = !showHints;
-    persistConfig({ showHints });
-    pushNotice(`Hints ${showHints ? "on" : "off"}`);
-    scheduleRender();
-    return true;
-  }
-
   const altKey = (key: string) => input === `\x1b${key}`;
   const altArrow = (seq: string) => input === seq;
   // Option+letter shortcuts only on macOS — elsewhere these glyphs (å, µ, º…)
   // are real AltGr characters and the ESC-prefixed altKey forms cover the keys.
   const optionChar = (char: string) => isMac && input === char;
 
-  if (altKey("h") || altKey("H") || altArrow("\x1b[1;3D") || altArrow("\x1b\x1b[D")) {
-    const step = altKey("H") ? PAN_FAST_STEP : PAN_STEP;
+  // CSI 1;3X = Alt+Arrow, CSI 1;4X = Shift+Alt+Arrow (fast pan).
+  if (altKey("h") || altKey("H") || altArrow("\x1b[1;3D") || altArrow("\x1b[1;4D") || altArrow("\x1b\x1b[D")) {
+    const step = altKey("H") || altArrow("\x1b[1;4D") ? PAN_FAST_STEP : PAN_STEP;
     viewX -= step;
     clampView();
     scheduleRender();
     return true;
   }
-  if (altKey("l") || altKey("L") || altArrow("\x1b[1;3C") || altArrow("\x1b\x1b[C")) {
-    const step = altKey("L") ? PAN_FAST_STEP : PAN_STEP;
+  if (altKey("l") || altKey("L") || altArrow("\x1b[1;3C") || altArrow("\x1b[1;4C") || altArrow("\x1b\x1b[C")) {
+    const step = altKey("L") || altArrow("\x1b[1;4C") ? PAN_FAST_STEP : PAN_STEP;
     viewX += step;
     clampView();
     scheduleRender();
     return true;
   }
-  if (altKey("k") || altKey("K") || altArrow("\x1b[1;3A") || altArrow("\x1b\x1b[A")) {
-    const step = altKey("K") ? PAN_FAST_STEP : PAN_STEP;
+  if (altKey("k") || altKey("K") || altArrow("\x1b[1;3A") || altArrow("\x1b[1;4A") || altArrow("\x1b\x1b[A")) {
+    const step = altKey("K") || altArrow("\x1b[1;4A") ? PAN_FAST_STEP : PAN_STEP;
     viewY -= step;
     clampView();
     updateFollowOutputFromViewport();
     scheduleRender();
     return true;
   }
-  if (altKey("j") || altKey("J") || altArrow("\x1b[1;3B") || altArrow("\x1b\x1b[B")) {
-    const step = altKey("J") ? PAN_FAST_STEP : PAN_STEP;
+  if (altKey("j") || altKey("J") || altArrow("\x1b[1;3B") || altArrow("\x1b[1;4B") || altArrow("\x1b\x1b[B")) {
+    const step = altKey("J") || altArrow("\x1b[1;4B") ? PAN_FAST_STEP : PAN_STEP;
     viewY += step;
     clampView();
     updateFollowOutputFromViewport();
@@ -1927,7 +2225,7 @@ const handleLocalShortcut = (input: string) => {
   if (altKey("a") || altKey("A") || optionChar("å")) {
     syncSize = !syncSize;
     persistConfig({ syncSize });
-    pushNotice(`Autofit ${syncSize ? "on" : "off"}`);
+    pushNotice(`Autofit ${syncSize ? "on" : "off"}`, "ok");
     if (syncSize) {
       applySyncSize();
     }
@@ -1936,19 +2234,27 @@ const handleLocalShortcut = (input: string) => {
   if (altKey("b") || altKey("B") || optionChar("∫")) {
     showStatusBar = !showStatusBar;
     persistConfig({ showStatusBar });
-    pushNotice(`Status bar ${showStatusBar ? "on" : "off"}`);
+    pushNotice(`Status bar ${showStatusBar ? "on" : "off"}`, "ok");
     scheduleRender();
     return true;
   }
   if (altKey("m") || altKey("M") || optionChar("µ")) {
     setMouseCapture(!mouseCapture);
     persistConfig({ mouseCapture });
-    pushNotice(`Mouse capture ${mouseCapture ? "on" : "off"}`);
+    pushNotice(`Mouse capture ${mouseCapture ? "on" : "off"}`, "ok");
+    return true;
+  }
+  if (altKey("t") || altKey("T") || optionChar("†")) {
+    showHints = !showHints;
+    persistConfig({ showHints });
+    pushNotice(`Hints ${showHints ? "on" : "off"}`, "ok");
+    scheduleRender();
     return true;
   }
   if (altKey("0") || optionChar("º")) {
     ensureCursorVisible(true);
-    pushNotice("Centered on cursor");
+    pushNotice("Following live output", "ok");
+    scheduleRender();
     return true;
   }
   if (altKey("f") || altKey("F") || optionChar("ƒ")) {
@@ -2031,11 +2337,40 @@ const tokenizeInput = (input: string): string[] => {
 process.stdin.on("data", (data) => {
   let input = pendingInput + data.toString();
   pendingInput = "";
+  // Auto theme: capture the terminal's OSC 11 background reply and keep it out
+  // of the remote stream. The window closes 2s after the query.
+  if (themeQueryDeadline) {
+    if (Date.now() > themeQueryDeadline) {
+      themeQueryDeadline = 0;
+    } else {
+      const reply = input.match(/\x1b\]11;([^\x07\x1b]*)(?:\x07|\x1b\\)/);
+      if (reply) {
+        themeQueryDeadline = 0;
+        input = input.replace(reply[0], "");
+        const color = parseOscColor(reply[1]);
+        if (color) {
+          const luminance = (0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b) / 255;
+          applyResolvedTheme(luminance > 0.55 ? "light" : "dark");
+        }
+      } else {
+        // Reply split across chunks: stash a partial tail. Must be more than a
+        // bare ESC so a real Escape keypress is never delayed.
+        const partial = input.match(/\x1b(?:\](?:1(?:1(?:;[^\x07\x1b]*)?)?)?)?$/);
+        if (partial && partial[0].length > 1) {
+          pendingInput = partial[0];
+          input = input.slice(0, -partial[0].length);
+        }
+      }
+      if (!input) return;
+    }
+  }
   const lastMouseStart = input.lastIndexOf("\x1b[<");
   if (lastMouseStart !== -1) {
     const tail = input.slice(lastMouseStart);
     if (!/[Mm]/.test(tail)) {
-      pendingInput = tail;
+      // Prepend: a stashed OSC-reply tail (above) must stay after the mouse
+      // tail so the original stream order is preserved on the next chunk.
+      pendingInput = tail + pendingInput;
       input = input.slice(0, lastMouseStart);
     }
   }
@@ -2060,16 +2395,22 @@ process.stdin.on("data", (data) => {
     return;
   }
 
-  // Fast path: a single keypress chunk that is a shortcut (the common case).
-  if (handleLocalShortcut(input)) return;
-
-  // Otherwise split into individual key tokens so a batched chunk can have its
-  // shortcut keys handled locally while the rest is forwarded to the shell.
-  const tokens = tokenizeInput(input);
   let remote = "";
-  for (const token of tokens) {
-    if (handleLocalShortcut(token)) continue;
-    remote += token;
+  if (literalNext) {
+    // Opt+\ armed: bypass all local shortcuts and forward this key verbatim.
+    literalNext = false;
+    remote = input;
+  } else {
+    // Fast path: a single keypress chunk that is a shortcut (the common case).
+    if (handleLocalShortcut(input)) return;
+
+    // Otherwise split into individual key tokens so a batched chunk can have its
+    // shortcut keys handled locally while the rest is forwarded to the shell.
+    const tokens = tokenizeInput(input);
+    for (const token of tokens) {
+      if (handleLocalShortcut(token)) continue;
+      remote += token;
+    }
   }
   if (!remote) return;
 

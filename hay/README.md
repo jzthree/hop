@@ -68,22 +68,55 @@ After building:
 node apps/cli/dist/index.js -r my-room -n alice
 ```
 
+### Theming
+
+The status and hint bars adapt to your terminal. By default (`auto`) the CLI
+queries the terminal's background color (OSC 11, with `$COLORFGBG` as an
+immediate fallback) and picks a light or dark palette to match. Colors use
+truecolor when `$COLORTERM` advertises support, with 256-color fallbacks.
+
+Pin a palette per run with `--theme light|dark|auto`, or persist it in
+`.hop.json` (local or `~/.hop.json`):
+
+```json
+{ "hay-cli": { "theme": "dark" } }
+```
+
+The dot at the right edge of the status bar is semantic: green = connected,
+amber = connecting/reconnecting, red = disconnected, purple = control locked.
+
 ### Keyboard Shortcuts
+
+`Opt` means the Option key on macOS and `Alt` elsewhere. Run `hay --help` for
+the authoritative, up-to-date list.
 
 | Key | Action |
 |-----|--------|
-| `←` `→` `↑` `↓` | Pan viewport |
-| `0` | Center on cursor |
-| `A` | Auto-fit viewport to content |
-| `B` | Toggle status bar |
-| `M` | Toggle mouse capture (off by default, so terminal context menus keep working) |
-| `Ctrl+T` | Toggle hints bar |
+| `Opt+←` `Opt+→` `Opt+↑` `Opt+↓` | Pan viewport (add `Shift` for faster panning) |
+| `Opt+H` `Opt+J` `Opt+K` `Opt+L` | Pan viewport, vim-style (`Shift` = faster) |
+| `Opt+0` | Return to live output (center on cursor) |
+| `Opt+A` | Toggle autofit of the remote size to the local window |
+| `Opt+B` | Toggle status bar |
+| `Opt+M` | Toggle mouse capture (off by default, so terminal context menus keep working) |
+| `Opt+F` | Search scrollback (`Enter`/`↓` next, `↑` previous, `Esc` close) |
+| `Opt+C` | Take/release exclusive control |
+| `Opt+T` | Toggle hints bar |
+| `Opt+\` | Send the next key literally to the remote terminal (lets reserved keys like `Ctrl+Q`/`Ctrl+G` reach remote programs) |
 | `Ctrl+G` | Detach from session; the session keeps running |
-| `Ctrl+Q` | Kill session |
+| `Ctrl+Q` `Ctrl+Q` | Kill session for all participants (press twice within 2s to confirm) |
+
+`Opt`/`Alt` letter shortcuts arrive as ESC-prefixed keys: on non-macOS
+terminals (and macOS terminals without "Option as Meta") enable the
+option/alt-as-meta or ESC-prefix setting in your terminal emulator for them to
+work.
 
 Local sessions are persistent by default: they keep running in the Hay host if
-the local CLI detaches or the Hop daemon restarts. Use `Ctrl+Q` to end the
-session itself.
+the local CLI detaches or the Hop daemon restarts. Use `Ctrl+Q` (pressed twice)
+to end the session itself; reattach to a running session with `hay -r <room>`.
+
+Mouse-selection copy uses OSC 52, so it lands in your local clipboard only if
+your terminal emulator supports and allows OSC 52 clipboard writes (iTerm2,
+kitty, WezTerm, recent tmux with `set-clipboard on`, etc.).
 
 When the viewport is at the bottom, the CLI follows new output automatically.
 If you pan upward to inspect scrollback, incoming output no longer forces the
@@ -199,12 +232,13 @@ Client to server:
 Server to client:
 
 ```ts
-{ type: "hello", clientId, roomId, color, collabMode, controllerId }
+{ type: "hello", clientId, roomId, color, collabMode, controllerId, created? }
 { type: "output", data: string }
 { type: "snapshot", data: string }
 { type: "presence", clients: [...] }
 { type: "collab", enabled, controllerId }
 { type: "input_rejected", reason: string }
+{ type: "session_ended", exitCode, signal, message, by? }
 ```
 
 ## Environment Variables

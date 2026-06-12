@@ -124,6 +124,48 @@ describe("Room", () => {
     expect(outputsB.at(-1)?.data).toBe("hello");
   });
 
+  it("marks only the room-creating client's hello with created=true", () => {
+    const manager = new RoomManager(() => new FakePty() as any);
+    const room = manager.getRoom("created", { cols: 80, rows: 24 }, "/tmp");
+    const socketA = new FakeSocket();
+    const socketB = new FakeSocket();
+
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socketA);
+    room.attachClient({ id: "b", name: "Blake", colorIndex: 1, cols: 80, rows: 24 }, socketB);
+
+    expect(findMessages(socketA, "hello").at(0)?.created).toBe(true);
+    expect(findMessages(socketB, "hello").at(0)?.created).toBe(false);
+  });
+
+  it("attributes a kill_session to the killing client in session_ended", () => {
+    const manager = new RoomManager(() => new FakePty() as any);
+    const room = manager.getRoom("killer", { cols: 80, rows: 24 }, "/tmp");
+    const socketA = new FakeSocket();
+    const socketB = new FakeSocket();
+
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socketA);
+    room.attachClient({ id: "b", name: "Blake", colorIndex: 1, cols: 80, rows: 24 }, socketB);
+
+    socketA.emitMessage({ type: "kill_session" });
+
+    const ended = findMessages(socketB, "session_ended").at(0);
+    expect(ended?.message).toBe("Session terminated");
+    expect(ended?.by).toBe("Alex");
+  });
+
+  it("names the message type and field when rejecting an invalid message", () => {
+    const manager = new RoomManager(() => new FakePty() as any);
+    const room = manager.getRoom("invalid", { cols: 80, rows: 24 }, "/tmp");
+    const socket = new FakeSocket();
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socket);
+
+    socket.emitMessage({ type: "resize", cols: 80, rows: 1 });
+
+    const error = findMessages(socket, "error").at(-1);
+    expect(String(error?.message)).toContain("resize");
+    expect(String(error?.message)).toContain("rows");
+  });
+
   it("rejects input when control is locked", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {

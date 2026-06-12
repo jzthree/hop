@@ -81,6 +81,10 @@ const READABLE_PROMPT_PADDING_RE = /^\s+[#$>%]\s*$/;
 const READABLE_PROMPT_PADDING_COMPLEX_RE = /^\s{4,}(?:\([^)\r\n]{0,24}\)\s*)?[^\r\n]{0,220}[#$>%]\s*$/;
 const WAIT_START_MODES = ['latest', 'cursor', 'beginning'];
 const MAX_BUFFER_EVENTS = 2000;
+// Default hop_read_terminal caps when the caller does not specify maxEvents /
+// maxBytes. Pass 0 explicitly to read unlimited buffered output.
+const DEFAULT_READ_MAX_EVENTS = 200;
+const DEFAULT_READ_MAX_BYTES = 65536;
 const STREAM_CONNECT_TIMEOUT_MS = 800;
 const REQUEST_JSON_TIMEOUT_MS = 30000;
 const CREATE_TERMINAL_OUTPUT_WARMUP_MS = 1200;
@@ -122,6 +126,7 @@ const NAMED_KEY_INPUTS = Object.freeze({
   esc: '\x1b',
   escape: '\x1b',
   tab: '\t',
+  shift_tab: '\x1b[Z',
   backspace: '\x7f',
   del: '\x7f',
   delete: '\x1b[3~',
@@ -142,7 +147,19 @@ const NAMED_KEY_INPUTS = Object.freeze({
   ctrl_u: '\x15',
   ctrl_w: '\x17',
   ctrl_a: '\x01',
-  ctrl_e: '\x05'
+  ctrl_e: '\x05',
+  f1: '\x1bOP',
+  f2: '\x1bOQ',
+  f3: '\x1bOR',
+  f4: '\x1bOS',
+  f5: '\x1b[15~',
+  f6: '\x1b[17~',
+  f7: '\x1b[18~',
+  f8: '\x1b[19~',
+  f9: '\x1b[20~',
+  f10: '\x1b[21~',
+  f11: '\x1b[23~',
+  f12: '\x1b[24~'
 });
 
 let HeadlessTerminalCtor = undefined;
@@ -2405,7 +2422,21 @@ class HopMCPServer {
           result = { tools: this.getToolDefinitions() };
           break;
         case 'tools/call':
-          result = await this.handleToolCall(params || {});
+          // Expected failures (daemon down, unconfigured connection) must come
+          // back as isError tool results, not JSON-RPC protocol errors.
+          try {
+            result = await this.handleToolCall(params || {});
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            const failure = { ok: false, status: null, endpoint: null, error: message };
+            if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|timed out|not configured/i.test(message)) {
+              failure.hint = this.buildDaemonUnreachableHint(this.baseUrl);
+            }
+            result = {
+              content: [{ type: 'text', text: JSON.stringify(failure) }],
+              isError: true
+            };
+          }
           break;
         case 'notifications/initialized':
           return null;
@@ -2451,7 +2482,7 @@ class HopMCPServer {
         inputSchema: {
           type: 'object',
           properties: {
-            base_url: { type: 'string', description: 'Hop API base URL (e.g. http://127.0.0.1:39528 or https://hop2.zhoulab.io)' },
+            base_url: { type: 'string', description: 'Hop API base URL (e.g. http://127.0.0.1:39528 or https://hop2.example.com)' },
             token: { type: 'string', description: 'Bearer token for Hop API (optional)' },
             verify: { type: 'boolean', description: 'If true, probe the Hop API before saving connection settings.' },
             verify_endpoint: { type: 'string', description: 'API path to probe when verify=true (default: /api/sessions).' }
@@ -2475,19 +2506,19 @@ class HopMCPServer {
       },
       {
         name: 'hop_create_terminal',
-        description: 'Create a terminal session and optionally run a startup command.',
+        description: 'Create a terminal session and optionally run a startup command. The returned `id` is the terminal_id used by every other terminal tool.',
         inputSchema: {
           type: 'object',
           properties: {
-            name: { type: 'string' },
-            cwd: { type: 'string', description: 'Absolute path.' },
-            cols: { type: 'number' },
-            rows: { type: 'number' },
-            shell: { type: 'string' },
-            env: { type: 'object', additionalProperties: { type: 'string' } },
-            startup: { type: 'string' },
-            autoStart: { type: 'boolean' },
-            folderId: { type: 'string' }
+            name: { type: 'string', description: 'Display name for the session (default: "agent-<timestamp>"). Names must be unique: if the name is already in use the call fails with 409 "Session name already in use" (use hop_attach_terminal to reuse the existing session).' },
+            cwd: { type: 'string', description: 'Working directory; must be an absolute path.' },
+            cols: { type: 'number', description: `Terminal width in columns (default: ${DEFAULT_TERMINAL_COLS}).` },
+            rows: { type: 'number', description: `Terminal height in rows (default: ${DEFAULT_TERMINAL_ROWS}).` },
+            shell: { type: 'string', description: 'Shell binary to launch (default: the daemon user\'s login shell from $SHELL).' },
+            env: { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra environment variables for the shell process.' },
+            startup: { type: 'string', description: 'Command typed into the shell right after it starts (skipped when autoStart=false).' },
+            autoStart: { type: 'boolean', description: 'If false, the startup command is saved but not run on create (default: true).' },
+            folderId: { type: 'string', description: 'Optional UI folder to place the session in; ignored if the folder does not exist.' }
           }
         }
       },
@@ -2518,7 +2549,7 @@ class HopMCPServer {
       },
       {
         name: 'hop_send_key',
-        description: 'Send a named keypress to a terminal session (e.g. enter, ctrl_c, up, esc).',
+        description: 'Send a named keypress to a terminal session. Supported: enter, esc, tab, shift_tab, backspace, delete, insert, arrows (up/down/left/right), home, end, page_up, page_down, space, f1-f12, and ctrl+[a-z] combos (e.g. ctrl_c). For anything else, send the raw escape sequence with hop_write_terminal.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2537,7 +2568,7 @@ class HopMCPServer {
           properties: {
             terminal_id: { type: 'string' },
             data: { type: 'string', description: 'Raw text to write before waiting.' },
-            press_enter: { type: 'boolean', description: 'If true, send an Enter key after data (default: false).' },
+            press_enter: { type: 'boolean', description: 'If true, send an Enter key after data (default: false). Note: unlike hopx_agent_turn, press_enter defaults to false here.' },
             key: { type: 'string', description: 'Optional named key to send after data (for example enter, esc, ctrl_c).' },
             repeat: { type: 'number', description: 'Repeat keypress count when key is provided (default: 1).' },
             wait: { type: 'boolean', description: 'If false, only sends input and skips wait logic (default: true).' },
@@ -2570,7 +2601,7 @@ class HopMCPServer {
       },
       {
         name: 'hopx_exec',
-        description: 'Execute a shell command and return clean stdout — like a Bash tool on a persistent terminal session. Sends the command, waits for the next shell prompt, strips the echoed input and ANSI codes, and returns plain text output. For simple command-then-read workflows that don\'t need raw terminal events.',
+        description: 'Execute a shell command and return clean stdout — like a Bash tool on a persistent terminal session. Sends the command, waits for the next shell prompt, strips the echoed input and ANSI codes, and returns plain text output. The command is wrapped with a sentinel that captures the real exit status on POSIX-ish shells: `exit_code` in the result is the command\'s numeric exit status, or null if it could not be determined (e.g. timeout or non-POSIX shell). `ok` only means the shell prompt returned within the timeout, NOT that the command succeeded — check exit_code for that. For simple command-then-read workflows that don\'t need raw terminal events.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2621,7 +2652,7 @@ class HopMCPServer {
               description: 'In readable_raw capture, text noise filter mode: balanced (default) or off.'
             },
             coalesce_ms: { type: 'number', description: 'In readable_raw capture, merge adjacent text frames within this time window (ms).' },
-            coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
+            coalesce_max_chars: { type: 'number', description: `In readable_raw capture, max chars per merged frame (default: ${DEFAULT_READABLE_COALESCE_MAX_CHARS}).` }
           },
           required: ['terminal_id']
         }
@@ -2663,14 +2694,14 @@ class HopMCPServer {
               description: 'In readable_raw capture, text noise filter mode: balanced (default) or off.'
             },
             coalesce_ms: { type: 'number', description: 'In readable_raw capture, merge adjacent text frames within this time window (ms).' },
-            coalesce_max_chars: { type: 'number', description: 'In readable_raw capture, max chars per merged frame (default: 16384).' }
+            coalesce_max_chars: { type: 'number', description: `In readable_raw capture, max chars per merged frame (default: ${DEFAULT_READABLE_COALESCE_MAX_CHARS}).` }
           },
           required: ['terminal_id']
         }
       },
       {
         name: 'hop_wait_poll',
-        description: 'Poll or await completion of a background wait job created by hop_wait_start (or hop_wait_terminal with async=true).',
+        description: 'Poll or await completion of a background wait job created by hop_wait_terminal with async=true (or the deprecated hop_wait_start).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2698,7 +2729,7 @@ class HopMCPServer {
       },
       {
         name: 'hop_read_terminal',
-        description: 'Read terminal output events. Supports raw ANSI events or UI snapshot mode with optional raw tail.',
+        description: 'Read terminal output events. Defaults to mode="readable_raw" (parsed text); raw ANSI events and UI snapshot modes are also available.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2707,11 +2738,11 @@ class HopMCPServer {
             start_from: {
               type: 'string',
               enum: WAIT_START_MODES,
-              description: 'Where to start reading: latest (tail), cursor (requires cursor), or beginning (oldest buffered event).'
+              description: 'Where to start reading: latest (tail), cursor (requires cursor), or beginning (oldest buffered event). Default: cursor when cursor is provided, otherwise beginning.'
             },
-            maxBytes: { type: 'number' },
-            maxEvents: { type: 'number' },
-            mode: { type: 'string', enum: READ_TERMINAL_MODES },
+            maxBytes: { type: 'number', description: `Max serialized bytes of events to return (default: ${DEFAULT_READ_MAX_BYTES}). Pass 0 for unlimited.` },
+            maxEvents: { type: 'number', description: `Max events to return (default: ${DEFAULT_READ_MAX_EVENTS}). Pass 0 for unlimited. When either cap truncates output, the payload includes truncated:true and a hint; continue with start_from="cursor", cursor=next_cursor.` },
+            mode: { type: 'string', enum: READ_TERMINAL_MODES, description: 'Output format: readable_raw (default; parsed text with compact control hints), raw (raw ANSI events), or ui (rendered screen snapshot).' },
             uiMaxLines: { type: 'number', description: 'In UI mode, number of visible lines to include (default: terminal rows).' },
             includeRawTail: { type: 'boolean', description: 'In UI mode, include raw output tail for lossless event inspection (default: false, opt-in).' },
             rawTailMaxEvents: { type: 'number', description: 'In UI mode, max raw tail events to include (default: 40).' },
@@ -2729,7 +2760,7 @@ class HopMCPServer {
               description: 'In readable_raw mode, text noise filter mode: balanced (default) or off.'
             },
             coalesce_ms: { type: 'number', description: 'In readable_raw mode, merge adjacent text frames within this time window (ms).' },
-            coalesce_max_chars: { type: 'number', description: 'In readable_raw mode, max chars per merged frame (default: 16384).' }
+            coalesce_max_chars: { type: 'number', description: `In readable_raw mode, max chars per merged frame (default: ${DEFAULT_READABLE_COALESCE_MAX_CHARS}).` }
           },
           required: ['terminal_id']
         }
@@ -2821,7 +2852,7 @@ class HopMCPServer {
       },
       {
         name: 'hopx_agent_turn',
-        description: 'Convenience helper: send one turn to a terminal agent, wait, and return mode-appropriate output. Built on top of core hop_* tools.',
+        description: 'Convenience helper: send one turn to a terminal agent, wait, and return mode-appropriate output. Built on top of core hop_* tools. Provide terminal_id to start a turn, or wait_id to continue/poll/control an async turn.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2829,7 +2860,7 @@ class HopMCPServer {
             wait_id: { type: 'string', description: 'Existing async hopx turn wait_id to poll or control.' },
             data: { type: 'string', description: 'Text to send to the terminal.' },
             message: { type: 'string', description: 'Alias for data.' },
-            press_enter: { type: 'boolean', description: 'Send Enter after data. Defaults to true when data/message is provided.' },
+            press_enter: { type: 'boolean', description: 'Send Enter after data. Defaults to true when data/message is provided. Note: unlike hopx_send_and_wait, press_enter defaults to true here.' },
             key: { type: 'string', description: 'Optional named key to send after data (for example enter, esc, ctrl_c).' },
             repeat: { type: 'number', description: 'Repeat keypress count when key is provided (default: 1).' },
             wait: { type: 'boolean', description: 'If false, send only and skip waiting.' },
@@ -2870,8 +2901,7 @@ class HopMCPServer {
             uiMaxLines: { type: 'number', description: 'For mode=ui, max visible lines to include.' },
             includeRawTail: { type: 'boolean', description: 'For mode=ui, include raw output tail (default: false in hopx helper).' },
             rawTailMaxEvents: { type: 'number', description: 'For mode=ui, max raw tail events.' }
-          },
-          required: ['terminal_id']
+          }
         }
       }
     ];
@@ -3320,8 +3350,26 @@ class HopMCPServer {
     return terminalId;
   }
 
+  buildDaemonUnreachableHint(baseUrl) {
+    const target = baseUrl || this.baseUrl || '<unconfigured>';
+    return `Could not reach the hop daemon at ${target}. Start it with 'hop' or 'hop start', or call connect_server(base_url=...) for a remote instance.`;
+  }
+
   async callApiWithConnection(method, baseUrl, token, endpoint, body) {
-    const response = await requestJson(method, baseUrl, endpoint, token, this.actor, body);
+    let response;
+    try {
+      response = await requestJson(method, baseUrl, endpoint, token, this.actor, body);
+    } catch (err) {
+      // Connection-level failures (ECONNREFUSED, DNS, timeouts) become normal
+      // tool-result errors instead of opaque JSON-RPC protocol errors.
+      return {
+        ok: false,
+        status: null,
+        endpoint,
+        error: err instanceof Error ? err.message : String(err),
+        hint: this.buildDaemonUnreachableHint(baseUrl)
+      };
+    }
     if (response.status >= 400) {
       return { ok: false, status: response.status, error: response.data };
     }
@@ -3353,17 +3401,23 @@ class HopMCPServer {
     const normalized = {
       ok: false,
       status,
-      endpoint: options.endpoint || null,
+      endpoint: options.endpoint || (payload && payload.endpoint) || null,
       error: Object.prototype.hasOwnProperty.call(payload, 'error') ? payload.error : payload
     };
+    if (payload && typeof payload.hint === 'string' && payload.hint) {
+      normalized.hint = payload.hint;
+    }
+    if (status === 403 && /agent access/i.test(JSON.stringify(normalized.error ?? ''))) {
+      normalized.hint = "Enable with hop_set_agent_permission(name=..., allowed=true), or ask the user to run 'hop session permit <name>'.";
+    }
     return {
-      content: [{ type: 'text', text: JSON.stringify(normalized, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify(normalized) }],
       isError: true
     };
   }
 
   wrapJson(payload) {
-    return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
   }
 
   wrapResource(uri, payload) {
@@ -3549,7 +3603,7 @@ class HopMCPServer {
 
     if (job.done && job.status === 'error') {
       return {
-        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(payload) }],
         isError: true
       };
     }
@@ -3653,7 +3707,7 @@ class HopMCPServer {
     if (job.done && job.status === 'error') {
       payload.error = job.error || 'Unknown wait failure';
       return {
-        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(payload) }],
         isError: true
       };
     }
@@ -3777,7 +3831,10 @@ class HopMCPServer {
     const requestedTerminalId = typeof args.terminal_id === 'string' ? args.terminal_id : '';
     const waitId = typeof args.wait_id === 'string' ? args.wait_id.trim() : '';
     if (!requestedTerminalId && !waitId) {
-      return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
+      return {
+        content: [{ type: 'text', text: 'Error: provide terminal_id (to start a turn) or wait_id (to continue/poll/control an async turn).' }],
+        isError: true
+      };
     }
 
     const data = typeof args.data === 'string'
@@ -4316,13 +4373,24 @@ class HopMCPServer {
     let terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
     const cursorBeforeSend = this.streamManager.getLatestCursor(terminalId);
 
+    // Append a sentinel that prints the command's exit status so we can report
+    // a real exit_code (POSIX-ish shells). If the sentinel never shows up
+    // (timeout, exotic shell), we degrade to exit_code: null.
+    const rcNonce = randomUUID().slice(0, 8);
+    const rcPrefix = `__HOPX_RC_${rcNonce}=`;
+    // Trim trailing semicolons/whitespace so `cmd;` doesn't become `cmd;;`,
+    // and join with a space after a trailing `&` (`cmd &; ...` is a syntax error).
+    const commandBody = command.replace(/[\s;]+$/, '');
+    const joiner = /&$/.test(commandBody) ? ' ' : '; ';
+    const wrappedCommand = `${commandBody}${joiner}printf '\\n${rcPrefix}%d\\n' "$?"`;
+
     // Send the command + Enter
-    this.streamManager.noteTerminalInput(terminalId, command);
+    this.streamManager.noteTerminalInput(terminalId, wrappedCommand);
     const sendResult = await this.callTerminalEndpointWithRecovery(
       requestedTerminalId,
       'POST',
       (tid) => `/api/terminals/${encodeURIComponent(tid)}/write`,
-      { data: command + '\r' }
+      { data: wrappedCommand + '\r' }
     );
     terminalId = sendResult.terminalId;
     if (this.isApiFailurePayload(sendResult.payload)) {
@@ -4365,19 +4433,29 @@ class HopMCPServer {
     // Condense to single text blob
     let waitPayload = condenseReadableWaitPayload(waited.payload);
     // Strip echo and slim
-    waitPayload = slimWaitPayload(waitPayload, command);
+    waitPayload = slimWaitPayload(waitPayload, wrappedCommand);
 
     // Get clean text: strip ANSI, trim
     let stdout = typeof waitPayload.text === 'string' ? waitPayload.text : '';
     stdout = stripAnsi(stdout);
 
-    // Remove only the single trailing shell prompt line, and only when the wait
-    // actually returned to a prompt. Greedily popping every line that ends in
-    // %/$/>/# would eat real output (e.g. "Download complete: 100%").
-    const lines = stdout.split('\n');
+    // Extract the exit-code sentinel and drop its line(s) from stdout.
+    let exitCode = null;
+    const rcLineRe = new RegExp(`^${rcPrefix}(\\d+)$`);
+    const lines = stdout.split('\n').filter((line) => {
+      const m = rcLineRe.exec(line.trim());
+      if (m) {
+        exitCode = parseInt(m[1], 10);
+        return false;
+      }
+      return true;
+    });
     while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
       lines.pop();
     }
+    // Remove only the single trailing shell prompt line, and only when the wait
+    // actually returned to a prompt. Greedily popping every line that ends in
+    // %/$/>/# would eat real output (e.g. "Download complete: 100%").
     if ((matchKind === 'prompt' || matchKind === 'agent_done')
         && lines.length > 0
         && isLikelyPrompt(lines[lines.length - 1])) {
@@ -4389,9 +4467,13 @@ class HopMCPServer {
     stdout = lines.join('\n').trimEnd();
 
     const timedOut = waitPayload.status === 'timeout';
+    // ok = the shell prompt returned within the timeout. It does NOT mean the
+    // command succeeded; exit_code carries the command's real status (null if
+    // the sentinel was never observed, e.g. timeout or non-POSIX shell).
     const result = {
       ok: !timedOut,
       terminal_id: requestedTerminalId,
+      exit_code: exitCode,
       stdout
     };
     if (timedOut) {
@@ -4781,9 +4863,10 @@ class HopMCPServer {
     if (startFrom && !WAIT_START_MODES.includes(startFrom)) {
       return { content: [{ type: 'text', text: 'Error: start_from must be one of "latest", "cursor", or "beginning".' }], isError: true };
     }
-    const maxBytes = typeof args.maxBytes === 'number' ? args.maxBytes : 0;
-    const maxEvents = typeof args.maxEvents === 'number' ? args.maxEvents : 0;
-    const mode = typeof args.mode === 'string' ? String(args.mode).toLowerCase() : 'raw';
+    // Token-thrifty defaults; callers pass 0 explicitly for unlimited reads.
+    const maxBytes = typeof args.maxBytes === 'number' ? args.maxBytes : DEFAULT_READ_MAX_BYTES;
+    const maxEvents = typeof args.maxEvents === 'number' ? args.maxEvents : DEFAULT_READ_MAX_EVENTS;
+    const mode = typeof args.mode === 'string' ? String(args.mode).toLowerCase() : 'readable_raw';
 
     if (!READ_TERMINAL_MODES.includes(mode)) {
       const supported = READ_TERMINAL_MODES.map((item) => `"${item}"`).join(', ');
@@ -4834,12 +4917,28 @@ class HopMCPServer {
       };
     }
     const cursorEnd = result.cursor;
+    // Flag reads cut short by the maxEvents/maxBytes caps so callers know to
+    // page through the rest via cursor instead of assuming they saw everything.
+    const latestCursor = this.streamManager.getLatestCursor(terminalId);
+    const truncated = Boolean(
+      (maxBytes || maxEvents)
+      && cursorEnd !== null
+      && latestCursor !== null
+      && latestCursor > cursorEnd
+    );
+    const truncation = truncated
+      ? {
+        truncated: true,
+        hint: `Output truncated by maxEvents/maxBytes caps. Continue with start_from="cursor", cursor=${cursorEnd}, or pass maxEvents=0 and maxBytes=0 for unlimited.`
+      }
+      : null;
     if (mode === 'raw') {
       return this.wrapJson({
         ...result,
         cursorStart,
         cursorEnd,
-        next_cursor: cursorEnd
+        next_cursor: cursorEnd,
+        ...(truncation || {})
       });
     }
 
@@ -4880,7 +4979,8 @@ class HopMCPServer {
         next_cursor: cursorEnd,
         done: result.done,
         eventCount: events.length,
-        events
+        events,
+        ...(truncation || {})
       };
       if (result.closed) readableRawPayload.closed = result.closed;
       if (result.error != null) readableRawPayload.error = result.error;
@@ -4900,7 +5000,8 @@ class HopMCPServer {
       cursor: cursorEnd,
       next_cursor: cursorEnd,
       done: result.done,
-      ui: this.streamManager.getUiSnapshot(terminalId, { maxLines: uiMaxLines })
+      ui: this.streamManager.getUiSnapshot(terminalId, { maxLines: uiMaxLines }),
+      ...(truncation || {})
     };
     if (result.closed) payload.closed = result.closed;
     if (result.error != null) payload.error = result.error;

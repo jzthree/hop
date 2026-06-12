@@ -21,15 +21,17 @@ const CONFIG_PATHS = {
   antigravity: path.join(HOME, '.gemini', 'antigravity', 'mcp_config.json')
 };
 
-const HOP_MCP_CONFIG = {
-  command: 'node',
-  args: [MCP_SERVER_PATH]
-};
+// Prefer the resilient `hop-mcp` bin when it is on PATH (global npm install);
+// fall back to absolute node+script paths for source checkouts.
+const USE_HOP_MCP_BIN = commandExists('hop-mcp');
+
+const HOP_MCP_CONFIG = USE_HOP_MCP_BIN
+  ? { command: 'hop-mcp' }
+  : { command: 'node', args: [MCP_SERVER_PATH] };
 
 const HOP_MCP_VSCODE_CONFIG = {
   type: 'stdio',
-  command: 'node',
-  args: [MCP_SERVER_PATH]
+  ...HOP_MCP_CONFIG
 };
 
 function commandExists(command) {
@@ -98,6 +100,11 @@ function mergeServerConfig(existing, desired) {
   }
 
   const merged = { ...existing, ...desired };
+  // args belong to the desired command; drop stale args from a previous
+  // node+script config when the desired form has none (bare `hop-mcp`).
+  if (desired.command && !('args' in desired)) {
+    delete merged.args;
+  }
   if (isPlainObject(existing.env) || isPlainObject(desired.env)) {
     merged.env = {
       ...(isPlainObject(existing.env) ? existing.env : {}),
@@ -124,7 +131,6 @@ function upsertMcpServer(config, rootKey, serverName, desiredConfig) {
 
 function detectTools() {
   const tools = {};
-  const hasVSCodeCli = commandExists('code') || commandExists('code-insiders');
   const hasAntigravityCli = commandExists('antigravity') || commandExists('agy');
   const hasVSCodeWorkspace = fs.existsSync(path.join(process.cwd(), '.vscode'));
 
@@ -148,9 +154,12 @@ function detectTools() {
     tools.codex = { name: 'Codex CLI', configPath: CONFIG_PATHS.codex };
   }
 
-  if (hasVSCodeCli || hasAntigravityCli || hasVSCodeWorkspace) {
+  // The workspace entry is written into the *current directory*; only offer it
+  // when cwd actually contains a .vscode workspace marker, and label it with
+  // the absolute target path so the cwd-dependence is visible.
+  if (hasVSCodeWorkspace) {
     tools.vscodeWorkspace = {
-      name: 'VS Code / GitHub Copilot / Antigravity (workspace)',
+      name: `VS Code / GitHub Copilot / Antigravity (workspace: ${CONFIG_PATHS.vscodeWorkspace})`,
       configPath: CONFIG_PATHS.vscodeWorkspace
     };
   }
@@ -185,11 +194,14 @@ function configureJsonServer(configPath, rootKey, serverConfig, options = {}) {
 }
 
 function buildCodexBlock() {
-  return [
+  const lines = [
     `[mcp_servers.${SERVER_NAME}]`,
-    'command = "node"',
-    `args = ["${MCP_SERVER_PATH}"]`
-  ].join('\n');
+    `command = "${HOP_MCP_CONFIG.command}"`
+  ];
+  if (Array.isArray(HOP_MCP_CONFIG.args)) {
+    lines.push(`args = [${HOP_MCP_CONFIG.args.map((arg) => `"${arg}"`).join(', ')}]`);
+  }
+  return lines.join('\n');
 }
 
 function escapeRegExp(value) {
@@ -212,10 +224,16 @@ function codexHasRequiredConfig(content) {
     return false;
   }
   const block = matches[0];
-  const hasCommand = /command\s*=\s*"node"/.test(block);
-  const escapedPath = escapeRegExp(MCP_SERVER_PATH);
-  const hasArgs = new RegExp(`args\\s*=\\s*\\[\\s*"${escapedPath}"\\s*\\]`).test(block);
-  return hasCommand && hasArgs;
+  const hasCommand = new RegExp(`command\\s*=\\s*"${escapeRegExp(HOP_MCP_CONFIG.command)}"`).test(block);
+  if (!hasCommand) {
+    return false;
+  }
+  if (Array.isArray(HOP_MCP_CONFIG.args)) {
+    const escapedPath = escapeRegExp(MCP_SERVER_PATH);
+    return new RegExp(`args\\s*=\\s*\\[\\s*"${escapedPath}"\\s*\\]`).test(block);
+  }
+  // Bare `hop-mcp` form: a leftover args line would point at a stale script path.
+  return !/^\s*args\s*=/m.test(block);
 }
 
 function prepareCodexContent(existingContent) {
@@ -343,8 +361,8 @@ async function main() {
     console.log(`  - ${tools[key].name}`);
   });
   console.log('');
-  console.log('Hop MCP server path:');
-  console.log(`  ${MCP_SERVER_PATH}`);
+  console.log('Hop MCP server command:');
+  console.log(`  ${HOP_MCP_CONFIG.command}${Array.isArray(HOP_MCP_CONFIG.args) ? ` ${HOP_MCP_CONFIG.args.join(' ')}` : ''}`);
   console.log('');
   console.log('Will configure:');
   toolNames.forEach((key) => {

@@ -6,7 +6,7 @@ restarts.
 
 ## Quick Start
 
-1. Ensure the Hop daemon is running locally.
+1. Ensure the Hop daemon is running locally by running `hop` (interactive) or `hop start` (daemon only).
 
 2. Auto-configure supported MCP clients:
 
@@ -49,7 +49,7 @@ The server auto-connects to the local Hop daemon via `~/.hop2/.tunnel-state`.
 
 Recommended flow for driving one Claude/Codex/Gemini terminal safely:
 
-1. Launch a dedicated terminal:
+1. Launch a dedicated terminal (the returned `id` is the `terminal_id` used by every other tool):
 
 ```
 hop_create_terminal(name="subagent", cwd="/path/to/repo")
@@ -58,32 +58,55 @@ hop_create_terminal(name="subagent", cwd="/path/to/repo")
 2. Start the agent CLI:
 
 ```
-hop_write_terminal(data="claude\n")
+hop_write_terminal(terminal_id=<id>, data="claude\n")
 # or
-hop_write_terminal(data="codex\n")
+hop_write_terminal(terminal_id=<id>, data="codex\n")
 ```
 
 3. Wait for a prompt before sending work:
 
 ```
-hop_wait_terminal(until_prompt=true, start_from="latest")
+hop_wait_terminal(terminal_id=<id>, until_prompt=true, start_from="latest")
 ```
 
 4. Run a multi-turn loop:
-- Preferred: `hopx_agent_turn(data="<task>", mode="auto")`
-- Good lower-level helper: `hopx_send_and_wait(data="<task>", press_enter=true, capture="readable_raw")`
+- Preferred: `hopx_agent_turn(terminal_id=<id>, data="<task>", mode="auto")`
+- Good lower-level helper: `hopx_send_and_wait(terminal_id=<id>, data="<task>", press_enter=true, capture="readable_raw")`
 - Manual split only when needed:
-- send with `hop_write_terminal(data="<task>\n")`
-- wait with `hop_wait_terminal(capture="readable_raw")`
-- continue via cursor deltas from `hop_read_terminal(start_from="cursor", cursor=...)`
+- send with `hop_write_terminal(terminal_id=<id>, data="<task>\n")`
+- wait with `hop_wait_terminal(terminal_id=<id>, capture="readable_raw")`
+- continue via cursor deltas from `hop_read_terminal(terminal_id=<id>, start_from="cursor", cursor=...)`
 
 5. Stop or clean up:
-- interrupt with `hop_send_key(key="ctrl_c")`
-- close with `hop_close_terminal(killSession=false)`
+- interrupt with `hop_send_key(terminal_id=<id>, key="ctrl_c")`
+- close with `hop_close_terminal(terminal_id=<id>, killSession=false)`
 
 Safety notes:
 - Keep one subagent per terminal (no multiplexing multiple agent CLIs in one PTY).
 - For existing user sessions, verify `agentPermitted` (or set with `hop_set_agent_permission`) before writing input.
+
+## Shell Commands: `hopx_exec`
+
+For plain shell work (not interactive TUIs), `hopx_exec` behaves like a Bash
+tool on a persistent terminal: it sends the command, waits for the next shell
+prompt, and returns clean plain-text output.
+
+Worked example:
+
+```
+hop_create_terminal(name="builder", cwd="/path/to/repo")   # returns id
+hopx_exec(terminal_id=<id>, command="npm test")
+# -> { "ok": true, "exit_code": 0, "stdout": "...", "next_cursor": ... }
+hopx_exec(terminal_id=<id>, command="ls /nope")
+# -> { "ok": true, "exit_code": 1, "stdout": "ls: /nope: No such file or directory", ... }
+```
+
+Semantics:
+- `ok` means the shell prompt returned within `timeout_ms` — NOT that the command succeeded.
+- `exit_code` is the command's real exit status, captured by appending a POSIX sentinel (`<cmd>; printf '\n__HOPX_RC_<nonce>=%d\n' "$?"`). It is `null` when the sentinel was never observed (timeout, or a shell without POSIX `$?` semantics) — in that case behavior degrades gracefully to prompt-based capture.
+- The sentinel line, the echoed command, the trailing prompt, and ANSI codes are stripped from `stdout`.
+- On timeout, `timed_out: true` is set and `ok` is `false`.
+- For SSH sessions or unusual prompts, pass `prompt_regex`; for commands with non-standard output endings, pass `idle_ms` as a fallback condition.
 
 ## Remote Hop
 
@@ -108,29 +131,32 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
 ## Tools
 
 Core tools (`hop_`): stable atomic operations.
-- `connect_server`
-- `hop_server_info`
-- `hop_list_sessions`
-- `hop_list_terminals`
-- `hop_create_terminal`
-- `hop_attach_terminal`
-- `hop_write_terminal`
-- `hop_send_key`
-- `hop_wait_terminal`
-- `hop_wait_start`
-- `hop_wait_poll`
-- `hop_resize_terminal`
-- `hop_read_terminal`
-- `hop_close_terminal`
-- `hop_set_agent_permission`
-- `hop_list_workspaces`
-- `hop_save_workspace`
-- `hop_load_workspace`
-- `hop_use_workspace`
+- `connect_server` — connect to a Hop API base_url (optional token); use for remote hop instances
+- `hop_server_info` — hop-mcp runtime diagnostics (version, script path, read-mode capabilities)
+- `hop_list_sessions` — list Hop sessions and metadata
+- `hop_list_terminals` — list terminal API sessions (created via `hop_create_terminal` / `hop_attach_terminal`)
+- `hop_create_terminal` — create a terminal session and optionally run a startup command; returns the `id` used as `terminal_id` everywhere else
+- `hop_attach_terminal` — attach to an existing terminal session by name or internalName
+- `hop_write_terminal` — write raw input to a terminal session
+- `hop_send_key` — send a named keypress (enter, esc, tab, shift_tab, arrows, f1-f12, ctrl+[a-z], ...)
+- `hop_wait_terminal` — wait for output conditions (regex, prompt, idle, agent_done); `async=true` returns a `wait_id`
+- `hop_wait_start` — deprecated legacy alias for `hop_wait_terminal(async=true)`
+- `hop_wait_poll` — poll or await completion of a background wait job
+- `hop_resize_terminal` — resize the terminal PTY
+- `hop_read_terminal` — read terminal output events (default `mode="readable_raw"`); returns a cursor for incremental reads
+- `hop_close_terminal` — detach the terminal API session; optionally kill the underlying hop session
+- `hop_set_agent_permission` — allow or block agent access for a session
+- `hop_list_workspaces` — list available workspaces
+- `hop_create_workspace` — create an empty workspace by name
+- `hop_show_workspace` — show saved definitions in a workspace
+- `hop_save_workspace` — save a workspace snapshot from live sessions
+- `hop_delete_workspace` — delete a workspace by name
+- `hop_load_workspace` — load a workspace and optionally start sessions
 
 Helper tools (`hopx_`): convenience wrappers built on top of core tools.
-- `hopx_send_and_wait` (single-call send + wait wrapper)
-- `hopx_agent_turn` (single-turn send + wait + mode-aware output, default `mode="auto"`)
+- `hopx_send_and_wait` — single-call send + wait wrapper
+- `hopx_exec` — Bash-tool-style shell execution: command in, clean stdout + `exit_code` out (see section above)
+- `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`
 
 ## Resources
 
@@ -151,6 +177,11 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 
 ### `hop_read_terminal`
 
+- Defaults are token-thrifty:
+  - `mode` defaults to `"readable_raw"` (pass `"raw"` or `"ui"` explicitly when needed)
+  - `maxEvents` defaults to `200` and `maxBytes` to `65536`; pass `0` explicitly for unlimited (the buffer keeps the last 2000 events)
+  - when these caps truncate a read, the payload includes `truncated: true` plus a `hint`; continue with `start_from="cursor"`, `cursor=<next_cursor>`
+  - `start_from` defaults to `cursor` when `cursor` is provided, otherwise `beginning`
 - `hop_read_terminal` supports `mode: "ui"` for structured terminal snapshots:
   - `ui.lines`: visible screen lines
   - `ui.cursor`: cursor position
@@ -194,9 +225,9 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 
 ### Async wait helpers
 
-- `hop_wait_start` / `hop_wait_poll` provide explicit async wait orchestration for long-running conditions:
-  - start with `hop_wait_start(...)` and poll with `hop_wait_poll(wait_id=..., wait=true)`
+- For long-running conditions, start a background wait with `hop_wait_terminal(terminal_id=<id>, async=true, ...)` (returns `wait_id` immediately) and poll with `hop_wait_poll(wait_id=..., wait=true)`
   - use `consume=true` on poll to remove completed jobs
+- `hop_wait_start` is a deprecated legacy alias for `hop_wait_terminal(async=true)`; prefer the latter
 
 ### `hopx_send_and_wait`
 
@@ -225,8 +256,11 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 
 ### Error model
 
-- Tool calls that fail at the Hop API layer now return MCP errors (`isError: true`) with normalized fields:
+- Tool calls that fail at the Hop API layer return MCP tool errors (`isError: true`) with normalized fields:
   - `ok`
   - `status`
   - `endpoint`
   - `error`
+  - `hint` (when a remedy is known)
+- Connection-level failures (daemon not running, unreachable host, timeouts) also come back as normalized tool errors with `status: null` and a `hint` explaining how to start the daemon (`hop` or `hop start`) or reconnect via `connect_server(base_url=...)` — not as raw JSON-RPC protocol errors.
+- A `403` "Agent access not permitted" error includes a hint to enable access with `hop_set_agent_permission(name=..., allowed=true)` or `hop session permit <name>`.

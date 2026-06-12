@@ -220,6 +220,18 @@ body {
   color: var(--accent-2);
 }
 
+/* Badge on the chip of whoever holds input control in locked mode */
+.presence-control {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
 .presence-empty {
   font-size: 12px;
   color: var(--ink-muted);
@@ -281,7 +293,8 @@ input {
   padding: 12px 14px;
   font-size: 15px;
   font-family: inherit;
-  background: #fff;
+  background: var(--panel);
+  color: var(--ink);
 }
 
 button {
@@ -445,6 +458,12 @@ button.primary {
   font-size: 13px;
   color: var(--ink);
   font-weight: 500;
+}
+
+.control-state {
+  font-size: 12px;
+  color: var(--ink-muted);
+  text-align: right;
 }
 
 .drawer-details {
@@ -769,6 +788,45 @@ button.primary {
 
 .footer-reconnect:hover {
   background: rgba(180, 83, 9, 0.1);
+}
+
+.terminal-footer .ended-label {
+  color: var(--ink-muted);
+  font-weight: 600;
+}
+
+/* Mobile connection banner — the footer is hidden on small screens, so
+   connecting/disconnected/ended states surface in a thin fixed top strip. */
+.connection-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: calc(env(safe-area-inset-top, 0px) + 6px) 12px 6px;
+  background: rgba(180, 83, 9, 0.95);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.connection-banner.ended {
+  background: rgba(63, 63, 70, 0.95);
+}
+
+.connection-banner button {
+  font: inherit;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  color: #fff;
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
 }
 
 .footer-find-toggle {
@@ -1450,6 +1508,27 @@ button.primary {
   padding: 8px 0;
 }
 
+.session-list-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-muted);
+  padding: 8px 0;
+}
+
+.session-list-error button {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+
 .session-list-item {
   display: flex;
   align-items: center;
@@ -1466,7 +1545,7 @@ button.primary {
 }
 
 .session-list-item:hover {
-  background: #fff;
+  background: var(--panel);
   border-color: var(--line);
   transform: translateY(-1px);
 }

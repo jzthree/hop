@@ -1,7 +1,7 @@
 <html>
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Session Picker</title>
         <style>
             * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -32,6 +32,12 @@
             .session-action.rename:active { background: #2563eb; }
             .session-action.delete { right: 0; background: #dc2626; }
             .session-action.delete:active { background: #b91c1c; }
+            /* Visible rename/delete affordance for pointer devices (swipe covers touch) */
+            .row-actions { display: none; gap: 0.35rem; flex-shrink: 0; }
+            .row-action { width: 34px; height: 34px; padding: 0; display: flex; align-items: center; justify-content: center; border: 1px solid #e4e4e7; border-radius: 8px; background: #fff; color: #52525b; cursor: pointer; font-size: 0.9rem; }
+            .row-action:hover { background: #f4f4f5; }
+            .row-action.delete:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
+            @media (hover: hover) and (pointer: fine) { .row-actions { display: flex; } }
             .session-info { flex: 1; min-width: 0; }
             .session-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
             .session-name { font-weight: 500; font-size: 1rem; }
@@ -64,6 +70,13 @@
             .port-badge { background: #f59e0b; color: #111827; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem; vertical-align: middle; font-weight: 600; text-transform: uppercase; }
             .loading { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.9); justify-content: center; align-items: center; flex-direction: column; z-index: 100; }
             .loading.show { display: flex; }
+            .inline-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 10px; padding: 0.6rem 0.9rem; font-size: 0.85rem; margin-bottom: 1rem; display: none; }
+            .flash { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); background: #18181b; color: #fff; padding: 0.6rem 1.1rem; border-radius: 999px; font-size: 0.85rem; z-index: 200; box-shadow: 0 8px 20px rgba(24,24,27,0.25); animation: flashIn 0.2s ease-out; }
+            @keyframes flashIn { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+            .dialog-option-btn { width: 100%; text-align: left; background: #fff; border: 0; border-bottom: 1px solid #e4e4e7; cursor: pointer; font: inherit; }
+            .dialog-option-btn:last-child { border-bottom: none; }
+            .dialog-option-btn:hover { background: #fafafa; }
+            .dialog-option-btn:active { background: #f4f4f5; }
             .spinner { width: 40px; height: 40px; border: 3px solid #e4e4e7; border-top-color: #7c3aed; border-radius: 50%; animation: spin 1s linear infinite; }
             @keyframes spin { to { transform: rotate(360deg); } }
             details.menu { position: relative; }
@@ -105,10 +118,11 @@
         <div class="loading" id="loading">
             <div class="spinner"></div>
             <p style="margin-top: 1rem; color: #71717a;">Starting session...</p>
+            <button class="btn btn-secondary" onclick="hideLoading()">Cancel</button>
         </div>
         <div class="container">
             <h1>Session Picker</h1>
-            <p class="subtitle">Create sessions, drag them into folders, or load a workspace. Swipe left to delete.</p>
+            <p class="subtitle">Create sessions, drag them into folders, or load a workspace. Swipe right to rename, swipe left to delete — or use the row buttons.</p>
             <div class="new-session">
                 <input type="text" id="newName" placeholder="Session name..." pattern="[a-zA-Z0-9_-]+">
                 <select id="sessionType">
@@ -118,6 +132,7 @@
                 <input type="number" id="portInput" placeholder="Port (e.g. 3000)" min="1" max="65535" style="display:none;">
                 <button class="btn btn-primary" onclick="createSession()">Create</button>
             </div>
+            <div class="inline-error" id="createError"></div>
             <div class="toolbar">
                 <button class="btn btn-secondary" onclick="createFolderPrompt()">New folder</button>
                 <details class="menu" id="workspaceMenu">
@@ -146,17 +161,50 @@
                 </div>
             </form>
         </dialog>
+        <dialog id="workspaceLoadDialog">
+            <div class="dialog-card">
+                <p class="dialog-title">Load Workspace</p>
+                <p class="dialog-subtitle">Pick a saved workspace to start its sessions.</p>
+                <div class="inline-error" id="workspaceLoadError"></div>
+                <div class="dialog-list" id="workspaceLoadOptions"></div>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeWorkspaceLoadDialog()">Cancel</button>
+                </div>
+            </div>
+        </dialog>
         <script>
             function showLoading() {
                 document.getElementById('loading').classList.add('show');
             }
 
+            function hideLoading() {
+                document.getElementById('loading').classList.remove('show');
+            }
+
+            function showFlash(message) {
+                const el = document.createElement('div');
+                el.className = 'flash';
+                el.textContent = message;
+                document.body.appendChild(el);
+                setTimeout(() => el.remove(), 2200);
+            }
+
             let dragSessionId = null;
             let latestSessionsData = { sessions: [], active: [], starting: [] };
+            // Pause the 3s auto-refresh while a swipe or drag is in progress so the
+            // full re-render doesn't yank the row out from under the user.
+            let interactionActive = false;
+            let lastSessionsPayload = null;
 
             async function loadSessions() {
+                if (interactionActive) return;
                 const res = await fetch('/api/sessions');
-                const data = await res.json();
+                const text = await res.text();
+                // Skip the destructive innerHTML re-render when nothing changed
+                if (text === lastSessionsPayload) return;
+                if (interactionActive) return;
+                lastSessionsPayload = text;
+                const data = JSON.parse(text);
                 latestSessionsData = data;
                 const list = document.getElementById('sessionList');
                 const sessions = data.sessions || [];
@@ -247,6 +295,10 @@
                                     <div class="session-meta">${metaText}</div>
                                     ${agentToggle}
                                 </div>
+                                <div class="row-actions">
+                                    <button class="row-action" title="Rename" aria-label="Rename session" onclick="renameSession('${displayName}')">✎</button>
+                                    <button class="row-action delete" title="Delete" aria-label="Delete session" onclick="deleteSession('${internalName}', '${displayName}')">🗑</button>
+                                </div>
                                 <a href="/s/${encodeURIComponent(displayName)}/" class="btn btn-primary" onclick="showLoading()">Join</a>
                             </div>
                         </div>
@@ -284,6 +336,12 @@
                 initDragAndDrop();
             }
 
+            function showCreateError(message) {
+                const el = document.getElementById('createError');
+                el.textContent = message;
+                el.style.display = 'block';
+            }
+
             async function createSession() {
                 const input = document.getElementById('newName');
                 const name = input.value.trim();
@@ -301,14 +359,32 @@
                     }
                 }
 
+                document.getElementById('createError').style.display = 'none';
                 showLoading();
-                const res = await fetch('/api/sessions', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, type, port })
-                });
-                const data = await res.json();
-                window.location.href = '/s/' + encodeURIComponent(data.name) + '/';
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 15000);
+                try {
+                    const res = await fetch('/api/sessions', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, type, port }),
+                        signal: controller.signal
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok || !data.name) {
+                        hideLoading();
+                        showCreateError(data.error || 'Failed to create session.');
+                        return;
+                    }
+                    window.location.href = '/s/' + encodeURIComponent(data.name) + '/';
+                } catch (err) {
+                    hideLoading();
+                    showCreateError(err && err.name === 'AbortError'
+                        ? 'Timed out creating the session. Please try again.'
+                        : 'Network error creating the session. Please try again.');
+                } finally {
+                    clearTimeout(timeoutId);
+                }
             }
 
             async function renameSession(oldDisplayName) {
@@ -392,7 +468,10 @@
                 if (!res.ok) {
                     const data = await res.json().catch(() => ({}));
                     alert(data.error || 'Failed to create workspace.');
+                    return;
                 }
+                showFlash('Workspace "' + name + '" created');
+                loadSessions();
             }
 
             async function saveWorkspacePrompt() {
@@ -419,18 +498,59 @@
             }
 
             async function loadWorkspacePrompt() {
-                const name = prompt('Load workspace:');
-                if (!name) return;
-                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
-                const res = await fetch('/api/workspaces/load', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name })
-                });
-                if (!res.ok) {
-                    alert('Failed to load workspace.');
+                const options = document.getElementById('workspaceLoadOptions');
+                const errEl = document.getElementById('workspaceLoadError');
+                errEl.style.display = 'none';
+                options.innerHTML = '<div class="dialog-empty">Loading workspaces...</div>';
+                document.getElementById('workspaceLoadDialog').showModal();
+                try {
+                    const res = await fetch('/api/workspaces');
+                    if (!res.ok) throw new Error('bad status');
+                    const data = await res.json();
+                    const names = data.workspaces || [];
+                    if (names.length === 0) {
+                        options.innerHTML = '<div class="dialog-empty">No saved workspaces yet. Use "Save workspace..." to create one.</div>';
+                        return;
+                    }
+                    // Names are validated server-side to [a-zA-Z0-9_-], safe to inline
+                    options.innerHTML = names.map(name => `
+                        <button type="button" class="dialog-option dialog-option-btn" onclick="loadWorkspaceByName('${name}')">
+                            <span class="dialog-option-name">${name}</span>
+                        </button>
+                    `).join('');
+                } catch (err) {
+                    options.innerHTML = '';
+                    errEl.textContent = 'Failed to fetch workspaces.';
+                    errEl.style.display = 'block';
                 }
-                loadSessions();
+            }
+
+            async function loadWorkspaceByName(name) {
+                const errEl = document.getElementById('workspaceLoadError');
+                errEl.style.display = 'none';
+                try {
+                    const res = await fetch('/api/workspaces/load', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name })
+                    });
+                    if (!res.ok) {
+                        const data = await res.json().catch(() => ({}));
+                        errEl.textContent = data.error || 'Failed to load workspace.';
+                        errEl.style.display = 'block';
+                        return;
+                    }
+                    closeWorkspaceLoadDialog();
+                    showFlash('Workspace "' + name + '" loaded');
+                    loadSessions();
+                } catch (err) {
+                    errEl.textContent = 'Network error loading workspace.';
+                    errEl.style.display = 'block';
+                }
+            }
+
+            function closeWorkspaceLoadDialog() {
+                document.getElementById('workspaceLoadDialog').close();
             }
 
             function closeWorkspaceSaveDialog() {
@@ -475,6 +595,7 @@
                         startX = e.touches[0].clientX;
                         currentX = startX;
                         isDragging = true;
+                        interactionActive = true;
                         item.style.transition = 'none';
                     }, { passive: true });
 
@@ -488,6 +609,7 @@
                     }, { passive: true });
 
                     wrapper.addEventListener('touchend', () => {
+                        interactionActive = false;
                         if (!isDragging) return;
                         isDragging = false;
                         item.style.transition = 'transform 0.2s ease-out';
@@ -499,6 +621,13 @@
                         } else {
                             item.style.transform = 'translateX(0)';
                         }
+                    }, { passive: true });
+
+                    wrapper.addEventListener('touchcancel', () => {
+                        interactionActive = false;
+                        isDragging = false;
+                        item.style.transition = 'transform 0.2s ease-out';
+                        item.style.transform = 'translateX(0)';
                     }, { passive: true });
 
                     // Close on tap elsewhere
@@ -517,6 +646,7 @@
                 document.querySelectorAll('.session-item-wrapper').forEach(wrapper => {
                     wrapper.addEventListener('dragstart', e => {
                         dragSessionId = wrapper.dataset.session;
+                        interactionActive = true;
                         wrapper.classList.add('dragging');
                         if (e.dataTransfer) {
                             e.dataTransfer.setData('text/plain', dragSessionId);
@@ -526,6 +656,7 @@
                     wrapper.addEventListener('dragend', () => {
                         wrapper.classList.remove('dragging');
                         dragSessionId = null;
+                        interactionActive = false;
                     });
 
                     wrapper.addEventListener('dragover', e => {

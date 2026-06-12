@@ -155,7 +155,12 @@ const shortenPath = (cwdPath: string) => {
   return display;
 };
 
-type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected";
+type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "ended";
+
+// Latency compensation (optimistic echo) and auto-fit-on-type are always on;
+// kept as constants so the gated code paths stay obvious.
+const LATENCY_COMP = true;
+const AUTO_FIT_ON_TYPE = true;
 type SessionSwitchMode = "page" | "instant";
 const DEFAULT_SESSION_SWITCH_MODE: SessionSwitchMode = "instant";
 const SESSION_LIST_STALE_MS = 5000;
@@ -201,8 +206,6 @@ const App = () => {
   const [notice, setNotice] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimeout = useRef<number | null>(null);
-  const [latencyComp, setLatencyComp] = useState(true);
-  const [autoFitOnType, setAutoFitOnType] = useState(true);
   const [terminalReady, setTerminalReady] = useState(false);
   const [reconnectToken, setReconnectToken] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -211,6 +214,7 @@ const App = () => {
   const [searchInfo, setSearchInfo] = useState({ index: 0, total: 0 });
   const searchMatchesRef = useRef<Array<{ row: number; col: number }>>([]);
   const searchIndexRef = useRef(-1);
+  const lastMatchPosRef = useRef<{ row: number; col: number } | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [fabPosition, setFabPosition] = useState({ x: 20, y: window.innerHeight - 80 });
   const fabDragRef = useRef<{ dragging: boolean; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
@@ -231,6 +235,7 @@ const App = () => {
   });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [sessionsError, setSessionsError] = useState(false);
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
     const saved = localStorage.getItem("hay_session_switch_mode");
     // Keep "page" as a legacy fallback while we validate instant mode end-to-end.
@@ -302,13 +307,13 @@ const App = () => {
 
   const typingActive = useRef(false);
   const noticeTimeout = useRef<number | null>(null);
-  const autoFitOnTypeRef = useRef(autoFitOnType);
   const viewModeRef = useRef(viewMode);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
   const userScrolledUpRef = useRef(false);
+  const lastDropToastRef = useRef(0);
   const activeSessionRoomRef = useRef<string | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
@@ -367,6 +372,7 @@ const App = () => {
     const i = ((idx % matches.length) + matches.length) % matches.length;
     searchIndexRef.current = i;
     const m = matches[i];
+    lastMatchPosRef.current = { row: m.row, col: m.col };
     terminal.select(m.col, m.row, len);
     const target = Math.max(0, m.row - Math.floor(terminal.rows / 2));
     const scrollable = terminal as unknown as { scrollToLine?: (line: number) => void };
@@ -375,15 +381,12 @@ const App = () => {
     setSearchInfo({ index: i + 1, total: matches.length });
   };
 
-  const runSearch = (query: string) => {
+  // Scan the whole buffer (scrollback included) for the query. Positions are
+  // absolute buffer rows, valid only until the next output/trim — callers
+  // recompute before navigating.
+  const collectMatches = (query: string) => {
     const terminal = termRef.current;
-    searchMatchesRef.current = [];
-    searchIndexRef.current = -1;
-    if (!terminal || !query) {
-      setSearchInfo({ index: 0, total: 0 });
-      terminal?.clearSelection();
-      return;
-    }
+    if (!terminal || !query) return [];
     const buffer = terminal.buffer.active;
     const needle = query.toLowerCase();
     const matches: Array<{ row: number; col: number }> = [];
@@ -398,9 +401,23 @@ const App = () => {
         from = idx + needle.length;
       }
     }
+    return matches;
+  };
+
+  const runSearch = (query: string) => {
+    const terminal = termRef.current;
+    searchIndexRef.current = -1;
+    lastMatchPosRef.current = null;
+    const matches = collectMatches(query);
     searchMatchesRef.current = matches;
+    if (!terminal || !query) {
+      setSearchInfo({ index: 0, total: 0 });
+      terminal?.clearSelection();
+      return;
+    }
     if (matches.length > 0) {
-      jumpToSearchMatch(0, query.length);
+      // Start at the most recent match (bottom of the buffer)
+      jumpToSearchMatch(matches.length - 1, query.length);
     } else {
       setSearchInfo({ index: 0, total: 0 });
       terminal.clearSelection();
@@ -408,8 +425,31 @@ const App = () => {
   };
 
   const searchStep = (dir: number) => {
-    if (searchMatchesRef.current.length === 0) return;
-    jumpToSearchMatch(searchIndexRef.current + dir, searchQuery.length);
+    const terminal = termRef.current;
+    const query = searchQuery;
+    if (!terminal || !query) return;
+    // Recompute on every navigation — rows shift as output streams in or scrollback trims
+    const matches = collectMatches(query);
+    searchMatchesRef.current = matches;
+    if (matches.length === 0) {
+      searchIndexRef.current = -1;
+      lastMatchPosRef.current = null;
+      setSearchInfo({ index: 0, total: 0 });
+      terminal.clearSelection();
+      return;
+    }
+    const prev = lastMatchPosRef.current;
+    if (!prev) {
+      jumpToSearchMatch(matches.length - 1, query.length);
+      return;
+    }
+    let idx = matches.findIndex((m) => m.row === prev.row && m.col === prev.col);
+    if (idx === -1) {
+      // Buffer shifted under us — re-anchor at the nearest match at/after the old position
+      idx = matches.findIndex((m) => m.row > prev.row || (m.row === prev.row && m.col >= prev.col));
+      if (idx === -1) idx = matches.length - 1;
+    }
+    jumpToSearchMatch(idx + dir, query.length);
   };
 
   const openSearch = () => {
@@ -422,6 +462,7 @@ const App = () => {
     setSearchQuery("");
     searchMatchesRef.current = [];
     searchIndexRef.current = -1;
+    lastMatchPosRef.current = null;
     setSearchInfo({ index: 0, total: 0 });
     termRef.current?.clearSelection();
     if (!isMobile) termRef.current?.focus();
@@ -457,7 +498,7 @@ const App = () => {
   }, [presence, controllerId]);
 
   const optimisticActive =
-    latencyComp && status === "connected" && !collabMode && controllerId === clientId;
+    LATENCY_COMP && status === "connected" && !collabMode && controllerId === clientId;
 
   useEffect(() => {
     if (optimisticPrevRef.current && !optimisticActive) {
@@ -465,10 +506,6 @@ const App = () => {
     }
     optimisticPrevRef.current = optimisticActive;
   }, [optimisticActive]);
-
-  useEffect(() => {
-    autoFitOnTypeRef.current = autoFitOnType;
-  }, [autoFitOnType]);
 
   useEffect(() => {
     viewModeRef.current = viewMode;
@@ -498,12 +535,21 @@ const App = () => {
     if (!sanitized) {
       return;
     }
+    // Surface dropped input instead of silently no-oping while disconnected
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      const now = Date.now();
+      if (now - lastDropToastRef.current > 2000) {
+        lastDropToastRef.current = now;
+        showToast("Disconnected — input not sent");
+      }
+      return;
+    }
     const echoed = optimisticEchoRef.current.onInput(sanitized, optimisticActive);
     if (echoed) {
       writeToTerminal(echoed);
     }
     sendMessage({ type: "input", data: sanitized });
-    if (autoFitOnTypeRef.current && viewModeRef.current === "fit") {
+    if (AUTO_FIT_ON_TYPE && viewModeRef.current === "fit") {
       fitToViewport();
       handleResize();
     }
@@ -698,9 +744,9 @@ const App = () => {
           break;
         case "session_ended":
           shouldReconnectRef.current = false;
-          pushNotice(message.message);
+          pushNotice(message.by ? `${message.message} (by ${message.by})` : message.message);
           ws.close();
-          setStatus("disconnected");
+          setStatus("ended");
           break;
         case "session_renamed":
           setSessionLabel(message.displayName);
@@ -760,6 +806,7 @@ const App = () => {
       fontSize,
       lineHeight: 1.3,
       cursorBlink: true,
+      scrollback: 5000,
       theme: resolveTerminalTheme(themeMode)
     });
     const fitAddon = new FitAddon();
@@ -818,6 +865,14 @@ const App = () => {
 
     // Prevent browser from intercepting common terminal shortcuts
     terminal.attachCustomKeyEventHandler((event) => {
+      // Cmd/Ctrl+F opens scrollback search instead of the browser's native find
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'f') {
+        if (event.type === 'keydown') {
+          event.preventDefault();
+          openSearch();
+        }
+        return false;
+      }
       // Allow ctrl+shift+c/v for copy/paste
       if (event.ctrlKey && event.shiftKey && (event.key === 'c' || event.key === 'v')) {
         return false;
@@ -1351,6 +1406,32 @@ const App = () => {
     };
   }, [name]);
 
+  // Periodic re-render so presence activity labels ("active"/"idle") don't go stale
+  const [, setPresenceTick] = useState(0);
+  useEffect(() => {
+    if (presence.length === 0) {
+      return;
+    }
+    const id = window.setInterval(() => setPresenceTick((tick) => tick + 1), 20000);
+    return () => window.clearInterval(id);
+  }, [presence.length]);
+
+  // Keep the FAB on-screen after rotation / window resize
+  useEffect(() => {
+    const clampFab = () => {
+      setFabPosition((pos) => ({
+        x: Math.max(0, Math.min(window.innerWidth - 56, pos.x)),
+        y: Math.max(0, Math.min(window.innerHeight - 56, pos.y))
+      }));
+    };
+    window.addEventListener("resize", clampFab);
+    window.addEventListener("orientationchange", clampFab);
+    return () => {
+      window.removeEventListener("resize", clampFab);
+      window.removeEventListener("orientationchange", clampFab);
+    };
+  }, []);
+
   const fetchSessions = useCallback(async (options: { showLoading?: boolean } = {}) => {
     const { showLoading = true } = options;
     if (showLoading) {
@@ -1387,10 +1468,12 @@ const App = () => {
       }
 
       setSessions(Array.from(sessionMap.values()));
+      setSessionsError(false);
       sessionListLoadedRef.current = true;
       sessionListFetchedAtRef.current = Date.now();
     } catch (err) {
       console.error("Failed to fetch sessions:", err);
+      setSessionsError(true);
     } finally {
       if (showLoading) {
         setLoadingSessions(false);
@@ -1583,6 +1666,9 @@ const App = () => {
             >
               <span className="presence-dot" style={{ backgroundColor: client.color }} />
               <span className="presence-name">{client.name}</span>
+              {!collabMode && controllerId === client.id && (
+                <span className="presence-control" title="Has control">control</span>
+              )}
               <span className={`presence-status ${formatStatus(client)}`}>{formatStatus(client)}</span>
             </div>
           ))}
@@ -1623,8 +1709,30 @@ const App = () => {
           className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}`}
           style={sessionStyle}
         >
+          {/* Mobile: footer is hidden, so surface connection state in a fixed top banner */}
+          {isMobile && status !== "connected" && status !== "idle" && (
+            <div
+              className={`connection-banner${status === "ended" ? " ended" : ""}`}
+              role="status"
+              aria-live="polite"
+            >
+              <span>
+                {status === "connecting"
+                  ? "Connecting…"
+                  : status === "ended"
+                    ? "Session ended"
+                    : "Disconnected — reconnecting…"}
+              </span>
+              {(status === "disconnected" || status === "ended") && (
+                <button type="button" onClick={() => setReconnectToken((value) => value + 1)}>
+                  Reconnect now
+                </button>
+              )}
+            </div>
+          )}
           <button
             type="button"
+            aria-label="Open menu"
             className="drawer-toggle"
             style={{ left: fabPosition.x, top: fabPosition.y, bottom: 'auto' }}
             onMouseDown={(e) => handleFabDragStart(e.clientX, e.clientY)}
@@ -1647,6 +1755,7 @@ const App = () => {
           <section className={`controls ${drawerOpen ? "open" : ""}`}>
             <button
               type="button"
+              aria-label="Close menu"
               className="drawer-close"
               onClick={() => setDrawerOpen(false)}
             >
@@ -1660,7 +1769,13 @@ const App = () => {
                 <p className="room-cwd" title={liveCwd}>{shortenPath(liveCwd)}</p>
               )}
               <p className="room-meta">
-                {status === "connected" ? "Live" : status === "connecting" ? "Connecting" : "Offline"}
+                {status === "connected"
+                  ? "Live"
+                  : status === "connecting"
+                    ? "Connecting"
+                    : status === "ended"
+                      ? "Ended"
+                      : "Offline"}
               </p>
             </div>
 
@@ -1674,21 +1789,74 @@ const App = () => {
                   {keyboardVisible ? "" : ""}
                 </button>
               )}
-              <button type="button" className="quick-btn" onClick={handleCopyLink} title="Copy share link">
+              <button type="button" className="quick-btn" onClick={handleCopyLink} title="Copy share link" aria-label="Copy share link">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
                 </svg>
               </button>
+              {isMobile && (
+                <button type="button" className="quick-btn" aria-label="Find in terminal" onClick={() => { setDrawerOpen(false); openSearch(); }}>
+                  Find
+                </button>
+              )}
               <button type="button" className="quick-btn" onClick={() => { fitToViewport(); handleResize(); }}>
                 Fit
               </button>
               <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
                 Manage
               </button>
-              {status === "disconnected" && (
+              {(status === "disconnected" || status === "ended") && (
                 <button type="button" className="quick-btn primary" onClick={() => setReconnectToken((value) => value + 1)}>
                   Reconnect
                 </button>
+              )}
+            </div>
+
+            {/* Input control: who is allowed to type */}
+            <div className="drawer-group">
+              <div className="drawer-row">
+                <label>Control</label>
+                <span className="control-state">
+                  {collabMode
+                    ? "Everyone can type"
+                    : controllerId === clientId
+                      ? "You have control"
+                      : controllerName
+                        ? `Locked by ${controllerName}`
+                        : "Locked"}
+                </span>
+              </div>
+              <div className="drawer-row">
+                <label>Typing</label>
+                <div className="view-mode-buttons">
+                  <button
+                    type="button"
+                    className={collabMode ? "active" : ""}
+                    onClick={() => { if (!collabMode) handleToggleCollab(); }}
+                  >
+                    Everyone
+                  </button>
+                  <button
+                    type="button"
+                    className={!collabMode ? "active" : ""}
+                    onClick={() => { if (collabMode) handleToggleCollab(); }}
+                  >
+                    One user
+                  </button>
+                </div>
+              </div>
+              {!collabMode && (
+                <div className="drawer-row">
+                  {controllerId === clientId ? (
+                    <button type="button" className="quick-btn" onClick={handleReleaseControl}>
+                      Release control
+                    </button>
+                  ) : (
+                    <button type="button" className="quick-btn" onClick={handleTakeControl}>
+                      Take control
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
@@ -1765,15 +1933,20 @@ const App = () => {
                 )}
               </div>
             </details>
-            {notice && <p className="notice">{notice}</p>}
+            {notice && <p className="notice" role="status" aria-live="polite">{notice}</p>}
             {(() => {
-              const currentSessionName = sessionLabel || session?.room;
-              const otherSessions = sessions.filter((s) => s.name !== currentSessionName);
+              // Compare against the internal room id — the display label can differ
+              const otherSessions = sessions.filter((s) => s.name !== session.room);
               return (
                 <div className="session-switcher">
                   <p className="session-switcher-label">Switch session</p>
                   {loadingSessions ? (
                     <div className="session-list-loading">Loading...</div>
+                  ) : sessionsError ? (
+                    <div className="session-list-error">
+                      <span>Couldn't load sessions</span>
+                      <button type="button" onClick={() => fetchSessions()}>Retry</button>
+                    </div>
                   ) : otherSessions.length === 0 ? (
                     <div className="session-list-empty">No other sessions</div>
                   ) : (
@@ -1847,7 +2020,7 @@ const App = () => {
               {status === "connected" ? (
                 <>
                   <span>Live</span>
-                  <button type="button" className="footer-find-toggle" onClick={openSearch}>
+                  <button type="button" className="footer-find-toggle" aria-label="Find in terminal" onClick={openSearch}>
                     🔍 Find
                   </button>
                   <span>
@@ -1856,6 +2029,17 @@ const App = () => {
                 </>
               ) : status === "idle" ? (
                 <span>Awaiting connection</span>
+              ) : status === "ended" ? (
+                <>
+                  <span className="ended-label">Session ended</span>
+                  <button
+                    type="button"
+                    className="footer-reconnect"
+                    onClick={() => setReconnectToken((value) => value + 1)}
+                  >
+                    Reconnect
+                  </button>
+                </>
               ) : (
                 <>
                   <span className="reconnecting">
@@ -1879,9 +2063,12 @@ const App = () => {
               onToggle={handleKeyboardToggle}
               onHeightChange={setKeyboardHeight}
               hapticsEnabled={hapticsEnabled}
+              onPasteFailed={() =>
+                showToast("Clipboard access denied — long-press the terminal to paste instead.", 3500)
+              }
             />
           )}
-          {toast && <div className="terminal-toast">{toast}</div>}
+          {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
       )}
     </div>

@@ -14,6 +14,8 @@ interface MobileKeyboardProps {
   onToggle: () => void;
   onHeightChange?: (height: number) => void;
   hapticsEnabled?: boolean;
+  /** Called when reading the clipboard fails (e.g. permission denied). */
+  onPasteFailed?: () => void;
 }
 
 type KeyboardView = "abc" | "num";
@@ -97,7 +99,8 @@ export const MobileKeyboard = ({
   visible,
   onToggle,
   onHeightChange,
-  hapticsEnabled = true
+  hapticsEnabled = true,
+  onPasteFailed
 }: MobileKeyboardProps) => {
   const [view, setView] = useState<KeyboardView>("abc");
   const [shift, setShift] = useState(false);
@@ -121,12 +124,16 @@ export const MobileKeyboard = ({
   const shiftRef = useRef(shift);
   const capsRef = useRef(caps);
   const ctrlRef = useRef(ctrl);
+  const altRef = useRef(alt);
+  const onPasteFailedRef = useRef(onPasteFailed);
 
   // Keep refs in sync with state
   onInputRef.current = onInput;
   shiftRef.current = shift;
   capsRef.current = caps;
   ctrlRef.current = ctrl;
+  altRef.current = alt;
+  onPasteFailedRef.current = onPasteFailed;
 
   // Create hidden switch elements for iOS haptic feedback
   // iOS doesn't support navigator.vibrate, so we use a hidden checkbox switch
@@ -195,14 +202,24 @@ export const MobileKeyboard = ({
     (key: string) => {
       let data = key;
 
-      // Handle Ctrl modifier - only for letter keys (A-Z)
-      // Read from ref for current value
-      if (ctrlRef.current && key.length === 1) {
-        const c = key.toUpperCase().charCodeAt(0);
-        if (c >= 65 && c <= 90) {
-          data = String.fromCharCode(c - 64);
-          setCtrl(false);
+      // Handle Ctrl modifier - applies only to letter keys (A-Z),
+      // but the latch clears on any keypress so it can't stick forever
+      if (ctrlRef.current) {
+        if (key.length === 1) {
+          const c = key.toUpperCase().charCodeAt(0);
+          if (c >= 65 && c <= 90) {
+            data = String.fromCharCode(c - 64);
+          }
         }
+        setCtrl(false);
+      }
+
+      // Handle Alt modifier - ESC-prefix the next single key, then clear the latch
+      if (altRef.current) {
+        if (data.length === 1) {
+          data = "\x1b" + data;
+        }
+        setAlt(false);
       }
 
       // Call onInput via ref to always use current callback
@@ -223,9 +240,12 @@ export const MobileKeyboard = ({
         if (text) {
           send(text);
         }
+      } else {
+        onPasteFailedRef.current?.();
       }
     } catch {
-      // Clipboard access denied
+      // Clipboard access denied — let the host surface it
+      onPasteFailedRef.current?.();
     }
   }, [send]); // send is stable
 
@@ -275,7 +295,8 @@ export const MobileKeyboard = ({
   const handleSysKbSubmit = useCallback(() => {
     const text = sysKbDraft;
     if (text) {
-      send(text);
+      // Enter sends the text followed by CR — the universal "run it" expectation
+      send(text + "\r");
       setSysKbDraft("");
     }
     if (sysInputRef.current) {
@@ -611,7 +632,7 @@ export const MobileKeyboard = ({
             <textarea
               ref={sysInputRef}
               className="kb-sys-input"
-              placeholder="Type here..."
+              placeholder="Type here — return runs it..."
               autoCapitalize="off"
               autoComplete="off"
               autoCorrect="off"

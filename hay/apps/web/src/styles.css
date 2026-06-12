@@ -1,87 +1,102 @@
 /* System font stack — no external font loading, instant render */
 
+/* ── hop identity palette — shared with the CLI status/hint bars ── */
+
 /* ── Light theme (default) ── */
 :root {
   color-scheme: light;
-  --bg: #f4f5f7;
-  --bg-alt: #eef0f3;
-  --ink: #1a1d23;
-  --ink-muted: #6b7280;
-  --accent: #3b82f6;
-  --accent-2: #6366f1;
-  --line: #e2e4e9;
+  --font-mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+  --bg: #f2f2f7;
+  --bg-alt: #e9e9ed;
+  --ink: #1d1d1f;
+  --ink-muted: #6e6e73;
+  --accent: #7c3aed;
+  --accent-2: #6d28d9;
+  --accent-fg: #ffffff;
+  --ok: #1a7f37;
+  --warn: #b45309;
+  --err: #cf222e;
+  --line: #dcdce3;
   --panel: #ffffff;
-  --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.04);
+  --shadow: 0 1px 2px rgba(20,20,24,0.05), 0 10px 30px rgba(20,20,24,0.07);
   --terminal-bg: #ffffff;
-  --terminal-fg: #000000;
-  --terminal-cursor: #3b82f6;
-  --btn-bg: #eef0f3;
-  --topbar-bg: rgba(255,255,255,0.72);
+  --terminal-fg: #1d1d1f;
+  --terminal-cursor: #7c3aed;
+  --btn-bg: #e9e9ed;
+  --topbar-bg: rgba(242,242,247,0.8);
   --chip-bg: rgba(255,255,255,0.92);
   --fab-bg: rgba(160,165,175,0.28);
   --fab-border: rgba(0,0,0,0.06);
   --fab-highlight: rgba(255,255,255,0.5);
   --fab-color: rgba(0,0,0,0.45);
-  --keyboard-bg: #d1d3d9;
+  --keyboard-bg: #d6d6dc;
   --keyboard-key-bg: #fff;
-  --keyboard-key-color: #000;
-  --keyboard-special-bg: #a9abaf;
+  --keyboard-key-color: #1d1d1f;
+  --keyboard-special-bg: #aeaeb4;
 }
 
 /* ── Dark theme ── */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111318;
-  --bg-alt: #191b22;
-  --ink: #e4e5e9;
-  --ink-muted: #7d818a;
-  --accent: #60a5fa;
-  --accent-2: #818cf8;
-  --line: #272a33;
-  --panel: #191b22;
-  --shadow: 0 1px 3px rgba(0,0,0,0.2), 0 8px 24px rgba(0,0,0,0.15);
-  --terminal-bg: #0d1117;
-  --terminal-fg: #e6edf3;
-  --terminal-cursor: #60a5fa;
-  --btn-bg: #272a33;
-  --topbar-bg: rgba(17,19,24,0.85);
-  --chip-bg: rgba(39,42,51,0.92);
+  --bg: #141417;
+  --bg-alt: #232327;
+  --ink: #e6e6e9;
+  --ink-muted: #93939b;
+  --accent: #a78bfa;
+  --accent-2: #c4b5fd;
+  --accent-fg: #1d1d1f;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --err: #f85149;
+  --line: #2c2c31;
+  --panel: #1d1d21;
+  --shadow: 0 1px 3px rgba(0,0,0,0.25), 0 10px 30px rgba(0,0,0,0.2);
+  --terminal-bg: #17181d;
+  --terminal-fg: #e6e6e9;
+  --terminal-cursor: #a78bfa;
+  --btn-bg: #2a2a2e;
+  --topbar-bg: rgba(20,20,23,0.85);
+  --chip-bg: rgba(42,42,46,0.92);
   --fab-bg: rgba(80,85,95,0.3);
   --fab-border: rgba(255,255,255,0.08);
   --fab-highlight: rgba(255,255,255,0.06);
   --fab-color: rgba(255,255,255,0.72);
-  --keyboard-bg: #272a33;
-  --keyboard-key-bg: #363940;
-  --keyboard-key-color: #e4e5e9;
-  --keyboard-special-bg: #1e2028;
+  --keyboard-bg: #232327;
+  --keyboard-key-bg: #2e2e33;
+  --keyboard-key-color: #e6e6e9;
+  --keyboard-special-bg: #1c1c20;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #111318;
-    --bg-alt: #191b22;
-    --ink: #e4e5e9;
-    --ink-muted: #7d818a;
-    --accent: #60a5fa;
-    --accent-2: #818cf8;
-    --line: #272a33;
-    --panel: #191b22;
-    --shadow: 0 1px 3px rgba(0,0,0,0.2), 0 8px 24px rgba(0,0,0,0.15);
-    --terminal-bg: #0d1117;
-    --terminal-fg: #e6edf3;
-    --terminal-cursor: #60a5fa;
-    --btn-bg: #272a33;
-    --topbar-bg: rgba(17,19,24,0.85);
-    --chip-bg: rgba(39,42,51,0.92);
+    --bg: #141417;
+    --bg-alt: #232327;
+    --ink: #e6e6e9;
+    --ink-muted: #93939b;
+    --accent: #a78bfa;
+    --accent-2: #c4b5fd;
+    --accent-fg: #1d1d1f;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --line: #2c2c31;
+    --panel: #1d1d21;
+    --shadow: 0 1px 3px rgba(0,0,0,0.25), 0 10px 30px rgba(0,0,0,0.2);
+    --terminal-bg: #17181d;
+    --terminal-fg: #e6e6e9;
+    --terminal-cursor: #a78bfa;
+    --btn-bg: #2a2a2e;
+    --topbar-bg: rgba(20,20,23,0.85);
+    --chip-bg: rgba(42,42,46,0.92);
     --fab-bg: rgba(80,85,95,0.3);
     --fab-border: rgba(255,255,255,0.08);
     --fab-highlight: rgba(255,255,255,0.06);
     --fab-color: rgba(255,255,255,0.72);
-    --keyboard-bg: #272a33;
-    --keyboard-key-bg: #363940;
-    --keyboard-key-color: #e4e5e9;
-    --keyboard-special-bg: #1e2028;
+    --keyboard-bg: #232327;
+    --keyboard-key-bg: #2e2e33;
+    --keyboard-key-color: #e6e6e9;
+    --keyboard-special-bg: #1c1c20;
   }
 }
 
@@ -146,25 +161,26 @@ body {
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 16px;
-  background: linear-gradient(140deg, var(--accent), var(--accent-2));
-  color: #fff;
-  font-size: 20px;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 19px;
 }
 
 .brand-title {
   margin: 0;
-  font-weight: 600;
-  font-size: 18px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.01em;
 }
 
 .brand-subtitle {
   margin: 2px 0 0;
   color: var(--ink-muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .presence-strip {
@@ -191,7 +207,6 @@ body {
 
 .presence-chip.self {
   border-color: var(--accent);
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.12);
 }
 
 .presence-chip:hover {
@@ -206,7 +221,9 @@ body {
 }
 
 .presence-name {
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .presence-status {
@@ -242,13 +259,16 @@ body {
   display: grid;
   place-items: center;
   padding: 40px 20px 80px;
+  /* instrument-panel dot grid */
+  background-image: radial-gradient(var(--line) 1px, transparent 1px);
+  background-size: 18px 18px;
 }
 
 .join-card {
   width: min(520px, 92vw);
   background: var(--panel);
-  padding: 32px 36px;
-  border-radius: 28px;
+  padding: 36px 40px;
+  border-radius: 16px;
   box-shadow: var(--shadow);
   animation: lift 0.6s ease;
   border: 1px solid var(--line);
@@ -267,7 +287,9 @@ body {
 
 .join-card h1 {
   margin-top: 0;
-  font-size: 28px;
+  font-family: var(--font-mono);
+  font-size: 22px;
+  letter-spacing: -0.01em;
 }
 
 .join-card p {
@@ -289,34 +311,39 @@ body {
 
 input {
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: 10px;
+  padding: 11px 13px;
   font-size: 15px;
   font-family: inherit;
   background: var(--panel);
   color: var(--ink);
 }
 
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
 button {
   border: none;
-  border-radius: 14px;
-  padding: 12px 16px;
-  font-size: 14px;
+  border-radius: 10px;
+  padding: 11px 15px;
+  font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
-  background: var(--btn-bg, #f1e7d8);
+  background: var(--btn-bg, #e9e9ed);
   color: var(--ink);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 button:hover {
   transform: translateY(-1px);
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.1);
 }
 
 button.primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
 }
 
 .join-links {
@@ -375,15 +402,18 @@ button.primary {
 
 .room-label {
   margin: 0;
+  font-family: var(--font-mono);
   text-transform: uppercase;
-  font-size: 11px;
+  font-size: 10px;
   letter-spacing: 0.2em;
   color: var(--ink-muted);
 }
 
 .room-info h2 {
   margin: 6px 0 2px;
-  font-size: 20px;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  letter-spacing: -0.01em;
 }
 
 .room-cwd {
@@ -418,12 +448,14 @@ button.primary {
   flex: 1;
   min-width: 0;
   padding: 8px 10px !important;
+  font-family: var(--font-mono);
   font-size: 12px !important;
   font-weight: 500 !important;
-  border-radius: 10px !important;
-  background: var(--btn-bg) !important;
+  border-radius: 8px !important;
+  background: var(--panel) !important;
   color: var(--ink) !important;
   border: 1px solid var(--line) !important;
+  border-bottom-width: 2px !important;
 }
 
 .quick-btn.primary {
@@ -537,11 +569,12 @@ button.primary {
 
 .notice {
   margin: 0;
-  background: rgba(59, 130, 246, 0.1);
+  background: var(--bg-alt);
+  border-left: 3px solid var(--accent);
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: 8px;
   font-size: 13px;
-  color: var(--accent-2);
+  color: var(--ink);
 }
 
 .font-size-control {
@@ -704,7 +737,7 @@ button.primary {
   height: calc(100vh - 250px);
   height: calc(100dvh - 250px);
   min-height: 300px;
-  border-radius: 24px;
+  border-radius: 13px;
   overflow: hidden;
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
@@ -756,16 +789,54 @@ button.primary {
   position: relative !important;
 }
 
+/* Status bar — same visual language as the CLI client's bottom bar:
+   accent session chip flush-left, dim cwd, semantic state dot at the right. */
 .terminal-footer {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ink-muted);
-  padding: 0 4px;
+  background: var(--bg-alt);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 5px 11px 5px 5px;
+  min-height: 32px;
 }
 
+.footer-chip {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.footer-cwd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.footer-spacer {
+  flex: 1;
+}
+
+.footer-dot {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--warn);
+}
+
+.footer-dot.connected { color: var(--ok); }
+.footer-dot.ended,
+.footer-dot.disconnected { color: var(--err); }
+
 .terminal-footer .reconnecting {
-  color: #b45309; /* amber */
+  color: var(--warn);
   font-weight: 600;
   animation: hop-reconnect-pulse 1.4s ease-in-out infinite;
 }
@@ -778,9 +849,9 @@ button.primary {
 .footer-reconnect {
   font: inherit;
   font-weight: 600;
-  color: #b45309;
+  color: var(--warn);
   background: transparent;
-  border: 1px solid #b45309;
+  border: 1px solid var(--warn);
   border-radius: 6px;
   padding: 1px 8px;
   cursor: pointer;
@@ -788,10 +859,12 @@ button.primary {
 
 .footer-reconnect:hover {
   background: rgba(180, 83, 9, 0.1);
+  transform: none;
+  box-shadow: none;
 }
 
 .terminal-footer .ended-label {
-  color: var(--ink-muted);
+  color: var(--err);
   font-weight: 600;
 }
 
@@ -829,17 +902,24 @@ button.primary {
   cursor: pointer;
 }
 
+/* Keycap-style control, shared by the find toggle and find-bar buttons */
 .footer-find-toggle {
-  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--ink-muted);
-  background: transparent;
-  border: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 2px 9px;
   cursor: pointer;
-  padding: 0 6px;
 }
 
 .footer-find-toggle:hover {
   color: var(--ink);
+  border-color: var(--accent);
+  transform: none;
+  box-shadow: none;
 }
 
 .terminal-frame {
@@ -855,9 +935,10 @@ button.primary {
   align-items: center;
   gap: 4px;
   padding: 4px 6px;
-  background: rgba(24, 24, 27, 0.92);
+  font-family: var(--font-mono);
+  background: rgba(24, 24, 28, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
+  border-radius: 9px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
 }
 
@@ -873,7 +954,7 @@ button.primary {
 
 .terminal-find-count {
   font-size: 12px;
-  color: #a1a1aa;
+  color: #c4b5fd;
   min-width: 36px;
   text-align: right;
 }
@@ -1320,8 +1401,8 @@ button.primary {
 
 /* System keyboard button pulse animation */
 .kb-key.kb-syskb {
-  background: #3b82f6;
-  color: #fff;
+  background: var(--accent);
+  color: var(--accent-fg);
 }
 
 .kb-key.kb-syskb svg {
@@ -1330,11 +1411,11 @@ button.primary {
 
 @keyframes kbPulse {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+    box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.6);
     transform: scale(1);
   }
   50% {
-    box-shadow: 0 0 0 8px rgba(59, 130, 246, 0);
+    box-shadow: 0 0 0 8px rgba(124, 58, 237, 0);
     transform: scale(1.1);
   }
 }
@@ -1609,6 +1690,6 @@ button.primary {
 }
 
 .session-badge.port {
-  background: #3b82f6;
-  color: #fff;
+  background: var(--accent);
+  color: var(--accent-fg);
 }

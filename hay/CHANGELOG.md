@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### New Features
+
+#### Web Client
+- **Restyle to the hop identity**: the web client now shares the CLI bars' palette and language — accent session chip, semantic state dot, and keycap-style find control in a real status-bar footer; mono-led chrome (brand, presence names, session labels); refined light/dark themes; dot-grid join page. The hop session picker got the same treatment, including dark-mode support.
+
 ## [0.9.0] - 2026-06-12
 
 ### New Features

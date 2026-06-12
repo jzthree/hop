@@ -13,6 +13,8 @@ import { MobileKeyboard } from "./components/MobileKeyboard";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
+const isMacPlatform = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || "");
+
 const parseSessionNameFromPath = (pathname: string) => {
   const match = pathname.match(/^\/s\/([^/]+)\/?$/);
   if (!match) {
@@ -1651,7 +1653,7 @@ const App = () => {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">◎</span>
+          <span className="brand-mark" aria-hidden="true">🐰</span>
           <div>
             <p className="brand-title">Hay</p>
             <p className="brand-subtitle">Collaborative terminal sharing for Hop.</p>
@@ -2017,21 +2019,23 @@ const App = () => {
               )}
             </div>
             <div className="terminal-footer">
+              <span className="footer-chip">{sessionLabel || session.room}</span>
+              {liveCwd ? <span className="footer-cwd">{liveCwd}</span> : null}
+              <span className="footer-spacer" />
               {status === "connected" ? (
                 <>
-                  <span>Live</span>
                   <button type="button" className="footer-find-toggle" aria-label="Find in terminal" onClick={openSearch}>
-                    🔍 Find
+                    {isMacPlatform ? "⌘F" : "Ctrl+F"} find
                   </button>
                   <span>
                     {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
                   </span>
                 </>
               ) : status === "idle" ? (
-                <span>Awaiting connection</span>
+                <span>awaiting connection</span>
               ) : status === "ended" ? (
                 <>
-                  <span className="ended-label">Session ended</span>
+                  <span className="ended-label">session ended</span>
                   <button
                     type="button"
                     className="footer-reconnect"
@@ -2054,6 +2058,9 @@ const App = () => {
                   </button>
                 </>
               )}
+              <span className={`footer-dot ${status}`} aria-hidden="true">
+                ●
+              </span>
             </div>
           </section>
           {isMobile && (

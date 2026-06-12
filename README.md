@@ -12,6 +12,10 @@ Hop gives you secure browser access to local terminals and a built-in MCP server
            o_(")(")
 ```
 
+<p align="center">
+  <img src="docs/hero.svg" width="980" alt="The hop terminal UI, annotated: a session chip pinned flush-left, a live state dot (green connected, amber reconnecting, red dropped, purple locked), a scrollback position indicator, keycap-style hints, adaptive light/dark themes, and scrollback search with toast notices." />
+</p>
+
 ## Why Hop
 
 - **Browser terminal from anywhere** — Tunnel through Cloudflare with no port forwarding

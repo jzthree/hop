@@ -57,13 +57,19 @@
             .session-action { position: absolute; top: 0; bottom: 0; width: 80px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 500; cursor: pointer; font-size: 0.85rem; }
             .session-action.rename { left: 0; background: #7c3aed; }
             .session-action.rename:active { background: #6d28d9; }
+            /* Agent toggle sits just right of Rename, revealed by the same swipe */
+            .session-action.agent { left: 80px; font-size: 0.78rem; }
+            .session-action.agent.on { background: #16a34a; }
+            .session-action.agent.off { background: #6b7280; }
             .session-action.delete { right: 0; background: #dc2626; }
             .session-action.delete:active { background: #b91c1c; }
-            /* Visible rename/delete affordance for pointer devices (swipe covers touch) */
+            /* Visible action cluster for pointer devices (swipe covers touch) */
             .row-actions { display: none; gap: 0.35rem; flex-shrink: 0; }
             .row-action { width: 34px; height: 34px; padding: 0; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink-muted); cursor: pointer; font-size: 0.9rem; }
             .row-action:hover { background: var(--bg-alt); }
             .row-action.delete:hover { background: var(--err-soft); border-color: var(--err-line); color: var(--err); }
+            .row-action.agent { filter: grayscale(1) opacity(0.55); }
+            .row-action.agent.on { filter: none; border-color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
             @media (hover: hover) and (pointer: fine) { .row-actions { display: flex; } }
             .session-info { flex: 1; min-width: 0; }
             .session-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
@@ -79,11 +85,6 @@
             .preview-toggle:hover { color: var(--accent); }
             .session-preview { display: none; margin: 0.45rem 0 0; padding: 0.6rem 0.7rem; background: var(--bg-alt); border: 1px solid var(--line); border-radius: 8px; font-family: var(--font-mono); font-size: 0.66rem; line-height: 1.35; color: var(--ink); white-space: pre; overflow: auto; max-height: 11rem; max-width: 100%; }
             .session-preview.open { display: block; }
-            /* Compact agent-access toggle in the header — subtle when off (common) */
-            .agent-pill { font-family: var(--font-mono); font-size: 0.62rem; font-weight: 600; cursor: pointer; border-radius: 999px; padding: 0.1rem 0.5rem; white-space: nowrap; line-height: 1.4; }
-            .agent-pill.off { background: transparent; border: 1px solid var(--line); color: var(--ink-muted); }
-            .agent-pill.off:hover { border-color: var(--ink-muted); }
-            .agent-pill.on { background: color-mix(in srgb, var(--ok) 14%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent); color: var(--ok); }
             .agent-badge { background: var(--accent); color: var(--accent-fg); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .btn { padding: 0.75rem 1.25rem; border: 1px solid transparent; border-radius: 10px; cursor: pointer; font-size: 1rem; font-weight: 500; text-decoration: none; display: inline-block; min-width: 80px; text-align: center; transition: background 0.15s ease, border-color 0.15s ease, opacity 0.2s; }
             .btn-primary { background: var(--accent); color: var(--accent-fg); }
@@ -156,7 +157,7 @@
         </div>
         <div class="container">
             <h1>🐰 hop · sessions</h1>
-            <p class="subtitle">Create sessions, drag them into folders, or load a workspace. Swipe right to rename, swipe left to delete — or use the row buttons.</p>
+            <p class="subtitle">Create sessions, drag them into folders, or load a workspace. Swipe right to manage (rename / agent access), swipe left to delete — or use the row buttons.</p>
             <div class="new-session">
                 <input type="text" id="newName" placeholder="Session name..." pattern="[a-zA-Z0-9_-]+">
                 <select id="sessionType">
@@ -373,18 +374,19 @@
                     } else {
                         metaText = 'Workspace session. Join starts a fresh shell.';
                     }
-                    // Compact agent-access toggle (sits in the header, not its own
-                    // row). Subtle when off (the common case) so it's not noise.
-                    const agentToggle = !isPort ? `
-                        <button class="agent-pill ${agentPermitted ? 'on' : 'off'}"
-                            title="Agent (MCP) access ${agentPermitted ? 'enabled — tap to disable' : 'disabled — tap to enable'}"
-                            onclick="toggleAgentAccess('${internalName}', ${agentPermitted ? 'false' : 'true'})">
-                            agent ${agentPermitted ? 'on' : 'off'}
-                        </button>
+                    // Agent (MCP) access is security-relevant and was easy to mis-tap
+                    // as a header pill — it now lives in the swipe "manage" area
+                    // (next to Rename) on touch, and the row-action cluster on pointer.
+                    const agentSwipeAction = !isPort ? `
+                        <div class="session-action agent ${agentPermitted ? 'on' : 'off'}" onclick="toggleAgentAccess('${internalName}', ${agentPermitted ? 'false' : 'true'})">Agent ${agentPermitted ? 'on' : 'off'}</div>
+                    ` : '';
+                    const agentRowBtn = !isPort ? `
+                        <button class="row-action agent ${agentPermitted ? 'on' : 'off'}" title="Agent (MCP) access ${agentPermitted ? 'on — click to disable' : 'off — click to enable'}" aria-label="Toggle agent access" onclick="toggleAgentAccess('${internalName}', ${agentPermitted ? 'false' : 'true'})">🤖</button>
                     ` : '';
                     return `
                         <div class="session-item-wrapper" draggable="true" data-session="${internalName}" data-display="${displayName}">
                             <div class="session-action rename" onclick="renameSession('${displayName}')">Rename</div>
+                            ${agentSwipeAction}
                             <div class="session-action delete" onclick="deleteSession('${internalName}', '${displayName}')">Delete</div>
                             <div class="session-item">
                                 <div class="session-info">
@@ -392,7 +394,6 @@
                                         <span class="session-name">${displayName}</span>
                                         ${agentBadge}
                                         ${stateBadge}
-                                        ${agentToggle}
                                     </div>
                                     <div class="session-meta">${metaText}</div>
                                     ${isLive && !isPort ? `
@@ -402,6 +403,7 @@
                                 </div>
                                 <div class="row-actions">
                                     <button class="row-action" title="Rename" aria-label="Rename session" onclick="renameSession('${displayName}')">✎</button>
+                                    ${agentRowBtn}
                                     <button class="row-action delete" title="Delete" aria-label="Delete session" onclick="deleteSession('${internalName}', '${displayName}')">🗑</button>
                                 </div>
                                 <a href="/s/${encodeURIComponent(displayName)}/" class="btn btn-primary" onclick="showLoading()">Join</a>
@@ -695,6 +697,9 @@
             function initSwipe() {
                 document.querySelectorAll('.session-item-wrapper').forEach(wrapper => {
                     const item = wrapper.querySelector('.session-item');
+                    // Right swipe reveals the "manage" actions (Rename + Agent toggle
+                    // when present); each action is 80px wide. Left reveals Delete.
+                    const rightReveal = wrapper.querySelector('.session-action.agent') ? 160 : 80;
                     let startX, currentX, isDragging = false;
 
                     wrapper.addEventListener('touchstart', e => {
@@ -709,8 +714,7 @@
                         if (!isDragging) return;
                         currentX = e.touches[0].clientX;
                         let dx = currentX - startX;
-                        // Clamp: -80 (left/delete) to +80 (right/rename)
-                        dx = Math.max(-80, Math.min(80, dx));
+                        dx = Math.max(-80, Math.min(rightReveal, dx));
                         item.style.transform = 'translateX(' + dx + 'px)';
                     }, { passive: true });
 
@@ -723,7 +727,7 @@
                         if (dx < -40) {
                             item.style.transform = 'translateX(-80px)'; // Show delete
                         } else if (dx > 40) {
-                            item.style.transform = 'translateX(80px)'; // Show rename
+                            item.style.transform = 'translateX(' + rightReveal + 'px)'; // Show manage actions
                         } else {
                             item.style.transform = 'translateX(0)';
                         }

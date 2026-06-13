@@ -452,6 +452,14 @@ button.primary {
 
 .quick-actions {
   display: flex;
+  align-items: center;
+  gap: 14px; /* clear separation between the icon cluster and the action cluster */
+  flex-wrap: wrap;
+}
+
+/* Two functional clusters: utility icons, then named actions */
+.quick-group {
+  display: flex;
   gap: 6px;
   flex-wrap: wrap;
 }

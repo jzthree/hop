@@ -223,7 +223,9 @@ const App = () => {
   const searchIndexRef = useRef(-1);
   const lastMatchPosRef = useRef<{ row: number; col: number } | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [fabPosition, setFabPosition] = useState({ x: 20, y: window.innerHeight - 80 });
+  // Default the drawer FAB to the top-right (clear of the status bar), mirroring
+  // the drawer's close button. It stays draggable; clampFab keeps it on-screen.
+  const [fabPosition, setFabPosition] = useState({ x: window.innerWidth - 72, y: 64 });
   const fabDragRef = useRef<{ dragging: boolean; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
   const [isMobile, setIsMobile] = useState(() => isMobileDevice());
   const [keyboardVisible, setKeyboardVisible] = useState(() => isMobileDevice());
@@ -1807,38 +1809,42 @@ const App = () => {
               </p>
             </div>
 
-            {/* Quick actions — compact row */}
+            {/* Quick actions — utility icons grouped left, named actions right */}
             <div className="quick-actions">
-              {isMobile && (
-                <button type="button" className="quick-btn icon-btn" onClick={() => { handleKeyboardToggle(); setDrawerOpen(false); }} title={keyboardVisible ? "Hide keyboard" : "Show keyboard"} aria-label={keyboardVisible ? "Hide keyboard" : "Show keyboard"}>
+              <div className="quick-group">
+                {isMobile && (
+                  <button type="button" className="quick-btn icon-btn" onClick={() => { handleKeyboardToggle(); setDrawerOpen(false); }} title={keyboardVisible ? "Hide keyboard" : "Show keyboard"} aria-label={keyboardVisible ? "Hide keyboard" : "Show keyboard"}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="2" y="4" width="20" height="14" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/>
+                    </svg>
+                  </button>
+                )}
+                <button type="button" className="quick-btn icon-btn" onClick={handleCopyLink} title="Copy share link" aria-label="Copy share link">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="2" y="4" width="20" height="14" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/>
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
                   </svg>
                 </button>
-              )}
-              <button type="button" className="quick-btn icon-btn" onClick={handleCopyLink} title="Copy share link" aria-label="Copy share link">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-                </svg>
-              </button>
-              {isMobile && (
-                <button type="button" className="quick-btn icon-btn" title="Find in scrollback" aria-label="Find in terminal" onClick={() => { setDrawerOpen(false); openSearch(); }}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
-                  </svg>
+                {isMobile && (
+                  <button type="button" className="quick-btn icon-btn" title="Find in scrollback" aria-label="Find in terminal" onClick={() => { setDrawerOpen(false); openSearch(); }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <div className="quick-group">
+                <button type="button" className="quick-btn" onClick={() => { fitToViewport(); handleResize(); }}>
+                  Fit
                 </button>
-              )}
-              <button type="button" className="quick-btn" onClick={() => { fitToViewport(); handleResize(); }}>
-                Fit
-              </button>
-              <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
-                Manage
-              </button>
-              {(status === "disconnected" || status === "ended") && (
-                <button type="button" className="quick-btn primary" onClick={() => setReconnectToken((value) => value + 1)}>
-                  Reconnect
+                <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
+                  Manage
                 </button>
-              )}
+                {(status === "disconnected" || status === "ended") && (
+                  <button type="button" className="quick-btn primary" onClick={() => setReconnectToken((value) => value + 1)}>
+                    Reconnect
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Input control: who is allowed to type */}

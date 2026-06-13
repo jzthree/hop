@@ -6,6 +6,7 @@
 
 #### Web Client
 - **Restyle to the hop identity**: the web client now shares the CLI bars' palette and language — accent session chip, semantic state dot, and keycap-style find control in a real status-bar footer; mono-led chrome (brand, presence names, session labels); refined light/dark themes; dot-grid join page. The hop session picker got the same treatment, including dark-mode support.
+- **Drawer polish**: quick actions split into two clusters — utility icons (keyboard / share / find) then named actions (Fit / Manage) — and the drawer FAB now defaults to the top-right (clear of the status bar, mirroring the close button) instead of bottom-left. It stays draggable.
 - **Autofit by default + fit on every session load**: the terminal fits the viewport on connect and on each session switch, on every platform. Autofit resizes the shared PTY, so other viewers follow this client; switch to Manual in the drawer to opt out.
 
 ### Bug Fixes

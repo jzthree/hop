@@ -1977,6 +1977,7 @@ const App = () => {
                 </div>
               );
             })()}
+            <p className="build-stamp">build {__BUILD_STAMP__}</p>
           </section>
           <section className="terminal">
             <div

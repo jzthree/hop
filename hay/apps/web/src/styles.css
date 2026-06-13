@@ -1689,3 +1689,13 @@ button.primary {
   background: var(--accent);
   color: var(--accent-fg);
 }
+
+/* Build stamp — lets you confirm which web bundle a device is actually running */
+.build-stamp {
+  margin: 16px 4px 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+  opacity: 0.7;
+  text-align: center;
+}

@@ -8,3 +8,6 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+// Build-time stamp (git short hash · date) injected via vite define.
+declare const __BUILD_STAMP__: string;

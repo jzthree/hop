@@ -41,6 +41,7 @@
 
 #### Server
 - Room summaries now report the foreground process name (node-pty's process getter, read fresh per summary) and live cwd, so the session manager can show what each session is running and where.
+- Rooms expose a bounded preview source (size + output tail) for on-demand screen previews in the session manager (`GET /rooms/:id/preview`).
 - Optional `created` flag on `hello` and `by` attribution on `session_ended` (both backwards compatible).
 - Invalid client messages are rejected with the message type and offending field (e.g. `Invalid resize message: rows …`) instead of a bare "Invalid message".
 

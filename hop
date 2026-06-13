@@ -3989,6 +3989,90 @@ function listDiscoveredHayHostCandidates(force = false) {
     return candidates.map((host) => ({ ...host }));
 }
 
+// ---- On-demand session screen preview (session manager) --------------------
+// Rendered only when a manager card is expanded and the tab is visible, so idle
+// or unwatched sessions cost nothing. The hay-host returns a bounded output
+// tail; we render it through a headless terminal here, on demand.
+let headlessTermCtor;
+let headlessTermLoadTried = false;
+function loadHeadlessTerminal() {
+    if (headlessTermLoadTried) return headlessTermCtor || null;
+    headlessTermLoadTried = true;
+    // xterm-headless references browser globals at load time; shim them.
+    if (!global.window) global.window = global;
+    if (!global.requestIdleCallback) {
+        global.requestIdleCallback = (cb) => setTimeout(() => cb({ timeRemaining: () => 0, didTimeout: false }), 0);
+    }
+    if (!global.cancelIdleCallback) {
+        global.cancelIdleCallback = (handle) => clearTimeout(handle);
+    }
+    const candidates = [
+        path.join(__dirname, 'hay', 'node_modules', 'xterm-headless'),
+        'xterm-headless'
+    ];
+    for (const candidate of candidates) {
+        try {
+            const mod = require(candidate);
+            if (mod && typeof mod.Terminal === 'function') {
+                headlessTermCtor = mod.Terminal;
+                return headlessTermCtor;
+            }
+        } catch (e) { /* try next candidate */ }
+    }
+    headlessTermCtor = null;
+    return null;
+}
+
+function fetchHayRoomPreviewSource(internalName) {
+    const host = hayHostState || readHayHostStateFile();
+    if (!host || !Number.isInteger(host.port) || host.port <= 0) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: host.port,
+            path: `/rooms/${encodeURIComponent(internalName)}/preview`,
+            method: 'GET'
+        }, (res) => {
+            if ((res.statusCode || 0) !== 200) { res.resume(); done(null); return; }
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => { try { done(JSON.parse(data || 'null')); } catch (e) { done(null); } });
+        });
+        req.on('error', () => done(null));
+        req.setTimeout(1500, () => { req.destroy(); done(null); });
+        req.end();
+    });
+}
+
+async function renderSessionPreviewText(source) {
+    if (!source || typeof source.output !== 'string') return null;
+    const Term = loadHeadlessTerminal();
+    if (!Term) return null;
+    const cols = Math.max(2, Math.min(220, Math.floor(Number(source.cols) || 80)));
+    const rows = Math.max(2, Math.min(80, Math.floor(Number(source.rows) || 24)));
+    let term;
+    try {
+        term = new Term({ cols, rows, scrollback: 0, allowProposedApi: true });
+    } catch (e) {
+        return null;
+    }
+    await new Promise((resolve) => {
+        try { term.write(source.output, () => resolve()); }
+        catch (e) { resolve(); }
+    });
+    const buffer = term.buffer.active;
+    const lines = [];
+    for (let i = 0; i < rows; i++) {
+        const line = buffer.getLine(buffer.baseY + i);
+        lines.push(line ? line.translateToString(true) : '');
+    }
+    try { term.dispose(); } catch (e) { /* ignore */ }
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    return lines.join('\n');
+}
+
 async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
     if (!isExternalTerminalBackend()) return null;
     if (!hostState || !Number.isInteger(hostState.port) || hostState.port <= 0) return null;
@@ -5062,6 +5146,31 @@ function startAuthProxy(authEmitter) {
                 aliases: sessionAliases,
                 runtimeAvailable: snapshot.runtimeAvailable
             }));
+            return;
+        }
+
+        // API: On-demand text preview of a live session's screen (session manager).
+        if (parsedUrl.pathname === '/api/sessions/preview' && req.method === 'GET') {
+            const internalName = typeof parsedUrl.query.name === 'string' ? parsedUrl.query.name : '';
+            if (!internalName || !SESSION_NAME_RE.test(internalName)) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid session name' }));
+                return;
+            }
+            try {
+                const source = await fetchHayRoomPreviewSource(internalName);
+                if (!source) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'No live preview available' }));
+                    return;
+                }
+                const text = await renderSessionPreviewText(source);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ text: typeof text === 'string' ? text : '', cols: source.cols, rows: source.rows }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Preview failed' }));
+            }
             return;
         }
 

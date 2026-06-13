@@ -74,6 +74,11 @@
             .session-meta { color: var(--ink-muted); font-size: 0.8rem; margin-top: 0.25rem; display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
             .meta-dir { font-family: var(--font-mono); color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
             .meta-proc { font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 0.05rem 0.5rem; white-space: nowrap; }
+            /* On-demand screen preview disclosure */
+            .preview-toggle { margin-top: 0.4rem; padding: 0; border: 0; background: transparent; color: var(--ink-muted); font-size: 0.75rem; cursor: pointer; font-family: var(--font-mono); }
+            .preview-toggle:hover { color: var(--accent); }
+            .session-preview { display: none; margin: 0.45rem 0 0; padding: 0.6rem 0.7rem; background: var(--bg-alt); border: 1px solid var(--line); border-radius: 8px; font-family: var(--font-mono); font-size: 0.66rem; line-height: 1.35; color: var(--ink); white-space: pre; overflow: auto; max-height: 11rem; max-width: 100%; }
+            .session-preview.open { display: block; }
             /* Compact agent-access toggle in the header — subtle when off (common) */
             .agent-pill { font-family: var(--font-mono); font-size: 0.62rem; font-weight: 600; cursor: pointer; border-radius: 999px; padding: 0.1rem 0.5rem; white-space: nowrap; line-height: 1.4; }
             .agent-pill.off { background: transparent; border: 1px solid var(--line); color: var(--ink-muted); }
@@ -234,6 +239,44 @@
             }
             const SHELL_PROCS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'nu', 'xonsh', 'login']);
 
+            // On-demand session previews: a card's screen is only fetched while
+            // it's expanded AND the tab is visible, so idle/unwatched sessions
+            // (and a closed/backgrounded manager) do zero work — no battery drain.
+            const expandedPreviews = new Set();
+            const previewCache = new Map();
+            async function refreshPreview(name) {
+                const el = document.querySelector(`pre.session-preview[data-preview="${CSS.escape(name)}"]`);
+                if (!el) return;
+                try {
+                    const res = await fetch('/api/sessions/preview?name=' + encodeURIComponent(name));
+                    if (!res.ok) { el.textContent = previewCache.get(name) || '(no preview)'; return; }
+                    const data = await res.json();
+                    const text = (data.text && data.text.replace(/\s+$/, '')) ? data.text : '(blank screen)';
+                    previewCache.set(name, text);
+                    el.textContent = text;
+                } catch (e) {
+                    el.textContent = previewCache.get(name) || '(preview unavailable)';
+                }
+            }
+            function refreshAllPreviews() {
+                if (document.hidden || expandedPreviews.size === 0) return; // cheap no-op when idle/unwatched
+                for (const name of expandedPreviews) refreshPreview(name);
+            }
+            function togglePreview(name) {
+                const pre = document.querySelector(`pre.session-preview[data-preview="${CSS.escape(name)}"]`);
+                const btn = pre && pre.previousElementSibling;
+                if (expandedPreviews.has(name)) {
+                    expandedPreviews.delete(name);
+                    if (pre) pre.classList.remove('open');
+                    if (btn) btn.textContent = '▸ preview';
+                } else {
+                    expandedPreviews.add(name);
+                    if (pre) pre.classList.add('open');
+                    if (btn) btn.textContent = '▾ preview';
+                    refreshPreview(name);
+                }
+            }
+
             let dragSessionId = null;
             let latestSessionsData = { sessions: [], active: [], starting: [] };
             // Pause the 3s auto-refresh while a swipe or drag is in progress so the
@@ -352,6 +395,10 @@
                                         ${agentToggle}
                                     </div>
                                     <div class="session-meta">${metaText}</div>
+                                    ${isLive && !isPort ? `
+                                        <button class="preview-toggle" onclick="togglePreview('${internalName}')">${expandedPreviews.has(internalName) ? '▾' : '▸'} preview</button>
+                                        <pre class="session-preview ${expandedPreviews.has(internalName) ? 'open' : ''}" data-preview="${escHtml(internalName)}">${escHtml(previewCache.get(internalName) || '')}</pre>
+                                    ` : ''}
                                 </div>
                                 <div class="row-actions">
                                     <button class="row-action" title="Rename" aria-label="Rename session" onclick="renameSession('${displayName}')">✎</button>
@@ -392,6 +439,7 @@
                 list.innerHTML = html;
                 initSwipe();
                 initDragAndDrop();
+                refreshAllPreviews(); // repopulate any expanded previews after re-render
             }
 
             function showCreateError(message) {
@@ -779,6 +827,9 @@
 
             loadSessions();
             setInterval(loadSessions, 3000);
+            // Live-refresh expanded previews on their own cadence (guarded so it's
+            // a no-op when nothing is expanded or the tab is hidden).
+            setInterval(refreshAllPreviews, 3000);
         </script>
     </body>
 </html>

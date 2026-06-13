@@ -631,6 +631,18 @@ export class Room extends EventEmitter {
     this.emit("empty");
   }
 
+  /**
+   * Bounded source for an on-demand screen preview: the terminal's size plus a
+   * tail of the raw output (enough to reconstruct the visible screen for the
+   * common case of full-repaint TUIs). The actual rendering happens in the
+   * daemon, on demand, only when someone is looking — so idle rooms cost nothing.
+   */
+  getPreviewSource(maxBytes = 65536): { cols: number; rows: number; output: string } {
+    const buf = this.outputBuffer;
+    const output = buf.length > maxBytes ? buf.slice(buf.length - maxBytes) : buf;
+    return { cols: this.activeCols, rows: this.activeRows, output };
+  }
+
   getSummary(): RoomSummary {
     const localCliCount = [...this.clients.values()].filter((client) => client.source === "local-cli").length;
     // Read the foreground process name fresh (cheap getter) so the session
@@ -701,6 +713,11 @@ export class RoomManager {
     for (const roomId of this.rooms.keys()) {
       this.closeRoom(roomId);
     }
+  }
+
+  getRoomPreviewSource(id: string, maxBytes?: number) {
+    const room = this.rooms.get(id);
+    return room ? room.getPreviewSource(maxBytes) : null;
   }
 
   listRooms(): RoomSummary[] {

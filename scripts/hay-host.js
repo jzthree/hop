@@ -97,6 +97,25 @@ async function main() {
             }
             return;
         }
+        // On-demand preview source for the session manager: terminal size + a
+        // bounded tail of raw output. Rendered to text by the daemon, only when
+        // a card is expanded — idle/unwatched rooms do no work here.
+        const previewMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)\/preview$/);
+        if (previewMatch && req.method === 'GET') {
+            const roomId = hay.sanitizeRoom(decodeURIComponent(previewMatch[1]));
+            const getPreview = typeof rooms.getRoomPreviewSource === 'function'
+                ? rooms.getRoomPreviewSource.bind(rooms)
+                : null;
+            const source = roomId && getPreview ? getPreview(roomId) : null;
+            if (!source) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Room not found' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(source));
+            return;
+        }
         const deleteRoomMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)$/);
         if (deleteRoomMatch && req.method === 'DELETE') {
             const roomId = hay.sanitizeRoom(decodeURIComponent(deleteRoomMatch[1]));

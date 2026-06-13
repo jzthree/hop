@@ -225,7 +225,7 @@ const App = () => {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [fabPosition, setFabPosition] = useState({ x: 20, y: window.innerHeight - 80 });
   const fabDragRef = useRef<{ dragging: boolean; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
-  const [isMobile] = useState(() => isMobileDevice());
+  const [isMobile, setIsMobile] = useState(() => isMobileDevice());
   const [keyboardVisible, setKeyboardVisible] = useState(() => isMobileDevice());
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [selectionMode, setSelectionMode] = useState(() => {
@@ -264,10 +264,11 @@ const App = () => {
   const [viewMode, setViewMode] = useState<"fit" | "full">(() => {
     const saved = localStorage.getItem("hay_view_mode");
     if (saved === "fit" || saved === "full") return saved;
-    // Mobile defaults to autofit so the terminal is readable on connect without
-    // panning; desktop keeps the remote's own size. (Autofit resizes the shared
-    // PTY, so other viewers of the same session follow the phone's dimensions.)
-    return isMobileDevice() ? "fit" : "full";
+    // Default to autofit on every platform so the terminal is readable on
+    // connect without panning; fit re-runs on each session load (snapshot
+    // replay). Switch to Manual in the drawer to keep the remote's own size.
+    // (Autofit resizes the shared PTY, so other viewers follow this client.)
+    return "fit";
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -281,6 +282,22 @@ const App = () => {
     start?: (ev: TouchEvent) => void;
     move?: (ev: TouchEvent) => boolean;
   } | null>(null);
+
+  // Keep isMobile in sync with the viewport. It's used to gate mobile-only
+  // controls (keyboard toggle, Find, Touch, the virtual keyboard) which must
+  // match the CSS mobile breakpoint (<768px). Without this, loading wide then
+  // resizing narrow leaves the JS in "desktop mode" while the CSS shows the
+  // mobile drawer — so those controls silently disappear.
+  useEffect(() => {
+    const onResize = () => setIsMobile(isMobileDevice());
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+    };
+  }, []);
+
   useEffect(() => {
     localStorage.setItem("hay_selection_mode", selectionMode ? "true" : "false");
   }, [selectionMode]);

@@ -15,6 +15,11 @@ const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
 const isMacPlatform = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || "");
 
+// Web haptics only exist where the Vibration API does (Android/Chromium). iOS
+// Safari has no web haptic API — the old <input switch> trick was removed in
+// iOS 17.4 — so we hide the toggle there rather than show a dead control.
+const hapticsSupported = typeof navigator.vibrate === "function";
+
 const parseSessionNameFromPath = (pathname: string) => {
   const match = pathname.match(/^\/s\/([^/]+)\/?$/);
   if (!match) {
@@ -1922,7 +1927,7 @@ const App = () => {
                     <button type="button" className={sessionSwitchMode === "instant" ? "active" : ""} onClick={() => setSessionSwitchMode("instant")}>Instant</button>
                   </div>
                 </div>
-                {isMobile && (
+                {isMobile && hapticsSupported && (
                   <div className="drawer-row">
                     <label>Haptics</label>
                     <div className="view-mode-buttons">

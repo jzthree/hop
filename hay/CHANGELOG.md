@@ -11,6 +11,7 @@
 ### Bug Fixes
 
 #### Web Client (mobile)
+- **Drawer groups no longer collapse with a long session list**: the drawer is a flex column with a fixed viewport height on mobile, so a long "Switch session" list overflowed and the flex algorithm shrank the Control and Theme/Font/Copy groups (which have `overflow:hidden`) to empty slivers. Children are now pinned to their natural height, so the drawer scrolls instead of squeezing — the settings groups stay visible no matter how many sessions are live.
 - **Mobile controls no longer disappear at narrow widths**: `isMobile` now tracks the viewport instead of being fixed at page load, so resizing a window narrow (or any narrow load) shows the full mobile drawer — keyboard toggle, Find, Touch mode, and the virtual keyboard — matching the CSS breakpoint. Previously a wide-then-narrow window stayed in "desktop mode" and dropped those controls.
 - **Find no longer triggers Safari's auto-zoom**: every focusable field is floored at 16px on mobile, so focusing the find box (or any input) never zooms the page with no way back. The drawer's Find action is now an icon.
 - **Drawer quick actions no longer clip**: buttons are content-width and wrap, so labels like "Manage" are never cut off; keyboard/share/find are compact icon buttons.

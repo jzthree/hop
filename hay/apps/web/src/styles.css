@@ -395,6 +395,15 @@ button.primary {
   gap: 12px;
 }
 
+/* The drawer is a flex column; on mobile it has a fixed viewport height with
+   overflow-y:auto. Without this, a long session list overflows and the flex
+   algorithm shrinks the other children to fit — collapsing the Control/Theme
+   groups (which have overflow:hidden) to slivers. Pin every child to its
+   natural height so the drawer scrolls instead of squeezing. */
+.controls > * {
+  flex-shrink: 0;
+}
+
 .room-info {
   background: var(--panel);
   padding: 16px;

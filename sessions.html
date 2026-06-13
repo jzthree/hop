@@ -71,7 +71,9 @@
             .active-badge { background: var(--ok); color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .starting-badge { background: var(--warn); color: #fff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .saved-badge { background: var(--bg-alt); color: var(--ink-muted); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
-            .session-meta { color: var(--ink-muted); font-size: 0.8rem; margin-top: 0.25rem; }
+            .session-meta { color: var(--ink-muted); font-size: 0.8rem; margin-top: 0.25rem; display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+            .meta-dir { font-family: var(--font-mono); color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+            .meta-proc { font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 0.05rem 0.5rem; white-space: nowrap; }
             .agent-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; }
             .agent-label { font-family: var(--font-mono); font-size: 0.65rem; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.08em; }
             .agent-toggle { border: 1px solid var(--line); border-radius: 999px; padding: 0.2rem 0.6rem; font-size: 0.7rem; cursor: pointer; background: var(--bg-alt); color: var(--ink); }
@@ -216,6 +218,22 @@
                 setTimeout(() => el.remove(), 2200);
             }
 
+            // Escape text destined for innerHTML / attributes (cwd + process come
+            // from the server and can contain HTML-special chars).
+            function escHtml(s) {
+                return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+                    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+                ));
+            }
+            // Compact an absolute path to its last two segments (full path in title).
+            function shortDir(p) {
+                const parts = String(p || '').replace(/\/+$/, '').split('/').filter(Boolean);
+                if (parts.length === 0) return '/';
+                if (parts.length <= 2) return '/' + parts.join('/');
+                return '…/' + parts.slice(-2).join('/');
+            }
+            const SHELL_PROCS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'nu', 'xonsh', 'login']);
+
             let dragSessionId = null;
             let latestSessionsData = { sessions: [], active: [], starting: [] };
             // Pause the 3s auto-refresh while a swipe or drag is in progress so the
@@ -293,13 +311,25 @@
                             : (isPort
                                 ? `<span class="port-badge">${portLabel}</span>`
                                 : '<span class="saved-badge">WORKSPACE</span>'));
-                    const metaText = isPort
-                        ? `Proxy to localhost:${s.port || ''}`
-                        : (isStarting
-                            ? 'Starting...'
-                            : (isLive
-                                ? (s.windows ? s.windows + ' window(s)' : 'Live session')
-                                : 'Workspace session. Join starts a fresh shell.'));
+                    // Live sessions show their working directory plus the running
+                    // program (when it's not just the shell sitting at a prompt).
+                    const cwd = s.cwd || '';
+                    const proc = (s.foregroundProcess || '').trim();
+                    const runningApp = proc && !SHELL_PROCS.has(proc.toLowerCase()) ? proc : '';
+                    let metaText;
+                    if (isPort) {
+                        metaText = `Proxy to localhost:${escHtml(s.port || '')}`;
+                    } else if (isStarting) {
+                        metaText = 'Starting...';
+                    } else if (isLive) {
+                        const dir = cwd
+                            ? `<span class="meta-dir" title="${escHtml(cwd)}">${escHtml(shortDir(cwd))}</span>`
+                            : '<span class="meta-dir">Live session</span>';
+                        const app = runningApp ? `<span class="meta-proc">${escHtml(runningApp)}</span>` : '';
+                        metaText = `${dir}${app}`;
+                    } else {
+                        metaText = 'Workspace session. Join starts a fresh shell.';
+                    }
                     const agentToggle = !isPort ? `
                         <div class="agent-row">
                             <span class="agent-label">Agent access</span>

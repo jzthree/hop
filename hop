@@ -2715,6 +2715,7 @@ async function listActiveSessionsRuntimeFirst() {
         localCliCount: Number(room.localCliCount) || 0,
         hasLocalCli: room.hasLocalCli === true || Number(room.localCliCount) > 0,
         cwd: room.cwd,
+        foregroundProcess: room.foregroundProcess,
         hostPort: room.hostPort
     }));
     return { sessions, runtimeAvailable: true };
@@ -4019,7 +4020,11 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                         .map((room) => {
                             const id = String(room?.id || '').trim();
                             if (!id || !SESSION_NAME_RE.test(id)) return null;
-                            const cwd = typeof room?.cwd === 'string' && room.cwd.trim() ? room.cwd : undefined;
+                            const liveCwd = typeof room?.liveCwd === 'string' && room.liveCwd.trim() ? room.liveCwd : undefined;
+                            const cwd = liveCwd || (typeof room?.cwd === 'string' && room.cwd.trim() ? room.cwd : undefined);
+                            const foregroundProcess = typeof room?.foregroundProcess === 'string' && room.foregroundProcess.trim()
+                                ? room.foregroundProcess.trim()
+                                : undefined;
                             const clientCountRaw = Number(room?.clientCount);
                             const clientCount = Number.isFinite(clientCountRaw) && clientCountRaw >= 0
                                 ? Math.floor(clientCountRaw)
@@ -4031,6 +4036,7 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                             return {
                                 id,
                                 cwd,
+                                foregroundProcess,
                                 clientCount,
                                 localCliCount,
                                 hasLocalCli: localCliCount > 0,
@@ -5028,6 +5034,7 @@ function startAuthProxy(authEmitter) {
                 hostPort: s.hostPort,
                 folderId: s.folderId || null,
                 cwd: s.cwd,
+                foregroundProcess: s.foregroundProcess,
                 shell: s.shell,
                 env: s.env,
                 cols: s.cols,

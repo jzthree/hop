@@ -34,6 +34,7 @@ export type RoomSummary = {
   id: string;
   cwd: string;
   liveCwd: string;
+  foregroundProcess: string;
   clientCount: number;
   localCliCount: number;
 };
@@ -124,6 +125,7 @@ export class Room extends EventEmitter {
   private pty: IPty;
   private readonly initialCwd: string;
   private liveCwd: string;
+  private foregroundProcess = "";
   private clients = new Map<string, ClientState>();
   private collabMode = true;
   private controllerId: string | null = null;
@@ -438,6 +440,12 @@ export class Room extends EventEmitter {
 
     const poll = () => {
       if (this.ended) return;
+      // node-pty exposes the foreground process name (already short, e.g. "vim",
+      // "node", "claude"); cheap getter, sampled on the same cadence as cwd.
+      const fg = (this.pty as unknown as { process?: string }).process;
+      if (typeof fg === "string" && fg) {
+        this.foregroundProcess = fg.replace(/^-/, ""); // strip login-shell "-zsh" dash
+      }
       if (process.platform === "darwin") {
         execFile("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeout: 5000 }, (err, stdout) => {
           if (err || !stdout) return;
@@ -625,10 +633,22 @@ export class Room extends EventEmitter {
 
   getSummary(): RoomSummary {
     const localCliCount = [...this.clients.values()].filter((client) => client.source === "local-cli").length;
+    // Read the foreground process name fresh (cheap getter) so the session
+    // manager reflects what's running now; fall back to the last polled sample.
+    let foregroundProcess = this.foregroundProcess;
+    try {
+      const live = (this.pty as unknown as { process?: string }).process;
+      if (typeof live === "string" && live) {
+        foregroundProcess = live.replace(/^-/, "");
+      }
+    } catch {
+      /* keep the polled fallback */
+    }
     return {
       id: this.id,
       cwd: this.initialCwd,
       liveCwd: this.liveCwd,
+      foregroundProcess,
       clientCount: this.clients.size,
       localCliCount
     };

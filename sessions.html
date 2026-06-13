@@ -74,11 +74,11 @@
             .session-meta { color: var(--ink-muted); font-size: 0.8rem; margin-top: 0.25rem; display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
             .meta-dir { font-family: var(--font-mono); color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
             .meta-proc { font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 0.05rem 0.5rem; white-space: nowrap; }
-            .agent-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; }
-            .agent-label { font-family: var(--font-mono); font-size: 0.65rem; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.08em; }
-            .agent-toggle { border: 1px solid var(--line); border-radius: 999px; padding: 0.2rem 0.6rem; font-size: 0.7rem; cursor: pointer; background: var(--bg-alt); color: var(--ink); }
-            .agent-toggle.on { background: var(--ok); border-color: var(--ok); color: #fff; }
-            .agent-toggle.off { background: var(--bg-alt); border-color: var(--line); color: var(--ink-muted); }
+            /* Compact agent-access toggle in the header — subtle when off (common) */
+            .agent-pill { font-family: var(--font-mono); font-size: 0.62rem; font-weight: 600; cursor: pointer; border-radius: 999px; padding: 0.1rem 0.5rem; white-space: nowrap; line-height: 1.4; }
+            .agent-pill.off { background: transparent; border: 1px solid var(--line); color: var(--ink-muted); }
+            .agent-pill.off:hover { border-color: var(--ink-muted); }
+            .agent-pill.on { background: color-mix(in srgb, var(--ok) 14%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent); color: var(--ok); }
             .agent-badge { background: var(--accent); color: var(--accent-fg); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
             .btn { padding: 0.75rem 1.25rem; border: 1px solid transparent; border-radius: 10px; cursor: pointer; font-size: 1rem; font-weight: 500; text-decoration: none; display: inline-block; min-width: 80px; text-align: center; transition: background 0.15s ease, border-color 0.15s ease, opacity 0.2s; }
             .btn-primary { background: var(--accent); color: var(--accent-fg); }
@@ -330,13 +330,14 @@
                     } else {
                         metaText = 'Workspace session. Join starts a fresh shell.';
                     }
+                    // Compact agent-access toggle (sits in the header, not its own
+                    // row). Subtle when off (the common case) so it's not noise.
                     const agentToggle = !isPort ? `
-                        <div class="agent-row">
-                            <span class="agent-label">Agent access</span>
-                            <button class="agent-toggle ${agentPermitted ? 'on' : 'off'}" onclick="toggleAgentAccess('${internalName}', ${agentPermitted ? 'false' : 'true'})">
-                                ${agentPermitted ? 'On' : 'Off'}
-                            </button>
-                        </div>
+                        <button class="agent-pill ${agentPermitted ? 'on' : 'off'}"
+                            title="Agent (MCP) access ${agentPermitted ? 'enabled — tap to disable' : 'disabled — tap to enable'}"
+                            onclick="toggleAgentAccess('${internalName}', ${agentPermitted ? 'false' : 'true'})">
+                            agent ${agentPermitted ? 'on' : 'off'}
+                        </button>
                     ` : '';
                     return `
                         <div class="session-item-wrapper" draggable="true" data-session="${internalName}" data-display="${displayName}">
@@ -348,9 +349,9 @@
                                         <span class="session-name">${displayName}</span>
                                         ${agentBadge}
                                         ${stateBadge}
+                                        ${agentToggle}
                                     </div>
                                     <div class="session-meta">${metaText}</div>
-                                    ${agentToggle}
                                 </div>
                                 <div class="row-actions">
                                     <button class="row-action" title="Rename" aria-label="Rename session" onclick="renameSession('${displayName}')">✎</button>

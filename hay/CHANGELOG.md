@@ -6,6 +6,16 @@
 
 #### Web Client
 - **Restyle to the hop identity**: the web client now shares the CLI bars' palette and language — accent session chip, semantic state dot, and keycap-style find control in a real status-bar footer; mono-led chrome (brand, presence names, session labels); refined light/dark themes; dot-grid join page. The hop session picker got the same treatment, including dark-mode support.
+- **Mobile autofit by default**: the terminal fits the viewport on connect on phones (desktop keeps the remote's own size). Autofit resizes the shared PTY, so other viewers follow the phone's dimensions; switch to Manual in the drawer to opt out.
+
+### Bug Fixes
+
+#### Web Client (mobile)
+- **Find no longer triggers Safari's auto-zoom**: every focusable field is floored at 16px on mobile, so focusing the find box (or any input) never zooms the page with no way back. The drawer's Find action is now an icon.
+- **Drawer quick actions no longer clip**: buttons are content-width and wrap, so labels like "Manage" are never cut off; keyboard/share/find are compact icon buttons.
+- **Copy is one tidy control** (`Screen | All`) instead of three loose buttons, matching the other drawer rows.
+- **Calmer disconnect**: connecting/reconnecting/disconnected now read in a muted slate instead of alarm orange/red — a dropped connection should feel recoverable. Only a truly ended session shows red.
+- **Haptics**: the key-tap vibration uses the Vibration API on Android/Chromium. (iOS Safari has no web haptic API — Apple removed the `<input switch>` trick in iOS 17.4 — so haptics are a no-op there.)
 
 ## [0.9.0] - 2026-06-12
 

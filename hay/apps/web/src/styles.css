@@ -16,6 +16,7 @@
   --ok: #1a7f37;
   --warn: #b45309;
   --err: #cf222e;
+  --calm: #5b6675; /* disconnect: calm slate, not alarm */
   --line: #dcdce3;
   --panel: #ffffff;
   --shadow: 0 1px 2px rgba(20,20,24,0.05), 0 10px 30px rgba(20,20,24,0.07);
@@ -48,6 +49,7 @@
   --ok: #3fb950;
   --warn: #d29922;
   --err: #f85149;
+  --calm: #9aa3b2; /* disconnect: calm slate, not alarm */
   --line: #2c2c31;
   --panel: #1d1d21;
   --shadow: 0 1px 3px rgba(0,0,0,0.25), 0 10px 30px rgba(0,0,0,0.2);
@@ -80,6 +82,7 @@
     --ok: #3fb950;
     --warn: #d29922;
     --err: #f85149;
+    --calm: #9aa3b2; /* disconnect: calm slate, not alarm */
     --line: #2c2c31;
     --panel: #1d1d21;
     --shadow: 0 1px 3px rgba(0,0,0,0.25), 0 10px 30px rgba(0,0,0,0.2);
@@ -445,9 +448,14 @@ button.primary {
 }
 
 .quick-btn {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 10px !important;
+  /* Content width + wrap, so labels like "Manage" are never clipped to fit an
+     equal-share column. Extra buttons flow onto a second row instead. */
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px !important;
   font-family: var(--font-mono);
   font-size: 12px !important;
   font-weight: 500 !important;
@@ -458,9 +466,15 @@ button.primary {
   border-bottom-width: 2px !important;
 }
 
+/* Icon-only quick actions: fixed square for visual rhythm next to text ones */
+.quick-btn.icon-btn {
+  width: 40px;
+  padding: 8px !important;
+}
+
 .quick-btn.primary {
   background: var(--accent) !important;
-  color: #fff !important;
+  color: var(--accent-fg) !important;
 }
 
 .quick-btn:active {
@@ -655,38 +669,6 @@ button.primary {
   100% { opacity: 0; }
 }
 
-.copy-actions {
-  padding: 8px 0;
-}
-
-.copy-actions label {
-  font-size: 12px;
-  color: var(--ink-muted);
-  line-height: 1.2;
-  display: block;
-  margin-bottom: 8px;
-}
-
-.copy-buttons {
-  display: flex;
-  gap: 6px;
-}
-
-.copy-buttons button {
-  flex: 1;
-  padding: 7px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--ink);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.copy-buttons button:active {
-  background: var(--line);
-}
 
 .view-mode-control label,
 .selection-mode-control label,
@@ -825,40 +807,42 @@ button.primary {
   flex: 1;
 }
 
+/* Disconnect states read as calm, not alarming — a transient reconnect is
+   normal, so connecting/reconnecting/disconnected use a muted slate rather
+   than alarm orange/red. Only a truly ended session is rendered in red. */
 .footer-dot {
   font-size: 11px;
   line-height: 1;
-  color: var(--warn);
+  color: var(--calm);
 }
 
 .footer-dot.connected { color: var(--ok); }
-.footer-dot.ended,
-.footer-dot.disconnected { color: var(--err); }
+.footer-dot.ended { color: var(--err); }
 
 .terminal-footer .reconnecting {
-  color: var(--warn);
+  color: var(--calm);
   font-weight: 600;
   animation: hop-reconnect-pulse 1.4s ease-in-out infinite;
 }
 
 @keyframes hop-reconnect-pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
+  50% { opacity: 0.55; }
 }
 
 .footer-reconnect {
   font: inherit;
   font-weight: 600;
-  color: var(--warn);
+  color: var(--calm);
   background: transparent;
-  border: 1px solid var(--warn);
+  border: 1px solid var(--calm);
   border-radius: 6px;
   padding: 1px 8px;
   cursor: pointer;
 }
 
 .footer-reconnect:hover {
-  background: rgba(180, 83, 9, 0.1);
+  background: color-mix(in srgb, var(--calm) 12%, transparent);
   transform: none;
   box-shadow: none;
 }
@@ -881,7 +865,8 @@ button.primary {
   justify-content: center;
   gap: 12px;
   padding: calc(env(safe-area-inset-top, 0px) + 6px) 12px 6px;
-  background: rgba(180, 83, 9, 0.95);
+  /* Calm slate — a dropped connection should feel recoverable, not alarming. */
+  background: var(--calm);
   color: #fff;
   font-size: 13px;
   font-weight: 600;
@@ -991,6 +976,17 @@ button.primary {
 }
 
 @media (max-width: 768px) {
+  /* Never let focusing an input trigger iOS Safari's auto-zoom (which has no
+     easy way back). Any control font-size < 16px zooms on focus, so floor every
+     focusable field at 16px on mobile. Accessibility zoom stays available via
+     the in-app Font control and normal pinch-zoom. */
+  input,
+  select,
+  textarea,
+  .terminal-find-input {
+    font-size: 16px !important;
+  }
+
   /* Mobile: full bleed terminal, no chrome */
   body {
     background: var(--terminal-bg);

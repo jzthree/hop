@@ -184,13 +184,14 @@ export const MobileKeyboard = ({
   const hapticTap = useCallback(() => {
     if (!hapticsEnabled) return;
     try {
-      if (isIOS()) {
-        // iOS: click hidden switch label to trigger native haptic
-        // Note: iOS 18+ requires this to be called from onClick handler
+      // Android/Chromium: the Vibration API gives a crisp tap. 8ms reads as a
+      // tick without buzzing. iOS Safari has no web haptic API — the old
+      // <input switch> trick was removed in iOS 17.4 — so we attempt it as a
+      // best effort but it is a no-op on current iOS.
+      if (typeof navigator.vibrate === "function") {
+        navigator.vibrate(8);
+      } else if (isIOS()) {
         hapticLabelRef.current?.click();
-      } else if (navigator.vibrate) {
-        // Android/other: use Vibration API
-        navigator.vibrate(5);
       }
     } catch {
       // Ignore haptic errors

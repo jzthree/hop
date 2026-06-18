@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { WebSocket } from "ws";
+import http from "node:http";
 import { safeParseServerMessage, type ClientMessage, type PresenceClient } from "hay-shared";
 
 const args = process.argv.slice(2);
@@ -167,6 +168,7 @@ Keyboard shortcuts:
   ${keyLabelLong}+M             Toggle mouse capture (saved)
   ${keyLabelLong}+C             Take/release exclusive control
   ${keyLabelLong}+F             Search scrollback (Enter/↓ next, ↑ prev, Esc close)
+  ${keyLabelLong}+S             Session panel — list + live preview; ↑↓ fly, Enter switch, Esc close
   ${keyLabelLong}+T             Toggle hint bar (saved)
   ${keyLabelLong}+\\             Send the next key literally to the remote terminal
                        (lets reserved keys like Ctrl+Q/G reach remote programs)
@@ -293,6 +295,19 @@ let searchMatches: Array<{ row: number; col: number }> = [];
 let searchMatchesByRow = new Map<number, number[]>(); // row → match start cols, for O(1) render lookups
 let searchIndex = -1;
 const SEARCH_MAX_MATCHES = 2000;
+
+// Session panel state (Opt+S): a file-manager-style overlay — session list on
+// the left, a live (cached) screen preview on the right. Arrow to fly through,
+// Enter to switch, Esc to close. Previews are fetched from the hay-host and
+// cached so navigation has no perceived latency.
+type PanelSession = { id: string; cwd: string; process: string; clients: number };
+let sessionPanelMode = false;
+let panelSessions: PanelSession[] = [];
+let panelIndex = 0;
+let panelLoading = false;
+let panelError = "";
+const panelPreviewCache = new Map<string, string[]>();
+let switchingRoom = false;
 
 let configFile = loadConfig();
 const persistConfig = (patch: Partial<CliConfig>) => {
@@ -1663,6 +1678,208 @@ const renderLine = (lineIndex: number, cursorRow: number, cursorCol: number) => 
   return output;
 };
 
+// ===== Session panel (Opt+S): file-manager-style switcher with preview =====
+const panelHttpOrigin = inferServerOrigin(); // http://host:port of the hay-host
+
+const fetchHostJson = (pathname: string): Promise<any> =>
+  new Promise((resolve) => {
+    if (!panelHttpOrigin) { resolve(null); return; }
+    let settled = false;
+    const done = (v: any) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const u = new URL(panelHttpOrigin + pathname);
+      const req = http.request(
+        { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: "GET" },
+        (res) => {
+          if ((res.statusCode || 0) !== 200) { res.resume(); done(null); return; }
+          let data = "";
+          res.on("data", (c) => (data += c));
+          res.on("end", () => { try { done(JSON.parse(data)); } catch { done(null); } });
+        }
+      );
+      req.on("error", () => done(null));
+      req.setTimeout(2000, () => { req.destroy(); done(null); });
+      req.end();
+    } catch { done(null); }
+  });
+
+// Render a preview source ({cols,rows,output}) to plain visible-screen lines via
+// a throwaway headless terminal (same approach the daemon uses for the web).
+const renderPreviewToLines = (source: { cols: number; rows: number; output: string }): Promise<string[]> =>
+  new Promise((resolve) => {
+    const cols = Math.max(2, Math.min(300, Math.floor(Number(source.cols) || 80)));
+    const rows = Math.max(2, Math.min(120, Math.floor(Number(source.rows) || 24)));
+    let t: ReturnType<typeof createPreviewTerm>;
+    try {
+      t = createPreviewTerm(cols, rows);
+    } catch { resolve(["(preview unavailable)"]); return; }
+    t.write(typeof source.output === "string" ? source.output : "", () => {
+      const buf = t.buffer.active;
+      const out: string[] = [];
+      for (let i = 0; i < rows; i++) {
+        const line = buf.getLine(buf.baseY + i);
+        out.push(line ? line.translateToString(true) : "");
+      }
+      try { t.dispose(); } catch { /* ignore */ }
+      while (out.length && !out[out.length - 1].trim()) out.pop();
+      resolve(out.length ? out : ["(blank screen)"]);
+    });
+  });
+const createPreviewTerm = (cols: number, rows: number) =>
+  new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
+
+const loadPanelPreview = async (id: string) => {
+  if (panelPreviewCache.has(id)) return;
+  const source = await fetchHostJson(`/rooms/${encodeURIComponent(id)}/preview`);
+  panelPreviewCache.set(id, source ? await renderPreviewToLines(source) : ["(no preview)"]);
+  if (sessionPanelMode) scheduleRender();
+};
+
+const openSessionPanel = async () => {
+  sessionPanelMode = true;
+  panelLoading = true;
+  panelError = "";
+  lastRenderedLines = [];
+  scheduleRender();
+  const data = await fetchHostJson("/rooms");
+  if (!sessionPanelMode) return; // closed while loading
+  panelLoading = false;
+  const rooms = Array.isArray(data?.rooms) ? data.rooms : null;
+  if (!rooms) { panelError = "Could not list sessions (is the host reachable?)"; scheduleRender(); return; }
+  panelSessions = rooms
+    .map((r: any): PanelSession => ({
+      id: String(r?.id || ""),
+      cwd: typeof r?.liveCwd === "string" && r.liveCwd ? r.liveCwd : (typeof r?.cwd === "string" ? r.cwd : ""),
+      process: (typeof r?.foregroundProcess === "string" ? r.foregroundProcess : "").replace(/^-/, ""),
+      clients: Number(r?.clientCount) || 0
+    }))
+    .filter((r: PanelSession) => r.id)
+    .sort((a: PanelSession, b: PanelSession) => a.id.localeCompare(b.id));
+  const cur = panelSessions.findIndex((r) => r.id === config.room);
+  panelIndex = cur >= 0 ? cur : 0;
+  panelPreviewCache.clear();
+  scheduleRender();
+  // Prefetch previews (selected first, then the rest) so flying has no latency.
+  const order = [panelIndex, ...panelSessions.map((_, i) => i).filter((i) => i !== panelIndex)];
+  for (const i of order) { const s = panelSessions[i]; if (s) loadPanelPreview(s.id); }
+};
+
+const closeSessionPanel = () => {
+  if (!sessionPanelMode) return;
+  sessionPanelMode = false;
+  lastRenderedLines = [];
+  scheduleRender();
+};
+
+const movePanelSelection = (delta: number) => {
+  if (!panelSessions.length) return;
+  panelIndex = (panelIndex + delta + panelSessions.length) % panelSessions.length;
+  const s = panelSessions[panelIndex];
+  if (s) loadPanelPreview(s.id);
+  scheduleRender();
+};
+
+const switchToRoom = (id: string) => {
+  if (!id || id === config.room) { closeSessionPanel(); return; }
+  closeSessionPanel();
+  config.room = id;
+  sessionLabel = id;
+  terminal.reset();
+  lastRenderedLines = [];
+  followOutput = true;
+  releaseScrollAnchor();
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  clearReconnectTicker();
+  reconnectAttempt = 0;
+  pushNotice(`Switching to '${id}'…`);
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    switchingRoom = true;
+    try { ws.close(); } catch { /* ignore */ }
+  } else {
+    connect();
+  }
+};
+
+const handlePanelInput = (input: string) => {
+  if (input === "\x1b" || input === "\x1bs" || input === "\x1bS" || (isMac && input === "ß")) { closeSessionPanel(); return; }
+  if (input === "\x1b[A" || input === "\x1bOA" || input === "k") { movePanelSelection(-1); return; }
+  if (input === "\x1b[B" || input === "\x1bOB" || input === "j") { movePanelSelection(1); return; }
+  if (input === "\r" || input === "\n") {
+    const s = panelSessions[panelIndex];
+    if (s) switchToRoom(s.id);
+    return;
+  }
+  // Everything else is swallowed while the panel is open.
+};
+
+const renderSessionPanel = (): string[] => {
+  const cols = localMetrics.cols;
+  const rows = localMetrics.rows;
+  const reset = "\x1b[0m";
+  const cell = (text: string, width: number) => {
+    const t = truncateAnsi(text, width);
+    return t + " ".repeat(Math.max(0, width - visibleLength(t)));
+  };
+  const lines: string[] = [];
+
+  // Header
+  const hint = panelLoading
+    ? "loading…"
+    : `${panelSessions.length} session${panelSessions.length === 1 ? "" : "s"} · ↑↓ move · ⏎ switch · Esc close`;
+  const header = ` ${BAR.bold}Sessions${BAR.resetFg}   ${BAR.dim}${hint}${BAR.resetFg}`;
+  lines.push(`${BAR.statusBg}${BAR.fg}${padOrTrim(header, cols)}${reset}`);
+
+  const bodyH = Math.max(1, rows - 2);
+  const listW = Math.max(22, Math.min(38, Math.floor(cols * 0.34)));
+  const prevW = Math.max(10, cols - listW - 3);
+  const listStart = panelSessions.length <= bodyH
+    ? 0
+    : Math.max(0, Math.min(panelIndex - Math.floor(bodyH / 2), panelSessions.length - bodyH));
+
+  const sel = panelSessions[panelIndex];
+  let previewLines: string[];
+  if (panelLoading) previewLines = ["Loading sessions…"];
+  else if (panelError) previewLines = [panelError];
+  else if (!panelSessions.length) previewLines = ["No sessions."];
+  else if (sel) previewLines = panelPreviewCache.get(sel.id) || ["loading preview…"];
+  else previewLines = [];
+  const prevStart = Math.max(0, previewLines.length - bodyH);
+
+  for (let b = 0; b < bodyH; b++) {
+    let left: string;
+    const absIdx = listStart + b;
+    if (!panelLoading && absIdx < panelSessions.length) {
+      const s = panelSessions[absIdx];
+      const selected = absIdx === panelIndex;
+      const isCurrent = s.id === config.room;
+      const label = `${selected ? "▸ " : "  "}${s.id}${isCurrent ? " ·here" : ""}`;
+      const padded = cell(label, listW);
+      left = selected ? `${BAR.chip}${padded}\x1b[22m${reset}` : `${BAR.fg}${padded}${reset}`;
+    } else {
+      left = cell("", listW);
+    }
+    const pline = previewLines[prevStart + b] ?? "";
+    const right = `${BAR.dim}${cell(pline, prevW)}${reset}`;
+    lines.push(`${left} ${BAR.dim}│${reset} ${right}\x1b[K`);
+  }
+
+  // Footer: selected session's working dir + running program
+  let footer: string;
+  if (sel && !panelLoading && !panelError) {
+    const meta = [
+      sel.cwd ? formatCwd(sel.cwd) : "",
+      sel.process ? `running ${sel.process}` : "",
+      sel.clients ? `${sel.clients} viewer${sel.clients === 1 ? "" : "s"}` : ""
+    ].filter(Boolean).join("  ·  ");
+    footer = ` ${BAR.bold}${sel.id}${BAR.resetFg}  ${BAR.dim}${meta}${BAR.resetFg}`;
+  } else {
+    footer = ` ${BAR.dim}${panelError || "Opt+S to close"}${BAR.resetFg}`;
+  }
+  lines.push(`${BAR.hintBg}${BAR.fg}${padOrTrim(footer, cols)}${reset}`);
+
+  return lines;
+};
+
 const render = () => {
   if (!process.stdout.isTTY) return;
   initUi();
@@ -1677,6 +1894,23 @@ const render = () => {
     lastRenderRows = localMetrics.rows;
     lastRenderedLines = []; // dimensions changed — repaint everything
     forceFull = true;
+  }
+
+  // Session panel overlay takes over the whole screen when open.
+  if (sessionPanelMode) {
+    const plines = renderSessionPanel();
+    let output = "\x1b[?25l";
+    let changed = 0;
+    for (let i = 0; i < localMetrics.rows; i++) {
+      const line = plines[i] ?? "\x1b[K";
+      if (forceFull || line !== lastRenderedLines[i]) {
+        output += `\x1b[${i + 1};1H` + line;
+        changed += 1;
+      }
+    }
+    lastRenderedLines = plines;
+    if (changed > 0) process.stdout.write(output);
+    return;
   }
 
   const others = presence.filter((client) => client.id !== clientId);
@@ -1766,6 +2000,7 @@ const render = () => {
     [kOpt("B"), `status ${showStatusBar ? "on" : "off"}`],
     [kOpt("M"), `mouse ${mouseCapture ? "on" : "off"}`],
     [kOpt("F"), "find"],
+    [kOpt("S"), "sessions"],
     [kOpt("C"), "control"],
     [kOpt("T"), "hints"],
     [kOpt("\\"), "literal"]
@@ -2062,6 +2297,11 @@ const connect = () => {
 
   ws.on("close", () => {
     connected = false;
+    if (switchingRoom) {
+      switchingRoom = false;
+      connect(); // reconnect immediately to the newly-selected room
+      return;
+    }
     if (shouldReconnect) {
       setStatus("reconnecting");
       scheduleReconnect();
@@ -2261,6 +2501,10 @@ const handleLocalShortcut = (input: string) => {
     enterSearch();
     return true;
   }
+  if (altKey("s") || altKey("S") || optionChar("ß")) {
+    void openSessionPanel();
+    return true;
+  }
   if (altKey("c") || altKey("C") || optionChar("ç")) {
     // Toggle exclusive control, mirroring the web Take/Release controls so a CLI
     // user on a locked shared session isn't stuck.
@@ -2388,6 +2632,12 @@ process.stdin.on("data", (data) => {
   const mouseResult = stripMouseSequences(input);
   input = mouseResult.cleaned;
   if (!input) return;
+
+  // While the session panel is open, keys drive the panel (never forwarded).
+  if (sessionPanelMode) {
+    handlePanelInput(input);
+    return;
+  }
 
   // While searching, all keys edit the query / navigate matches (never forwarded).
   if (searchMode) {

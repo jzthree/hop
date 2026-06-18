@@ -25,6 +25,7 @@
 ### New Features
 
 #### CLI Client
+- **Session panel (Opt+S)**: a file-manager-style overlay — session list on the left, a live screen preview of the highlighted session on the right. `↑`/`↓` (or `j`/`k`) fly through sessions with no perceived latency (previews are fetched from the host and cached), `Enter` switches the live terminal to the selected session, `Esc` closes. The footer shows the selected session's working dir, running program, and viewer count.
 - **Scrollback search (Opt+F)**: incremental search over the buffer; all matches are highlighted (current match bright), `Enter`/`↓` jump to the next match and `↑` to the previous one.
 - **Presence names + take/release control (Opt+C)**: peer names (with typing markers) in the status bar and exclusive-control parity with the web client.
 - **Persistent reconnect indicator**: a banner with the failure reason, countdown to the next retry, and attempt count stays visible while disconnected (CLI and web); the CLI now exits with a clear error if the first ~5 connection attempts never succeed.

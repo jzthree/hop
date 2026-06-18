@@ -836,7 +836,7 @@ const App = () => {
       fontSize,
       lineHeight: 1.3,
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: 50000,
       theme: resolveTerminalTheme(themeMode)
     });
     const fitAddon = new FitAddon();

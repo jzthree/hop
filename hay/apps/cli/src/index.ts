@@ -476,7 +476,7 @@ let remoteRows = Math.max(1, localMetrics.viewportRows);
 const terminal = new Terminal({
   cols: remoteCols,
   rows: remoteRows,
-  scrollback: 5000,
+  scrollback: 50000,
   allowProposedApi: true
 });
 

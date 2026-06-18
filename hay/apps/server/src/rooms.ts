@@ -39,13 +39,15 @@ export type RoomSummary = {
   localCliCount: number;
 };
 
-// Raw output retained for reattach snapshots. ~2MB of raw stream reconstructs
-// roughly a full client scrollback (2000-5000 lines) of plain output; TUI
-// streams are escape-dense and reconstruct less. Override with
+// Raw output retained for reattach snapshots. ~20MB of raw stream reconstructs
+// roughly a full client scrollback (tens of thousands of lines) of plain
+// output; TUI streams are escape-dense and reconstruct less. This is the whole
+// buffer replayed (and parsed by the client) on reattach, so very large values
+// trade memory + reattach-parse time for deeper restored history. Override with
 // HAY_SNAPSHOT_BUFFER_BYTES (bytes of raw stream kept per room).
 const MAX_BUFFER_SIZE = (() => {
   const env = Number(process.env.HAY_SNAPSHOT_BUFFER_BYTES);
-  return Number.isFinite(env) && env > 0 ? env : 2_000_000;
+  return Number.isFinite(env) && env > 0 ? env : 20_000_000;
 })();
 // Keep rooms alive indefinitely; only explicit kill/remove should end a session.
 const CLEANUP_DELAY_MS = 0;

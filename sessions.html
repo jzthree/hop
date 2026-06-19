@@ -38,6 +38,10 @@
             .subtitle { color: var(--ink-muted); font-size: 0.875rem; margin-bottom: 1rem; }
             .session-list { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 1.5rem; box-shadow: var(--shadow); }
             .session-groups { margin-bottom: 1.5rem; }
+            .sort-bar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem; }
+            .sort-bar label { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-muted); }
+            .sort-bar select { padding: 0.35rem 0.6rem; border: 1px solid var(--line); border-radius: 8px; font-size: 0.85rem; background: var(--panel); color: var(--ink); cursor: pointer; }
+            .sort-bar select:focus { outline: none; border-color: var(--accent); }
             .toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
             .toolbar .btn { width: 100%; padding: 0.6rem 0.9rem; font-size: 0.875rem; min-width: auto; }
             .toolbar details { width: 100%; }
@@ -181,6 +185,14 @@
                     </div>
                 </details>
             </div>
+            <div class="sort-bar">
+                <label for="sortMode">Sort</label>
+                <select id="sortMode" onchange="onSortModeChange(this.value)">
+                    <option value="recent">Recent activity</option>
+                    <option value="name">Name</option>
+                    <option value="manual">Manual</option>
+                </select>
+            </div>
             <div class="session-groups" id="sessionList">
                 <div class="empty">Loading sessions...</div>
             </div>
@@ -292,7 +304,25 @@
                 }
             }
 
+            // Sort mode: 'recent' (default) | 'name' | 'manual'. Persisted locally.
+            let sortMode = (() => {
+                const m = localStorage.getItem('hop_sort_mode');
+                return (m === 'recent' || m === 'name' || m === 'manual') ? m : 'recent';
+            })();
+            function setSortMode(m) {
+                sortMode = m;
+                try { localStorage.setItem('hop_sort_mode', m); } catch (e) { /* ignore */ }
+                const sel = document.getElementById('sortMode');
+                if (sel && sel.value !== m) sel.value = m;
+            }
+            function onSortModeChange(m) {
+                setSortMode(m);
+                lastSessionsPayload = null; // force a re-render even though the data is unchanged
+                loadSessions();
+            }
+
             let dragSessionId = null;
+            let dragSourceFolder = null; // bucket key the drag started in ('' = root)
             let latestSessionsData = { sessions: [], active: [], starting: [] };
             // Pause the 3s auto-refresh while a swipe or drag is in progress so the
             // full re-render doesn't yank the row out from under the user.
@@ -340,18 +370,32 @@
                             usedIds.add(internalName);
                         }
                     });
-                    // Default sort: most recently active first. Sessions with no
-                    // activity timestamp (saved/workspace defs) sink to the bottom,
-                    // ordered by creation then name.
-                    items.sort((a, b) => {
-                        const ta = Number(a.lastActivityAt) || 0;
-                        const tb = Number(b.lastActivityAt) || 0;
-                        if (tb !== ta) return tb - ta;
-                        const ca = Number(a.createdAt) || 0;
-                        const cb = Number(b.createdAt) || 0;
-                        if (cb !== ca) return cb - ca;
-                        return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name));
-                    });
+                    if (sortMode === 'manual') {
+                        // Respect the stored bucket order; anything not in it (new
+                        // sessions) falls to the end in arrival order.
+                        const bucket = folderId || 'root';
+                        const orderedIds = Array.isArray(orderedIdsByFolder[bucket]) ? orderedIdsByFolder[bucket] : [];
+                        const rank = new Map(orderedIds.map((id, i) => [id, i]));
+                        items.sort((a, b) => {
+                            const ra = rank.has(a.internalName || a.name) ? rank.get(a.internalName || a.name) : Infinity;
+                            const rb = rank.has(b.internalName || b.name) ? rank.get(b.internalName || b.name) : Infinity;
+                            return ra - rb;
+                        });
+                    } else if (sortMode === 'name') {
+                        items.sort((a, b) => String(a.displayName || a.name).localeCompare(String(b.displayName || b.name)));
+                    } else {
+                        // 'recent': most recently active first; sessions with no activity
+                        // (saved/workspace defs) sink to the bottom, by creation then name.
+                        items.sort((a, b) => {
+                            const ta = Number(a.lastActivityAt) || 0;
+                            const tb = Number(b.lastActivityAt) || 0;
+                            if (tb !== ta) return tb - ta;
+                            const ca = Number(a.createdAt) || 0;
+                            const cb = Number(b.createdAt) || 0;
+                            if (cb !== ca) return cb - ca;
+                            return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name));
+                        });
+                    }
                     return items;
                 }
 
@@ -714,6 +758,36 @@
                 loadSessions();
             }
 
+            async function reorderBucket(folderId, names) {
+                await fetch('/api/sessions/reorder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ folderId: folderId || null, names })
+                });
+                loadSessions();
+            }
+
+            // A drop inside the same folder is a reorder. In a non-manual sort that
+            // would be overridden on the next render, so offer to switch to manual
+            // and freeze exactly what the user just arranged.
+            function handleReorderDrop(list, index) {
+                const targetFolder = list.dataset.folderId || '';
+                const names = Array.from(list.querySelectorAll('.session-item-wrapper')).map(w => w.dataset.session);
+                const from = names.indexOf(dragSessionId);
+                if (from !== -1) names.splice(from, 1);
+                names.splice(Math.max(0, Math.min(index, names.length)), 0, dragSessionId);
+                if (sortMode === 'manual') {
+                    reorderBucket(targetFolder || null, names);
+                    return;
+                }
+                if (confirm('Keep this order? This switches sorting to Manual.')) {
+                    setSortMode('manual');
+                    reorderBucket(targetFolder || null, names);
+                } else {
+                    loadSessions(); // revert to the sorted view
+                }
+            }
+
             function initSwipe() {
                 document.querySelectorAll('.session-item-wrapper').forEach(wrapper => {
                     const item = wrapper.querySelector('.session-item');
@@ -776,6 +850,7 @@
                 document.querySelectorAll('.session-item-wrapper').forEach(wrapper => {
                     wrapper.addEventListener('dragstart', e => {
                         dragSessionId = wrapper.dataset.session;
+                        dragSourceFolder = wrapper.closest('.folder-list')?.dataset.folderId || '';
                         interactionActive = true;
                         wrapper.classList.add('dragging');
                         if (e.dataTransfer) {
@@ -802,7 +877,12 @@
                         list.classList.remove('drag-over');
                         const items = Array.from(list.querySelectorAll('.session-item-wrapper'));
                         const index = items.indexOf(wrapper);
-                        moveSession(dragSessionId, list.dataset.folderId || null, index);
+                        const targetFolder = list.dataset.folderId || '';
+                        if (targetFolder === (dragSourceFolder || '')) {
+                            handleReorderDrop(list, index); // same folder = reorder
+                        } else {
+                            moveSession(dragSessionId, targetFolder || null, index); // folder change
+                        }
                     });
                 });
 
@@ -822,7 +902,12 @@
                         if (!dragSessionId) return;
                         const items = Array.from(list.querySelectorAll('.session-item-wrapper'));
                         const index = items.length;
-                        moveSession(dragSessionId, list.dataset.folderId || null, index);
+                        const targetFolder = list.dataset.folderId || '';
+                        if (targetFolder === (dragSourceFolder || '')) {
+                            handleReorderDrop(list, index); // dropped into empty area of same folder
+                        } else {
+                            moveSession(dragSessionId, targetFolder || null, index); // folder change
+                        }
                     });
                 });
             }
@@ -849,6 +934,7 @@
                 });
             });
 
+            { const sel = document.getElementById('sortMode'); if (sel) sel.value = sortMode; }
             loadSessions();
             setInterval(loadSessions, 3000);
             // Live-refresh expanded previews on their own cadence (guarded so it's

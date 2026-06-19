@@ -843,6 +843,27 @@ function moveSessionToFolder(name, folderId, index) {
     return true;
 }
 
+// Replace a bucket's full manual session order (used when the manager switches
+// to manual sort via a drag, to freeze the arrangement the user is looking at).
+function setSessionBucketOrder(folderId, names) {
+    if (!Array.isArray(names)) return false;
+    const bucket = (folderId && sessionStore.folders[folderId]) ? folderId : 'root';
+    const seen = new Set();
+    const ordered = [];
+    for (const n of names) {
+        if (typeof n !== 'string' || seen.has(n)) continue;
+        const config = getEffectiveSessionConfig(n);
+        if (!config || config.type === 'port') continue;
+        if ((config.folderId || 'root') !== bucket) continue;
+        seen.add(n);
+        ordered.push(n);
+    }
+    if (!sessionStore.order.sessions) sessionStore.order.sessions = {};
+    sessionStore.order.sessions[bucket] = ordered;
+    saveSessionStore();
+    return true;
+}
+
 function setFolderOrder(order) {
     if (!Array.isArray(order)) return false;
     const filtered = order.filter((id) => sessionStore.folders[id]);
@@ -5449,6 +5470,24 @@ function startAuthProxy(authEmitter) {
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Replace a bucket's full manual order (session manager → manual sort)
+        if (parsedUrl.pathname === '/api/sessions/reorder' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { folderId, names } = JSON.parse(body);
+                    const ok = setSessionBucketOrder(folderId || null, Array.isArray(names) ? names : []);
+                    res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(ok ? { ok: true } : { error: 'Failed to reorder' }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));

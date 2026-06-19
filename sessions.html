@@ -80,6 +80,7 @@
             .session-meta { color: var(--ink-muted); font-size: 0.8rem; margin-top: 0.25rem; display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
             .meta-dir { font-family: var(--font-mono); color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
             .meta-proc { font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 0.05rem 0.5rem; white-space: nowrap; }
+            .meta-time { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-muted); white-space: nowrap; margin-left: auto; }
             /* On-demand screen preview disclosure */
             .preview-toggle { margin-top: 0.4rem; padding: 0; border: 0; background: transparent; color: var(--ink-muted); font-size: 0.75rem; cursor: pointer; font-family: var(--font-mono); }
             .preview-toggle:hover { color: var(--accent); }
@@ -239,6 +240,19 @@
                 return '…/' + parts.slice(-2).join('/');
             }
             const SHELL_PROCS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'nu', 'xonsh', 'login']);
+            // Compact "time since last activity" for the session manager.
+            function relativeTime(ts) {
+                if (!ts) return '';
+                const s = Math.floor((Date.now() - ts) / 1000);
+                if (s < 10) return 'just now';
+                if (s < 60) return s + 's ago';
+                const m = Math.floor(s / 60);
+                if (m < 60) return m + 'm ago';
+                const h = Math.floor(m / 60);
+                if (h < 24) return h + 'h ago';
+                const d = Math.floor(h / 24);
+                return d + 'd ago';
+            }
 
             // On-demand session previews: a card's screen is only fetched while
             // it's expanded AND the tab is visible, so idle/unwatched sessions
@@ -317,15 +331,7 @@
                 const usedIds = new Set();
 
                 function orderedSessionsForFolder(folderId) {
-                    const bucket = folderId || 'root';
-                    const orderedIds = Array.isArray(orderedIdsByFolder[bucket]) ? orderedIdsByFolder[bucket] : [];
                     const items = [];
-                    orderedIds.forEach(id => {
-                        if (sessionMap.has(id)) {
-                            items.push(sessionMap.get(id));
-                            usedIds.add(id);
-                        }
-                    });
                     sessions.forEach(s => {
                         const internalName = s.internalName || s.name;
                         const sessionFolder = s.folderId || null;
@@ -333,6 +339,18 @@
                             items.push(s);
                             usedIds.add(internalName);
                         }
+                    });
+                    // Default sort: most recently active first. Sessions with no
+                    // activity timestamp (saved/workspace defs) sink to the bottom,
+                    // ordered by creation then name.
+                    items.sort((a, b) => {
+                        const ta = Number(a.lastActivityAt) || 0;
+                        const tb = Number(b.lastActivityAt) || 0;
+                        if (tb !== ta) return tb - ta;
+                        const ca = Number(a.createdAt) || 0;
+                        const cb = Number(b.createdAt) || 0;
+                        if (cb !== ca) return cb - ca;
+                        return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name));
                     });
                     return items;
                 }
@@ -370,7 +388,9 @@
                             ? `<span class="meta-dir" title="${escHtml(cwd)}">${escHtml(shortDir(cwd))}</span>`
                             : '<span class="meta-dir">Live session</span>';
                         const app = runningApp ? `<span class="meta-proc">${escHtml(runningApp)}</span>` : '';
-                        metaText = `${dir}${app}`;
+                        const rel = relativeTime(Number(s.lastActivityAt) || 0);
+                        const updated = rel ? `<span class="meta-time" title="Last activity">${escHtml(rel)}</span>` : '';
+                        metaText = `${dir}${app}${updated}`;
                     } else {
                         metaText = 'Workspace session. Join starts a fresh shell.';
                     }

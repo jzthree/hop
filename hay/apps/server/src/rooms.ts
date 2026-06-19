@@ -35,6 +35,7 @@ export type RoomSummary = {
   cwd: string;
   liveCwd: string;
   foregroundProcess: string;
+  lastActivityAt: number;
   clientCount: number;
   localCliCount: number;
 };
@@ -128,6 +129,7 @@ export class Room extends EventEmitter {
   private readonly initialCwd: string;
   private liveCwd: string;
   private foregroundProcess = "";
+  private lastActivityAt = now(); // ms of the most recent PTY output
   private clients = new Map<string, ClientState>();
   private collabMode = true;
   private controllerId: string | null = null;
@@ -162,6 +164,7 @@ export class Room extends EventEmitter {
     this.activeRows = initialSize.rows;
 
     this.pty.onData((data: string) => {
+      this.lastActivityAt = now();
       this.outputBuffer = clampBuffer(this.outputBuffer + data);
       this.updateTerminalState(data);
       this.broadcast({ type: "output", data });
@@ -663,6 +666,7 @@ export class Room extends EventEmitter {
       cwd: this.initialCwd,
       liveCwd: this.liveCwd,
       foregroundProcess,
+      lastActivityAt: this.lastActivityAt,
       clientCount: this.clients.size,
       localCliCount
     };

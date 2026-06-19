@@ -2716,6 +2716,7 @@ async function listActiveSessionsRuntimeFirst() {
         hasLocalCli: room.hasLocalCli === true || Number(room.localCliCount) > 0,
         cwd: room.cwd,
         foregroundProcess: room.foregroundProcess,
+        lastActivityAt: room.lastActivityAt,
         hostPort: room.hostPort
     }));
     return { sessions, runtimeAvailable: true };
@@ -4109,6 +4110,9 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                             const foregroundProcess = typeof room?.foregroundProcess === 'string' && room.foregroundProcess.trim()
                                 ? room.foregroundProcess.trim()
                                 : undefined;
+                            const lastActivityAt = Number.isFinite(Number(room?.lastActivityAt)) && Number(room.lastActivityAt) > 0
+                                ? Number(room.lastActivityAt)
+                                : undefined;
                             const clientCountRaw = Number(room?.clientCount);
                             const clientCount = Number.isFinite(clientCountRaw) && clientCountRaw >= 0
                                 ? Math.floor(clientCountRaw)
@@ -4121,6 +4125,7 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                                 id,
                                 cwd,
                                 foregroundProcess,
+                                lastActivityAt,
                                 clientCount,
                                 localCliCount,
                                 hasLocalCli: localCliCount > 0,
@@ -5119,6 +5124,7 @@ function startAuthProxy(authEmitter) {
                 folderId: s.folderId || null,
                 cwd: s.cwd,
                 foregroundProcess: s.foregroundProcess,
+                lastActivityAt: s.lastActivityAt,
                 shell: s.shell,
                 env: s.env,
                 cols: s.cols,

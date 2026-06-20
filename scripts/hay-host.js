@@ -2,6 +2,8 @@
 'use strict';
 
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { randomUUID } = require('crypto');
@@ -11,6 +13,38 @@ const HOST = '127.0.0.1';
 const portFromEnv = Number.parseInt(process.env.HAY_HOST_PORT || '', 10);
 const PORT = Number.isInteger(portFromEnv) && portFromEnv > 0 ? portFromEnv : 0;
 const FALLBACK_CWD = process.env.HAY_HOST_CWD || process.cwd();
+
+// Where we stash each room's tail buffer on shutdown so `hop restore` can replay
+// a plain-shell session's last screen. Mirrors the daemon's HOP_HOME (~/.hop2).
+const HOP_HOME = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
+const BUFFER_DIR = path.join(HOP_HOME, 'session-buffers');
+
+// Persist live rooms' tail output, called on graceful shutdown (before the PTYs
+// are killed). Best-effort: any failure here must not block the shutdown path.
+function persistRoomBuffers(rooms) {
+    if (typeof rooms.getPersistableBuffers !== 'function') return;
+    let buffers;
+    try {
+        buffers = rooms.getPersistableBuffers();
+    } catch (e) {
+        return;
+    }
+    if (!buffers || !buffers.length) return;
+    try {
+        fs.mkdirSync(BUFFER_DIR, { recursive: true });
+    } catch (e) {
+        return;
+    }
+    for (const { id, output } of buffers) {
+        if (!id || !output) continue;
+        if (!/^[A-Za-z0-9_.-]+$/.test(id)) continue; // never let an id escape BUFFER_DIR
+        try {
+            fs.writeFileSync(path.join(BUFFER_DIR, `${id}.raw`), output, { mode: 0o600 });
+        } catch (e) {
+            /* skip this room, keep persisting the rest */
+        }
+    }
+}
 
 function readJsonBody(req) {
     return new Promise((resolve, reject) => {
@@ -88,7 +122,10 @@ async function main() {
                     ? body.shell
                     : undefined;
                 const env = normalizeEnv(body.env);
-                const room = rooms.getRoom(roomId, { cols, rows }, { cwd, shell, env });
+                const seedOutput = typeof body.seedOutput === 'string' && body.seedOutput
+                    ? body.seedOutput
+                    : undefined;
+                const room = rooms.getRoom(roomId, { cols, rows }, { cwd, shell, env, seedOutput });
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, room: room.getSummary() }));
             } catch (err) {
@@ -181,6 +218,11 @@ async function main() {
     });
 
     const shutdown = () => {
+        // Persist tail buffers BEFORE closeAll() kills the PTYs, so a graceful
+        // `hop stop --all` leaves something for `hop restore` to replay.
+        try {
+            persistRoomBuffers(rooms);
+        } catch (e) { }
         try {
             rooms.closeAll();
         } catch (e) { }

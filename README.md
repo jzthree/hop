@@ -203,7 +203,7 @@ hop restore               # recreate saved sessions; claude ones resume their ow
 hop restore --dry-run     # preview what would be restored
 ```
 
-How it works: every hop terminal gets a `HOP_SESSION` env var; a Claude Code `SessionStart` hop hook records which conversation is running in each session. On `hop restore`, each session is reopened in its original directory and claude sessions relaunch with `claude --resume <id>` — so even multiple Claude sessions in the *same* directory each come back to their own conversation. Non-Claude sessions reopen a shell in their last directory (a dead process can't be resumed). `hop status` shows how many sessions can be restored.
+How it works: every hop terminal gets a `HOP_SESSION` env var; a Claude Code `SessionStart` hop hook records which conversation is running in each session. On `hop restore`, each session is reopened in its original directory and claude sessions relaunch with `claude --resume <id>` — so even multiple Claude sessions in the *same* directory each come back to their own conversation. Plain-shell sessions reopen a shell in their last directory and replay their last screen: on a graceful shutdown hop saves each session's recent output and, on restore, paints it back above a dim `──── session restored ────` separator before the fresh prompt — so you keep the context even though the old process is gone. `hop status` shows how many sessions can be restored.
 
 `hop claude-hook install` adds a `SessionStart` entry to `~/.claude/settings.json` (backed up first); `hop claude-hook remove` reverts it. The hook is a no-op outside hop terminals.
 

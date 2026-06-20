@@ -3285,7 +3285,8 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         agentPermitted: opts.agentPermitted,
         workspaceName: opts.workspaceName,
         folderId: opts.folderId,
-        saveDefinition: opts.saveDefinition === true
+        saveDefinition: opts.saveDefinition === true,
+        seedOutput: opts.seedOutput
     });
 
     const cols = Number.isInteger(opts.cols) ? opts.cols : 80;
@@ -3435,6 +3436,43 @@ function sendTerminalResize(entry, cols, rows) {
 const CLAUDE_SESSIONS_DIR = path.join(HOME_DIR, 'claude-sessions');
 const CLAUDE_HOOK_SCRIPT = path.join(__dirname, 'scripts', 'claude-session-hook.js');
 
+// The hay-host writes each room's tail buffer here on graceful shutdown; on
+// restore we replay a plain-shell session's buffer as the new room's seed so it
+// reopens on its last screen, then a fresh shell starts in the same dir.
+const SESSION_BUFFERS_DIR = path.join(HOME_DIR, 'session-buffers');
+
+// Printed between the replayed buffer and the fresh shell's first prompt, so the
+// boundary is obvious. Dim, centered-ish marker on its own line.
+const SESSION_RESTORED_SEPARATOR = '\r\n\x1b[2m──────── session restored ────────\x1b[0m\r\n';
+
+function shellSessionBufferPath(internalName) {
+    if (!internalName || !/^[A-Za-z0-9_.-]+$/.test(internalName)) return null;
+    return path.join(SESSION_BUFFERS_DIR, `${internalName}.raw`);
+}
+
+// Non-consuming check used for `hop restore` planning/dry-run.
+function shellSessionBufferExists(internalName) {
+    const file = shellSessionBufferPath(internalName);
+    if (!file) return false;
+    try { return fs.statSync(file).size > 0; } catch (e) { return false; }
+}
+
+// Read (and consume) a persisted plain-shell buffer for a session. One-shot: the
+// file is deleted after reading so a later normal recreate of the same name does
+// not replay a stale screen. Returns "" when there is nothing to replay.
+function readShellSessionBuffer(internalName) {
+    const file = shellSessionBufferPath(internalName);
+    if (!file) return '';
+    let data = '';
+    try {
+        data = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+        return '';
+    }
+    try { fs.unlinkSync(file); } catch (e) { /* best effort */ }
+    return data;
+}
+
 function readClaudeSessionRecord(internalName) {
     if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
     try {
@@ -3472,6 +3510,9 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
         displayName: e.displayName || e.internalName,
         cwd: plan.cwd || e.cwd || process.cwd(),
         command: plan.command,
+        // Plain-shell sessions (no claude/startup command) replay their last
+        // screen if we persisted a buffer for them at the previous shutdown.
+        replay: !plan.command && shellSessionBufferExists(e.internalName),
         cols: Number.isInteger(e.cols) ? e.cols : 140,
         rows: Number.isInteger(e.rows) ? e.rows : 40,
         shell: e.shell,
@@ -3482,15 +3523,26 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
         };
     });
     if (dryRun) {
-        return { restored: planned.map((p) => ({ name: p.displayName, command: p.command })), count: planned.length, dryRun: true };
+        return {
+            restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay })),
+            count: planned.length,
+            dryRun: true
+        };
     }
     for (const p of planned) {
+        // Plain-shell restore: replay the saved buffer + a separator ahead of the
+        // fresh shell's prompt. Reading consumes (deletes) the buffer file.
+        let seedOutput;
+        if (p.replay) {
+            const buf = readShellSessionBuffer(p.internalName);
+            if (buf) seedOutput = buf + SESSION_RESTORED_SEPARATOR;
+        }
         let entry;
         try {
             entry = await attachTerminalApiClient(p.internalName, p.displayName, {
                 actor: 'user', cwd: p.cwd, cols: p.cols, rows: p.rows, shell: p.shell, env: p.env,
                 createdBy: p.createdBy, agentPermitted: p.agentPermitted, folderId: p.folderId,
-                saveDefinition: true
+                saveDefinition: true, seedOutput
             });
         } catch (e) {
             continue;
@@ -3507,7 +3559,11 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
             setTimeout(() => { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }, 600);
         }
     }
-    return { restored: planned.map((p) => ({ name: p.displayName, command: p.command })), count: planned.length, dryRun: false };
+    return {
+        restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay })),
+        count: planned.length,
+        dryRun: false
+    };
 }
 
 // ---- Claude SessionStart hook install/remove (in ~/.claude/settings.json) ---
@@ -4480,7 +4536,10 @@ async function ensureExternalHayHostReady() {
             env: {
                 ...process.env,
                 HAY_HOST_PORT: String(hostPort),
-                HAY_HOST_CWD: process.cwd()
+                HAY_HOST_CWD: process.cwd(),
+                // Pin the host's HOP_HOME to the daemon's so it persists session
+                // buffers (for `hop restore`) under the same dir we read from.
+                HOP_HOME: HOME_DIR
             }
         });
     } finally {
@@ -4625,14 +4684,20 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
     rememberRuntimeSessionMetadata(sessionName, effectiveConfig);
 
     const ptyRuntime = buildSessionPtyEnv(sessionName, effectiveConfig, effectiveConfig.workspaceName);
-    const response = await callExternalHayHostApi('/rooms', 'POST', {
+    const roomBody = {
         id: sessionName,
         cwd: effectiveConfig.cwd,
         cols: Number.isInteger(effectiveConfig.cols) ? effectiveConfig.cols : 80,
         rows: Number.isInteger(effectiveConfig.rows) ? effectiveConfig.rows : 24,
         shell: effectiveConfig.shell,
         env: ptyRuntime.env
-    }, 2500);
+    };
+    // Restore replay (plain-shell sessions only): seed the new room with the
+    // previous session's tail buffer so it reopens on its last screen.
+    if (typeof opts.seedOutput === 'string' && opts.seedOutput) {
+        roomBody.seedOutput = opts.seedOutput;
+    }
+    const response = await callExternalHayHostApi('/rooms', 'POST', roomBody, 2500);
     if (!response || response.status < 200 || response.status >= 300 || !response.data?.ok) {
         const reason = response?.data?.error || `status ${response?.status || 'unknown'}`;
         throw new Error(`Failed to start external session "${displayName || sessionName}": ${reason}`);
@@ -8679,7 +8744,9 @@ async function main() {
         }
         log(`${dryRun ? 'Would restore' : 'Restoring'} ${items.length} session(s):`, BOLD);
         for (const it of items) {
-            const how = it.command ? `${DIM}${it.command}${RESET}` : `${DIM}shell in last dir${RESET}`;
+            const how = it.command
+                ? `${DIM}${it.command}${RESET}`
+                : (it.replay ? `${DIM}shell in last dir (replay last screen)${RESET}` : `${DIM}shell in last dir${RESET}`);
             log(`  ${GREEN}•${RESET} ${it.name}  ${how}`, RESET);
         }
         if (!dryRun) {

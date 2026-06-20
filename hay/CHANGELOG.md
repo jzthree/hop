@@ -9,6 +9,9 @@
 - **Drawer polish**: quick actions split into two clusters — utility icons (keyboard / share / find) then named actions (Fit / Manage) — and the drawer FAB now defaults to the top-right (clear of the status bar, mirroring the close button) instead of bottom-left. It stays draggable.
 - **Autofit by default + fit on every session load**: the terminal fits the viewport on connect and on each session switch, on every platform. Autofit resizes the shared PTY, so other viewers follow this client; switch to Manual in the drawer to opt out.
 
+#### Server
+- **Plain-shell restore replays the last screen**: on a graceful shutdown the host now persists each room's tail buffer to `<HOP_HOME>/session-buffers/<id>.raw`; `hop restore` seeds a recreated plain-shell session with that buffer plus a dim `──── session restored ────` separator, then starts a fresh shell in the same dir — so reopening a shell session picks up where it left off (claude sessions still resume via `claude --resume`, so they aren't seeded). The buffer is consumed (deleted) on restore so a later normal recreate never replays a stale screen. The first restart after upgrading has no persisted buffers yet (nothing to replay).
+
 ### Bug Fixes
 
 #### CLI Client

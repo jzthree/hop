@@ -28,6 +28,11 @@ export type RoomCreateOptions = {
   cwd: string;
   env?: Record<string, string>;
   shell?: string;
+  // Raw terminal output to pre-load into the room's buffer before the PTY
+  // starts producing data. Used by `hop restore` to replay a plain-shell
+  // session's last screen (so reopening it picks up where it left off) ahead of
+  // the fresh shell's first prompt. Clamped to the buffer cap like live output.
+  seedOutput?: string;
 };
 
 export type RoomSummary = {
@@ -165,6 +170,14 @@ export class Room extends EventEmitter {
     });
     this.activeCols = initialSize.cols;
     this.activeRows = initialSize.rows;
+
+    // Restore replay: pre-load the previous session's tail output so the first
+    // client to attach sees the restored screen (via the snapshot) before the
+    // fresh shell repaints. This is raw bytes that already happened, so we only
+    // stage it into the buffer — we don't re-broadcast or re-parse it.
+    if (options.seedOutput) {
+      this.outputBuffer = clampBuffer(options.seedOutput);
+    }
 
     this.pty.onData((data: string) => {
       this.lastActivityAt = now();
@@ -651,6 +664,17 @@ export class Room extends EventEmitter {
     return { cols: this.activeCols, rows: this.activeRows, output };
   }
 
+  /**
+   * A bounded tail of the raw output, for persisting across a host restart so
+   * `hop restore` can replay the last screen of a plain-shell session. Returns
+   * an empty string for an empty buffer so callers can skip writing a file.
+   */
+  getPersistableBuffer(maxBytes = 65536): string {
+    const buf = this.outputBuffer;
+    if (!buf) return "";
+    return buf.length > maxBytes ? buf.slice(buf.length - maxBytes) : buf;
+  }
+
   getSummary(): RoomSummary {
     const localCliCount = [...this.clients.values()].filter((client) => client.source === "local-cli").length;
     // Read the foreground process name fresh (cheap getter) so the session
@@ -727,6 +751,20 @@ export class RoomManager {
   getRoomPreviewSource(id: string, maxBytes?: number) {
     const room = this.rooms.get(id);
     return room ? room.getPreviewSource(maxBytes) : null;
+  }
+
+  /**
+   * Snapshot every live room's tail buffer for persistence across a host
+   * restart. Rooms with no output are omitted. The host script writes these to
+   * disk on shutdown; `hop restore` replays them as `seedOutput`.
+   */
+  getPersistableBuffers(maxBytes?: number): Array<{ id: string; output: string }> {
+    const out: Array<{ id: string; output: string }> = [];
+    for (const room of this.rooms.values()) {
+      const output = room.getPersistableBuffer(maxBytes);
+      if (output) out.push({ id: room.id, output });
+    }
+    return out;
   }
 
   listRooms(): RoomSummary[] {

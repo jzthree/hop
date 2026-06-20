@@ -325,6 +325,9 @@ let renderScheduled = false;
 let lastRenderCols = 0;
 let lastRenderRows = 0;
 let lastRenderedLines: string[] = []; // previous frame's lines, for dirty-line diffing
+let scrollGeneration = 0;   // bumped on every buffer scroll (xterm onScroll)
+let lastRenderScrollGen = -1; // scrollGeneration captured at the last frame
+let lastRenderTopRow = -1;  // viewY captured at the last frame
 
 // ---- Bar theme -------------------------------------------------------------
 // The bars adapt to the terminal: "auto" (default) resolves light/dark from the
@@ -507,6 +510,12 @@ terminal.onData((data) => {
   if (replayingSnapshot) return;
   sendMessage({ type: "input", data });
 });
+
+// Bump a generation counter whenever the buffer scrolls. The dirty-line diff
+// compares screen rows positionally, which is only valid when the buffer→screen
+// mapping is unchanged; a scroll shifts every row's content, so the renderer
+// forces a full repaint when this counter (or the view offset) changed.
+terminal.onScroll(() => { scrollGeneration += 1; });
 
 const filterFocusSequences = (data: string) => data.replace(/\x1b\[I/g, "").replace(/\x1b\[O/g, "");
 
@@ -1895,6 +1904,17 @@ const render = () => {
     lastRenderedLines = []; // dimensions changed — repaint everything
     forceFull = true;
   }
+  // The dirty-line diff compares screen rows positionally; that's only valid
+  // when the buffer→screen mapping is stable. A scroll (buffer scrolled, or the
+  // user panned the viewport) shifts every row's content, so a positional diff
+  // would skip rows that matched a stale neighbour (lost text) and leave moved
+  // rows behind (duplicated text). Force a full repaint whenever the view
+  // offset or scroll generation changed since the last frame.
+  if (!sessionPanelMode && (viewY !== lastRenderTopRow || scrollGeneration !== lastRenderScrollGen)) {
+    forceFull = true;
+  }
+  lastRenderTopRow = viewY;
+  lastRenderScrollGen = scrollGeneration;
 
   // Session panel overlay takes over the whole screen when open.
   if (sessionPanelMode) {
@@ -2210,6 +2230,7 @@ const connect = () => {
           // reset() (not clear()) so the stale cursor position, SGR attrs, and
           // mode state from the previous connection don't bleed into the replay.
           terminal.reset();
+          lastRenderedLines = []; // post-reset buffer is unrelated to the last frame — repaint fully
           releaseScrollAnchor();
           followOutput = true;
           const filtered = filterFocusSequences(message.data);

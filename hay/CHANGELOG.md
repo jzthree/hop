@@ -11,6 +11,9 @@
 
 ### Bug Fixes
 
+#### CLI Client
+- **Duplicated / lost text during scrolling output (e.g. Claude Code)**: the dirty-line render diff compared screen rows positionally but only forced a full repaint on resize — so when the buffer scrolled (or you panned), rows that shifted could be skipped (lost text) or left behind (duplicated). The renderer now forces a full repaint whenever the buffer scrolls (xterm `onScroll`) or the viewport offset changes, and clears its frame cache on snapshot replay. The in-place diff still applies for typing (no scroll), keeping that fast.
+
 #### Web Client (mobile)
 - **Drawer groups no longer collapse with a long session list**: the drawer is a flex column with a fixed viewport height on mobile, so a long "Switch session" list overflowed and the flex algorithm shrank the Control and Theme/Font/Copy groups (which have `overflow:hidden`) to empty slivers. Children are now pinned to their natural height, so the drawer scrolls instead of squeezing — the settings groups stay visible no matter how many sessions are live.
 - **Mobile controls no longer disappear at narrow widths**: `isMobile` now tracks the viewport instead of being fixed at page load, so resizing a window narrow (or any narrow load) shows the full mobile drawer — keyboard toggle, Find, Touch mode, and the virtual keyboard — matching the CSS breakpoint. Previously a wide-then-narrow window stayed in "desktop mode" and dropped those controls.

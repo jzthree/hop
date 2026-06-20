@@ -193,6 +193,20 @@ Hop’s mobile UI includes:
 - a floating menu for keyboard toggle and session switching
 - draggable controls designed for one-handed use
 
+### Restore Sessions (incl. Claude Code)
+
+A restart kills the underlying processes, but hop can rebuild your sessions and — for Claude Code — resume each conversation where it left off.
+
+```bash
+hop claude-hook install   # one-time: lets hop track each session's Claude conversation
+hop restore               # recreate saved sessions; claude ones resume their own conversation
+hop restore --dry-run     # preview what would be restored
+```
+
+How it works: every hop terminal gets a `HOP_SESSION` env var; a Claude Code `SessionStart` hop hook records which conversation is running in each session. On `hop restore`, each session is reopened in its original directory and claude sessions relaunch with `claude --resume <id>` — so even multiple Claude sessions in the *same* directory each come back to their own conversation. Non-Claude sessions reopen a shell in their last directory (a dead process can't be resumed). `hop status` shows how many sessions can be restored.
+
+`hop claude-hook install` adds a `SessionStart` entry to `~/.claude/settings.json` (backed up first); `hop claude-hook remove` reverts it. The hook is a no-op outside hop terminals.
+
 ## Operations
 
 ### Logging and History

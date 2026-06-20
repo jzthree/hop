@@ -157,7 +157,10 @@ export class Room extends EventEmitter {
       cols: initialSize.cols,
       rows: initialSize.rows,
       cwd: options.cwd,
-      env: options.env,
+      // Tag every session's environment with its room id so a Claude SessionStart
+      // hook can map a running claude conversation back to this hop session (used
+      // by `hop restore` to resume the exact conversation per session).
+      env: { ...(options.env || {}), HOP_SESSION: id },
       shell: options.shell
     });
     this.activeCols = initialSize.cols;

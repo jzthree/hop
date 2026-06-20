@@ -41,6 +41,7 @@
 - **CLI argument validation**: unknown flags and extra positional arguments are rejected with an error instead of silently becoming the room name.
 
 #### Server
+- Every session's PTY env now carries `HOP_SESSION=<room id>`, so a Claude Code SessionStart hook can map a running conversation back to its hop session (enables `hop restore` to resume the exact conversation per session).
 - Room summaries now report the foreground process name (node-pty's process getter, read fresh per summary), live cwd, and last-activity timestamp, so the session manager can show what each session is running, where, and when it was last active.
 - Rooms expose a bounded preview source (size + output tail) for on-demand screen previews in the session manager (`GET /rooms/:id/preview`).
 - Optional `created` flag on `hello` and `by` attribution on `session_ended` (both backwards compatible).

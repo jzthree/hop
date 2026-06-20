@@ -3427,6 +3427,153 @@ function sendTerminalResize(entry, cols, rows) {
     entry.adapter.emit(JSON.stringify({ type: 'resize', cols, rows }));
 }
 
+// ---- Session restore -------------------------------------------------------
+// The SessionStart hook (scripts/claude-session-hook.js) records, per hop
+// session, which Claude conversation is running in it. We read that here to
+// rebuild each session on `hop restore` with `claude --resume <id>` so multiple
+// claude sessions in one workdir each resume their OWN conversation.
+const CLAUDE_SESSIONS_DIR = path.join(HOME_DIR, 'claude-sessions');
+const CLAUDE_HOOK_SCRIPT = path.join(__dirname, 'scripts', 'claude-session-hook.js');
+
+function readClaudeSessionRecord(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    try {
+        const raw = fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.json`), 'utf8');
+        const rec = JSON.parse(raw);
+        return rec && typeof rec.sessionId === 'string' && rec.sessionId ? rec : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Compute how to relaunch a session: the command to run (if any) and the cwd to
+// start the shell in. For a claude session we use the cwd recorded by the hook
+// (where claude started), since `claude --resume` resolves the conversation from
+// that project directory.
+function restorePlanForSession(entry) {
+    const rec = readClaudeSessionRecord(entry.internalName);
+    if (rec && rec.sessionId) {
+        return { command: `claude --resume ${rec.sessionId}`, cwd: rec.cwd || entry.cwd };
+    }
+    if (entry.startup && entry.autoStart !== false) {
+        return { command: String(entry.startup), cwd: entry.cwd };
+    }
+    return { command: null, cwd: entry.cwd }; // plain shell — just reopen in its cwd
+}
+
+async function restoreSavedSessions({ dryRun = false } = {}) {
+    const snapshot = await listAllSessionEntriesRuntimeFirst();
+    const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
+    const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !live.has(e.internalName));
+    const planned = candidates.map((e) => {
+        const plan = restorePlanForSession(e);
+        return {
+        internalName: e.internalName,
+        displayName: e.displayName || e.internalName,
+        cwd: plan.cwd || e.cwd || process.cwd(),
+        command: plan.command,
+        cols: Number.isInteger(e.cols) ? e.cols : 140,
+        rows: Number.isInteger(e.rows) ? e.rows : 40,
+        shell: e.shell,
+        env: e.env,
+        createdBy: e.createdBy || 'user',
+        agentPermitted: e.agentPermitted === true,
+        folderId: e.folderId || null
+        };
+    });
+    if (dryRun) {
+        return { restored: planned.map((p) => ({ name: p.displayName, command: p.command })), count: planned.length, dryRun: true };
+    }
+    for (const p of planned) {
+        let entry;
+        try {
+            entry = await attachTerminalApiClient(p.internalName, p.displayName, {
+                actor: 'user', cwd: p.cwd, cols: p.cols, rows: p.rows, shell: p.shell, env: p.env,
+                createdBy: p.createdBy, agentPermitted: p.agentPermitted, folderId: p.folderId,
+                saveDefinition: true
+            });
+        } catch (e) {
+            continue;
+        }
+        if (p.command && entry) {
+            const cmd = p.command.endsWith('\n') ? p.command : `${p.command}\n`;
+            // Give the fresh shell a moment to reach its prompt before typing, then
+            // detach our virtual client (the room persists with no clients).
+            setTimeout(() => {
+                try { sendTerminalInput(entry, cmd); } catch (e) { /* ignore */ }
+                setTimeout(() => { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }, 1500);
+            }, 800);
+        } else if (entry) {
+            setTimeout(() => { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }, 600);
+        }
+    }
+    return { restored: planned.map((p) => ({ name: p.displayName, command: p.command })), count: planned.length, dryRun: false };
+}
+
+// ---- Claude SessionStart hook install/remove (in ~/.claude/settings.json) ---
+function getClaudeSettingsPath() {
+    const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+    return path.join(dir, 'settings.json');
+}
+
+function readClaudeSettings() {
+    const p = getClaudeSettingsPath();
+    try {
+        return { path: p, data: JSON.parse(fs.readFileSync(p, 'utf8')) };
+    } catch (e) {
+        return { path: p, data: {} };
+    }
+}
+
+function claudeHookIsInstalled(settings) {
+    const groups = settings?.hooks?.SessionStart;
+    if (!Array.isArray(groups)) return false;
+    return groups.some((g) => Array.isArray(g?.hooks) && g.hooks.some(
+        (h) => h && typeof h.command === 'string' && h.command.includes('claude-session-hook.js')
+    ));
+}
+
+function installClaudeHook() {
+    const { path: p, data } = readClaudeSettings();
+    if (claudeHookIsInstalled(data)) return { ok: true, already: true, path: p };
+    if (!fs.existsSync(CLAUDE_HOOK_SCRIPT)) {
+        return { ok: false, error: `hook script missing: ${CLAUDE_HOOK_SCRIPT}` };
+    }
+    data.hooks = data.hooks || {};
+    if (!Array.isArray(data.hooks.SessionStart)) data.hooks.SessionStart = [];
+    data.hooks.SessionStart.push({
+        matcher: '',
+        hooks: [{ type: 'command', command: `${process.execPath} ${CLAUDE_HOOK_SCRIPT}` }]
+    });
+    try {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, JSON.stringify(data, null, 2));
+        return { ok: true, already: false, path: p };
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+}
+
+function removeClaudeHook() {
+    const { path: p, data } = readClaudeSettings();
+    if (!claudeHookIsInstalled(data)) return { ok: true, already: true, path: p };
+    for (const g of data.hooks.SessionStart) {
+        if (Array.isArray(g.hooks)) {
+            g.hooks = g.hooks.filter((h) => !(h && typeof h.command === 'string' && h.command.includes('claude-session-hook.js')));
+        }
+    }
+    data.hooks.SessionStart = data.hooks.SessionStart.filter((g) => Array.isArray(g.hooks) && g.hooks.length > 0);
+    if (data.hooks.SessionStart.length === 0) delete data.hooks.SessionStart;
+    try {
+        if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, JSON.stringify(data, null, 2));
+        return { ok: true, already: false, path: p };
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+}
+
 // Resolve display name aliases (follows rename chain)
 function resolveDisplayNameAlias(name) {
     if (!name || typeof name !== 'string') return name;
@@ -5491,6 +5638,24 @@ function startAuthProxy(authEmitter) {
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Restore saved sessions (recreate rooms + resume claude conversations)
+        if (parsedUrl.pathname === '/api/sessions/restore' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const parsed = body ? JSON.parse(body) : {};
+                    const result = await restoreSavedSessions({ dryRun: parsed.dryRun === true });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(result));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Restore failed' }));
                 }
             });
             return;
@@ -8119,7 +8284,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -8488,6 +8653,68 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop restore` - recreate saved sessions, resuming claude conversations
+    if (process.argv[2] === 'restore') {
+        const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
+        const state = isServerRunning();
+        if (!state) {
+            log(`Hop is not running. Start it with ${CYAN}hop${RESET} first.`, RED);
+            process.exit(1);
+        }
+        let res;
+        try {
+            res = await callLocalApi(state, '/api/sessions/restore', 'POST', { dryRun });
+        } catch (e) {
+            log(`Restore request failed: ${e.message}`, RED);
+            process.exit(1);
+        }
+        if (!res || res.status < 200 || res.status >= 300) {
+            log(`Restore failed${res?.data?.error ? `: ${res.data.error}` : ''}.`, RED);
+            process.exit(1);
+        }
+        const items = Array.isArray(res.data?.restored) ? res.data.restored : [];
+        if (items.length === 0) {
+            log(`No saved sessions to restore.`, YELLOW);
+            process.exit(0);
+        }
+        log(`${dryRun ? 'Would restore' : 'Restoring'} ${items.length} session(s):`, BOLD);
+        for (const it of items) {
+            const how = it.command ? `${DIM}${it.command}${RESET}` : `${DIM}shell in last dir${RESET}`;
+            log(`  ${GREEN}•${RESET} ${it.name}  ${how}`, RESET);
+        }
+        if (!dryRun) {
+            log(`\nDone. Attach with ${CYAN}hop attach <name>${RESET} or open the web session manager.`, RESET);
+        } else {
+            log(`\n(dry run — re-run without --dry-run to apply)`, DIM);
+        }
+        process.exit(0);
+    }
+
+    // Handle `hop claude-hook [install|remove|status]` - manage the Claude
+    // SessionStart hook that lets `hop restore` resume the right conversation.
+    if (process.argv[2] === 'claude-hook') {
+        const sub = process.argv[3] || 'status';
+        if (sub === 'install') {
+            const r = installClaudeHook();
+            if (!r.ok) { log(`Failed to install hook: ${r.error}`, RED); process.exit(1); }
+            log(r.already ? `Claude SessionStart hook already installed (${r.path}).` : `${GREEN}Installed${RESET} Claude SessionStart hook → ${r.path}`, RESET);
+            if (!r.already) log(`New claude sessions started in hop terminals will now be restorable. Backup: ${r.path}.hop-backup`, DIM);
+            process.exit(0);
+        }
+        if (sub === 'remove') {
+            const r = removeClaudeHook();
+            if (!r.ok) { log(`Failed to remove hook: ${r.error}`, RED); process.exit(1); }
+            log(r.already ? `Claude SessionStart hook was not installed.` : `${GREEN}Removed${RESET} Claude SessionStart hook from ${r.path}`, RESET);
+            process.exit(0);
+        }
+        // status
+        const { path: p, data } = readClaudeSettings();
+        log(claudeHookIsInstalled(data)
+            ? `${GREEN}✓${RESET} Claude SessionStart hook installed (${p})`
+            : `${YELLOW}!${RESET} Claude SessionStart hook not installed. Run ${CYAN}hop claude-hook install${RESET} to enable full session restore.`, RESET);
+        process.exit(0);
+    }
+
     // Handle `hop status` command - concise daemon/tunnel/session overview
     if (process.argv[2] === 'status') {
         const state = isServerRunning();
@@ -8538,6 +8765,12 @@ async function main() {
         } catch (e) {
             log(`  Sessions:  ${YELLOW}unavailable${RESET}`, RESET);
         }
+
+        try {
+            const r = await callLocalApi(state, '/api/sessions/restore', 'POST', { dryRun: true });
+            const n = r && r.status === 200 ? (r.data?.count || 0) : 0;
+            if (n > 0) log(`  Restore:   ${n} saved session(s) can be restored (${CYAN}hop restore${RESET})`, RESET);
+        } catch (e) { }
 
         log(`  Logs:      ${LOG_DIR}  (hop logs -f)`, RESET);
         log('');
@@ -8684,6 +8917,11 @@ async function main() {
         log(`  hop workspace save <name>     Save selected live sessions into a workspace`, RESET);
         log(`  hop workspace load <name>     Start sessions defined in a workspace`, RESET);
         log(`  hop workspace delete <name> [--yes]  Delete a workspace (asks before deleting a non-empty one)`, RESET);
+        log('');
+        log(`${BOLD}Restore:${RESET}`, RESET);
+        log(`  hop restore [--dry-run]   Recreate your saved sessions, resuming claude conversations`, RESET);
+        log(`  hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`, RESET);
+        log(`  hop claude-hook status|remove   Check or remove the hook`, RESET);
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);

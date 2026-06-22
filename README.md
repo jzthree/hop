@@ -217,7 +217,7 @@ hop math '\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}'
 echo '\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}' | hop math
 ```
 
-`hop math` picks the best output for *where it prints*: an **inline image** in graphics-capable terminals (Kitty, Ghostty, WezTerm, iTerm2) when run standalone, or a **2D Unicode layout** everywhere else — including inside a hop session, since image escapes don't yet survive hop's re-rendering clients. The Unicode path is dependency-free; image rendering uses the optional `mathjax-full` + `@resvg/resvg-js` packages and falls back to Unicode if they're unavailable. Flags: `--unicode`, `--kitty`/`--iterm`, `--scale N`, `--dark`/`--light`, `--fg`/`--bg`, `--transparent`.
+`hop math` renders a **2D Unicode layout** — fractions, roots, sums/limits, sub/superscripts, Greek + operators, and accents — with no dependencies. Inline-image rendering (Kitty/iTerm) is deferred until graphics support lands in the web client (xterm.js): the real payoff is math that renders *inside* a shared hop session, which the re-rendering clients can't show yet, so until then it's Unicode everywhere.
 
 ## Operations
 

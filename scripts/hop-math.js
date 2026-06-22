@@ -1,20 +1,16 @@
 #!/usr/bin/env node
 'use strict';
-// hop math — render a LaTeX math formula in the terminal.
+// hop math — render a LaTeX math formula in the terminal as a 2D Unicode layout.
 //
-// Picks the best output for *where it is printing*:
-//   • inline image (Kitty / iTerm2 graphics) when run standalone in a
-//     graphics-capable terminal, and
-//   • a 2D Unicode layout otherwise — always available, zero dependencies.
+// Dependency-free: a small box-layout engine handles stacked fractions, √ with
+// an overline, big-operator limits stacked over/under, super/subscripts (Unicode
+// glyphs with ^/_ fallback), Greek + operator symbols, and combining-mark
+// accents (\vec, \hat, \bar, …).
 //
-// Inside a hop session (HOP_SESSION is set) it uses Unicode regardless, because
-// inline-image escape sequences don't survive hop's re-rendering clients yet
-// (the CLI repaints cell-by-cell; the web client has no image addon). See the
-// "math" notes in the README/CHANGELOG.
-//
-// Image rendering uses mathjax-full (LaTeX→SVG, glyphs as vector paths) +
-// @resvg/resvg-js (SVG→PNG). Both are optional: if they can't be loaded we fall
-// back to the Unicode layout with a one-line note, so `hop math` never hard-fails.
+// Inline-image rendering (Kitty/iTerm/Sixel) is intentionally NOT here yet: the
+// real payoff is images that render *inside* a shared hop session, which needs
+// graphics-protocol support in xterm.js (the web client) — see the
+// hop-math-rendering note. Until that lands, math is Unicode everywhere.
 
 const fs = require('fs');
 
@@ -50,10 +46,9 @@ const SYMBOLS = {
   '\\infty': '∞', '\\partial': '∂', '\\nabla': '∇', '\\hbar': 'ℏ', '\\ell': 'ℓ',
   '\\Re': 'ℜ', '\\Im': 'ℑ', '\\aleph': 'ℵ', '\\angle': '∠', '\\perp': '⊥',
   '\\parallel': '∥', '\\cdots': '⋯', '\\ldots': '…', '\\dots': '…', '\\vdots': '⋮',
-  '\\ddots': '⋱', '\\prime': '′', '\\degree': '°', '\\pm ': '±',
-  '\\int': '∫', '\\oint': '∮', '\\nabla': '∇', '\\surd': '√',
+  '\\ddots': '⋱', '\\prime': '′', '\\degree': '°',
+  '\\int': '∫', '\\oint': '∮', '\\surd': '√',
   '\\langle': '⟨', '\\rangle': '⟩', '\\lceil': '⌈', '\\rceil': '⌉', '\\lfloor': '⌊', '\\rfloor': '⌋',
-  '\\mathbb{R}': 'ℝ',
   // named functions render as themselves (no backslash)
 };
 
@@ -119,7 +114,6 @@ function fracBox(num, den) {
 function sqrtBox(a) {
   const over = ' ' + '‾'.repeat(a.width);
   const body = hcat([box('√'), a]);
-  // pad the overline to the body height, sitting one row above the radicand
   const lines = [over, ...body.lines];
   return { lines, baseline: body.baseline + 1, width: body.width, height: lines.length };
 }
@@ -162,9 +156,9 @@ function tokenize(src) {
   // strip math delimiters and size/spacing-only commands
   src = src
     .replace(/\$\$?/g, ' ')
-    .replace(/\\left|\\right|\\!|\\bigg?l?|\\Bigg?l?|\\bigg?r?|\\Bigg?r?/g, '')
+    .replace(/\\left|\\right/g, '')
     .replace(/\\Big|\\big|\\bigg|\\Bigg/g, '')
-    .replace(/\\[,;:>]/g, ' ')
+    .replace(/\\[,;:>!]/g, ' ')
     .replace(/\\quad|\\qquad/g, '  ');
   const tokens = [];
   let i = 0;
@@ -230,7 +224,6 @@ function parse(tokens) {
       return fracBox(groupOrAtom(), groupOrAtom());
     }
     if (cmd === '\\sqrt') {
-      // ignore an optional [n] index for v1
       if (peek() && peek().t === 'ch' && peek().v === '[') { while (peek() && !(peek().t === 'ch' && peek().v === ']')) next(); if (peek()) next(); }
       return sqrtBox(groupOrAtom());
     }
@@ -274,86 +267,6 @@ function latexToBox(latex) {
   catch (e) { return box(latex); } // never throw on the text path
 }
 
-// ───────────────────────── terminal capability ─────────────────────────
-function detectProtocol(opts) {
-  if (opts.protocol) return opts.protocol;       // explicit --kitty/--iterm
-  if (opts.unicode) return 'unicode';            // explicit --unicode
-  if (process.env.HOP_SESSION) return 'unicode'; // images don't survive hop yet
-  if (!process.stdout.isTTY) return 'unicode';   // piped/redirected
-  const term = process.env.TERM || '';
-  const prog = process.env.TERM_PROGRAM || '';
-  if (process.env.KITTY_WINDOW_ID || /kitty/i.test(term) ||
-      /ghostty/i.test(prog) || process.env.GHOSTTY_RESOURCES_DIR || process.env.GHOSTTY_BIN_DIR) return 'kitty';
-  if (process.env.WEZTERM_PANE || prog === 'WezTerm') return 'kitty'; // WezTerm speaks kitty graphics
-  if (process.env.KONSOLE_VERSION) return 'kitty';
-  if (prog === 'iTerm.app' || process.env.LC_TERMINAL === 'iTerm2') return 'iterm';
-  return 'unicode';
-}
-function detectDark() {
-  const v = process.env.COLORFGBG;
-  if (v) {
-    const parts = v.split(';');
-    const bg = parseInt(parts[parts.length - 1], 10);
-    if (Number.isFinite(bg)) return bg === 0 || bg === 8; // 0/8 ≈ black background
-  }
-  return false; // default to light (matches the common preference); use --dark to flip
-}
-
-// ───────────────────────── image path (lazy deps) ─────────────────────────
-function svgForLatex(latex) {
-  const { mathjax } = require('mathjax-full/js/mathjax.js');
-  const { TeX } = require('mathjax-full/js/input/tex.js');
-  const { SVG } = require('mathjax-full/js/output/svg.js');
-  const { liteAdaptor } = require('mathjax-full/js/adaptors/liteAdaptor.js');
-  const { RegisterHTMLHandler } = require('mathjax-full/js/handlers/html.js');
-  const { AllPackages } = require('mathjax-full/js/input/tex/AllPackages.js');
-  const adaptor = liteAdaptor();
-  RegisterHTMLHandler(adaptor);
-  const tex = new TeX({ packages: AllPackages });
-  const svg = new SVG({ fontCache: 'none' }); // inline path glyphs → no font deps to rasterize
-  const doc = mathjax.document('', { InputJax: tex, OutputJax: svg });
-  const node = doc.convert(latex.replace(/\$\$?/g, ''), { display: true });
-  const html = adaptor.outerHTML(node);
-  const m = html.match(/<svg[\s\S]*<\/svg>/);
-  if (!m) throw new Error('no SVG produced');
-  return m[0];
-}
-function renderImagePng(latex, opts) {
-  const { Resvg } = require('@resvg/resvg-js');
-  let svg = svgForLatex(latex);
-  // MathJax paints glyphs in `currentColor`; resvg needs a concrete color.
-  svg = svg.split('currentColor').join(opts.fg);
-  // estimate height in rows from the SVG's ex-height
-  const hm = svg.match(/height="([\d.]+)ex"/);
-  const exH = hm ? parseFloat(hm[1]) : 2.4;
-  const rows = Math.min(40, Math.max(1, Math.round(exH * opts.scale)));
-  const pxH = rows * 44; // generous DPI so the terminal downscale stays crisp
-  const r = new Resvg(svg, {
-    fitTo: { mode: 'height', value: pxH },
-    background: opts.transparent ? undefined : opts.bg,
-    font: { loadSystemFonts: false },
-  });
-  const png = Buffer.from(r.render().asPng());
-  return { png, rows };
-}
-function encodeKitty(png, rows) {
-  const b64 = png.toString('base64');
-  const chunks = [];
-  for (let i = 0; i < b64.length; i += 4096) chunks.push(b64.slice(i, i + 4096));
-  let out = '';
-  chunks.forEach((c, idx) => {
-    const ctrl = [];
-    if (idx === 0) ctrl.push('a=T', 'f=100', `r=${rows}`); // transmit+display PNG, height in rows
-    ctrl.push(`m=${idx === chunks.length - 1 ? 0 : 1}`);
-    out += `\x1b_G${ctrl.join(',')};${c}\x1b\\`;
-  });
-  return out + '\n';
-}
-function encodeIterm(png, rows) {
-  const b64 = png.toString('base64');
-  return `\x1b]1337;File=inline=1;height=${rows};preserveAspectRatio=1:${b64}\x07\n`;
-}
-
 // ───────────────────────── CLI ─────────────────────────
 function printHelp(out = process.stdout) {
   out.write(`hop math — render a LaTeX formula in the terminal
@@ -362,21 +275,11 @@ Usage:
   hop math '<latex>'            Render a formula (quote it to protect $, \\, {})
   echo '<latex>' | hop math     Read the formula from stdin
 
-Output is chosen automatically: an inline image in graphics-capable terminals
-(Kitty/Ghostty/WezTerm/iTerm2) when run standalone, or a 2D Unicode layout
-everywhere else (including inside a hop session).
+Renders a 2D Unicode layout (fractions, roots, sums/limits, sub/superscripts,
+Greek + operators, accents). Inline-image rendering will arrive alongside
+graphics support in the web client.
 
 Options:
-  -u, --unicode     Force the Unicode layout
-      --image       Prefer an inline image (auto-detect the protocol)
-      --kitty       Force the Kitty graphics protocol
-      --iterm       Force the iTerm2 inline-image protocol
-      --scale N     Image size multiplier (default 1.0)
-      --dark        Render light glyphs on a dark card (default: dark on light)
-      --light       Render dark glyphs on a light card
-      --transparent No background card (image mode)
-      --fg <color>  Glyph color (e.g. '#1a1a1a')
-      --bg <color>  Card color (e.g. '#ffffff')
   -h, --help        This help
 
 Examples:
@@ -386,22 +289,11 @@ Examples:
 }
 
 function runMathCli(argv) {
-  const opts = { scale: 1.0, transparent: false };
-  let darkFlag;
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '-u' || a === '--unicode') opts.unicode = true;
-    else if (a === '--image') opts.forceImage = true;
-    else if (a === '--kitty') opts.protocol = 'kitty';
-    else if (a === '--iterm') opts.protocol = 'iterm';
-    else if (a === '--dark') darkFlag = true;
-    else if (a === '--light') darkFlag = false;
-    else if (a === '--transparent') opts.transparent = true;
-    else if (a === '--scale') opts.scale = parseFloat(argv[++i]) || 1.0;
-    else if (a === '--fg') opts.fg = argv[++i];
-    else if (a === '--bg') opts.bg = argv[++i];
-    else if (a === '-h' || a === '--help') { printHelp(); return 0; }
+    if (a === '-h' || a === '--help') { printHelp(); return 0; }
+    else if (a === '-u' || a === '--unicode') { /* the only mode; accepted for compatibility */ }
     else if (a.startsWith('--')) { process.stderr.write(`hop math: unknown option ${a}\n`); return 1; }
     else positional.push(a);
   }
@@ -412,34 +304,12 @@ function runMathCli(argv) {
   }
   if (!latex) { printHelp(process.stderr); return 1; }
 
-  const dark = darkFlag !== undefined ? darkFlag : detectDark();
-  opts.fg = opts.fg || (dark ? '#e8e8e8' : '#1a1a1a');
-  opts.bg = opts.bg || (dark ? '#1e1e1e' : '#ffffff');
-
-  let proto = detectProtocol(opts);
-  if (opts.forceImage && proto === 'unicode' && !opts.unicode && !process.env.HOP_SESSION && process.stdout.isTTY) {
-    proto = 'kitty'; // best-effort when the user insists on an image
-  }
-
-  if (proto !== 'unicode') {
-    try {
-      const { png, rows } = renderImagePng(latex, opts);
-      process.stdout.write(proto === 'kitty' ? encodeKitty(png, rows) : encodeIterm(png, rows));
-      return 0;
-    } catch (e) {
-      const hint = /Cannot find module/.test(e.message)
-        ? "install image support with: npm i -g mathjax-full @resvg/resvg-js"
-        : e.message;
-      process.stderr.write(`hop math: image render unavailable (${hint}); using text layout.\n`);
-    }
-  }
-
   const b = latexToBox(latex);
   process.stdout.write(b.lines.join('\n') + '\n');
   return 0;
 }
 
-module.exports = { runMathCli, latexToBox, detectProtocol, renderImagePng };
+module.exports = { runMathCli, latexToBox };
 
 if (require.main === module) {
   process.exit(runMathCli(process.argv.slice(2)));

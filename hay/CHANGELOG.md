@@ -17,6 +17,9 @@
 
 ### Bug Fixes
 
+#### Session manager
+- **Workdir now shows the live directory, not the creation directory**: a session that's both running and saved had its working dir clobbered by the saved definition's cwd when the session list was assembled — so a session you'd `cd`'d into a subdir of (e.g. `~/Code/hop2`) showed its original dir (`~`) in the web/mobile session manager, even though the CLI status bar showed the right one. The live runtime cwd (the room's tracked `liveCwd`) now wins over the saved config cwd.
+
 #### CLI Client
 - **Duplicated / lost text during scrolling output (e.g. Claude Code)**: the dirty-line render diff compared screen rows positionally but only forced a full repaint on resize — so when the buffer scrolled (or you panned), rows that shifted could be skipped (lost text) or left behind (duplicated). The renderer now forces a full repaint whenever the buffer scrolls (xterm `onScroll`) or the viewport offset changes, and clears its frame cache on snapshot replay. The in-place diff still applies for typing (no scroll), keeping that fast.
 

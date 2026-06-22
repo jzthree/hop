@@ -2929,7 +2929,11 @@ function buildSessionEntries(haySessions, opts = {}) {
             entry.displayName = displayName;
             entry.folderId = folderId;
             entry.internalName = name;
-            entry.cwd = config?.cwd;
+            // Keep the live runtime cwd (set from the room's liveCwd in the first
+            // loop) — only fall back to the saved config cwd when there's no live
+            // value. Overwriting here made a live session (e.g. cd'd into a
+            // subdir) show its creation dir in the session manager.
+            entry.cwd = entry.cwd || config?.cwd;
             entry.shell = config?.shell;
             entry.env = config?.env;
             entry.workspaceName = config?.workspaceName || resolveSessionWorkspaceName(config);

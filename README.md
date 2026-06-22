@@ -207,6 +207,18 @@ How it works: every hop terminal gets a `HOP_SESSION` env var; a Claude Code `Se
 
 `hop claude-hook install` adds a `SessionStart` entry to `~/.claude/settings.json` (backed up first); `hop claude-hook remove` reverts it. The hook is a no-op outside hop terminals.
 
+### Render LaTeX math (`hop math`)
+
+Glance at a formula without leaving the terminal:
+
+```bash
+hop math 'e^{i\pi} + 1 = 0'
+hop math '\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}'
+echo '\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}' | hop math
+```
+
+`hop math` picks the best output for *where it prints*: an **inline image** in graphics-capable terminals (Kitty, Ghostty, WezTerm, iTerm2) when run standalone, or a **2D Unicode layout** everywhere else — including inside a hop session, since image escapes don't yet survive hop's re-rendering clients. The Unicode path is dependency-free; image rendering uses the optional `mathjax-full` + `@resvg/resvg-js` packages and falls back to Unicode if they're unavailable. Flags: `--unicode`, `--kitty`/`--iterm`, `--scale N`, `--dark`/`--light`, `--fg`/`--bg`, `--transparent`.
+
 ## Operations
 
 ### Logging and History

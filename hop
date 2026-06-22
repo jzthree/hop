@@ -83,7 +83,9 @@ function resolveHayWebDir() {
     ];
     for (const p of devPaths) {
         if (fs.existsSync(p)) {
-            console.log(`[Dev] Serving Hay from: ${p}`);
+            // Diagnostic banner → stderr so it never corrupts command stdout
+            // (e.g. `hop math` image escape sequences).
+            console.error(`[Dev] Serving Hay from: ${p}`);
             return p;
         }
     }
@@ -8349,7 +8351,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'math'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -8928,6 +8930,14 @@ async function main() {
     }
 
     // Handle `hop --help` or `hop help`
+    // Handle `hop math '<latex>'` - render a LaTeX formula in the terminal.
+    // Pure local render; needs no daemon. Image in graphics-capable terminals,
+    // 2D Unicode otherwise (and always inside a hop session).
+    if (process.argv[2] === 'math') {
+        const { runMathCli } = require('./scripts/hop-math.js');
+        process.exit(runMathCli(process.argv.slice(3)));
+    }
+
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
@@ -8992,6 +9002,9 @@ async function main() {
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
+        log('');
+        log(`${BOLD}Math:${RESET}`, RESET);
+        log(`  hop math '<latex>'        Render a LaTeX formula (inline image where supported, else Unicode)`, RESET);
         log('');
         log(`${BOLD}Maintenance:${RESET}`, RESET);
         log(`  hop health [--restart]    Check tunnel health (--restart forces a tunnel restart)`, RESET);

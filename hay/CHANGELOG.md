@@ -4,6 +4,9 @@
 
 ### New Features
 
+#### Tooling
+- **`hop math '<latex>'`** — render a LaTeX formula in the terminal. It picks the best output for where it's printing: an **inline image** (Kitty / Ghostty / WezTerm / iTerm2 graphics protocols) when run standalone in a graphics-capable terminal, and a **2D Unicode layout** everywhere else — including inside a hop session, where image escapes don't survive the re-rendering clients yet. The Unicode renderer is a dependency-free box-layout engine (stacked fractions, `√` with overline, big-operator limits stacked over/under, super/subscripts via Unicode glyphs with `^`/`_` fallback, Greek + operator symbols, and combining-mark accents like `\vec`/`\hat`/`\bar`). Image rendering uses `mathjax-full` (LaTeX→SVG, glyphs as vector paths) + `@resvg/resvg-js` (SVG→PNG) — both **optional** deps, lazily loaded, with graceful fallback to the Unicode layout if absent. Reads from an argument or stdin; `--unicode`, `--kitty`, `--iterm`, `--scale`, `--dark`/`--light`, `--fg`/`--bg`, `--transparent` flags.
+
 #### Web Client
 - **Restyle to the hop identity**: the web client now shares the CLI bars' palette and language — accent session chip, semantic state dot, and keycap-style find control in a real status-bar footer; mono-led chrome (brand, presence names, session labels); refined light/dark themes; dot-grid join page. The hop session picker got the same treatment, including dark-mode support.
 - **Drawer polish**: quick actions split into two clusters — utility icons (keyboard / share / find) then named actions (Fit / Manage) — and the drawer FAB now defaults to the top-right (clear of the status bar, mirroring the close button) instead of bottom-left. It stays draggable.

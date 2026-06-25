@@ -2493,9 +2493,10 @@ const handleLocalShortcut = (input: string) => {
     return true;
   }
   if (altKey("b") || altKey("B") || optionChar("∫")) {
+    // Session-only: don't persist, so an in-session toggle never becomes the
+    // default. The default comes from .hop.json (showStatusBar, default true).
     showStatusBar = !showStatusBar;
-    persistConfig({ showStatusBar });
-    pushNotice(`Status bar ${showStatusBar ? "on" : "off"}`, "ok");
+    pushNotice(`Status bar ${showStatusBar ? "on" : "off"} (this session)`, "ok");
     scheduleRender();
     return true;
   }
@@ -2506,9 +2507,10 @@ const handleLocalShortcut = (input: string) => {
     return true;
   }
   if (altKey("t") || altKey("T") || optionChar("†")) {
+    // Session-only (see Opt+B): the default stays whatever .hop.json says
+    // (showHints, default true); toggling here doesn't rewrite it.
     showHints = !showHints;
-    persistConfig({ showHints });
-    pushNotice(`Hints ${showHints ? "on" : "off"}`, "ok");
+    pushNotice(`Hints ${showHints ? "on" : "off"} (this session)`, "ok");
     scheduleRender();
     return true;
   }

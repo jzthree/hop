@@ -7585,7 +7585,8 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
     process.on('exit', cleanup);
 }
 
-async function attachToExistingTunnel(existingTunnel) {
+async function attachToExistingTunnel(existingTunnel, opts = {}) {
+    const forceNew = opts.forceNew === true;
     log(`Hop tunnel is already running!`, GREEN);
     log(`URL: ${existingTunnel.url}`, BOLD);
 
@@ -7595,11 +7596,20 @@ async function attachToExistingTunnel(existingTunnel) {
     const cwdPath = process.cwd();
 
     let selection = null;
-    try {
-        selection = await claimLocalCliSession(existingTunnel, cwdPath, cwdName);
-    } catch (e) {
-        if (e?.status && e.status !== 404) {
-            log(`Note: Could not claim session atomically (${e.message}). Falling back to local selection.`, YELLOW);
+    // The daemon hands out a session for this terminal atomically (so two
+    // terminals opened at once don't grab the same one). `hop new` skips that and
+    // always creates a fresh session.
+    if (!forceNew) {
+        try {
+            selection = await claimLocalCliSession(existingTunnel, cwdPath, cwdName);
+        } catch (e) {
+            if (e?.status && e.status !== 404) {
+                // Non-fatal: we just pick a session ourselves below. A bare
+                // "status 200" (no error body) usually means the running daemon
+                // is an older build than this CLI and lacks this endpoint.
+                log(`Note: the daemon didn't reserve a session for this terminal (${e.message}); choosing one locally instead.`, YELLOW);
+                log(`If this keeps happening, the daemon may be older than this CLI — restart it with ${CYAN}hop stop && hop start${RESET} (your sessions keep running).`, DIM);
+            }
         }
     }
 
@@ -7611,7 +7621,7 @@ async function attachToExistingTunnel(existingTunnel) {
             log(`Note: Could not query daemon sessions (${e.message}). Defaulting to create-new.`, YELLOW);
         }
         const sessions = Array.isArray(sessionsRes.sessions) ? sessionsRes.sessions : [];
-        selection = await chooseUnnamedSessionTarget(sessions, { cwdPath, cwdName });
+        selection = await chooseUnnamedSessionTarget(sessions, { cwdPath, cwdName, forceNew });
     }
     const target = selection.target;
 
@@ -7636,6 +7646,7 @@ async function attachToExistingTunnel(existingTunnel) {
         }
     } else {
         log(`Attaching to existing session: ${target.displayName}`, RESET);
+        log(`(Run ${CYAN}hop new${RESET} to start a fresh session here instead.)`, DIM);
     }
 
     const code = await runHayCliAttach(target, existingTunnel.url || '');
@@ -7972,14 +7983,16 @@ async function chooseUnnamedSessionTarget(existingSessions, opts = {}) {
     const cwdName = typeof opts.cwdName === 'string' && opts.cwdName.trim()
         ? opts.cwdName
         : path.basename(cwdPath).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const matched = pickSessionForCwd(existingSessions, cwdPath, cwdName, {
-        requireNoLocalCli: opts.requireNoLocalCli !== false
-    });
-
-    if (matched) {
-        const attachTarget = buildAttachTargetFromSession(matched);
-        if (attachTarget) {
-            return { target: attachTarget, createdNew: false };
+    // `hop new` (forceNew) skips reuse and always builds a fresh identity below.
+    if (!opts.forceNew) {
+        const matched = pickSessionForCwd(existingSessions, cwdPath, cwdName, {
+            requireNoLocalCli: opts.requireNoLocalCli !== false
+        });
+        if (matched) {
+            const attachTarget = buildAttachTargetFromSession(matched);
+            if (attachTarget) {
+                return { target: attachTarget, createdNew: false };
+            }
         }
     }
 
@@ -8355,7 +8368,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'math'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'math', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -8945,7 +8958,8 @@ async function main() {
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
-        log(`  hop                       Start tunnel if needed, then launch local terminal`, RESET);
+        log(`  hop                       Start tunnel if needed, then attach (reuses this dir's session)`, RESET);
+        log(`  hop new                   Like hop, but always start a fresh session for this dir`, RESET);
         log(`  hop start                 Start hop daemon and print QR codes`, RESET);
         log(`  hop attach [session]      Attach to an existing session`, RESET);
         log(`  hop attach all            Attach sequentially to all sessions`, RESET);
@@ -10157,9 +10171,14 @@ async function main() {
         process.exit(0);
     }
 
+    // `hop new` / `hop --new` force a brand-new session instead of reusing an
+    // existing one for this directory.
+    const forceNew = process.argv[2] === 'new' || process.argv.includes('--new');
+
     // Every known command returned or exited above; anything else here is a typo.
-    // Only bare `hop` (or the internal --daemon flag) may reach the default flow.
-    if (process.argv[2] && process.argv[2] !== '--daemon') {
+    // Only bare `hop` (or `new`/`--new`, or the internal --daemon flag) reaches
+    // the default flow.
+    if (process.argv[2] && process.argv[2] !== '--daemon' && process.argv[2] !== 'new' && process.argv[2] !== '--new') {
         const badCommand = process.argv[2];
         log(`Unknown command: ${badCommand}`, RED);
         const suggestion = suggestNearestCommand(badCommand);
@@ -10176,7 +10195,7 @@ async function main() {
     if (!DAEMON_FLAG) {
         const existingTunnel = isServerRunning();
         if (existingTunnel) {
-            await attachToExistingTunnel(existingTunnel);
+            await attachToExistingTunnel(existingTunnel, { forceNew });
             return;
         }
 
@@ -10189,7 +10208,7 @@ async function main() {
         const label = domainConfig?.hostname ? `Hop-${domainConfig.hostname}` : 'Hop';
         loadAuthSecret();
         await waitForStartPolling(state, label);
-        await attachToExistingTunnel(state);
+        await attachToExistingTunnel(state, { forceNew });
         return;
     }
 

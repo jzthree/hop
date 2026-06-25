@@ -5,6 +5,8 @@
 ### New Features
 
 #### Tooling
+- **`hop new`** — start a fresh session for the current directory instead of reusing the existing one. Plain `hop` attaches to (or creates) a session matched to your cwd; `hop new` (also `hop --new`) always creates a new one. When `hop` does reuse an existing session it now prints a hint pointing at `hop new`.
+- **Clearer "couldn't reserve a session" note**: when the daemon can't hand out a session atomically, the fallback message now explains it's non-fatal and that a bare `status 200` typically means the running daemon is older than the CLI — with the fix (`hop stop && hop start`, which keeps sessions running). Previously it read as a cryptic "Could not claim session atomically (status 200)".
 - **`hop math '<latex>'`** — render a LaTeX formula in the terminal as a **2D Unicode layout**, dependency-free. The box-layout engine handles stacked fractions, `√` with an overline, big-operator limits stacked over/under, super/subscripts (Unicode glyphs with `^`/`_` fallback), Greek + operator symbols, and combining-mark accents like `\vec`/`\hat`/`\bar`. Reads from an argument or stdin. Inline-image rendering (Kitty/iTerm/Sixel) is deferred until graphics support lands in the web client (xterm.js), since the real payoff is images that render *inside* a shared hop session — until then math is Unicode everywhere.
 
 #### Web Client

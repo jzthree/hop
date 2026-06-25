@@ -2735,6 +2735,7 @@ async function listActiveSessionsRuntimeFirst() {
         name: room.id,
         windows: 1,
         attached: Number(room.clientCount) > 0,
+        clientCount: Number(room.clientCount) || 0,
         localCliCount: Number(room.localCliCount) || 0,
         hasLocalCli: room.hasLocalCli === true || Number(room.localCliCount) > 0,
         cwd: room.cwd,
@@ -9666,8 +9667,10 @@ async function main() {
                     const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
                         ? `, WORKSPACE ${s.workspaceNames.join(',')}`
                         : '';
+                    const clients = Number(s.clientCount) || 0;
+                    const clientChip = `${DIM} · ${clients} ${clients === 1 ? 'client' : 'clients'}${RESET}`;
                     const stateLabel = s.live
-                        ? `${GREEN}[TERMINAL, LIVE${workspaceSuffix}]${RESET}`
+                        ? `${GREEN}[TERMINAL, LIVE${workspaceSuffix}]${RESET}${clientChip}`
                         : `${YELLOW}[TERMINAL${workspaceSuffix}]${RESET}`;
                     log(`  ${BOLD}${s.displayName}${RESET}  ${stateLabel}`, RESET);
                 }

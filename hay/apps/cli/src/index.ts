@@ -547,10 +547,20 @@ const stripMouseSequences = (data: string) => {
       // Wheel clears any active selection
       clearSelection();
       const direction = wheelAxis === 1 ? 1 : -1;
-      const isTuiLikeMode = remoteAlternateScreen || remoteMouseModes.size > 0;
-      if (isTuiLikeMode) {
+      // A mouse-aware remote (it turned on mouse tracking) gets the real wheel
+      // event — exactly like clicks/drags are passed through below — so it
+      // scrolls natively instead of being fed arrow keys. This is the point of
+      // mouse mode, and it's why the wheel was wrongly arrow-keyed before.
+      if (remoteMouseModes.size > 0) {
+        return sequence;
+      }
+      // A fullscreen app that is NOT tracking the mouse (alt-screen only):
+      // emulate the wheel with arrow keys so paging still works (less, man, a
+      // $PAGER, etc.) where there's no native mouse handling to forward to.
+      if (remoteAlternateScreen) {
         return getDirectionalKey(direction).repeat(SCROLL_STEP);
       }
+      // Normal screen: scroll our own viewport buffer.
       viewY += direction * SCROLL_STEP;
       clampView();
       updateFollowOutputFromViewport();

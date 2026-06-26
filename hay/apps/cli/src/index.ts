@@ -164,12 +164,13 @@ Keyboard shortcuts:
   ${keyLabelLong}+H/J/K/L        Pan viewport, vim-style (Shift = faster)
   ${keyLabelLong}+0             Return to live output (center on cursor)
   ${keyLabelLong}+A             Toggle autofit of remote size to window (saved)
-  ${keyLabelLong}+B             Toggle status bar (saved)
+  ${keyLabelLong}+B             Toggle status bar (this session)
   ${keyLabelLong}+M             Toggle mouse capture (saved)
   ${keyLabelLong}+C             Take/release exclusive control
   ${keyLabelLong}+F             Search scrollback (Enter/↓ next, ↑ prev, Esc close)
   ${keyLabelLong}+S             Session panel — list + live preview; ↑↓ fly, Enter switch, Esc close
-  ${keyLabelLong}+T             Toggle hint bar (saved)
+  ${keyLabelLong}+?             Show ALL shortcuts in a full-screen overlay (↑↓ scroll, Esc close)
+  ${keyLabelLong}+T             Toggle hint bar (this session)
   ${keyLabelLong}+\\             Send the next key literally to the remote terminal
                        (lets reserved keys like Ctrl+Q/G reach remote programs)
 
@@ -308,6 +309,16 @@ let panelLoading = false;
 let panelError = "";
 const panelPreviewCache = new Map<string, string[]>();
 let switchingRoom = false;
+
+// Help overlay (Opt+?): a full-screen list of every shortcut, so the keys are
+// reachable even when the hint bar is too narrow to show them all.
+let helpMode = false;
+let helpScroll = 0;
+// Matches Opt+? / Opt+/ in both Option-as-Meta (ESC-prefixed) and macOS
+// Option-as-glyph forms. A bare "?" is intentionally NOT matched so it still
+// types through to the remote.
+const isHelpKey = (input: string) =>
+  input === "\x1b?" || input === "\x1b/" || (isMac && (input === "¿" || input === "÷"));
 
 let configFile = loadConfig();
 const persistConfig = (patch: Partial<CliConfig>) => {
@@ -1899,6 +1910,93 @@ const renderSessionPanel = (): string[] => {
   return lines;
 };
 
+const openHelp = () => {
+  helpMode = true;
+  helpScroll = 0;
+  lastRenderedLines = [];
+  scheduleRender();
+};
+
+const closeHelp = () => {
+  if (!helpMode) return;
+  helpMode = false;
+  lastRenderedLines = [];
+  scheduleRender();
+};
+
+const handleHelpInput = (input: string) => {
+  if (input === "\x1b" || input === "q" || isHelpKey(input)) { closeHelp(); return; }
+  if (input === "\x1b[A" || input === "\x1bOA" || input === "k") {
+    helpScroll = Math.max(0, helpScroll - 1); scheduleRender(); return;
+  }
+  if (input === "\x1b[B" || input === "\x1bOB" || input === "j") {
+    helpScroll += 1; scheduleRender(); return;
+  }
+  // Everything else is swallowed while help is open.
+};
+
+// Full-screen list of every shortcut, grouped. Reachable even when the hint bar
+// is too narrow to show them all (which is the whole point of this overlay).
+const renderHelpOverlay = (): string[] => {
+  const cols = localMetrics.cols;
+  const rows = localMetrics.rows;
+  const reset = "\x1b[0m";
+  const kOpt = (k: string) => (isMac ? `⌥${k}` : `Alt+${k}`);
+  const kCtrl = (k: string) => (isMac ? `⌃${k}` : `Ctrl+${k}`);
+  const groups: Array<[string, Array<[string, string]>]> = [
+    ["Viewport", [
+      [kOpt("←/→/↑/↓"), "pan the view"],
+      [kOpt("H/J/K/L"), "pan (vim keys)"],
+      ["Shift + pan", "pan faster"],
+      [kOpt("0"), "jump back to live output"],
+      [kOpt("A"), "toggle autofit"],
+    ]],
+    ["Session", [
+      [kCtrl("G"), "detach (leave it running)"],
+      [`${kCtrl("Q")} ×2`, "kill the session"],
+      [kOpt("S"), "session switcher"],
+      [kOpt("C"), "take / release control"],
+    ]],
+    ["Display", [
+      [kOpt("B"), "status bar on/off (this session)"],
+      [kOpt("T"), "hints on/off (this session)"],
+      [kOpt("M"), "mouse capture on/off"],
+    ]],
+    ["Input", [
+      [kOpt("F"), "search the scrollback"],
+      [kOpt("\\"), "send the next key literally"],
+      [kOpt("?"), "this help"],
+    ]],
+  ];
+
+  const body: string[] = [];
+  for (const [title, items] of groups) {
+    if (body.length) body.push("");
+    body.push(` ${BAR.bold}${title}${BAR.resetFg}`);
+    const keyW = Math.max(...items.map(([k]) => visibleLength(k)));
+    for (const [k, desc] of items) {
+      const key = k + " ".repeat(Math.max(0, keyW - visibleLength(k)));
+      body.push(`   ${BAR.fg}${key}${reset}   ${BAR.dim}${desc}${reset}`);
+    }
+  }
+
+  const bodyH = Math.max(1, rows - 2);
+  const maxScroll = Math.max(0, body.length - bodyH);
+  if (helpScroll > maxScroll) helpScroll = maxScroll;
+
+  const lines: string[] = [];
+  const atEnd = helpScroll >= maxScroll;
+  const scrollHint = maxScroll > 0 ? (atEnd ? "↑ more" : "↑↓ scroll") : "";
+  const header = ` ${BAR.bold}Keyboard shortcuts${BAR.resetFg}   ${BAR.dim}${scrollHint}${scrollHint ? " · " : ""}Esc close${BAR.resetFg}`;
+  lines.push(`${BAR.statusBg}${BAR.fg}${padOrTrim(header, cols)}${reset}`);
+  for (let b = 0; b < bodyH; b++) {
+    lines.push(`${padOrTrim(body[helpScroll + b] ?? "", cols)}\x1b[K`);
+  }
+  const footer = ` ${BAR.dim}${kOpt("?")} or Esc to close${maxScroll > 0 && !atEnd ? "  ·  more below ↓" : ""}${BAR.resetFg}`;
+  lines.push(`${BAR.hintBg}${BAR.fg}${padOrTrim(footer, cols)}${reset}`);
+  return lines;
+};
+
 const render = () => {
   if (!process.stdout.isTTY) return;
   initUi();
@@ -1920,25 +2018,25 @@ const render = () => {
   // would skip rows that matched a stale neighbour (lost text) and leave moved
   // rows behind (duplicated text). Force a full repaint whenever the view
   // offset or scroll generation changed since the last frame.
-  if (!sessionPanelMode && (viewY !== lastRenderTopRow || scrollGeneration !== lastRenderScrollGen)) {
+  if (!sessionPanelMode && !helpMode && (viewY !== lastRenderTopRow || scrollGeneration !== lastRenderScrollGen)) {
     forceFull = true;
   }
   lastRenderTopRow = viewY;
   lastRenderScrollGen = scrollGeneration;
 
-  // Session panel overlay takes over the whole screen when open.
-  if (sessionPanelMode) {
-    const plines = renderSessionPanel();
+  // Session panel / help overlays take over the whole screen when open.
+  if (sessionPanelMode || helpMode) {
+    const olines = helpMode ? renderHelpOverlay() : renderSessionPanel();
     let output = "\x1b[?25l";
     let changed = 0;
     for (let i = 0; i < localMetrics.rows; i++) {
-      const line = plines[i] ?? "\x1b[K";
+      const line = olines[i] ?? "\x1b[K";
       if (forceFull || line !== lastRenderedLines[i]) {
         output += `\x1b[${i + 1};1H` + line;
         changed += 1;
       }
     }
-    lastRenderedLines = plines;
+    lastRenderedLines = olines;
     if (changed > 0) process.stdout.write(output);
     return;
   }
@@ -2024,6 +2122,7 @@ const render = () => {
   const hintPairs: Array<[string, string]> = [
     [kCtrl("G"), "detach"],
     [kCtrl("Q"), "kill"],
+    [kOpt("?"), "help"],
     [kOpt("←→↑↓"), "pan"],
     [kOpt("0"), "live"],
     [kOpt("A"), "autofit"],
@@ -2052,6 +2151,12 @@ const render = () => {
     hintInner = `${BAR.reconnect} ⟳ Reconnecting${reason} — ${detail} · attempt ${reconnectAttempt} · ${kCtrl("G")} detach ${BAR.resetFg}`;
   } else {
     hintInner = noticeText || controls;
+  }
+  // When the controls overflow a narrow window, end with a dim ellipsis so it's
+  // clear there are more hints than fit — Opt+? (kept near the front so it
+  // survives truncation) opens the full list.
+  if (hintInner === controls && visibleLength(controls) > localMetrics.cols && localMetrics.cols > 2) {
+    hintInner = truncateAnsi(controls, localMetrics.cols - 2) + `${BAR.dim} …${BAR.resetFg}`;
   }
   const hintLine = renderBar(
     composeBar(hintInner, "", localMetrics.cols),
@@ -2538,6 +2643,10 @@ const handleLocalShortcut = (input: string) => {
     void openSessionPanel();
     return true;
   }
+  if (isHelpKey(input)) {
+    openHelp();
+    return true;
+  }
   if (altKey("c") || altKey("C") || optionChar("ç")) {
     // Toggle exclusive control, mirroring the web Take/Release controls so a CLI
     // user on a locked shared session isn't stuck.
@@ -2665,6 +2774,12 @@ process.stdin.on("data", (data) => {
   const mouseResult = stripMouseSequences(input);
   input = mouseResult.cleaned;
   if (!input) return;
+
+  // While the help overlay is open, keys drive it (never forwarded).
+  if (helpMode) {
+    handleHelpInput(input);
+    return;
+  }
 
   // While the session panel is open, keys drive the panel (never forwarded).
   if (sessionPanelMode) {

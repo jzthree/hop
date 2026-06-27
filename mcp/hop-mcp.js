@@ -549,6 +549,37 @@ function summarizeMessageContent(message, includeThinking) {
   return out;
 }
 
+// --- Scrollback-capture stitching helpers (Part 2) ---
+// A captured frame is an array of row texts (trailing whitespace stripped).
+function stripTrailingBlankLines(arr) {
+  let end = arr.length;
+  while (end > 0 && !arr[end - 1].trim()) end--;
+  return arr.slice(0, end);
+}
+// Count the contiguous run of identical rows at the BOTTOM of two equal-height
+// frames. For a TUI with a fixed footer (e.g. Claude's composer + hint bar), this
+// is the non-scrolling chrome, which must be excluded before stitching the
+// scrolling transcript region above it. For a clean full-screen pager it catches
+// just the status line.
+function bottomFixedCount(a, b) {
+  let n = 0;
+  for (let i = a.length - 1, j = b.length - 1; i >= 0 && j >= 0 && a[i] === b[j]; i--, j--) n++;
+  return n;
+}
+// Largest L such that the bottom L rows of `top` equal the top L rows of `bottom`
+// (the overlap when scrolling up reveals new rows above the prior view).
+function maxBottomTopOverlap(top, bottom) {
+  const max = Math.min(top.length, bottom.length);
+  for (let L = max; L > 0; L--) {
+    let ok = true;
+    for (let k = 0; k < L; k++) {
+      if (top[top.length - L + k] !== bottom[k]) { ok = false; break; }
+    }
+    if (ok) return L;
+  }
+  return 0;
+}
+
 function extractToolErrorText(response) {
   if (!response || typeof response !== 'object') return 'Unknown error';
   const content = Array.isArray(response.content) ? response.content : [];
@@ -3130,6 +3161,23 @@ class HopMCPServer {
           },
           required: ['name']
         }
+      },
+      {
+        name: 'hopx_capture_scrollback',
+        description: 'Capture an alternate-screen TUI\'s scrollback history the way a user would: drive the app to scroll up page-by-page, snapshot each rendered frame, and stitch the newly-revealed rows together. Works for any scrollable TUI (Claude fullscreen verified: PageUp scrolls, PageDown restores) and when no transcript file is reachable. The user\'s live view is restored afterward by default. Best-effort and lossy for wrapped/redrawn content — prefer hop_read_trajectory when a Claude transcript is available. Requires agent permission on the session.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            terminal_id: { type: 'string', description: 'Terminal id (from hop_attach_terminal / hop_create_terminal).' },
+            scroll_key: { type: 'string', description: 'Key that scrolls up one page (default: page_up).' },
+            restore_key: { type: 'string', description: 'Key that scrolls back down to restore the view (default: page_down). Applied once per captured page.' },
+            max_pages: { type: 'number', description: 'Max scroll-up steps (default: 40). Capture stops earlier when the top is reached.' },
+            settle_ms: { type: 'number', description: 'Max ms to wait for a redraw after each scroll before concluding the top is reached (default: 1200).' },
+            max_chars: { type: 'number', description: 'Output cap for the stitched text (default: 8000). Earliest content is kept on overflow.' },
+            restore: { type: 'boolean', description: 'Scroll back down to the live bottom when done (default: true).' }
+          },
+          required: ['terminal_id']
+        }
       }
     ];
   }
@@ -3383,6 +3431,8 @@ class HopMCPServer {
         return await this.handleHopxAgentTurn(args);
       case 'hop_read_trajectory':
         return await this.handleReadTrajectory(args);
+      case 'hopx_capture_scrollback':
+        return await this.handleCaptureScrollback(args);
       default:
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -4269,6 +4319,108 @@ class HopMCPServer {
       return { content: [{ type: 'text', text: `Error: ${payload.__error}` }], isError: true };
     }
     return this.wrapJson(this.capTrajectoryPayload(payload, mode, maxChars));
+  }
+
+  // Hop-native history capture: obtain an alternate-screen TUI's scrollback the way
+  // a user would — drive the app to scroll up, snapshot each rendered frame, and
+  // stitch the newly-revealed rows together. Works when the transcript file isn't
+  // reachable and for any scrollable TUI (Claude verified: PageUp scrolls, PageDown
+  // restores). Best-effort and lossy for wrapped/redrawn content — prefer
+  // hop_read_trajectory when a Claude transcript is available.
+  async handleCaptureScrollback(args) {
+    const requestedTerminalId = typeof args.terminal_id === 'string' ? args.terminal_id : '';
+    if (!requestedTerminalId) {
+      return { content: [{ type: 'text', text: 'Error: terminal_id is required.' }], isError: true };
+    }
+    const scrollKey = (typeof args.scroll_key === 'string' && args.scroll_key) ? args.scroll_key : 'page_up';
+    const restoreKey = (typeof args.restore_key === 'string' && args.restore_key) ? args.restore_key : 'page_down';
+    const maxPages = Number.isFinite(args.max_pages) ? Math.max(1, Math.floor(args.max_pages)) : 40;
+    const settleMs = Number.isFinite(args.settle_ms) ? Math.max(100, Math.floor(args.settle_ms)) : 1200;
+    const maxChars = Number.isFinite(args.max_chars) ? Math.max(500, Math.floor(args.max_chars)) : 8000;
+    const restore = args.restore !== false;
+
+    const terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const readFrame = async () => {
+      await this.streamManager.flushVirtualScreen(terminalId);
+      const snap = this.streamManager.getUiSnapshot(terminalId, {});
+      if (!snap || snap.available === false) return null;
+      const lines = Array.isArray(snap.lines)
+        ? snap.lines.map((l) => (l && typeof l.text === 'string' ? l.text.replace(/\s+$/, '') : ''))
+        : [];
+      return { lines, rev: snap.screenRevision };
+    };
+    // Send a scroll key, then poll for the screen to actually redraw (screenRevision
+    // change) within the settle budget. No redraw → the app didn't scroll (top reached
+    // or key not handled).
+    const scrollAndWait = async (key, prevRev) => {
+      await this.handleSendAndWait({ terminal_id: requestedTerminalId, key, wait: false });
+      const deadline = Date.now() + settleMs;
+      while (Date.now() < deadline) {
+        await sleep(120);
+        const f = await readFrame();
+        if (f && f.rev !== prevRev) return f;
+      }
+      return null;
+    };
+
+    const first = await readFrame();
+    if (!first) {
+      return { content: [{ type: 'text', text: 'Error: no rendered screen available for this terminal.' }], isError: true };
+    }
+    let prevFull = first.lines;
+    let prevRev = first.rev;
+    let accumulator = null;
+    let pages = 0;
+    let reachedTop = false;
+    let truncated = false;
+
+    while (pages < maxPages) {
+      const nf = await scrollAndWait(scrollKey, prevRev);
+      if (!nf) { reachedTop = true; break; } // no redraw → can't scroll further
+      const newFull = nf.lines;
+      prevRev = nf.rev;
+      const chromeN = bottomFixedCount(newFull, prevFull);
+      const prevTrans = stripTrailingBlankLines(prevFull.slice(0, prevFull.length - chromeN));
+      const newTrans = stripTrailingBlankLines(newFull.slice(0, newFull.length - chromeN));
+      if (accumulator === null) accumulator = prevTrans.slice();
+      const overlap = maxBottomTopOverlap(newTrans, accumulator);
+      const revealed = newTrans.slice(0, newTrans.length - overlap);
+      if (revealed.filter((s) => s.trim().length).length === 0) { reachedTop = true; break; }
+      accumulator = revealed.concat(accumulator);
+      prevFull = newFull;
+      pages += 1;
+      if (accumulator.join('\n').length > maxChars) { truncated = true; break; }
+    }
+    if (accumulator === null) accumulator = stripTrailingBlankLines(prevFull); // never scrolled
+
+    // Restore the user's live view (reverse the scroll). page_down is a no-op once
+    // at the bottom, so an exact reversal is safe even if the last scroll clamped.
+    let restored = false;
+    if (restore && pages > 0) {
+      for (let i = 0; i < pages; i++) {
+        await this.handleSendAndWait({ terminal_id: requestedTerminalId, key: restoreKey, wait: false });
+        await sleep(60);
+      }
+      await sleep(150);
+      restored = true;
+    }
+
+    let text = accumulator.join('\n');
+    if (text.length > maxChars) { text = text.slice(0, maxChars); truncated = true; }
+
+    return this.wrapJson({
+      ok: true,
+      helper: 'hopx_capture_scrollback',
+      terminal_id: requestedTerminalId,
+      scrollKey,
+      pagesCaptured: pages,
+      reachedTop,
+      restored,
+      lineCount: accumulator.length,
+      ...(truncated ? { truncated: true, hint: `Captured scrollback hit max_chars=${maxChars}; raise max_chars or lower max_pages. Earliest content kept; the live bottom is visible in the terminal.` } : {}),
+      text
+    });
   }
 
   // Verified submit (firstmate lesson): pressing Enter at a TUI composer can be

@@ -3573,7 +3573,12 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
     };
 }
 
-// ---- Claude SessionStart hook install/remove (in ~/.claude/settings.json) ---
+// ---- Claude hook install/remove (in ~/.claude/settings.json) ---------------
+// The same script is registered for two events: SessionStart (records the
+// conversation id for `hop restore`) and Stop (bumps a per-turn counter a driver
+// can wait on). See scripts/claude-session-hook.js.
+const CLAUDE_HOOK_EVENTS = ['SessionStart', 'Stop'];
+
 function getClaudeSettingsPath() {
     const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
     return path.join(dir, 'settings.json');
@@ -3588,12 +3593,16 @@ function readClaudeSettings() {
     }
 }
 
-function claudeHookIsInstalled(settings) {
-    const groups = settings?.hooks?.SessionStart;
-    if (!Array.isArray(groups)) return false;
-    return groups.some((g) => Array.isArray(g?.hooks) && g.hooks.some(
+function hookGroupsHaveScript(groups) {
+    return Array.isArray(groups) && groups.some((g) => Array.isArray(g?.hooks) && g.hooks.some(
         (h) => h && typeof h.command === 'string' && h.command.includes('claude-session-hook.js')
     ));
+}
+
+// Installed only when every event we manage carries the hook (so an upgrade from
+// the SessionStart-only version reports "not installed" and re-install adds Stop).
+function claudeHookIsInstalled(settings) {
+    return CLAUDE_HOOK_EVENTS.every((ev) => hookGroupsHaveScript(settings?.hooks?.[ev]));
 }
 
 function installClaudeHook() {
@@ -3603,11 +3612,13 @@ function installClaudeHook() {
         return { ok: false, error: `hook script missing: ${CLAUDE_HOOK_SCRIPT}` };
     }
     data.hooks = data.hooks || {};
-    if (!Array.isArray(data.hooks.SessionStart)) data.hooks.SessionStart = [];
-    data.hooks.SessionStart.push({
-        matcher: '',
-        hooks: [{ type: 'command', command: `${process.execPath} ${CLAUDE_HOOK_SCRIPT}` }]
-    });
+    const command = `${process.execPath} ${CLAUDE_HOOK_SCRIPT}`;
+    for (const ev of CLAUDE_HOOK_EVENTS) {
+        if (!Array.isArray(data.hooks[ev])) data.hooks[ev] = [];
+        if (!hookGroupsHaveScript(data.hooks[ev])) {
+            data.hooks[ev].push({ matcher: '', hooks: [{ type: 'command', command }] });
+        }
+    }
     try {
         fs.mkdirSync(path.dirname(p), { recursive: true });
         if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
@@ -3620,14 +3631,19 @@ function installClaudeHook() {
 
 function removeClaudeHook() {
     const { path: p, data } = readClaudeSettings();
-    if (!claudeHookIsInstalled(data)) return { ok: true, already: true, path: p };
-    for (const g of data.hooks.SessionStart) {
-        if (Array.isArray(g.hooks)) {
-            g.hooks = g.hooks.filter((h) => !(h && typeof h.command === 'string' && h.command.includes('claude-session-hook.js')));
+    const present = CLAUDE_HOOK_EVENTS.some((ev) => hookGroupsHaveScript(data?.hooks?.[ev]));
+    if (!present) return { ok: true, already: true, path: p };
+    for (const ev of CLAUDE_HOOK_EVENTS) {
+        const groups = data?.hooks?.[ev];
+        if (!Array.isArray(groups)) continue;
+        for (const g of groups) {
+            if (Array.isArray(g.hooks)) {
+                g.hooks = g.hooks.filter((h) => !(h && typeof h.command === 'string' && h.command.includes('claude-session-hook.js')));
+            }
         }
+        data.hooks[ev] = groups.filter((g) => Array.isArray(g.hooks) && g.hooks.length > 0);
+        if (data.hooks[ev].length === 0) delete data.hooks[ev];
     }
-    data.hooks.SessionStart = data.hooks.SessionStart.filter((g) => Array.isArray(g.hooks) && g.hooks.length > 0);
-    if (data.hooks.SessionStart.length === 0) delete data.hooks.SessionStart;
     try {
         if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
         fs.writeFileSync(p, JSON.stringify(data, null, 2));

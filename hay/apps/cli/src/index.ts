@@ -169,6 +169,7 @@ Keyboard shortcuts:
   ${keyLabelLong}+C             Take/release exclusive control
   ${keyLabelLong}+F             Search scrollback (Enter/↓ next, ↑ prev, Esc close)
   ${keyLabelLong}+S             Session panel — list + live preview; ↑↓ fly, Enter switch, Esc close
+  ${keyLabelLong}+R             Rename this session (Enter save, Esc cancel)
   ${keyLabelLong}+?             Show ALL shortcuts in a full-screen overlay (↑↓ scroll, Esc close)
   ${keyLabelLong}+T             Toggle hint bar (this session)
   ${keyLabelLong}+\\             Send the next key literally to the remote terminal
@@ -322,6 +323,11 @@ let helpScroll = 0;
 // types through to the remote.
 const isHelpKey = (input: string) =>
   input === "\x1b?" || input === "\x1b/" || (isMac && (input === "¿" || input === "÷"));
+
+// Inline rename (Opt+R): edit the session's display name in place. Posts to the
+// local hop daemon's rename API and optimistically updates the label.
+let renameMode = false;
+let renameQuery = "";
 
 let configFile = loadConfig();
 const persistConfig = (patch: Partial<CliConfig>) => {
@@ -487,7 +493,7 @@ const getLocalMetrics = () => {
   // toggles just the hint line while the status bar is shown. The reconnect
   // banner forces the line on regardless, so a dropped connection is never silent.
   const reconnecting = !connected && reconnectAttempt > 0;
-  const showHintBar = ((showHints && showBottomBar) || hasNotice || reconnecting || searchMode) && rows >= (showBottomBar ? 3 : 2);
+  const showHintBar = ((showHints && showBottomBar) || hasNotice || reconnecting || searchMode || renameMode) && rows >= (showBottomBar ? 3 : 2);
   const barRows = (showBottomBar ? 1 : 0) + (showHintBar ? 1 : 0);
   return {
     cols,
@@ -1938,6 +1944,86 @@ const handleHelpInput = (input: string) => {
   // Everything else is swallowed while help is open.
 };
 
+// ── Inline rename (Opt+R) ──
+const enterRename = () => {
+  renameMode = true;
+  renameQuery = "";
+  scheduleRender();
+};
+
+// The local hop daemon's API address + auth, read from ~/.hop2/.tunnel-state
+// (the same file the daemon writes its pid/port/secret to). Null when there's no
+// reachable local daemon (e.g. a remote `hop client`).
+const readDaemonApi = (): { port: number; secret: string } | null => {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(hopTunnelStateFile, "utf8"));
+    if (!isPidAlive(Number(parsed?.pid))) return null;
+    const port = Number(parsed?.port);
+    const secret = typeof parsed?.sessionSecret === "string" ? parsed.sessionSecret : "";
+    if (!Number.isInteger(port) || port <= 0 || !secret) return null;
+    return { port, secret };
+  } catch {
+    return null;
+  }
+};
+
+const submitRename = (raw: string) => {
+  const newName = raw.trim();
+  if (!newName || newName === sessionLabel || newName === config.room) { scheduleRender(); return; }
+  const api = readDaemonApi();
+  if (!api) {
+    pushNotice("Rename needs the local hop daemon (not available here)", "warn");
+    scheduleRender();
+    return;
+  }
+  const body = JSON.stringify({ oldName: config.room, newName });
+  const req = http.request(
+    {
+      hostname: "127.0.0.1", port: api.port, path: "/api/sessions/rename", method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        Authorization: `Bearer ${api.secret}`,
+      },
+    },
+    (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
+        const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300;
+        if (ok) {
+          sessionLabel = newName;
+          pushNotice(`Renamed to ${newName}`, "ok");
+        } else {
+          let msg = `status ${res.statusCode}`;
+          try { msg = JSON.parse(data)?.error || msg; } catch { /* keep status */ }
+          pushNotice(`Rename failed: ${msg}`, "warn");
+        }
+        scheduleRender();
+      });
+    }
+  );
+  req.on("error", (e) => { pushNotice(`Rename failed: ${e.message}`, "warn"); scheduleRender(); });
+  req.setTimeout(2500, () => { req.destroy(); pushNotice("Rename timed out", "warn"); scheduleRender(); });
+  req.write(body);
+  req.end();
+};
+
+const handleRenameInput = (input: string) => {
+  if (input === "\x1b") { renameMode = false; scheduleRender(); return; }
+  if (input === "\r" || input === "\n") {
+    const q = renameQuery;
+    renameMode = false;
+    submitRename(q);
+    return;
+  }
+  if (input === "\x7f" || input === "\b") { renameQuery = renameQuery.slice(0, -1); scheduleRender(); return; }
+  // Accept only characters valid in a session name; ignore the rest (control
+  // sequences, spaces, etc.) so the result is always a legal name.
+  const cleaned = input.replace(/[^A-Za-z0-9_-]/g, "");
+  if (cleaned) { renameQuery = (renameQuery + cleaned).slice(0, 64); scheduleRender(); }
+};
+
 // Full-screen list of every shortcut, grouped. Reachable even when the hint bar
 // is too narrow to show them all (which is the whole point of this overlay).
 const renderHelpOverlay = (): string[] => {
@@ -1958,6 +2044,7 @@ const renderHelpOverlay = (): string[] => {
       [kCtrl("G"), "detach (leave it running)"],
       [`${kCtrl("Q")} ×2`, "kill the session"],
       [kOpt("S"), "session switcher"],
+      [kOpt("R"), "rename this session"],
       [kOpt("C"), "take / release control"],
     ]],
     ["Display", [
@@ -2140,6 +2227,7 @@ const render = () => {
     [kOpt("M"), `mouse ${mouseCapture ? "on" : "off"}`],
     [kOpt("F"), "find"],
     [kOpt("S"), "sessions"],
+    [kOpt("R"), "rename"],
     [kOpt("C"), "control"],
     [kOpt("T"), "hints"],
     [kOpt("\\"), "literal"]
@@ -2147,7 +2235,9 @@ const render = () => {
   const controls = ` ${hintPairs.map(([key, label]) => `${BAR.fg}${key} ${BAR.dim}${label}`).join(" · ")}`;
   const reconnecting = !connected && reconnectAttempt > 0;
   let hintInner: string;
-  if (searchMode) {
+  if (renameMode) {
+    hintInner = `${BAR.accent} rename: ${renameQuery}▏${BAR.resetFg}${BAR.dim}  Enter save · Esc cancel${BAR.resetFg}`;
+  } else if (searchMode) {
     const count = searchQuery
       ? (searchMatches.length > 0
           ? `${searchIndex + 1}/${searchMatches.length}`
@@ -2669,6 +2759,10 @@ const handleLocalShortcut = (input: string) => {
     openHelp();
     return true;
   }
+  if (altKey("r") || altKey("R") || optionChar("®")) {
+    enterRename();
+    return true;
+  }
   if (altKey("c") || altKey("C") || optionChar("ç")) {
     // Toggle exclusive control, mirroring the web Take/Release controls so a CLI
     // user on a locked shared session isn't stuck.
@@ -2796,6 +2890,12 @@ process.stdin.on("data", (data) => {
   const mouseResult = stripMouseSequences(input);
   input = mouseResult.cleaned;
   if (!input) return;
+
+  // While renaming, keys edit the name (never forwarded).
+  if (renameMode) {
+    handleRenameInput(input);
+    return;
+  }
 
   // While the help overlay is open, keys drive it (never forwarded).
   if (helpMode) {

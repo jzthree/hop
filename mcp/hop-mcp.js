@@ -505,6 +505,50 @@ function composerSharesContent(sent, composerText) {
   return head.length >= 4 && longer.includes(head);
 }
 
+// Claude Code stores a session transcript at
+// ~/.claude/projects/<enc>/<sessionId>.jsonl where <enc> is the cwd with every
+// '/' and '_' replaced by '-'. Verified: /Users/jianzhou/Code/auto_statistician_claude
+// -> -Users-jianzhou-Code-auto-statistician-claude.
+function encodeClaudeProjectDir(cwd) {
+  return String(cwd || '').replace(/[/_]/g, '-');
+}
+
+function firstTrajectoryText(parts, n) {
+  const s = parts.join(' ').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n) : s;
+}
+
+// Flatten one transcript message's content (string OR block array) into the bits
+// a compact turn record needs, without holding the raw blocks. Distinguishes text
+// from tool_use (names) from tool_result (size + error) from thinking/image.
+function summarizeMessageContent(message, includeThinking) {
+  const out = { textParts: [], toolNames: [], toolResults: 0, toolResultBytes: 0, isError: false, hasImage: false };
+  if (!message || typeof message !== 'object') return out;
+  const content = message.content;
+  if (typeof content === 'string') { if (content) out.textParts.push(content); return out; }
+  if (!Array.isArray(content)) return out;
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    const t = block.type;
+    if (t === 'text' && typeof block.text === 'string') out.textParts.push(block.text);
+    else if (t === 'thinking' && typeof block.thinking === 'string') { if (includeThinking) out.textParts.push(block.thinking); }
+    else if (t === 'tool_use') { if (typeof block.name === 'string') out.toolNames.push(block.name); }
+    else if (t === 'tool_result') {
+      out.toolResults += 1;
+      if (block.is_error) out.isError = true;
+      const c = block.content;
+      if (typeof c === 'string') out.toolResultBytes += Buffer.byteLength(c, 'utf8');
+      else if (Array.isArray(c)) {
+        for (const cb of c) {
+          if (cb && cb.type === 'text' && typeof cb.text === 'string') out.toolResultBytes += Buffer.byteLength(cb.text, 'utf8');
+          else if (cb && cb.type === 'image') out.hasImage = true;
+        }
+      }
+    } else if (t === 'image') out.hasImage = true;
+  }
+  return out;
+}
+
 function extractToolErrorText(response) {
   if (!response || typeof response !== 'object') return 'Unknown error';
   const content = Array.isArray(response.content) ? response.content : [];
@@ -3063,6 +3107,29 @@ class HopMCPServer {
             settle_checks: { type: 'number', description: 'For the busy-line completion heuristic (no Stop-hook marker): consecutive idle reads required before declaring the turn done (default: 2). Ignored when the turn counter marker is authoritative.' }
           }
         }
+      },
+      {
+        name: 'hop_read_trajectory',
+        description: 'Read a Claude Code session\'s real conversation history from its on-disk transcript (resolved from the hop session name via the SessionStart hook record). Context-safe: returns compact, paginated summaries by default, never the raw transcript. Use this to see what an agent in a hop session has actually done — far more than the terminal frame shows for an alternate-screen TUI. Requires the transcript to be on the same host as the MCP.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Hop session name (display name or internalName), e.g. "Lyra".' },
+            mode: {
+              type: 'string',
+              enum: ['summary', 'list', 'get', 'tail'],
+              description: 'summary (default): session metadata + counts + last few turns. list: paginated compact turn records (offset/limit). get: full content of one turn (index or uuid). tail: last N turns\' full text.'
+            },
+            offset: { type: 'number', description: 'For mode=list: turn offset (negative counts from the end; default: last `limit` turns).' },
+            limit: { type: 'number', description: 'For mode=list (default 20) / tail (default 6): number of turns.' },
+            index: { type: 'number', description: 'For mode=get: 0-based turn index (as reported by list/summary).' },
+            uuid: { type: 'string', description: 'For mode=get: the turn uuid (alternative to index).' },
+            include_thinking: { type: 'boolean', description: 'Include assistant "thinking" blocks in previews/text (default: false).' },
+            text_only: { type: 'boolean', description: 'For get/tail: return only joined message text, omitting tool input/result blocks (default: false).' },
+            max_chars: { type: 'number', description: 'Output cap in characters (default: 8000). On overflow the result is trimmed and marked truncated with a hint to narrow the query.' }
+          },
+          required: ['name']
+        }
       }
     ];
   }
@@ -3314,6 +3381,8 @@ class HopMCPServer {
         );
       case 'hopx_agent_turn':
         return await this.handleHopxAgentTurn(args);
+      case 'hop_read_trajectory':
+        return await this.handleReadTrajectory(args);
       default:
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -3922,6 +3991,269 @@ class HopMCPServer {
     } catch {
       return null;
     }
+  }
+
+  // Resolve a hop session name to its Claude transcript file. Seam: returns a
+  // { kind:'local', path, ... } source today (the MCP runs on the same host as
+  // the sessions); a future { kind:'daemon', name } variant can route the read
+  // through a daemon endpoint for agent-remote-from-sessions setups, with
+  // loadTrajectory() switching on source.kind.
+  async resolveTrajectorySource(name) {
+    if (!name || typeof name !== 'string') return { error: 'name is required' };
+    let internalName = name;
+    let cwd = null;
+    try {
+      const listed = await this.callApi('GET', '/api/sessions');
+      if (listed && Array.isArray(listed.sessions)) {
+        const match = listed.sessions.find((s) => s && (s.name === name || s.displayName === name || s.internalName === name));
+        if (match) {
+          internalName = match.internalName || match.name || name;
+          cwd = typeof match.cwd === 'string' ? match.cwd : null;
+        }
+      }
+    } catch { /* daemon unreachable -> fall back to name as internalName */ }
+
+    let sessionId = null;
+    if (/^[A-Za-z0-9_.-]+$/.test(internalName)) {
+      try {
+        const rec = JSON.parse(fs.readFileSync(path.join(resolveHomeDir(), 'claude-sessions', `${internalName}.json`), 'utf8'));
+        if (rec && typeof rec.sessionId === 'string' && rec.sessionId) sessionId = rec.sessionId;
+        if (rec && typeof rec.cwd === 'string' && rec.cwd) cwd = rec.cwd; // hook record cwd wins
+      } catch { /* no hook record */ }
+    }
+    if (!cwd) {
+      return { error: `Could not resolve a working directory for session "${name}" (not a known hop session, and no claude-sessions record).` };
+    }
+
+    const projectDir = path.join(os.homedir(), '.claude', 'projects', encodeClaudeProjectDir(cwd));
+    if (sessionId) {
+      const preferred = path.join(projectDir, `${sessionId}.jsonl`);
+      if (fs.existsSync(preferred)) {
+        return { kind: 'local', path: preferred, sessionId, cwd, internalName, fallback: false };
+      }
+    }
+    // Fallback: newest .jsonl in the project dir (hook not installed / sessionId stale).
+    try {
+      const files = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'));
+      let best = null; let bestMtime = -1;
+      for (const f of files) {
+        const p = path.join(projectDir, f);
+        let m = 0; try { m = fs.statSync(p).mtimeMs; } catch { /* skip */ }
+        if (m > bestMtime) { bestMtime = m; best = p; }
+      }
+      if (best) {
+        return { kind: 'local', path: best, sessionId: sessionId || path.basename(best, '.jsonl'), cwd, internalName, fallback: true };
+      }
+    } catch { /* project dir missing */ }
+    return { error: `No Claude transcript found for "${name}" in ${projectDir}. The SessionStart hook may not be installed, the session may not be Claude, or the transcript isn't on this host.` };
+  }
+
+  buildFullTrajectoryTurn(obj, rec, summary, textOnly) {
+    const full = {
+      index: rec.index,
+      uuid: rec.uuid,
+      kind: rec.kind,
+      ts: rec.ts,
+      role: (obj.message && typeof obj.message.role === 'string') ? obj.message.role : null,
+      model: (obj.message && typeof obj.message.model === 'string') ? obj.message.model : undefined,
+      outTokens: rec.outTokens,
+      text: summary.textParts.join('\n\n')
+    };
+    if (textOnly) return full;
+    const content = (obj.message && Array.isArray(obj.message.content)) ? obj.message.content : [];
+    const toolUses = [];
+    const toolResults = [];
+    for (const b of content) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'tool_use') {
+        let inputStr = '';
+        try { inputStr = JSON.stringify(b.input); } catch { inputStr = ''; }
+        toolUses.push({ name: b.name, inputPreview: inputStr.slice(0, 400), inputBytes: Buffer.byteLength(inputStr || '', 'utf8') });
+      } else if (b.type === 'tool_result') {
+        let txt = '';
+        const c = b.content;
+        if (typeof c === 'string') txt = c;
+        else if (Array.isArray(c)) txt = c.filter((x) => x && x.type === 'text' && typeof x.text === 'string').map((x) => x.text).join('\n');
+        toolResults.push({ isError: !!b.is_error, preview: txt.slice(0, 400), bytes: Buffer.byteLength(txt, 'utf8') });
+      }
+    }
+    if (toolUses.length) full.toolUses = toolUses;
+    if (toolResults.length) full.toolResults = toolResults;
+    return full;
+  }
+
+  // Stream-parse a transcript (readline; never loads the whole file) and assemble
+  // a mode-appropriate, compact payload. turns[] holds only compact records;
+  // full content is captured only for the one requested turn (get) or the last N
+  // (tail). The seam: only kind:'local' is implemented today.
+  async loadTrajectory(source, opts) {
+    if (source.kind !== 'local') throw new Error(`Unsupported trajectory source: ${source.kind}`);
+    const mode = opts.mode;
+    const includeThinking = opts.includeThinking === true;
+    const tailLimit = mode === 'tail' ? (Number.isInteger(opts.limit) && opts.limit > 0 ? opts.limit : 6) : 0;
+
+    const turns = [];
+    const counts = {};
+    const tailRing = [];
+    let getMatch = null;
+    let lineCount = 0; let parseErrors = 0; let totalOutTokens = 0;
+    let model = null; let title = null; let firstTs = null; let lastTs = null;
+    let turnIndex = 0;
+
+    const rl = readline.createInterface({ input: fs.createReadStream(source.path, { encoding: 'utf8' }), crlfDelay: Infinity });
+    for await (const line of rl) {
+      if (!line) continue;
+      lineCount += 1;
+      let obj;
+      try { obj = JSON.parse(line); } catch { parseErrors += 1; continue; }
+      if (!obj || typeof obj !== 'object') { parseErrors += 1; continue; }
+
+      const ltype = typeof obj.type === 'string' ? obj.type : 'unknown';
+      counts[ltype] = (counts[ltype] || 0) + 1;
+      const ts = typeof obj.timestamp === 'string' ? obj.timestamp : null;
+      if (ts) { if (!firstTs) firstTs = ts; lastTs = ts; }
+      if (obj.message && typeof obj.message === 'object') {
+        if (typeof obj.message.model === 'string') model = obj.message.model;
+        const u = obj.message.usage;
+        if (u && Number.isInteger(u.output_tokens)) totalOutTokens += u.output_tokens;
+      }
+      if (ltype === 'ai-title' && typeof obj.aiTitle === 'string') title = obj.aiTitle;
+
+      const role = (obj.message && typeof obj.message.role === 'string') ? obj.message.role : null;
+      let kind = null;
+      if (ltype === 'assistant' || role === 'assistant') kind = 'assistant';
+      else if (ltype === 'user' || role === 'user') kind = 'user';
+      if (!kind) continue; // noise line: counted in countsByType only
+
+      const summary = summarizeMessageContent(obj.message, includeThinking);
+      const hasText = summary.textParts.some((t) => t && t.trim());
+      let semantic = kind;
+      if (kind === 'user' && !hasText && summary.toolResults > 0) semantic = 'tool_result';
+      const outTokens = (obj.message && obj.message.usage && Number.isInteger(obj.message.usage.output_tokens))
+        ? obj.message.usage.output_tokens : undefined;
+      const rec = {
+        index: turnIndex,
+        uuid: typeof obj.uuid === 'string' ? obj.uuid : null,
+        kind: semantic,
+        ts,
+        preview: firstTrajectoryText(summary.textParts, 120)
+          || (summary.toolResults ? `[tool_result x${summary.toolResults}${summary.isError ? ' error' : ''}]`
+            : (summary.toolNames.length ? `[tool_use: ${summary.toolNames.join(', ')}]` : '')),
+        toolNames: summary.toolNames.length ? summary.toolNames : undefined,
+        outTokens,
+        isError: summary.isError || undefined,
+        bytes: Buffer.byteLength(line, 'utf8')
+      };
+      turns.push(rec);
+
+      if (mode === 'get') {
+        const wantIndex = Number.isInteger(opts.index) ? opts.index : null;
+        const wantUuid = typeof opts.uuid === 'string' ? opts.uuid : null;
+        if ((wantUuid && rec.uuid === wantUuid) || (wantIndex !== null && turnIndex === wantIndex)) {
+          getMatch = this.buildFullTrajectoryTurn(obj, rec, summary, opts.textOnly === true);
+        }
+      } else if (tailLimit > 0) {
+        tailRing.push(this.buildFullTrajectoryTurn(obj, rec, summary, opts.textOnly === true));
+        if (tailRing.length > tailLimit) tailRing.shift();
+      }
+      turnIndex += 1;
+    }
+
+    let bytes = 0;
+    try { bytes = fs.statSync(source.path).size; } catch { /* ignore */ }
+    const sourceInfo = {
+      sessionId: source.sessionId, cwd: source.cwd, internalName: source.internalName,
+      path: source.path, fallback: source.fallback === true
+    };
+
+    if (mode === 'list') {
+      const limit = (Number.isInteger(opts.limit) && opts.limit > 0) ? opts.limit : 20;
+      let offset;
+      if (Number.isInteger(opts.offset)) offset = opts.offset < 0 ? Math.max(0, turns.length + opts.offset) : opts.offset;
+      else offset = Math.max(0, turns.length - limit);
+      const slice = turns.slice(offset, offset + limit);
+      return {
+        ok: true, helper: 'hop_read_trajectory', mode, source: sourceInfo,
+        turnCount: turns.length, offset, limit,
+        nextOffset: (offset + limit) < turns.length ? (offset + limit) : null,
+        turns: slice
+      };
+    }
+    if (mode === 'get') {
+      if (!getMatch) {
+        return { __error: `Turn not found (index=${opts.index}, uuid=${opts.uuid || ''}). turnCount=${turns.length}; use mode="list" to find a valid index.` };
+      }
+      return { ok: true, helper: 'hop_read_trajectory', mode, source: sourceInfo, turnCount: turns.length, turn: getMatch };
+    }
+    if (mode === 'tail') {
+      return { ok: true, helper: 'hop_read_trajectory', mode, source: sourceInfo, turnCount: turns.length, tail: tailRing };
+    }
+    // summary (default)
+    return {
+      ok: true, helper: 'hop_read_trajectory', mode: 'summary', source: sourceInfo,
+      lineCount, parseErrors, bytes, firstTs, lastTs, model, title: title || undefined,
+      turnCount: turns.length, countsByType: counts, totalOutTokens,
+      lastTurns: turns.slice(-8)
+    };
+  }
+
+  // Keep the result under max_chars. Compact modes rarely overflow by construction;
+  // when they do, trim the biggest field (full text / oldest items) and flag it.
+  capTrajectoryPayload(payload, mode, maxChars) {
+    const fits = (p) => JSON.stringify(p).length <= maxChars;
+    if (fits(payload)) return payload;
+    payload.truncated = true;
+    payload.hint = `Output exceeded max_chars=${maxChars}; narrow the query (smaller limit, a specific index/uuid via mode="get", or raise max_chars).`;
+    if (mode === 'get' && payload.turn) {
+      if (payload.turn.toolUses) delete payload.turn.toolUses;
+      if (!fits(payload) && payload.turn.toolResults) delete payload.turn.toolResults;
+      while (!fits(payload) && typeof payload.turn.text === 'string' && payload.turn.text.length > 200) {
+        payload.turn.text = payload.turn.text.slice(0, Math.floor(payload.turn.text.length * 0.7));
+      }
+      if (!fits(payload) && typeof payload.turn.text === 'string') payload.turn.text = payload.turn.text.slice(0, 200) + '…';
+    } else if (mode === 'tail' && Array.isArray(payload.tail)) {
+      for (const it of payload.tail) {
+        if (typeof it.text === 'string' && it.text.length > 300) it.text = it.text.slice(0, 300) + '…';
+        delete it.toolUses; delete it.toolResults;
+      }
+      while (!fits(payload) && payload.tail.length > 1) payload.tail.shift();
+    } else if (mode === 'list' && Array.isArray(payload.turns)) {
+      while (!fits(payload) && payload.turns.length > 1) payload.turns.pop();
+    } else if (Array.isArray(payload.lastTurns)) {
+      while (!fits(payload) && payload.lastTurns.length > 1) payload.lastTurns.shift();
+    }
+    return payload;
+  }
+
+  async handleReadTrajectory(args) {
+    const name = typeof args.name === 'string' ? args.name.trim() : '';
+    if (!name) return { content: [{ type: 'text', text: 'Error: name is required.' }], isError: true };
+    const mode = ['summary', 'list', 'get', 'tail'].includes(args.mode) ? args.mode : 'summary';
+    const maxChars = Number.isFinite(args.max_chars) ? Math.max(500, Math.floor(args.max_chars)) : 8000;
+    const opts = {
+      mode,
+      includeThinking: args.include_thinking === true,
+      textOnly: args.text_only === true,
+      offset: Number.isFinite(args.offset) ? Math.floor(args.offset) : undefined,
+      limit: Number.isFinite(args.limit) ? Math.floor(args.limit) : undefined,
+      index: Number.isFinite(args.index) ? Math.floor(args.index) : undefined,
+      uuid: typeof args.uuid === 'string' ? args.uuid : undefined
+    };
+    if (mode === 'get' && opts.index === undefined && !opts.uuid) {
+      return { content: [{ type: 'text', text: 'Error: mode="get" requires index or uuid (find one with mode="list").' }], isError: true };
+    }
+    const source = await this.resolveTrajectorySource(name);
+    if (source.error) return { content: [{ type: 'text', text: `Error: ${source.error}` }], isError: true };
+    let payload;
+    try {
+      payload = await this.loadTrajectory(source, opts);
+    } catch (e) {
+      return { content: [{ type: 'text', text: `Error reading trajectory: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
+    }
+    if (payload && payload.__error) {
+      return { content: [{ type: 'text', text: `Error: ${payload.__error}` }], isError: true };
+    }
+    return this.wrapJson(this.capTrajectoryPayload(payload, mode, maxChars));
   }
 
   // Verified submit (firstmate lesson): pressing Enter at a TUI composer can be
@@ -5396,6 +5728,8 @@ if (require.main === module) {
     extractUiBusyLine,
     getBusyLinePatterns,
     COMPOSER_BORDER_CHARS,
-    COMPOSER_PROMPT_CHARS
+    COMPOSER_PROMPT_CHARS,
+    encodeClaudeProjectDir,
+    summarizeMessageContent
   };
 }

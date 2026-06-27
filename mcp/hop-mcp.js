@@ -4033,6 +4033,10 @@ class HopMCPServer {
       }
     }
     // Fallback: newest .jsonl in the project dir (hook not installed / sessionId stale).
+    // This is AMBIGUOUS when several sessions share a cwd: every one of them maps to
+    // the single newest transcript. We surface that (ambiguous + candidateCount) so a
+    // caller knows the mapping may be wrong and to install the SessionStart hook
+    // (`hop claude-hook install`), which records each session's exact sessionId.
     try {
       const files = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'));
       let best = null; let bestMtime = -1;
@@ -4042,7 +4046,13 @@ class HopMCPServer {
         if (m > bestMtime) { bestMtime = m; best = p; }
       }
       if (best) {
-        return { kind: 'local', path: best, sessionId: sessionId || path.basename(best, '.jsonl'), cwd, internalName, fallback: true };
+        return {
+          kind: 'local', path: best,
+          sessionId: sessionId || path.basename(best, '.jsonl'),
+          cwd, internalName, fallback: true,
+          ambiguous: files.length > 1,
+          candidateCount: files.length
+        };
       }
     } catch { /* project dir missing */ }
     return { error: `No Claude transcript found for "${name}" in ${projectDir}. The SessionStart hook may not be installed, the session may not be Claude, or the transcript isn't on this host.` };
@@ -4165,6 +4175,11 @@ class HopMCPServer {
       sessionId: source.sessionId, cwd: source.cwd, internalName: source.internalName,
       path: source.path, fallback: source.fallback === true
     };
+    if (source.ambiguous) {
+      sourceInfo.ambiguous = true;
+      sourceInfo.candidateCount = source.candidateCount;
+      sourceInfo.warning = `No SessionStart-hook record for "${source.internalName}"; resolved by newest transcript in a cwd with ${source.candidateCount} transcripts, so this may be the wrong session. Install the hook (\`hop claude-hook install\`) for exact per-session mapping.`;
+    }
 
     if (mode === 'list') {
       const limit = (Number.isInteger(opts.limit) && opts.limit > 0) ? opts.limit : 20;

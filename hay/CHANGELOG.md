@@ -11,6 +11,7 @@
 - **`hop math '<latex>'`** — render a LaTeX formula in the terminal as a **2D Unicode layout**, dependency-free. The box-layout engine handles stacked fractions, `√` with an overline, big-operator limits stacked over/under, super/subscripts (Unicode glyphs with `^`/`_` fallback), Greek + operator symbols, and combining-mark accents like `\vec`/`\hat`/`\bar`. Reads from an argument or stdin. Inline-image rendering (Kitty/iTerm/Sixel) is deferred until graphics support lands in the web client (xterm.js), since the real payoff is images that render *inside* a shared hop session — until then math is Unicode everywhere.
 
 #### CLI Client
+- **You're told when another client reshapes the shared terminal**: with autofit on (the default), a peer's window can resize the shared PTY for everyone. When that happens the status bar shows a `⇄ <name>` indicator (who's driving the current size), and a one-off notice — `<name> resized the terminal to <cols>×<rows>` — explains the reshape so a sudden change of shape (including on connect, when a peer already sized it) isn't a surprise.
 - **Status bar / hints toggles are session-only**: `Opt+B` (status bar) and `Opt+T` (hints) no longer persist to `.hop.json`, so an in-session toggle can't silently become your permanent default. The default is taken from `.hop.json` (`showStatusBar`/`showHints`, both default `true`); toggles affect only the current session and the notice now says so. (Other toggles like mouse capture and sync-size still persist.)
 
 #### Web Client

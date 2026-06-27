@@ -267,6 +267,9 @@ let literalNext = false; // Opt+\ armed: forward the next key verbatim
 let collabMode = true;
 let controllerId: string | null = null;
 let presence: PresenceClient[] = [];
+// Which client last set the shared terminal size. When it's a peer (not us), the
+// status bar shows it so a reshape from someone else's autofit isn't a mystery.
+let activeSizeClientId: string | null = null;
 type NoticeKind = "info" | "ok" | "warn";
 let notice: { message: string; kind: NoticeKind; expiresAt: number } | null = null;
 
@@ -2076,12 +2079,19 @@ const render = () => {
   const peerNames = others.map((c) => (c.typing ? `${c.name}*` : c.name)).join(", ");
   const peerLabel = others.length ? `peers: ${peerNames}` : "";
   const controlLabel = (!collabMode && controllerName) ? `locked: ${controllerName}` : "";
+  // When a peer is driving the shared size, surface it so a different shape is
+  // explained at a glance (the transient notice covers the moment it changes).
+  const sizeDriverName = (activeSizeClientId && activeSizeClientId !== clientId)
+    ? others.find((c) => c.id === activeSizeClientId)?.name
+    : null;
+  const sizeDriverLabel = sizeDriverName ? `⇄ ${sizeDriverName}` : "";
   const candidateSegments: Array<BarSegment | null> = [
     scrollLabel ? { text: scrollLabel } : null,
     statusLabel ? { text: statusLabel } : null,
     hopDaemonLabel ? { text: hopDaemonLabel, secondary: true, dropPriority: 1 } : null,
     !statusLabel && shareUrl ? { text: shareUrl, secondary: true, dropPriority: 0 } : null,
     autofitLabel ? { text: autofitLabel, secondary: true, dropPriority: 3 } : null,
+    sizeDriverLabel ? { text: sizeDriverLabel, secondary: true, dropPriority: 5 } : null,
     peerLabel ? { text: peerLabel, secondary: true, dropPriority: 4 } : null,
     controlLabel ? { text: controlLabel, secondary: true, dropPriority: 6 } : null,
     { text: "● " } // state dot, rightmost; no dropPriority — always visible
@@ -2388,9 +2398,21 @@ const connect = () => {
         }
         break;
       }
-      case "active_size":
+      case "active_size": {
+        const prevCols = remoteCols;
+        const prevRows = remoteRows;
+        activeSizeClientId = message.clientId || null;
         applyRemoteSize(message.cols, message.rows);
+        // A peer's autofit (or manual resize) just reshaped the shared terminal —
+        // say who and to what, so the new shape isn't a surprise.
+        if (message.clientId && message.clientId !== clientId &&
+            (message.cols !== prevCols || message.rows !== prevRows)) {
+          const who = presence.find((c) => c.id === message.clientId)?.name || "another client";
+          pushNotice(`${who} resized the terminal to ${message.cols}×${message.rows}`, "info");
+        }
+        scheduleRender();
         break;
+      }
       case "session_ended": {
         shouldReconnect = false;
         // Attribute the kill unless we requested it ourselves; surface a

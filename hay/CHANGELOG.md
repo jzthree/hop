@@ -30,6 +30,9 @@
 
 ### Bug Fixes
 
+#### Tooling
+- **`hopx_agent_turn` no longer runs non-UI input twice**: in `readable_raw` mode (and `auto` resolving to it — i.e. a plain shell or any non-alternate-screen agent), a synchronous turn pre-sent the input and *then* sent it again via the combined send+wait, so a command driven through `hopx_agent_turn` executed twice. The pre-send is now done only for the paths that need it (the `ui` branch and async turns, which return before the combined call); non-UI synchronous turns let the single send+wait do the send. UI and async turns are unchanged.
+
 #### Session manager
 - **Workdir now shows the live directory, not the creation directory**: a session that's both running and saved had its working dir clobbered by the saved definition's cwd when the session list was assembled — so a session you'd `cd`'d into a subdir of (e.g. `~/Code/hop2`) showed its original dir (`~`) in the web/mobile session manager, even though the CLI status bar showed the right one. The live runtime cwd (the room's tracked `liveCwd`) now wins over the saved config cwd.
 

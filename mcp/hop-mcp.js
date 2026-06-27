@@ -4293,7 +4293,12 @@ class HopMCPServer {
           return { content: [{ type: 'text', text: `Error: ${parsedTerminateSend.error}` }], isError: true };
         }
       }
-    } else if (hasInputAction) {
+    } else if (hasInputAction && (selectedMode === 'ui' || shouldAsync)) {
+      // Pre-send (then wait separately) only for paths that DON'T fall through to
+      // the combined send+wait below: the ui branch and any async branch both
+      // return before that final handleSendAndWait. Non-ui synchronous turns must
+      // NOT pre-send here — the final handleSendAndWait does the send, so a
+      // pre-send would run the input twice (double-send).
       const sendOnly = await this.handleSendAndWait({
         terminal_id: requestedTerminalId,
         data,

@@ -580,6 +580,64 @@ function maxBottomTopOverlap(top, bottom) {
   return 0;
 }
 
+// --- Trajectory "digest" reduction (ported from ~/Code/agent_tools/agent_migration.py,
+// kept self-contained so hop has no dependency on that tool). The digest is the
+// reduced view a driver actually wants: per-turn User text + Assistant text + a
+// one-line summary of each tool call, with transcript noise dropped. ---
+
+// Injected/system text that isn't real conversation; turns whose user text starts
+// with one of these are dropped from the digest (agent_migration's noise list).
+const TRAJECTORY_NOISE_PREFIXES = [
+  '<task-notification>', '<turn_aborted>', '<local-command-caveat>',
+  '[Request interrupted', '<command-name>', '<system-reminder>',
+  '# AGENTS.md', '<INSTRUCTIONS>', '<local-command-stdout>',
+  'Automation:', '<subagent_notification>'
+];
+function isTrajectoryNoise(text) {
+  const t = (text || '').replace(/^\s+/, '');
+  return TRAJECTORY_NOISE_PREFIXES.some((p) => t.startsWith(p));
+}
+
+// One-line summary of a tool call (port of _summarize_tool_call): the bit that
+// drops "a lot of the details" — a Read/Edit/Write becomes just its path, a Bash
+// its command head, an MCP call its short name + first couple of args.
+function summarizeToolCall(block) {
+  const name = (block && typeof block.name === 'string') ? block.name : '?';
+  const inp = (block && block.input && typeof block.input === 'object') ? block.input : {};
+  const str = (v) => (v === undefined || v === null) ? '' : String(v);
+  switch (name) {
+    case 'Bash': return `[Bash] ${str(inp.command).slice(0, 120)}`;
+    case 'Read': return `[Read] ${str(inp.file_path) || '?'}`;
+    case 'Edit': return `[Edit] ${str(inp.file_path) || '?'}`;
+    case 'Write': return `[Write] ${str(inp.file_path) || '?'}`;
+    case 'Glob': return `[Glob] ${str(inp.pattern) || '?'}`;
+    case 'Grep': return `[Grep] ${str(inp.pattern) || '?'}`;
+    case 'Agent': return `[Agent] ${str(inp.prompt).slice(0, 80) || '?'}`;
+    default: {
+      const short = name.includes('__') ? name.split('__').pop() : name;
+      const args = Object.entries(inp).slice(0, 2).map(([k, v]) => `${k}=${str(v).slice(0, 30)}`).join(' ');
+      return `[${short}] ${args}`.slice(0, 120);
+    }
+  }
+}
+
+// Render one grouped turn ({ user, ts, assistantParts[], tools[] }) to text.
+function renderDigestTurn(turn) {
+  const lines = [];
+  if (turn.user !== null && turn.user !== undefined) {
+    lines.push(turn.ts ? `## User [${turn.ts}]` : '## User');
+    lines.push(turn.user);
+  }
+  const assistant = turn.assistantParts.join('\n').trim();
+  if (assistant) { lines.push('', '## Assistant', assistant); }
+  if (turn.tools && turn.tools.length) {
+    lines.push('', '### Actions');
+    for (const t of turn.tools) lines.push(`  ${t}`);
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 function extractToolErrorText(response) {
   if (!response || typeof response !== 'object') return 'Unknown error';
   const content = Array.isArray(response.content) ? response.content : [];
@@ -3141,15 +3199,15 @@ class HopMCPServer {
       },
       {
         name: 'hop_read_trajectory',
-        description: 'Read a Claude Code session\'s real conversation history from its on-disk transcript (resolved from the hop session name via the SessionStart hook record). Context-safe: returns compact, paginated summaries by default, never the raw transcript. Use this to see what an agent in a hop session has actually done — far more than the terminal frame shows for an alternate-screen TUI. Requires the transcript to be on the same host as the MCP.',
+        description: 'Read a Claude Code session\'s real conversation history from its on-disk transcript (resolved from the hop session name via the SessionStart hook record). Context-safe: returns a reduced digest by default (never the raw transcript). Use this to see what an agent in a hop session has actually done — far more than the terminal frame shows for an alternate-screen TUI. Gated by the same per-session agent permission as attaching (enable with hop_set_agent_permission). Requires the transcript to be on the same host as the MCP.',
         inputSchema: {
           type: 'object',
           properties: {
             name: { type: 'string', description: 'Hop session name (display name or internalName), e.g. "Lyra".' },
             mode: {
               type: 'string',
-              enum: ['summary', 'list', 'get', 'tail'],
-              description: 'summary (default): session metadata + counts + last few turns. list: paginated compact turn records (offset/limit). get: full content of one turn (index or uuid). tail: last N turns\' full text.'
+              enum: ['digest', 'summary', 'list', 'get', 'tail'],
+              description: 'digest (default): reduced conversation view — per-turn User text + Assistant text + one-line tool-call summaries, transcript noise dropped, most-recent turns within max_chars. summary: metadata + per-type counts + last few turns. list: paginated compact turn records (offset/limit). get: full content of one turn (index or uuid). tail: last N turns\' full text.'
             },
             offset: { type: 'number', description: 'For mode=list: turn offset (negative counts from the end; default: last `limit` turns).' },
             limit: { type: 'number', description: 'For mode=list (default 20) / tail (default 6): number of turns.' },
@@ -4052,16 +4110,34 @@ class HopMCPServer {
     if (!name || typeof name !== 'string') return { error: 'name is required' };
     let internalName = name;
     let cwd = null;
+    let matched = false;
+    let agentPermitted = false;
     try {
       const listed = await this.callApi('GET', '/api/sessions');
       if (listed && Array.isArray(listed.sessions)) {
         const match = listed.sessions.find((s) => s && (s.name === name || s.displayName === name || s.internalName === name));
         if (match) {
+          matched = true;
           internalName = match.internalName || match.name || name;
           cwd = typeof match.cwd === 'string' ? match.cwd : null;
+          agentPermitted = match.agentPermitted === true;
         }
       }
-    } catch { /* daemon unreachable -> fall back to name as internalName */ }
+    } catch { /* daemon unreachable -> cannot verify permission, deny below */ }
+
+    // Agent-permission gate: reading a session's transcript is gated by the SAME
+    // per-session permission as attaching to its terminal, so a driver can't read
+    // history it isn't allowed to drive. We must be able to confirm the permission
+    // from the live session list; if we can't (unknown session / daemon down), deny.
+    if (!matched) {
+      return { error: `Unknown hop session "${name}" (not in the session list, so access can't be verified).`, denied: true };
+    }
+    if (!agentPermitted) {
+      return {
+        error: `Agent access not permitted for "${name}". Enable with hop_set_agent_permission(name="${name}", allowed=true) or run 'hop session permit ${name}'.`,
+        denied: true
+      };
+    }
 
     let sessionId = null;
     if (/^[A-Za-z0-9_.-]+$/.test(internalName)) {
@@ -4155,6 +4231,8 @@ class HopMCPServer {
     const turns = [];
     const counts = {};
     const tailRing = [];
+    const digestTurns = [];
+    let curTurn = null;
     let getMatch = null;
     let lineCount = 0; let parseErrors = 0; let totalOutTokens = 0;
     let model = null; let title = null; let firstTs = null; let lastTs = null;
@@ -4206,6 +4284,24 @@ class HopMCPServer {
       };
       turns.push(rec);
 
+      if (mode === 'digest') {
+        // Group into User -> (Assistant text + tool one-liners) turns. A
+        // tool_result-only user line doesn't start a turn (it's dropped); it just
+        // doesn't interrupt the current one.
+        if (kind === 'user' && hasText) {
+          if (curTurn) digestTurns.push(curTurn);
+          curTurn = { user: summary.textParts.join('\n').trim(), ts: ts ? ts.slice(0, 19) : '', assistantParts: [], tools: [] };
+        } else if (kind === 'assistant') {
+          if (!curTurn) curTurn = { user: null, ts: ts ? ts.slice(0, 19) : '', assistantParts: [], tools: [] };
+          const atxt = summary.textParts.join('\n');
+          if (atxt.trim()) curTurn.assistantParts.push(atxt);
+          const content = (obj.message && Array.isArray(obj.message.content)) ? obj.message.content : [];
+          for (const b of content) {
+            if (b && typeof b === 'object' && b.type === 'tool_use') curTurn.tools.push(summarizeToolCall(b));
+          }
+        }
+      }
+
       if (mode === 'get') {
         const wantIndex = Number.isInteger(opts.index) ? opts.index : null;
         const wantUuid = typeof opts.uuid === 'string' ? opts.uuid : null;
@@ -4229,6 +4325,33 @@ class HopMCPServer {
       sourceInfo.ambiguous = true;
       sourceInfo.candidateCount = source.candidateCount;
       sourceInfo.warning = `No SessionStart-hook record for "${source.internalName}"; resolved by newest transcript in a cwd with ${source.candidateCount} transcripts, so this may be the wrong session. Install the hook (\`hop claude-hook install\`) for exact per-session mapping.`;
+    }
+
+    if (mode === 'digest') {
+      if (curTurn) digestTurns.push(curTurn);
+      const maxChars = Number.isFinite(opts.maxChars) ? Math.max(500, Math.floor(opts.maxChars)) : 8000;
+      // Drop turns whose user text is injected noise (system reminders, command
+      // echoes, task notifications, ...).
+      const kept = digestTurns.filter((t) => !(typeof t.user === 'string' && isTrajectoryNoise(t.user)));
+      // Budget recent-first: keep the most recent turns that fit (always >=1).
+      const budget = Math.max(400, Math.floor(maxChars * 0.9)); // headroom for header/JSON escaping
+      const blocks = [];
+      let total = 0;
+      for (let i = kept.length - 1; i >= 0; i--) {
+        const block = renderDigestTurn(kept[i]);
+        if (total + block.length > budget && blocks.length) break;
+        blocks.push(block);
+        total += block.length;
+      }
+      blocks.reverse();
+      const included = blocks.length;
+      return {
+        ok: true, helper: 'hop_read_trajectory', mode: 'digest', source: sourceInfo,
+        turnCountTotal: kept.length, turnsIncluded: included,
+        firstTs, lastTs, model, title: title || undefined,
+        ...(included < kept.length ? { truncated: true, hint: `Showing the ${included} most recent of ${kept.length} turns (max_chars=${maxChars}). Raise max_chars for more, or use mode="list"/"get" to navigate.` } : {}),
+        text: blocks.join('\n')
+      };
     }
 
     if (mode === 'list') {
@@ -4269,7 +4392,14 @@ class HopMCPServer {
     if (fits(payload)) return payload;
     payload.truncated = true;
     payload.hint = `Output exceeded max_chars=${maxChars}; narrow the query (smaller limit, a specific index/uuid via mode="get", or raise max_chars).`;
-    if (mode === 'get' && payload.turn) {
+    if (mode === 'digest' && typeof payload.text === 'string') {
+      // digest is already budgeted recent-first; if JSON overhead still pushes it
+      // over, trim from the FRONT so the most recent turns are kept.
+      while (!fits(payload) && payload.text.length > 200) {
+        payload.text = payload.text.slice(Math.floor(payload.text.length * 0.2));
+      }
+      payload.text = '…\n' + payload.text;
+    } else if (mode === 'get' && payload.turn) {
       if (payload.turn.toolUses) delete payload.turn.toolUses;
       if (!fits(payload) && payload.turn.toolResults) delete payload.turn.toolResults;
       while (!fits(payload) && typeof payload.turn.text === 'string' && payload.turn.text.length > 200) {
@@ -4293,10 +4423,11 @@ class HopMCPServer {
   async handleReadTrajectory(args) {
     const name = typeof args.name === 'string' ? args.name.trim() : '';
     if (!name) return { content: [{ type: 'text', text: 'Error: name is required.' }], isError: true };
-    const mode = ['summary', 'list', 'get', 'tail'].includes(args.mode) ? args.mode : 'summary';
+    const mode = ['digest', 'summary', 'list', 'get', 'tail'].includes(args.mode) ? args.mode : 'digest';
     const maxChars = Number.isFinite(args.max_chars) ? Math.max(500, Math.floor(args.max_chars)) : 8000;
     const opts = {
       mode,
+      maxChars,
       includeThinking: args.include_thinking === true,
       textOnly: args.text_only === true,
       offset: Number.isFinite(args.offset) ? Math.floor(args.offset) : undefined,

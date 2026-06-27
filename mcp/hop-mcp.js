@@ -29,6 +29,28 @@ const DEFAULT_HOPX_UI_WAIT_CAPTURE_MAX_EVENTS = 0;
 const DEFAULT_HOPX_TEXT_ONLY_READABLE = true;
 const DEFAULT_HOPX_UI_BUSY_GUARD_MAX_WAIT_MS = 12000;
 const DEFAULT_HOPX_UI_BUSY_GUARD_POLL_MS = 500;
+// How many consecutive idle reads the busy-line heuristic needs before it calls a
+// turn "done". One idle read can be a lull between an agent's bursts (thinking ->
+// tool call); requiring a short settle avoids that stale-idle false positive.
+// Only applies on the heuristic path; the Stop-hook turn counter stays
+// authoritative and needs no settle.
+const DEFAULT_HOPX_UI_SETTLE_CHECKS = 2;
+// Verified submit: after pressing Enter in a TUI composer, re-check that the box
+// actually cleared. A composer still holding our text means Enter was swallowed
+// (a known TUI race), so re-send it up to this many times before giving up.
+const DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES = 2;
+const DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS = 250;
+// Box-drawing characters that frame a TUI input box (rounded, square, and heavy
+// variants), plus the column separators. Used to locate the composer and to skip
+// border cells when scraping its contents.
+const COMPOSER_BORDER_CHARS = new Set([
+  '╭', '╮', '╰', '╯', '─', '│',
+  '┌', '┐', '└', '┘', '┃', '━', '┏', '┓', '┗', '┛'
+]);
+const COMPOSER_TOP_CORNER_CHARS = new Set(['╭', '┌', '┏']);
+const COMPOSER_BOTTOM_CORNER_CHARS = new Set(['╰', '└', '┗']);
+// Prompt glyphs Claude/other TUIs print at the start of the input line.
+const COMPOSER_PROMPT_CHARS = new Set(['>', '❯', '›', '▶', '⏵']);
 const HOPX_UI_BUSY_LINE_PATTERNS = [
   /\besc to (?:interrupt|cancel|stop)\b/i,
   /\bctrl\+c to (?:interrupt|cancel|stop)\b/i,
@@ -464,6 +486,23 @@ function extractUiBusyLine(uiPayload) {
     }
   }
   return null;
+}
+
+// Does the text still sitting in a composer look like the text we just tried to
+// submit? Used by verified-submit to tell a swallowed Enter (our prompt is still
+// in the box) from an unrelated box state (something else is there — leave it be).
+// Whitespace-insensitive, case-insensitive, and tolerant of a visually truncated
+// composer (compares a leading chunk when one side is shorter).
+function composerSharesContent(sent, composerText) {
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const a = norm(sent);
+  const b = norm(composerText);
+  if (!a || !b) return false;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  if (longer.includes(shorter)) return true;
+  const head = shorter.slice(0, Math.min(20, shorter.length));
+  return head.length >= 4 && longer.includes(head);
 }
 
 function extractToolErrorText(response) {
@@ -1868,6 +1907,123 @@ class TerminalStreamManager {
     };
   }
 
+  // Read the state of a TUI input box ("composer") from the live virtual screen,
+  // distinguishing text the user/agent actually typed from the dim ghost
+  // placeholder the app shows when the box is empty. The discriminator is the
+  // per-cell SGR dim attribute (cell.isDim()) rather than stripping \e[2m from a
+  // string, which sidesteps the color-payload ambiguity of attribute-blind scrapes.
+  //
+  // Strategy: scan the bottom of the viewport for a box-drawing frame
+  // (╭…╮ / ╰…╯). The rows between the corners are the composer body; within them
+  // we drop border cells, a leading prompt glyph (> / ❯), and any run of dim
+  // cells (the placeholder), and keep the rest as the real input `text`.
+  //
+  // Returns { available, found, strategy, text, ghost, isEmpty, boxTop, boxBottom }.
+  // found=false (with available=true) means no recognizable composer was on
+  // screen — callers must treat that as "cannot verify", never as "empty".
+  getComposerState(terminalId, options = {}) {
+    const state = this.streams.get(terminalId);
+    if (!state || !state.virtualScreen) {
+      return { available: false, found: false, reason: 'virtual screen unavailable' };
+    }
+    const buffer = state.virtualScreen.buffer.active;
+    const rows = state.rows;
+    const cols = state.cols;
+    const viewportStart = buffer.baseY;
+    const scanRows = Math.min(rows, Number.isFinite(options.scanRows) ? Math.max(1, Math.floor(options.scanRows)) : 16);
+    const firstScanRow = viewportStart + Math.max(0, rows - scanRows);
+    const lastRow = viewportStart + rows - 1;
+
+    const cell = buffer.getNullCell ? buffer.getNullCell() : undefined;
+    const firstChar = (row) => {
+      const line = buffer.getLine(row);
+      if (!line) return '';
+      const s = line.translateToString(true);
+      const trimmed = s.replace(/\s+$/, '');
+      const idx = trimmed.search(/\S/);
+      return idx < 0 ? '' : trimmed[idx];
+    };
+
+    // Find the bottom border first (search upward from the screen bottom), then
+    // the matching top border above it.
+    let boxBottom = -1;
+    for (let row = lastRow; row >= firstScanRow; row--) {
+      if (COMPOSER_BOTTOM_CORNER_CHARS.has(firstChar(row))) { boxBottom = row; break; }
+    }
+    let boxTop = -1;
+    if (boxBottom >= 0) {
+      for (let row = boxBottom - 1; row >= firstScanRow; row--) {
+        if (COMPOSER_TOP_CORNER_CHARS.has(firstChar(row))) { boxTop = row; break; }
+        // A second bottom corner before a top corner means we mis-paired; reset.
+        if (COMPOSER_BOTTOM_CORNER_CHARS.has(firstChar(row))) { boxBottom = row; }
+      }
+    }
+
+    const readBody = (rowStart, rowEnd) => {
+      let real = '';
+      let ghost = '';
+      let strippedPrompt = false;
+      for (let row = rowStart; row <= rowEnd; row++) {
+        const line = buffer.getLine(row);
+        if (!line) continue;
+        const lineLen = Math.min(cols, line.length);
+        let rowReal = '';
+        for (let x = 0; x < lineLen; x++) {
+          const c = line.getCell(x, cell);
+          if (!c) continue;
+          if (c.getWidth() === 0) continue; // trailing half of a wide glyph
+          const ch = c.getChars();
+          if (!ch) continue;
+          if (COMPOSER_BORDER_CHARS.has(ch)) continue; // box frame
+          // Strip a single leading prompt glyph at the very start of the body.
+          if (!strippedPrompt && COMPOSER_PROMPT_CHARS.has(ch) && rowReal.trim() === '' && real.trim() === '') {
+            strippedPrompt = true;
+            continue;
+          }
+          if (c.isDim()) { ghost += ch; continue; } // placeholder ghost text
+          rowReal += ch;
+        }
+        real += (real && rowReal.trim() ? ' ' : '') + rowReal;
+      }
+      return { real: real.replace(/\s+/g, ' ').trim(), ghost: ghost.replace(/\s+/g, ' ').trim() };
+    };
+
+    if (boxTop >= 0 && boxBottom > boxTop) {
+      const body = readBody(boxTop + 1, boxBottom - 1);
+      return {
+        available: true,
+        found: true,
+        strategy: 'box',
+        text: body.real,
+        ghost: body.ghost,
+        isEmpty: body.real.length === 0,
+        boxTop: boxTop - viewportStart,
+        boxBottom: boxBottom - viewportStart
+      };
+    }
+
+    // No frame: fall back to a prompt line near the bottom (legacy/narrow TUIs
+    // that draw `> ` without a box). Lower confidence — only used to read text,
+    // never as a hard "found a box" signal.
+    for (let row = lastRow; row >= firstScanRow; row--) {
+      if (COMPOSER_PROMPT_CHARS.has(firstChar(row))) {
+        const body = readBody(row, row);
+        return {
+          available: true,
+          found: true,
+          strategy: 'prompt',
+          text: body.real,
+          ghost: body.ghost,
+          isEmpty: body.real.length === 0,
+          boxTop: row - viewportStart,
+          boxBottom: row - viewportStart
+        };
+      }
+    }
+
+    return { available: true, found: false, strategy: 'none', text: '', ghost: '', isEmpty: false };
+  }
+
   startStream(baseUrl, token, actor, state) {
     state.connecting = true;
     state.closed = false;
@@ -2900,7 +3056,11 @@ class HopMCPServer {
             // helper schema for clarity. Use hop_wait_terminal for full control.
             uiMaxLines: { type: 'number', description: 'For mode=ui, max visible lines to include.' },
             includeRawTail: { type: 'boolean', description: 'For mode=ui, include raw output tail (default: false in hopx helper).' },
-            rawTailMaxEvents: { type: 'number', description: 'For mode=ui, max raw tail events.' }
+            rawTailMaxEvents: { type: 'number', description: 'For mode=ui, max raw tail events.' },
+            verify_submit: { type: 'boolean', description: 'For mode=ui: after data+Enter, confirm the composer cleared and re-send Enter if it was swallowed (default: true). Set false to disable.' },
+            verify_submit_retries: { type: 'number', description: 'Max Enter re-sends when verified submit detects a swallowed Enter (default: 2).' },
+            verify_submit_delay_ms: { type: 'number', description: 'Delay before each verified-submit composer re-check (default: 250).' },
+            settle_checks: { type: 'number', description: 'For the busy-line completion heuristic (no Stop-hook marker): consecutive idle reads required before declaring the turn done (default: 2). Ignored when the turn counter marker is authoritative.' }
           }
         }
       }
@@ -3764,6 +3924,90 @@ class HopMCPServer {
     }
   }
 
+  // Verified submit (firstmate lesson): pressing Enter at a TUI composer can be
+  // swallowed when the app isn't ready for input, leaving the prompt sitting
+  // unsent — the driver then waits forever for a turn that never started. After a
+  // send+Enter we re-read the composer (dim-ghost/border-aware, see
+  // getComposerState) and, if our text is still in the box, re-send Enter a
+  // bounded number of times. Only acts in TUI/alt-screen mode where a composer
+  // exists; degrades to a no-op (verified:false, reason:composer_not_found) when
+  // it can't see a box, so it never double-submits a plain shell.
+  async verifyHopxSubmitCleared(requestedTerminalId, streamTerminalId, sentData, opts = {}) {
+    const retries = Number.isInteger(opts.retries)
+      ? Math.max(0, opts.retries)
+      : DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES;
+    const delayMs = Number.isFinite(opts.delayMs)
+      ? Math.max(0, Math.floor(opts.delayMs))
+      : DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS;
+    let resends = 0;
+    let composer = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await this.streamManager.flushVirtualScreen(streamTerminalId);
+      composer = this.streamManager.getComposerState(streamTerminalId);
+      if (!composer || !composer.found) {
+        return { applied: true, verified: false, reason: 'composer_not_found', resends, composer: composer || null };
+      }
+      if (composer.isEmpty) {
+        return {
+          applied: true, verified: true,
+          reason: resends ? 'cleared_after_resend' : 'cleared',
+          resends, composer
+        };
+      }
+      if (!composerSharesContent(sentData, composer.text)) {
+        // The box holds something other than our un-submitted prompt; don't poke it.
+        return { applied: true, verified: false, reason: 'composer_has_other_text', resends, composer };
+      }
+      if (attempt === retries) break;
+      // Our prompt is still sitting in the composer → Enter was swallowed. Re-send.
+      const re = await this.handleSendAndWait({
+        terminal_id: requestedTerminalId,
+        press_enter: true,
+        wait: false
+      });
+      if (re.isError) {
+        return { applied: true, verified: false, reason: 'resend_failed', resends, composer };
+      }
+      resends += 1;
+    }
+    return { applied: true, verified: false, reason: 'still_present', resends, composer };
+  }
+
+  shouldVerifyHopxSubmit(args) {
+    return args.verify_submit !== false;
+  }
+
+  // Compact view of a waitForHopxUiNotBusy result for the wait payload's
+  // uiBusyGuard field: the three-state verdict plus the signals behind it.
+  summarizeUiBusyGuard(payload) {
+    if (!payload || typeof payload !== 'object') return { applied: true };
+    return {
+      applied: true,
+      state: payload.state || (payload.busy === true ? 'busy' : 'done'),
+      busy: payload.busy === true,
+      turnDone: payload.turnDone === true,
+      busyLine: payload.busyLine || null,
+      settledIdle: Number.isInteger(payload.settledIdle) ? payload.settledIdle : undefined,
+      composer: payload.composer || null,
+      checks: payload.checks,
+      waitedMs: payload.waitedMs
+    };
+  }
+
+  // Compact, response-friendly view of a verifyHopxSubmitCleared result: keep the
+  // verdict, the reason, and how many Enters it had to re-send; drop the bulky
+  // raw composer dump (callers that want it can read the composer directly).
+  summarizeSubmitVerification(v) {
+    if (!v || typeof v !== 'object') return null;
+    return {
+      applied: v.applied === true,
+      verified: v.verified === true,
+      reason: v.reason || null,
+      resends: Number.isInteger(v.resends) ? v.resends : 0
+    };
+  }
+
   async readHopxUiSnapshot(terminalId, uiMaxLines, rawTailMaxEvents, includeRawTail = false) {
     const uiRead = await this.handleReadTerminal({
       terminal_id: terminalId,
@@ -3802,6 +4046,20 @@ class HopMCPServer {
     const baselineProvided = Number.isInteger(args.baselineTurnCount);
     const baseline = baselineProvided ? args.baselineTurnCount : 0;
 
+    // Settle: on the heuristic path one idle read can be a lull between an agent's
+    // bursts. Require N consecutive idle reads before calling it done. The marker
+    // path is exact and needs no settle.
+    const settleChecks = Number.isInteger(args.settle_checks)
+      ? Math.max(1, args.settle_checks)
+      : DEFAULT_HOPX_UI_SETTLE_CHECKS;
+
+    const streamTerminalId = this.resolveTerminalAlias(requestedTerminalId);
+    const composerSummary = () => {
+      const c = this.streamManager.getComposerState(streamTerminalId);
+      if (!c) return null;
+      return { found: c.found === true, isEmpty: c.isEmpty === true, strategy: c.strategy || null };
+    };
+
     const startedAt = Date.now();
     const maxWaitMsInput = Number.isFinite(args.max_wait_ms)
       ? Math.max(0, Math.floor(args.max_wait_ms))
@@ -3810,6 +4068,8 @@ class HopMCPServer {
     let checks = 0;
     let lastBusyLine = null;
     let lastOutput = null;
+    let consecutiveIdle = 0;
+    let lastComposer = null;
 
     while (true) {
       // Authoritative path: the turn counter advanced → the turn is done.
@@ -3824,7 +4084,8 @@ class HopMCPServer {
           const out = snap.errorResponse ? lastOutput : snap.payload;
           return {
             payload: {
-              applied: true, busy: false, busyLine: null, turnDone: true,
+              applied: true, state: 'done', busy: false, busyLine: null, turnDone: true,
+              settledIdle: consecutiveIdle, composer: composerSummary(),
               checks: checks + 1, waitedMs: Date.now() - startedAt, output: out || lastOutput
             }
           };
@@ -3842,30 +4103,65 @@ class HopMCPServer {
       lastOutput = uiPayload;
       checks += 1;
       const busyLine = extractUiBusyLine(uiPayload);
+      lastComposer = composerSummary();
       // "Not busy" ends the wait only when the marker is NOT the source of truth.
       // When a marker is active we ignore an idle-looking screen and keep waiting
       // for the counter to advance (or for the guard budget to expire).
-      if (!busyLine && !markerActive) {
-        return {
-          payload: {
-            applied: true,
-            busy: false,
-            busyLine: null,
-            checks,
-            waitedMs: Date.now() - startedAt,
-            output: uiPayload
+      if (!markerActive) {
+        if (!busyLine) {
+          consecutiveIdle += 1;
+          // Settle confirmed: idle held across N consecutive reads → done.
+          if (consecutiveIdle >= settleChecks) {
+            return {
+              payload: {
+                applied: true,
+                state: 'done',
+                busy: false,
+                busyLine: null,
+                turnDone: false,
+                settledIdle: consecutiveIdle,
+                composer: lastComposer,
+                checks,
+                waitedMs: Date.now() - startedAt,
+                output: uiPayload
+              }
+            };
           }
-        };
+        } else {
+          consecutiveIdle = 0;
+        }
       }
       if (busyLine) lastBusyLine = busyLine;
 
       if (guardMaxWaitMs <= 0 || (Date.now() - startedAt) >= guardMaxWaitMs) {
+        // Three-state verdict at timeout. The marker (when active) is authoritative
+        // that the turn is NOT done → busy. Otherwise read the heuristic: a busy
+        // line right now means busy; pure-idle-but-under-settle leans done; a
+        // busy→idle flap we couldn't confirm is unknown.
+        let state;
+        let busy;
+        if (markerActive) {
+          state = 'busy';
+          busy = true;
+        } else if (consecutiveIdle >= 1 && !lastBusyLine) {
+          state = 'done';
+          busy = false;
+        } else if (consecutiveIdle === 0 && lastBusyLine) {
+          state = 'busy';
+          busy = true;
+        } else {
+          state = 'unknown';
+          busy = Boolean(lastBusyLine);
+        }
         return {
           payload: {
             applied: true,
-            busy: markerActive ? true : Boolean(lastBusyLine),
+            state,
+            busy,
             busyLine: lastBusyLine,
             turnDone: false,
+            settledIdle: consecutiveIdle,
+            composer: lastComposer,
             checks,
             waitedMs: Date.now() - startedAt,
             output: lastOutput
@@ -4015,6 +4311,25 @@ class HopMCPServer {
       sendOnlyPayload = parsedSend.payload;
     }
 
+    // Verified submit: in a TUI we just pressed Enter — confirm the composer
+    // actually cleared (re-send Enter if it was swallowed). Only meaningful in UI
+    // mode with an actual data+Enter submit; a no-op (and harmless) otherwise.
+    let submitVerification = null;
+    if (
+      selectedMode === 'ui'
+      && data
+      && pressEnter
+      && controlMode === 'send'
+      && this.shouldVerifyHopxSubmit(args)
+    ) {
+      submitVerification = await this.verifyHopxSubmitCleared(
+        requestedTerminalId,
+        terminalId,
+        data,
+        { retries: args.verify_submit_retries, delayMs: args.verify_submit_delay_ms }
+      );
+    }
+
     if (selectedMode === 'ui') {
       let waitPayload = null;
       if (shouldWait) {
@@ -4106,13 +4421,7 @@ class HopMCPServer {
         if (waitPayload && typeof waitPayload === 'object') {
           waitPayload = {
             ...waitPayload,
-            uiBusyGuard: {
-              applied: true,
-              busy: guardOutcome.payload.busy === true,
-              busyLine: guardOutcome.payload.busyLine || null,
-              checks: guardOutcome.payload.checks,
-              waitedMs: guardOutcome.payload.waitedMs
-            }
+            uiBusyGuard: this.summarizeUiBusyGuard(guardOutcome.payload)
           };
         }
       }
@@ -4122,7 +4431,8 @@ class HopMCPServer {
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
         wait: waitPayload,
-        output: outputPayload
+        output: outputPayload,
+        ...(submitVerification ? { submit: this.summarizeSubmitVerification(submitVerification) } : {})
       });
     }
 
@@ -4264,13 +4574,7 @@ class HopMCPServer {
           if (promotedPayload.wait && typeof promotedPayload.wait === 'object') {
             promotedPayload.wait = {
               ...promotedPayload.wait,
-              uiBusyGuard: {
-                applied: true,
-                busy: guardOutcome.payload.busy === true,
-                busyLine: guardOutcome.payload.busyLine || null,
-                checks: guardOutcome.payload.checks,
-                waitedMs: guardOutcome.payload.waitedMs
-              }
+              uiBusyGuard: this.summarizeUiBusyGuard(guardOutcome.payload)
             };
           }
         }
@@ -5072,7 +5376,21 @@ class HopMCPServer {
   }
 }
 
-new HopMCPServer().start().catch((err) => {
-  console.error('Hop MCP server failed to start:', err);
-  process.exit(1);
-});
+// Only boot the server when run directly (`node hop-mcp.js`). When required as a
+// module (tests), export the internals instead so the scrape/wait logic can be
+// exercised without standing up a stdio server.
+if (require.main === module) {
+  new HopMCPServer().start().catch((err) => {
+    console.error('Hop MCP server failed to start:', err);
+    process.exit(1);
+  });
+} else {
+  module.exports = {
+    HopMCPServer,
+    TerminalStreamManager,
+    extractUiBusyLine,
+    getBusyLinePatterns,
+    COMPOSER_BORDER_CHARS,
+    COMPOSER_PROMPT_CHARS
+  };
+}

@@ -3748,6 +3748,22 @@ class HopMCPServer {
     return true;
   }
 
+  // Read the per-turn completion counter the Claude Stop hook writes for a hop
+  // session (see scripts/claude-session-hook.js). Returns the integer count, or
+  // null when the marker is absent/unreadable (hook not installed, driving a
+  // non-Claude session, or no local filesystem access) — callers then fall back
+  // to the busy-line heuristic.
+  readTurnCount(internalName) {
+    if (!internalName || !/^[A-Za-z0-9_.-]+$/.test(internalName)) return null;
+    try {
+      const file = path.join(resolveHomeDir(), 'claude-sessions', `${internalName}.turn`);
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return data && Number.isInteger(data.count) ? data.count : null;
+    } catch {
+      return null;
+    }
+  }
+
   async readHopxUiSnapshot(terminalId, uiMaxLines, rawTailMaxEvents, includeRawTail = false) {
     const uiRead = await this.handleReadTerminal({
       terminal_id: terminalId,
@@ -3775,6 +3791,17 @@ class HopMCPServer {
       };
     }
 
+    // Deterministic turn-end via the Claude Stop hook (scripts/claude-session-hook.js):
+    // when a turn counter is in use for this session it is AUTHORITATIVE. The agent
+    // is done iff the count advanced past the baseline captured at send time; until
+    // then we keep waiting regardless of the busy-line heuristic (which can read a
+    // paused agent as idle). With no marker we fall back to the busy-line scrape.
+    const turnInternalName = typeof args.turnInternalName === 'string' && args.turnInternalName
+      ? args.turnInternalName
+      : null;
+    const baselineProvided = Number.isInteger(args.baselineTurnCount);
+    const baseline = baselineProvided ? args.baselineTurnCount : 0;
+
     const startedAt = Date.now();
     const maxWaitMsInput = Number.isFinite(args.max_wait_ms)
       ? Math.max(0, Math.floor(args.max_wait_ms))
@@ -3785,6 +3812,25 @@ class HopMCPServer {
     let lastOutput = null;
 
     while (true) {
+      // Authoritative path: the turn counter advanced → the turn is done.
+      let markerActive = false;
+      if (turnInternalName) {
+        const current = this.readTurnCount(turnInternalName);
+        markerActive = current !== null || baselineProvided;
+        if (current !== null && current > baseline) {
+          const snap = await this.readHopxUiSnapshot(
+            requestedTerminalId, args.uiMaxLines, args.rawTailMaxEvents, false
+          );
+          const out = snap.errorResponse ? lastOutput : snap.payload;
+          return {
+            payload: {
+              applied: true, busy: false, busyLine: null, turnDone: true,
+              checks: checks + 1, waitedMs: Date.now() - startedAt, output: out || lastOutput
+            }
+          };
+        }
+      }
+
       const uiOutcome = await this.readHopxUiSnapshot(
         requestedTerminalId,
         args.uiMaxLines,
@@ -3796,7 +3842,10 @@ class HopMCPServer {
       lastOutput = uiPayload;
       checks += 1;
       const busyLine = extractUiBusyLine(uiPayload);
-      if (!busyLine) {
+      // "Not busy" ends the wait only when the marker is NOT the source of truth.
+      // When a marker is active we ignore an idle-looking screen and keep waiting
+      // for the counter to advance (or for the guard budget to expire).
+      if (!busyLine && !markerActive) {
         return {
           payload: {
             applied: true,
@@ -3808,14 +3857,15 @@ class HopMCPServer {
           }
         };
       }
-      lastBusyLine = busyLine;
+      if (busyLine) lastBusyLine = busyLine;
 
       if (guardMaxWaitMs <= 0 || (Date.now() - startedAt) >= guardMaxWaitMs) {
         return {
           payload: {
             applied: true,
-            busy: true,
+            busy: markerActive ? true : Boolean(lastBusyLine),
             busyLine: lastBusyLine,
+            turnDone: false,
             checks,
             waitedMs: Date.now() - startedAt,
             output: lastOutput
@@ -3910,6 +3960,12 @@ class HopMCPServer {
     }
 
     let terminalId = await this.ensureTerminalReadyWithRecovery(requestedTerminalId);
+    // Capture the session's turn counter BEFORE sending, so the wait below can
+    // detect the Stop-hook bump that marks this turn's completion (authoritative
+    // when the hook is installed; falls back to the busy-line heuristic otherwise).
+    const turnHandle = this.getTerminalHandle(terminalId);
+    const turnInternalName = turnHandle ? (turnHandle.internalName || turnHandle.sessionName || null) : null;
+    const baselineTurnCount = this.readTurnCount(turnInternalName);
     let selectedMode = selectedModeInput;
     if (selectedMode === 'auto') {
       const flags = this.streamManager.getTerminalFlags(terminalId);
@@ -4031,7 +4087,9 @@ class HopMCPServer {
           terminal_id: requestedTerminalId,
           max_wait_ms: args.max_wait_ms,
           uiMaxLines: args.uiMaxLines,
-          rawTailMaxEvents: args.rawTailMaxEvents
+          rawTailMaxEvents: args.rawTailMaxEvents,
+          turnInternalName,
+          baselineTurnCount: baselineTurnCount === null ? undefined : baselineTurnCount
         });
         if (guardOutcome.errorResponse) return guardOutcome.errorResponse;
         outputPayload = guardOutcome.payload.output || outputPayload;

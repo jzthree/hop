@@ -8312,16 +8312,26 @@ async function attachToNamedSession(existingTunnel, displayName) {
     process.exit(code || 0);
 }
 
-async function attachToSessionForDir(existingTunnel) {
+// `hop attach` with no name: attach to a session that has no client connected.
+// Prefer one matching the current directory, else the most recently active. If
+// every session is already attached, say so and list them (attach by name to
+// co-view, or start a new one with `hop`).
+async function attachToUnattachedSession(existingTunnel) {
     const sessionsRes = await fetchSessionList(existingTunnel);
-    const sessions = sessionsRes.sessions || [];
-    const cwdName = getCwdSessionBaseName();
-    const target = pickSessionForCwd(sessions, process.cwd(), cwdName);
-    if (!target) {
-        log(`No existing session for ${cwdName}.`, RED);
+    const live = (sessionsRes.sessions || []).filter(
+        (s) => s && s.type !== 'port' && s.live && typeof s.displayName === 'string'
+    );
+    const unattached = live.filter((s) => !s.attached);
+    if (unattached.length === 0) {
+        log(`No unattached session.`, YELLOW);
         printAvailableSessionNames(sessionsRes);
-        process.exit(1);
+        log(`Or start a new session with ${CYAN}hop${RESET}.`, RESET);
+        process.exit(0);
     }
+    const cwdName = getCwdSessionBaseName();
+    const matched = pickSessionForCwd(unattached, process.cwd(), cwdName, { requireNoLocalCli: false });
+    const target = matched
+        || unattached.slice().sort((a, b) => (Number(b.lastActivityAt) || 0) - (Number(a.lastActivityAt) || 0))[0];
     return attachToNamedSession(existingTunnel, target.displayName);
 }
 
@@ -8650,7 +8660,7 @@ async function main() {
         if (displayName) {
             await attachToNamedSession(existing, displayName);
         } else {
-            await attachToSessionForDir(existing);
+            await attachToUnattachedSession(existing);
         }
         return;
     }
@@ -8959,11 +8969,12 @@ async function main() {
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
-        log(`  hop                       Start tunnel if needed, then attach (reuses this dir's session)`, RESET);
-        log(`  hop new                   Like hop, but always start a fresh session for this dir`, RESET);
+        log(`  hop                       Start tunnel if needed, then start a NEW session`, RESET);
+        log(`  hop new                   Alias for hop (start a new session)`, RESET);
+        log(`  hop attach                Attach to an unattached session (lists sessions if none are free)`, RESET);
+        log(`  hop attach <name>         Attach to a session by name`, RESET);
+        log(`  hop attach all            Attach to every session in turn`, RESET);
         log(`  hop start                 Start hop daemon and print QR codes`, RESET);
-        log(`  hop attach [session]      Attach to an existing session`, RESET);
-        log(`  hop attach all            Attach sequentially to all sessions`, RESET);
         log(`  hop local [session]       Start daemonless local terminal ([session] attaches if present)`, RESET);
         log(`  hop stop                  Stop hop daemon (terminal sessions keep running)`, RESET);
         log(`  hop stop --all            Stop daemon, hay-host, and all terminal sessions`, RESET);
@@ -10174,13 +10185,9 @@ async function main() {
         process.exit(0);
     }
 
-    // `hop new` / `hop --new` force a brand-new session instead of reusing an
-    // existing one for this directory.
-    const forceNew = process.argv[2] === 'new' || process.argv.includes('--new');
-
-    // Every known command returned or exited above; anything else here is a typo.
-    // Only bare `hop` (or `new`/`--new`, or the internal --daemon flag) reaches
-    // the default flow.
+    // The default flow always starts a NEW session: bare `hop`, `hop new`, and
+    // `hop --new` are equivalent. To reuse a running session, use `hop attach`.
+    // (`new`/`--new` pass the typo gate below as explicit aliases.)
     if (process.argv[2] && process.argv[2] !== '--daemon' && process.argv[2] !== 'new' && process.argv[2] !== '--new') {
         const badCommand = process.argv[2];
         log(`Unknown command: ${badCommand}`, RED);
@@ -10198,7 +10205,7 @@ async function main() {
     if (!DAEMON_FLAG) {
         const existingTunnel = isServerRunning();
         if (existingTunnel) {
-            await attachToExistingTunnel(existingTunnel, { forceNew });
+            await attachToExistingTunnel(existingTunnel, { forceNew: true });
             return;
         }
 
@@ -10211,7 +10218,7 @@ async function main() {
         const label = domainConfig?.hostname ? `Hop-${domainConfig.hostname}` : 'Hop';
         loadAuthSecret();
         await waitForStartPolling(state, label);
-        await attachToExistingTunnel(state, { forceNew });
+        await attachToExistingTunnel(state, { forceNew: true });
         return;
     }
 

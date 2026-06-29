@@ -343,6 +343,12 @@ const App = () => {
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
   const userScrolledUpRef = useRef(false);
+  // Whether the remote app is on the alternate screen (vim/less/Claude fullscreen).
+  // Seeded from the server snapshot (message.alternateScreen) and kept live via the
+  // xterm ?h/?l CSI handlers below. The alt-screen buffer has no scrollback, so a
+  // local viewport scroll is a no-op there — touch scrolling must instead send the
+  // app its own scroll keys (PageUp/PageDown). See the mobile touch handler.
+  const remoteAltScreenRef = useRef(false);
   const lastDropToastRef = useRef(0);
   const activeSessionRoomRef = useRef<string | null>(null);
   const sessionListLoadedRef = useRef(false);
@@ -735,6 +741,12 @@ const App = () => {
             termRef.current.reset();
           }
           writeToTerminal(message.data);
+          // Seed alt-screen state from the snapshot: reset() above cleared xterm's
+          // modes, and the rendered snapshot doesn't re-emit the DECSET that the
+          // live ?h/?l handlers would catch, so the server's flag is the only signal.
+          if (typeof message.alternateScreen === "boolean") {
+            remoteAltScreenRef.current = message.alternateScreen;
+          }
           if (termRef.current) {
             // Respect cursor visibility state after snapshot restore.
             if (typeof message.cursorHidden === "boolean") {
@@ -874,6 +886,22 @@ const App = () => {
     // ESC[I = Focus In, ESC[O = Focus Out
     terminal.parser.registerCsiHandler({ final: 'I' }, () => true);
     terminal.parser.registerCsiHandler({ final: 'O' }, () => true);
+
+    // Track the remote's alternate-screen state live so touch scrolling knows
+    // whether to scroll the local viewport or send the app its own scroll keys.
+    // ESC[?47h / ESC[?1047h / ESC[?1049h enter alt-screen; the `l` variants exit.
+    // We only observe (update the ref) and return false so xterm still applies the
+    // mode itself (switching buffers). Params can carry sub-params (number[]).
+    const ALT_SCREEN_PARAMS = new Set([47, 1047, 1049]);
+    const trackAltScreen = (params: (number | number[])[], enabled: boolean) => {
+      for (const p of params) {
+        const n = Array.isArray(p) ? p[0] : p;
+        if (ALT_SCREEN_PARAMS.has(n)) remoteAltScreenRef.current = enabled;
+      }
+      return false; // let xterm's default handler apply the mode
+    };
+    terminal.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => trackAltScreen(params, true));
+    terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => trackAltScreen(params, false));
 
     setTerminalReady(true);
 
@@ -1141,6 +1169,18 @@ const App = () => {
       return cellHeight && cellHeight > 0 ? cellHeight : 18;
     };
 
+    // Alt-screen scroll: the alternate buffer has no scrollback, so touch-dragging
+    // can't move a local viewport. Instead send the app its own paging keys.
+    // Claude Code (fullscreen) scrolls its transcript on PageUp/PageDown; this also
+    // covers pagers like less/man. One page key is emitted per this many lines of
+    // finger drag (kept modest so a normal swipe pages a few times, not dozens).
+    const PAGE_UP_KEY = "\x1b[5~";
+    const PAGE_DOWN_KEY = "\x1b[6~";
+    const ALT_SCREEN_DRAG_LINES_PER_PAGE = 3;
+    const sendScrollKey = (seq: string) => {
+      sendMessage({ type: "input", data: seq });
+    };
+
     const getTwoFingerCenter = (touches: TouchList) => {
       const x = (touches[0].clientX + touches[1].clientX) / 2;
       const y = (touches[0].clientY + touches[1].clientY) / 2;
@@ -1255,12 +1295,26 @@ const App = () => {
       }
 
       e.preventDefault();
-      // Accumulate scroll and apply whole lines
+      // Accumulate scroll; deltaY > 0 = finger up = scroll toward newer/bottom.
       scrollDebt += deltaY;
-      const lines = Math.trunc(scrollDebt / getCellHeight());
-      if (lines !== 0) {
-        terminal.scrollLines(lines);
-        scrollDebt -= lines * getCellHeight();
+
+      if (remoteAltScreenRef.current) {
+        // Alt-screen app: drive its own paging keys instead of the (no-op) local
+        // viewport scroll. pages > 0 → scroll down (PageDown); < 0 → up (PageUp).
+        const pagePx = getCellHeight() * ALT_SCREEN_DRAG_LINES_PER_PAGE;
+        const pages = Math.trunc(scrollDebt / pagePx);
+        if (pages !== 0) {
+          const key = pages > 0 ? PAGE_DOWN_KEY : PAGE_UP_KEY;
+          for (let i = 0; i < Math.abs(pages); i++) sendScrollKey(key);
+          scrollDebt -= pages * pagePx;
+        }
+      } else {
+        // Normal screen: scroll the local xterm viewport (whole lines).
+        const lines = Math.trunc(scrollDebt / getCellHeight());
+        if (lines !== 0) {
+          terminal.scrollLines(lines);
+          scrollDebt -= lines * getCellHeight();
+        }
       }
 
       lastY = touchY;
@@ -1273,8 +1327,10 @@ const App = () => {
         return;
       }
 
-      // Only apply momentum if we were scrolling vertically
-      if (isScrolling && velocitySamples.length > 0) {
+      // Only apply momentum if we were scrolling vertically. Skip it on the
+      // alternate screen: there's no local viewport to coast, and we don't want a
+      // flick to fire a burst of page keys at the remote app.
+      if (isScrolling && velocitySamples.length > 0 && !remoteAltScreenRef.current) {
         // Use peak velocity (max absolute value) - users often slow down at end of flick
         // but we want to capture their flick intent, not their stopping motion
         let peakVelocity = 0;

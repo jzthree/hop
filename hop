@@ -560,6 +560,9 @@ function deleteSessionConfig(name) {
     delete sessionStore.sessions[name];
     removeSessionFromOrder(name);
     saveSessionStore();
+    // A deleted session should not be resurrected by `hop restore`, so drop its
+    // SessionStart-hook record too. (Defined later; hoisted.)
+    removeClaudeSessionRecord(name);
 }
 
 function getSessionDisplayName(name) {
@@ -3491,6 +3494,32 @@ function readClaudeSessionRecord(internalName) {
     }
 }
 
+// The SessionStart hook writes one record per hop session, so the set of these
+// files is itself a durable, crash-surviving list of what to restore — it does
+// not depend on the workspace-scoped session store (which is dormant unless a
+// workspace is active). Each is `{ internalName, sessionId, cwd }`.
+function listClaudeSessionRecords() {
+    let files = [];
+    try { files = fs.readdirSync(CLAUDE_SESSIONS_DIR).filter((f) => f.endsWith('.json')); }
+    catch (e) { return []; }
+    const out = [];
+    for (const f of files) {
+        const internalName = f.slice(0, -'.json'.length);
+        const rec = readClaudeSessionRecord(internalName);
+        if (rec) out.push({ internalName, ...rec });
+    }
+    return out;
+}
+
+// Drop a session's hook record (+ turn counter) so a deleted session is not
+// resurrected by `hop restore`.
+function removeClaudeSessionRecord(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
+    for (const ext of ['.json', '.turn']) {
+        try { fs.unlinkSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}${ext}`)); } catch (e) { /* best effort */ }
+    }
+}
+
 // Compute how to relaunch a session: the command to run (if any) and the cwd to
 // start the shell in. For a claude session we use the cwd recorded by the hook
 // (where claude started), since `claude --resume` resolves the conversation from
@@ -3510,6 +3539,26 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
     const snapshot = await listAllSessionEntriesRuntimeFirst();
     const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
     const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !live.has(e.internalName));
+    // Primary source: the SessionStart-hook records. Add any recorded session that
+    // isn't already live or covered by the store, so restore works even though the
+    // workspace store is empty. restorePlanForSession() reads each record and turns
+    // it into `claude --resume <sessionId>`.
+    const known = new Set(candidates.map((e) => e.internalName));
+    for (const rec of listClaudeSessionRecords()) {
+        if (live.has(rec.internalName) || known.has(rec.internalName)) continue;
+        known.add(rec.internalName);
+        candidates.push({
+            internalName: rec.internalName,
+            displayName: getSessionDisplayName(rec.internalName) || toDisplaySessionName(rec.internalName),
+            type: 'terminal',
+            cwd: rec.cwd,
+            cols: 140,
+            rows: 40,
+            createdBy: 'user',
+            agentPermitted: false,
+            folderId: null
+        });
+    }
     const planned = candidates.map((e) => {
         const plan = restorePlanForSession(e);
         return {
@@ -8767,10 +8816,17 @@ async function main() {
     // Handle `hop restore` - recreate saved sessions, resuming claude conversations
     if (process.argv[2] === 'restore') {
         const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
-        const state = isServerRunning();
+        let state = isServerRunning();
         if (!state) {
-            log(`Hop is not running. Start it with ${CYAN}hop${RESET} first.`, RED);
-            process.exit(1);
+            // Start the daemon on demand so `hop restore` is a one-command recovery
+            // after a reboot (no need to run `hop` first).
+            if (dryRun) {
+                log(`Hop is not running. Start it with ${CYAN}hop${RESET} first (or run without --dry-run to start it).`, RED);
+                process.exit(1);
+            }
+            log(`Hop is not running — starting it…`, DIM);
+            startDaemon();
+            state = await waitForDaemonReady();
         }
         let res;
         try {

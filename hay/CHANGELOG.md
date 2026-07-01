@@ -32,7 +32,8 @@
 
 ### Bug Fixes
 
-#### Tooling
+#### Session restore
+- **`hop restore` actually restores now (Claude conversations included), from the SessionStart-hook records**: restore built its candidate list from the workspace-scoped session store, which is only populated when a workspace is active — and no workspace is ever activated in normal use, so `restore` found nothing and silently restored zero sessions. It now sources candidates directly from the durable per-session records the SessionStart hook writes (`~/.hop2/claude-sessions/<name>.json` = `{ sessionId, cwd }`), which survive a crash/reboot and carry the exact conversation id. So after a restart, `hop restore` recreates each session in its directory and resumes its Claude conversation with `claude --resume <id>` — no manual capture step. Sessions already live are skipped (idempotent), and `hop restore` now starts the daemon itself if it isn't running, so post-reboot recovery is a single command. `--dry-run` previews the plan. Records are pruned when a session is deleted, so restore never resurrects a session you intentionally closed (and if an unwanted one does come back, deleting it once keeps it gone).
 - **`hopx_agent_turn` no longer runs non-UI input twice**: in `readable_raw` mode (and `auto` resolving to it — i.e. a plain shell or any non-alternate-screen agent), a synchronous turn pre-sent the input and *then* sent it again via the combined send+wait, so a command driven through `hopx_agent_turn` executed twice. The pre-send is now done only for the paths that need it (the `ui` branch and async turns, which return before the combined call); non-UI synchronous turns let the single send+wait do the send. UI and async turns are unchanged.
 
 #### Session manager

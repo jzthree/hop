@@ -498,6 +498,91 @@ button.primary {
   filter: brightness(0.9);
 }
 
+.quick-btn.danger {
+  color: var(--err) !important;
+  border-color: color-mix(in srgb, var(--err) 35%, transparent) !important;
+}
+
+/* Inline editors (display name, rename, new session) */
+.inline-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.inline-edit input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg-alt);
+  color: var(--ink);
+}
+
+.inline-edit input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.inline-edit button {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.name-edit-toggle {
+  font-size: 12px;
+  color: var(--ink-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  text-align: right;
+}
+
+.name-edit-toggle:hover {
+  color: var(--ink);
+}
+
+.room-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.room-title-row h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-btn-inline {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.icon-btn-inline:hover {
+  color: var(--ink);
+  background: var(--bg-alt);
+}
+
 .drawer-group {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1670,6 +1755,66 @@ button.primary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Attention indicators: bell = the app asked for attention (pulses);
+   output = new output since this client last viewed the session. */
+.attention-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+  flex-shrink: 0;
+}
+
+.attention-dot.output {
+  background: var(--warn);
+}
+
+.attention-dot.bell {
+  background: var(--err);
+  animation: attention-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes attention-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.fab-attention {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--warn);
+  border: 2px solid var(--bg);
+}
+
+.fab-attention.bell {
+  background: var(--err);
+  animation: attention-pulse 1.6s ease-in-out infinite;
+}
+
+.session-switcher-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.session-switcher-head .session-switcher-label {
+  margin: 0;
+}
+
+/* Disconnected/ended: dim the terminal so a dead session doesn't look idle */
+.terminal.degraded .terminal-scroll {
+  opacity: 0.55;
+  filter: saturate(0.5);
+  transition: opacity 0.3s ease, filter 0.3s ease;
 }
 
 .session-list-cwd {

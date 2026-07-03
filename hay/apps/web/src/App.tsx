@@ -180,26 +180,62 @@ type SessionInfo = {
   type?: "terminal" | "port";
   port?: number;
   cwd?: string;
+  internalName?: string;
+  lastActivityAt?: number;
+  bellSeq?: number;
+  // Computed against the local seen-markers: new output / an unseen bell since
+  // this client last viewed the session.
+  unread?: boolean;
+  bellUnseen?: boolean;
 };
 
 // Check if embedded in Hop
-const getHopSession = () => (window as unknown as { __HOP_SESSION__?: { room?: string; wsUrl?: string } }).__HOP_SESSION__;
+const getHopSession = () =>
+  (window as unknown as { __HOP_SESSION__?: { room?: string; wsUrl?: string; name?: string } }).__HOP_SESSION__;
 const isEmbeddedInHop = () => !!getHopSession()?.room;
 
+// Display name resolution: an explicit ?name= wins, then the name the user set
+// on this device, then the login identity hop injects (never the legacy
+// "Guest" placeholder), then a generic fallback.
+const resolveInitialName = () => {
+  const fromParams = new URLSearchParams(window.location.search).get("name");
+  const stored = localStorage.getItem("hay_name");
+  const injected = getHopSession()?.name;
+  return fromParams ?? stored ?? (injected && injected !== "Guest" ? injected : null) ?? "User";
+};
+
+// Per-session "seen" markers, shared with the session manager page via
+// localStorage (same origin). Keyed by internal session name; values are the
+// server's own lastActivityAt/bellSeq so no cross-device clock comparison
+// ever happens.
+type SeenMarker = { out: number; bell: number };
+const SEEN_MARKERS_KEY = "hop_session_seen_v1";
+const loadSeenMarkers = (): Record<string, SeenMarker> => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SEEN_MARKERS_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+const saveSeenMarkers = (markers: Record<string, SeenMarker>) => {
+  try {
+    localStorage.setItem(SEEN_MARKERS_KEY, JSON.stringify(markers));
+  } catch {
+    /* quota/private mode — indicators just stay baseline */
+  }
+};
+
 const App = () => {
-  const params = new URLSearchParams(window.location.search);
   const hopSession = getHopSession();
   const initialRoom = hopSession?.room ?? getLocationRoom() ?? createRoomId();
 
-  const [name, setName] = useState(() => {
-    return params.get("name") ?? localStorage.getItem("hay_name") ?? "User";
-  });
+  const [name, setName] = useState(() => resolveInitialName());
   const [room, setRoom] = useState(() => initialRoom);
   // Auto-start session when embedded in Hop (skip join page)
   const [session, setSession] = useState<{ name: string; room: string } | null>(() => {
     if (hopSession?.room) {
-      const userName = params.get("name") ?? localStorage.getItem("hay_name") ?? "User";
-      return { name: userName, room: initialRoom };
+      return { name: resolveInitialName(), room: initialRoom };
     }
     return null;
   });
@@ -245,6 +281,15 @@ const App = () => {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [sessionsError, setSessionsError] = useState(false);
+  // Attention plumbing: tab-title alert for a bell in the attached session
+  // while the tab is hidden; inline editors for display name / rename / create.
+  const [titleAlert, setTitleAlert] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [renamingSession, setRenamingSession] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [newSessionName, setNewSessionName] = useState("");
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
     const saved = localStorage.getItem("hay_session_switch_mode");
     // Keep "page" as a legacy fallback while we validate instant mode end-to-end.
@@ -886,6 +931,14 @@ const App = () => {
     // ESC[I = Focus In, ESC[O = Focus Out
     terminal.parser.registerCsiHandler({ final: 'I' }, () => true);
     terminal.parser.registerCsiHandler({ final: 'O' }, () => true);
+
+    // A bell in the attached session while the tab is hidden marks the title
+    // so the user can spot "my agent finished/asked something" from another tab.
+    terminal.onBell(() => {
+      if (document.hidden) {
+        setTitleAlert(true);
+      }
+    });
 
     // Track the remote's alternate-screen state live so touch scrolling knows
     // whether to scroll the local viewport or send the app its own scroll keys.
@@ -1537,7 +1590,10 @@ const App = () => {
           starting: (data.starting || []).includes(s.name),
           type: s.type,
           port: s.port,
-          cwd: s.cwd
+          cwd: s.cwd,
+          internalName: s.internalName || s.name,
+          lastActivityAt: Number(s.lastActivityAt) || 0,
+          bellSeq: Number(s.bellSeq) || 0
         });
       }
 
@@ -1548,12 +1604,55 @@ const App = () => {
             name,
             displayName: name,
             active: true,
-            starting: false
+            starting: false,
+            internalName: name
           });
         }
       }
 
-      setSessions(Array.from(sessionMap.values()));
+      // Reconcile seen-markers: a session first observed gets a silent baseline
+      // (no retroactive "unread" noise); the attached session, while the tab is
+      // visible, is continuously marked seen. Everything else diffs the server's
+      // lastActivityAt/bellSeq against the marker to derive the indicators.
+      const markers = loadSeenMarkers();
+      const currentRoom = activeSessionRoomRef.current;
+      const tabVisible = document.visibilityState === "visible";
+      let markersDirty = false;
+      const list = Array.from(sessionMap.values()).map((info) => {
+        const key = info.internalName || info.name;
+        const out = info.lastActivityAt || 0;
+        const bell = info.bellSeq || 0;
+        const isCurrent = currentRoom !== null && (info.internalName === currentRoom || info.name === currentRoom);
+        let marker = markers[key];
+        if (!marker) {
+          marker = { out, bell };
+          markers[key] = marker;
+          markersDirty = true;
+        } else if (isCurrent && tabVisible && (marker.out !== out || marker.bell !== bell)) {
+          marker = { out, bell };
+          markers[key] = marker;
+          markersDirty = true;
+        }
+        return {
+          ...info,
+          unread: !isCurrent && out > marker.out,
+          bellUnseen: !isCurrent && bell > marker.bell
+        };
+      });
+      if (list.length > 0) {
+        const liveKeys = new Set(list.map((info) => info.internalName || info.name));
+        for (const key of Object.keys(markers)) {
+          if (!liveKeys.has(key)) {
+            delete markers[key];
+            markersDirty = true;
+          }
+        }
+      }
+      if (markersDirty) {
+        saveSeenMarkers(markers);
+      }
+
+      setSessions(list);
       setSessionsError(false);
       sessionListLoadedRef.current = true;
       sessionListFetchedAtRef.current = Date.now();
@@ -1584,6 +1683,51 @@ const App = () => {
   useEffect(() => {
     fetchSessions();
   }, [fetchSessions]);
+
+  // Keep the list fresh while attached so attention indicators (unread output,
+  // bells in other sessions) update without opening the drawer. Background tabs
+  // get throttled by the browser, which is fine — the check runs on refocus too.
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+    const id = window.setInterval(() => fetchSessions({ showLoading: false }), 5000);
+    return () => window.clearInterval(id);
+  }, [session, fetchSessions]);
+
+  // Returning to the tab clears the title alert and re-baselines the attached
+  // session's seen marker (via the fetch's isCurrent+visible path).
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        setTitleAlert(false);
+        fetchSessions({ showLoading: false });
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [fetchSessions]);
+
+  // Does any *other* session want attention? Bells outrank plain output.
+  const otherAttention = useMemo(() => {
+    const current = session?.room ?? null;
+    let bell = false;
+    let output = false;
+    for (const s of sessions) {
+      if (current && (s.internalName === current || s.name === current)) continue;
+      if (s.bellUnseen) bell = true;
+      else if (s.unread) output = true;
+    }
+    return { bell, output };
+  }, [sessions, session?.room]);
+
+  // Tab title: session name, with a dot when the attached session rang a bell
+  // while hidden or another session has an unseen bell.
+  useEffect(() => {
+    const base = sessionLabel || session?.room || "hop";
+    const alert = titleAlert || otherAttention.bell;
+    document.title = `${alert ? "● " : ""}${base}`;
+  }, [titleAlert, otherAttention.bell, sessionLabel, session?.room]);
 
   // Update terminal font size when it changes
   useEffect(() => {
@@ -1621,6 +1765,14 @@ const App = () => {
     const currentRoom = session?.room ?? sessionLabel;
     const canSwitchInPlace = sessionSwitchMode === "instant" && nextSession.type !== "port";
 
+    // Switching to it counts as seeing it — clear its attention indicators.
+    const markers = loadSeenMarkers();
+    markers[nextSession.internalName || nextSession.name] = {
+      out: nextSession.lastActivityAt || 0,
+      bell: nextSession.bellSeq || 0
+    };
+    saveSeenMarkers(markers);
+
     if (!canSwitchInPlace) {
       window.location.href = nextPath;
       return;
@@ -1655,6 +1807,91 @@ const App = () => {
     }
     localStorage.setItem("hay_name", name.trim());
     setSession({ name: name.trim(), room: room.trim() });
+  };
+
+  const submitName = (event: FormEvent) => {
+    event.preventDefault();
+    const next = nameDraft.trim();
+    setEditingName(false);
+    if (!next || next === name) {
+      return;
+    }
+    localStorage.setItem("hay_name", next);
+    setName(next);
+    // A new session object triggers the connect effect — the socket reconnects
+    // carrying the new name, so presence updates for everyone.
+    setSession((current) => (current ? { ...current, name: next } : current));
+    pushNotice(`Display name set to ${next}`);
+  };
+
+  const submitRename = async (event: FormEvent) => {
+    event.preventDefault();
+    const next = renameDraft.trim();
+    const current = sessionLabel || session?.room || "";
+    if (!next || next === current) {
+      setRenamingSession(false);
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(next)) {
+      pushNotice("Only letters, numbers, - and _ allowed");
+      return;
+    }
+    try {
+      const res = await fetch("/api/sessions/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ oldName: current, newName: next })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({} as { error?: string }));
+        pushNotice(data.error || "Rename failed");
+        return;
+      }
+      // The server broadcasts session_renamed, which updates the label.
+      setRenamingSession(false);
+      fetchSessions({ showLoading: false });
+    } catch {
+      pushNotice("Rename failed");
+    }
+  };
+
+  const handleKillSession = () => {
+    const label = sessionLabel || session?.room || "this session";
+    if (!window.confirm(`Kill session "${label}" for all participants? Its running process is terminated.`)) {
+      return;
+    }
+    sendMessage({ type: "kill_session" });
+    setDrawerOpen(false);
+  };
+
+  const submitNewSession = async (event: FormEvent) => {
+    event.preventDefault();
+    const next = newSessionName.trim();
+    if (!next) {
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(next)) {
+      pushNotice("Only letters, numbers, - and _ allowed");
+      return;
+    }
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: next, type: "terminal", port: null })
+      });
+      const data = await res.json().catch(() => ({} as { name?: string; error?: string }));
+      if (!res.ok || !data.name) {
+        pushNotice(data.error || "Failed to create session");
+        return;
+      }
+      setCreatingSession(false);
+      setNewSessionName("");
+      switchSession({ name: data.name, displayName: data.name, active: false, starting: true, internalName: data.name });
+      fetchSessions({ showLoading: false });
+    } catch {
+      pushNotice("Failed to create session");
+    }
   };
 
   const handleCopyLink = async () => {
@@ -1795,8 +2032,9 @@ const App = () => {
           className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}`}
           style={sessionStyle}
         >
-          {/* Mobile: footer is hidden, so surface connection state in a fixed top banner */}
-          {isMobile && status !== "connected" && status !== "idle" && (
+          {/* Connection state banner — on mobile the footer is hidden, and on
+              desktop the footer dot alone is too easy to miss during an outage. */}
+          {status !== "connected" && status !== "idle" && (
             <div
               className={`connection-banner${status === "ended" ? " ended" : ""}`}
               role="status"
@@ -1834,6 +2072,9 @@ const App = () => {
               <line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2" fill="currentColor"/>
               <line x1="4" y1="18" x2="20" y2="18"/><circle cx="11" cy="18" r="2" fill="currentColor"/>
             </svg>
+            {(otherAttention.bell || otherAttention.output) && (
+              <span className={`fab-attention${otherAttention.bell ? " bell" : ""}`} aria-hidden="true" />
+            )}
           </button>
           {drawerOpen && (
             <div className="drawer-overlay" onClick={() => setDrawerOpen(false)} />
@@ -1850,7 +2091,37 @@ const App = () => {
             {/* Session info */}
             <div className="room-info">
               <p className="room-label">Session</p>
-              <h2>{sessionLabel || session.room}</h2>
+              {renamingSession ? (
+                <form className="inline-edit" onSubmit={submitRename}>
+                  <input
+                    value={renameDraft}
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    maxLength={64}
+                    autoFocus
+                    aria-label="New session name"
+                  />
+                  <button type="submit">Save</button>
+                  <button type="button" onClick={() => setRenamingSession(false)}>✕</button>
+                </form>
+              ) : (
+                <div className="room-title-row">
+                  <h2>{sessionLabel || session.room}</h2>
+                  {isEmbeddedInHop() && (
+                    <button
+                      type="button"
+                      className="icon-btn-inline"
+                      title="Rename session"
+                      aria-label="Rename session"
+                      onClick={() => {
+                        setRenameDraft(sessionLabel || session.room);
+                        setRenamingSession(true);
+                      }}
+                    >
+                      ✎
+                    </button>
+                  )}
+                </div>
+              )}
               {liveCwd && (
                 <p className="room-cwd" title={liveCwd}>{shortenPath(liveCwd)}</p>
               )}
@@ -1895,6 +2166,9 @@ const App = () => {
                 <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
                   Manage
                 </button>
+                <button type="button" className="quick-btn danger" onClick={handleKillSession}>
+                  Kill
+                </button>
                 {(status === "disconnected" || status === "ended") && (
                   <button type="button" className="quick-btn primary" onClick={() => setReconnectToken((value) => value + 1)}>
                     Reconnect
@@ -1905,6 +2179,33 @@ const App = () => {
 
             {/* Input control: who is allowed to type */}
             <div className="drawer-group">
+              <div className="drawer-row">
+                <label>Name</label>
+                {editingName ? (
+                  <form className="inline-edit" onSubmit={submitName}>
+                    <input
+                      value={nameDraft}
+                      onChange={(event) => setNameDraft(event.target.value)}
+                      maxLength={24}
+                      autoFocus
+                      aria-label="Display name"
+                    />
+                    <button type="submit">Save</button>
+                  </form>
+                ) : (
+                  <button
+                    type="button"
+                    className="name-edit-toggle"
+                    title="Change your display name"
+                    onClick={() => {
+                      setNameDraft(name);
+                      setEditingName(true);
+                    }}
+                  >
+                    {name} <span aria-hidden="true">✎</span>
+                  </button>
+                )}
+              </div>
               <div className="drawer-row">
                 <label>Control</label>
                 <span className="control-state">
@@ -2023,7 +2324,35 @@ const App = () => {
               const otherSessions = sessions.filter((s) => s.name !== session.room);
               return (
                 <div className="session-switcher">
-                  <p className="session-switcher-label">Switch session</p>
+                  <div className="session-switcher-head">
+                    <p className="session-switcher-label">Switch session</p>
+                    {isEmbeddedInHop() && !creatingSession && (
+                      <button
+                        type="button"
+                        className="quick-btn"
+                        onClick={() => {
+                          setNewSessionName("");
+                          setCreatingSession(true);
+                        }}
+                      >
+                        + New
+                      </button>
+                    )}
+                  </div>
+                  {creatingSession && (
+                    <form className="inline-edit" onSubmit={submitNewSession}>
+                      <input
+                        placeholder="session-name"
+                        value={newSessionName}
+                        onChange={(event) => setNewSessionName(event.target.value)}
+                        maxLength={64}
+                        autoFocus
+                        aria-label="New session name"
+                      />
+                      <button type="submit">Create</button>
+                      <button type="button" onClick={() => setCreatingSession(false)}>✕</button>
+                    </form>
+                  )}
                   {loadingSessions ? (
                     <div className="session-list-loading">Loading...</div>
                   ) : sessionsError ? (
@@ -2043,7 +2372,15 @@ const App = () => {
                           onClick={() => switchSession(s)}
                         >
                           <span className="session-list-name-group">
-                            <span className="session-list-name">{s.displayName}</span>
+                            <span className="session-list-name">
+                              {(s.bellUnseen || s.unread) && (
+                                <span
+                                  className={`attention-dot ${s.bellUnseen ? "bell" : "output"}`}
+                                  title={s.bellUnseen ? "Bell rung since last viewed" : "New output since last viewed"}
+                                />
+                              )}
+                              {s.displayName}
+                            </span>
                             {s.cwd && <span className="session-list-cwd">{shortenPath(s.cwd)}</span>}
                           </span>
                           {s.active && <span className="session-badge live">LIVE</span>}
@@ -2058,7 +2395,7 @@ const App = () => {
             })()}
             <p className="build-stamp">build {__BUILD_STAMP__}</p>
           </section>
-          <section className="terminal">
+          <section className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
             <div
               className="terminal-frame"
               onClick={() => {

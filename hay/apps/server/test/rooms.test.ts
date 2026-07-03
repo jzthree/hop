@@ -297,4 +297,60 @@ describe("Room", () => {
     expect(inputs.at(-1)?.source).toBe("hop");
     expect(inputs.at(-1)?.clientId).toBe(null);
   });
+
+  it("counts attention bells but not OSC-terminator BELs", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("bells", { cols: 80, rows: 24 }, "/tmp");
+    const bells: any[] = [];
+    room.on("bell", (payload) => bells.push(payload));
+
+    expect(room.getSummary().bellSeq).toBe(0);
+    expect(room.getSummary().lastBellAt).toBe(0);
+
+    // OSC title update terminated by BEL — not an attention bell.
+    ptyInstance?.emit("\x1b]0;my title\x07plain output");
+    expect(room.getSummary().bellSeq).toBe(0);
+
+    // A real bell.
+    ptyInstance?.emit("done\x07");
+    expect(room.getSummary().bellSeq).toBe(1);
+    expect(room.getSummary().lastBellAt).toBeGreaterThan(0);
+    expect(bells.at(-1)?.bellSeq).toBe(1);
+
+    // Two bells in one chunk, with an ST-terminated OSC between them.
+    ptyInstance?.emit("\x07\x1b]7;file://host/tmp\x1b\\\x07");
+    expect(room.getSummary().bellSeq).toBe(3);
+  });
+
+  it("tracks bells across chunk-split OSC sequences", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("bells-split", { cols: 80, rows: 24 }, "/tmp");
+
+    // OSC opens in one chunk, its BEL terminator arrives in the next —
+    // that BEL must not count as a bell.
+    ptyInstance?.emit("\x1b]0;long tit");
+    ptyInstance?.emit("le\x07");
+    expect(room.getSummary().bellSeq).toBe(0);
+
+    // Even the "\x1b" / "]..." split across chunks stays an OSC.
+    ptyInstance?.emit("output\x1b");
+    ptyInstance?.emit("]0;t\x07");
+    expect(room.getSummary().bellSeq).toBe(0);
+
+    // And a bell right after a completed OSC still counts.
+    ptyInstance?.emit("\x1b]0;t\x07\x07");
+    expect(room.getSummary().bellSeq).toBe(1);
+  });
 });

@@ -41,6 +41,8 @@ export type RoomSummary = {
   liveCwd: string;
   foregroundProcess: string;
   lastActivityAt: number;
+  bellSeq: number;
+  lastBellAt: number;
   clientCount: number;
   localCliCount: number;
 };
@@ -135,6 +137,15 @@ export class Room extends EventEmitter {
   private liveCwd: string;
   private foregroundProcess = "";
   private lastActivityAt = now(); // ms of the most recent PTY output
+  // Terminal bells (BEL outside escape sequences) rung by the app — agents and
+  // long jobs ring one to ask for attention. Monotonic counter + timestamp so
+  // clients can diff against a last-seen value; never reset for a room's life.
+  private bellSeq = 0;
+  private lastBellAt = 0;
+  // Whether the previous output chunk ended inside an unterminated OSC (whose
+  // BEL terminator must not count as a bell) — see trackBells.
+  private inOscForBells = false;
+  private bellEscCarry = false;
   private clients = new Map<string, ClientState>();
   private collabMode = true;
   private controllerId: string | null = null;
@@ -407,7 +418,68 @@ export class Room extends EventEmitter {
       this.parseOsc7(data);
     }
 
+    this.trackBells(data);
+
     this.controlSequenceTail = combined.slice(-CONTROL_SEQUENCE_TAIL);
+  }
+
+  // Count attention bells: BEL bytes that are NOT the terminator of an OSC
+  // sequence (title updates, OSC 7 cwd reports, clipboard writes all end in
+  // BEL and must not register). Tracks OSC state across chunk boundaries; a
+  // trailing lone ESC is carried so a split "\x1b]" still opens an OSC.
+  private trackBells(data: string) {
+    let chunk = data;
+    if (this.bellEscCarry) {
+      chunk = "\x1b" + chunk;
+      this.bellEscCarry = false;
+    }
+    if (!this.inOscForBells && chunk.indexOf("\x07") === -1) {
+      // Fast path: no bell to classify; just keep the cross-chunk OSC state.
+      const lastOsc = chunk.lastIndexOf("\x1b]");
+      if (lastOsc !== -1) {
+        const tail = chunk.slice(lastOsc);
+        this.inOscForBells = tail.indexOf("\x07") === -1 && tail.indexOf("\x1b\\") === -1;
+      }
+      if (chunk.endsWith("\x1b")) this.bellEscCarry = true;
+      return;
+    }
+    let bells = 0;
+    let i = 0;
+    const len = chunk.length;
+    while (i < len) {
+      if (this.inOscForBells) {
+        const bel = chunk.indexOf("\x07", i);
+        const st = chunk.indexOf("\x1b\\", i);
+        if (bel === -1 && st === -1) {
+          i = len;
+          break;
+        }
+        if (bel !== -1 && (st === -1 || bel < st)) {
+          this.inOscForBells = false;
+          i = bel + 1;
+        } else {
+          this.inOscForBells = false;
+          i = st + 2;
+        }
+      } else {
+        const bel = chunk.indexOf("\x07", i);
+        const osc = chunk.indexOf("\x1b]", i);
+        if (bel === -1 && osc === -1) break;
+        if (bel !== -1 && (osc === -1 || bel < osc)) {
+          bells += 1;
+          i = bel + 1;
+        } else {
+          this.inOscForBells = true;
+          i = osc + 2;
+        }
+      }
+    }
+    if (!this.inOscForBells && chunk.endsWith("\x1b")) this.bellEscCarry = true;
+    if (bells > 0) {
+      this.bellSeq += bells;
+      this.lastBellAt = now();
+      this.emit("bell", { roomId: this.id, bellSeq: this.bellSeq, timestamp: this.lastBellAt });
+    }
   }
 
   // Regex: matches OSC 7 with BEL (\x07) or ST (\x1b\\) terminator
@@ -720,6 +792,8 @@ export class Room extends EventEmitter {
       liveCwd: this.liveCwd,
       foregroundProcess,
       lastActivityAt: this.lastActivityAt,
+      bellSeq: this.bellSeq,
+      lastBellAt: this.lastBellAt,
       clientCount: this.clients.size,
       localCliCount
     };

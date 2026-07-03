@@ -57,6 +57,11 @@
             .session-item-wrapper { position: relative; overflow: hidden; border-bottom: 1px solid var(--line); }
             .session-item-wrapper:last-child { border-bottom: none; }
             .session-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; gap: 1rem; background: var(--panel); position: relative; transition: transform 0.2s ease-out; }
+            /* Attention indicators: bell = the app asked for attention; output = new output since last viewed */
+            .attention-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; flex-shrink: 0; }
+            .attention-dot.output { background: var(--warn); }
+            .attention-dot.bell { background: var(--err); animation: attention-pulse 1.6s ease-in-out infinite; }
+            @keyframes attention-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
             .session-item:active { background: var(--bg-alt); }
             .session-action { position: absolute; top: 0; bottom: 0; width: 80px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 500; cursor: pointer; font-size: 0.85rem; }
             .session-action.rename { left: 0; background: #7c3aed; }
@@ -321,6 +326,10 @@
                 loadSessions();
             }
 
+            const SEEN_MARKERS_KEY = 'hop_session_seen_v1';
+            let seenMarkers = {};
+            let seenMarkersDirty = false;
+
             let dragSessionId = null;
             let dragSourceFolder = null; // bucket key the drag started in ('' = root)
             let latestSessionsData = { sessions: [], active: [], starting: [] };
@@ -339,6 +348,12 @@
                 lastSessionsPayload = text;
                 const data = JSON.parse(text);
                 latestSessionsData = data;
+
+                // Seen markers (shared with the terminal app via localStorage):
+                // sessions first observed get a silent baseline; afterwards a
+                // newer bellSeq/lastActivityAt than the marker shows a dot.
+                try { seenMarkers = JSON.parse(localStorage.getItem(SEEN_MARKERS_KEY) || '{}') || {}; } catch (e) { seenMarkers = {}; }
+                seenMarkersDirty = false;
                 const list = document.getElementById('sessionList');
                 const sessions = data.sessions || [];
                 const active = data.active || [];
@@ -419,6 +434,21 @@
                                 : '<span class="saved-badge">WORKSPACE</span>'));
                     // Live sessions show their working directory plus the running
                     // program (when it's not just the shell sitting at a prompt).
+                    // Attention indicator: unseen bell (pulsing) beats new output.
+                    const lastOut = Number(s.lastActivityAt) || 0;
+                    const bellSeq = Number(s.bellSeq) || 0;
+                    let attentionDot = '';
+                    const marker = seenMarkers[internalName];
+                    if (!marker) {
+                        if (isLive) {
+                            seenMarkers[internalName] = { out: lastOut, bell: bellSeq };
+                            seenMarkersDirty = true;
+                        }
+                    } else if (bellSeq > marker.bell) {
+                        attentionDot = '<span class="attention-dot bell" title="Bell rung since last viewed"></span>';
+                    } else if (lastOut > marker.out) {
+                        attentionDot = '<span class="attention-dot output" title="New output since last viewed"></span>';
+                    }
                     const cwd = s.cwd || '';
                     const proc = (s.foregroundProcess || '').trim();
                     const runningApp = proc && !SHELL_PROCS.has(proc.toLowerCase()) ? proc : '';
@@ -455,7 +485,7 @@
                             <div class="session-item">
                                 <div class="session-info">
                                     <div class="session-header">
-                                        <span class="session-name">${displayName}</span>
+                                        ${attentionDot}<span class="session-name">${displayName}</span>
                                         ${agentBadge}
                                         ${stateBadge}
                                     </div>
@@ -506,6 +536,9 @@
                 initSwipe();
                 initDragAndDrop();
                 refreshAllPreviews(); // repopulate any expanded previews after re-render
+                if (seenMarkersDirty) {
+                    try { localStorage.setItem(SEEN_MARKERS_KEY, JSON.stringify(seenMarkers)); } catch (e) { /* ignore */ }
+                }
             }
 
             function showCreateError(message) {
@@ -932,6 +965,15 @@
                 document.querySelectorAll('details.menu[open]').forEach(d => {
                     if (!d.contains(e.target)) d.open = false;
                 });
+            });
+
+            // Another tab (e.g. the terminal app) marking a session seen should
+            // clear our dots promptly, not wait for the payload to change.
+            window.addEventListener('storage', (e) => {
+                if (e.key === SEEN_MARKERS_KEY) {
+                    lastSessionsPayload = null;
+                    loadSessions();
+                }
             });
 
             { const sel = document.getElementById('sortMode'); if (sel) sel.value = sortMode; }

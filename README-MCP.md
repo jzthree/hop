@@ -139,11 +139,11 @@ Core tools (`hop_`): stable atomic operations.
 - `hop_attach_terminal` — attach to an existing terminal session by name or internalName
 - `hop_write_terminal` — write raw input to a terminal session
 - `hop_send_key` — send a named keypress (enter, esc, tab, shift_tab, arrows, f1-f12, ctrl+[a-z], ...)
-- `hop_wait_terminal` — wait for output conditions (regex, prompt, idle, agent_done); `async=true` returns a `wait_id`
-- `hop_wait_start` — deprecated legacy alias for `hop_wait_terminal(async=true)`
+- `hop_wait_terminal` — wait for output conditions (regex, prompt, idle, agent_done); `async=true` returns a `wait_id` (`hop_wait_start` was removed; use `hop_wait_terminal(async=true)`)
 - `hop_wait_poll` — poll or await completion of a background wait job
 - `hop_resize_terminal` — resize the terminal PTY
 - `hop_read_terminal` — read terminal output events (default `mode="readable_raw"`); returns a cursor for incremental reads
+- `hop_read_trajectory` — read a Claude Code session's real conversation history from its on-disk transcript (resolved from the hop session name via the SessionStart hook record); context-safe reduced `digest` mode by default, plus `summary`/`list`/`get`/`tail` modes; gated by the per-session agent permission (`hop_set_agent_permission`) and requires the transcript on the same host as the MCP
 - `hop_close_terminal` — detach the terminal API session; optionally kill the underlying hop session
 - `hop_set_agent_permission` — allow or block agent access for a session
 - `hop_list_workspaces` — list available workspaces
@@ -157,6 +157,13 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 - `hopx_send_and_wait` — single-call send + wait wrapper
 - `hopx_exec` — Bash-tool-style shell execution: command in, clean stdout + `exit_code` out (see section above)
 - `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`
+- `hopx_capture_scrollback` — capture an alternate-screen TUI's scrollback the way a user would: scroll up page-by-page, snapshot each frame, and stitch newly-revealed rows together (live view restored afterward by default); best-effort and lossy for wrapped/redrawn content; requires agent permission on the session
+
+### Reading terminal history
+
+- `hop_read_terminal` — recent and incremental output; the day-to-day read primitive (cursor-based deltas).
+- `hop_read_trajectory` — a Claude Code session's full conversation history from its transcript; prefer it when a transcript is available (the default `digest` mode is context-safe and shows far more than the terminal frame).
+- `hopx_capture_scrollback` — scrollback of non-Claude TUIs, or when no transcript file is reachable; best-effort and lossy for wrapped/redrawn content.
 
 ## Resources
 
@@ -227,7 +234,7 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 
 - For long-running conditions, start a background wait with `hop_wait_terminal(terminal_id=<id>, async=true, ...)` (returns `wait_id` immediately) and poll with `hop_wait_poll(wait_id=..., wait=true)`
   - use `consume=true` on poll to remove completed jobs
-- `hop_wait_start` is a deprecated legacy alias for `hop_wait_terminal(async=true)`; prefer the latter
+- `hop_wait_start` was removed; use `hop_wait_terminal(async=true)`
 
 ### `hopx_send_and_wait`
 

@@ -144,7 +144,7 @@ Use one dedicated terminal per subagent.
 2. Start the agent CLI with `hop_write_terminal`.
 3. Wait for readiness with `hop_wait_terminal(until_prompt=true)`.
 4. Prefer `hopx_agent_turn(mode="auto")` or `hopx_send_and_wait(...)` for one turn at a time.
-5. For long waits, use `hopx_agent_turn(async=true, ...)` or the lower-level `hop_wait_terminal(async=true, ...)` + `hop_wait_poll(...)` (`hop_wait_start` remains only as a legacy alias).
+5. For long waits, use `hopx_agent_turn(async=true, ...)` or the lower-level `hop_wait_terminal(async=true, ...)` + `hop_wait_poll(...)` (`hop_wait_start` was removed; use `hop_wait_terminal(async=true)`).
 6. Interrupt with `hop_send_key(key="ctrl_c")` and close with `hop_close_terminal`.
 
 Safety tips:

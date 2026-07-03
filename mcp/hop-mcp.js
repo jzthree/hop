@@ -2947,50 +2947,8 @@ class HopMCPServer {
         }
       },
       {
-        name: 'hop_wait_start',
-        description: 'Deprecated: prefer hop_wait_terminal with async:true. Start a background terminal wait job and return wait_id immediately.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            terminal_id: { type: 'string' },
-            cursor: { type: 'number' },
-            start_from: {
-              type: 'string',
-              enum: WAIT_START_MODES,
-              description: 'Where to start scanning output: latest (tail), cursor (requires cursor), or beginning (oldest buffered event).'
-            },
-            until_regex: { type: 'string' },
-            regex_flags: { type: 'string', description: 'Regex flags for until_regex (default: m).' },
-            match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
-            until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
-            until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, the terminal is quiet, the interactive cursor is visible, and no busy indicator (e.g. "esc to interrupt") is showing.' },
-            prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
-            idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
-            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
-            capture: { type: 'string', enum: ['raw', 'readable_raw'], description: 'Capture format for returned events (default: readable_raw).' },
-            capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 120).' },
-            maxControlOps: { type: 'number', description: 'In readable_raw capture, max parsed control ops per event (default: 200).' },
-            includeRawData: { type: 'boolean', description: 'In readable_raw capture, include original event data.' },
-            includeMetaEvents: { type: 'boolean', description: 'In readable_raw capture, include non-output meta events (default: false).' },
-            control_level: {
-              type: 'string',
-              enum: READABLE_CONTROL_LEVELS,
-              description: 'In readable_raw capture, control detail level: full, structural, or none.'
-            },
-            noise_filter: {
-              type: 'string',
-              enum: READABLE_NOISE_FILTERS,
-              description: 'In readable_raw capture, text noise filter mode: balanced (default) or off.'
-            },
-            coalesce_ms: { type: 'number', description: 'In readable_raw capture, merge adjacent text frames within this time window (ms).' },
-            coalesce_max_chars: { type: 'number', description: `In readable_raw capture, max chars per merged frame (default: ${DEFAULT_READABLE_COALESCE_MAX_CHARS}).` }
-          },
-          required: ['terminal_id']
-        }
-      },
-      {
         name: 'hop_wait_poll',
-        description: 'Poll or await completion of a background wait job created by hop_wait_terminal with async=true (or the deprecated hop_wait_start).',
+        description: 'Poll or await completion of a background wait job created by hop_wait_terminal with async=true.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -3408,8 +3366,6 @@ class HopMCPServer {
           return await this.handleWaitStart(args);
         }
         return await this.handleWaitTerminal(args);
-      case 'hop_wait_start':
-        return await this.handleWaitStart(args);
       case 'hop_wait_poll':
         return await this.handleWaitPoll(args);
       case 'hop_resize_terminal': {

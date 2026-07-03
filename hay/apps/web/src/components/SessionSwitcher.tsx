@@ -1,0 +1,512 @@
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent
+} from "react";
+import {
+  buildSwitcherModel,
+  relativeTime,
+  type SwitcherSession
+} from "../utils/switcherModel";
+
+// Full-screen, in-app session switcher (mobile-first). Hot sessions — current,
+// attention, most recent — are preview cards; the tail is compact rows grouped
+// by project. Long-press (or the ⋯ button) opens a per-session action sheet.
+// Previews are fetched only for hero cards, only while the switcher is open
+// and the tab visible, seeded from a cache so reopening paints instantly.
+
+const LONG_PRESS_MS = 450;
+const PREVIEW_REFRESH_MS = 5000;
+const FILTER_THRESHOLD = 10;
+
+type Props = {
+  open: boolean;
+  sessions: SwitcherSession[];
+  currentRoom: string | null;
+  onClose: () => void;
+  onSwitch: (session: SwitcherSession) => void;
+  onRefresh: () => void;
+  onNotice: (message: string) => void;
+};
+
+type Sheet = {
+  session: SwitcherSession;
+  mode: "menu" | "rename";
+};
+
+const sessionKey = (s: SwitcherSession) => s.internalName || s.name;
+
+const shortDir = (p?: string) => {
+  const parts = String(p || "").replace(/\/+$/, "").split("/").filter(Boolean);
+  if (parts.length === 0) return "";
+  return parts.slice(-2).join("/");
+};
+
+const SHELL_PROCS = new Set(["zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "nu", "xonsh", "login"]);
+const runningApp = (s: SwitcherSession) => {
+  const proc = (s.foregroundProcess || "").trim();
+  return proc && !SHELL_PROCS.has(proc.toLowerCase()) ? proc : "";
+};
+
+export const SessionSwitcher = ({ open, sessions, currentRoom, onClose, onSwitch, onRefresh, onNotice }: Props) => {
+  const [filter, setFilter] = useState("");
+  const [sheet, setSheet] = useState<Sheet | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createDraft, setCreateDraft] = useState("");
+  const [, setTick] = useState(0);
+  const previewCacheRef = useRef(new Map<string, string>());
+  const longPressRef = useRef<{ timer: number; startX: number; startY: number } | null>(null);
+  // Set when a long-press opened the sheet, so the click that fires on finger
+  // release doesn't also switch sessions.
+  const suppressTapRef = useRef(false);
+
+  const model = useMemo(
+    () => buildSwitcherModel(sessions, currentRoom, filter),
+    [sessions, currentRoom, filter]
+  );
+
+  // Reset transient state whenever the switcher opens.
+  useEffect(() => {
+    if (open) {
+      setFilter("");
+      setSheet(null);
+      setCreating(false);
+      setCreateDraft("");
+    }
+  }, [open]);
+
+  // Keep relative times fresh while open.
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setInterval(() => setTick((t) => t + 1), 10000);
+    return () => window.clearInterval(id);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (sheet) setSheet(null);
+        else onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, sheet]);
+
+  // Hero-card previews: fetch on open and every 5s while open + visible.
+  // Only live terminal sessions are asked; rows never fetch anything.
+  useEffect(() => {
+    if (!open || model.mode !== "tiers") return;
+    let cancelled = false;
+    const targets = model.hero.filter((s) => s.type !== "port" && (s.active || s.starting));
+    const refresh = async () => {
+      if (cancelled || document.hidden) return;
+      await Promise.all(
+        targets.map(async (s) => {
+          const key = sessionKey(s);
+          try {
+            const res = await fetch(`/api/sessions/preview?name=${encodeURIComponent(key)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const text = typeof data.text === "string" ? data.text.replace(/\s+$/, "") : "";
+            if (!cancelled && text) {
+              previewCacheRef.current.set(key, text);
+            }
+          } catch {
+            /* keep the cached preview */
+          }
+        })
+      );
+      if (!cancelled) setTick((t) => t + 1);
+    };
+    refresh();
+    const id = window.setInterval(refresh, PREVIEW_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [open, model]);
+
+  const startLongPress = (event: ReactPointerEvent, session: SwitcherSession) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    cancelLongPress();
+    const timer = window.setTimeout(() => {
+      longPressRef.current = null;
+      suppressTapRef.current = true;
+      setSheet({ session, mode: "menu" });
+    }, LONG_PRESS_MS);
+    longPressRef.current = { timer, startX: event.clientX, startY: event.clientY };
+  };
+
+  const cancelLongPress = () => {
+    if (longPressRef.current) {
+      window.clearTimeout(longPressRef.current.timer);
+      longPressRef.current = null;
+    }
+  };
+
+  // Finger jitter shouldn't cancel a long-press; a real drag/scroll should.
+  const moveLongPress = (event: ReactPointerEvent) => {
+    const pending = longPressRef.current;
+    if (!pending) return;
+    if (Math.abs(event.clientX - pending.startX) > 10 || Math.abs(event.clientY - pending.startY) > 10) {
+      cancelLongPress();
+    }
+  };
+
+  const handleTap = (session: SwitcherSession) => {
+    cancelLongPress();
+    if (suppressTapRef.current) {
+      suppressTapRef.current = false;
+      return;
+    }
+    if (currentRoom !== null && (session.internalName === currentRoom || session.name === currentRoom)) {
+      onClose();
+      return;
+    }
+    onSwitch(session);
+  };
+
+  const openSheet = (session: SwitcherSession) => {
+    cancelLongPress();
+    setSheet({ session, mode: "menu" });
+  };
+
+  const submitRename = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!sheet) return;
+    const next = renameDraft.trim();
+    const oldName = sheet.session.displayName || sheet.session.name;
+    if (!next || next === oldName) {
+      setSheet(null);
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(next)) {
+      onNotice("Only letters, numbers, - and _ allowed");
+      return;
+    }
+    try {
+      const res = await fetch("/api/sessions/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ oldName, newName: next })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({} as { error?: string }));
+        onNotice(data.error || "Rename failed");
+        return;
+      }
+      onNotice(`Renamed to ${next}`);
+      setSheet(null);
+      onRefresh();
+    } catch {
+      onNotice("Rename failed");
+    }
+  };
+
+  const toggleAgentAccess = async () => {
+    if (!sheet) return;
+    const key = sessionKey(sheet.session);
+    const allowed = sheet.session.agentPermitted !== true;
+    try {
+      const res = await fetch("/api/sessions/agent-permission", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internalName: key, allowed })
+      });
+      if (!res.ok) {
+        onNotice("Failed to update agent access");
+        return;
+      }
+      onNotice(allowed ? "Agent access enabled" : "Agent access disabled");
+      setSheet(null);
+      onRefresh();
+    } catch {
+      onNotice("Failed to update agent access");
+    }
+  };
+
+  const killSession = async () => {
+    if (!sheet) return;
+    const label = sheet.session.displayName || sheet.session.name;
+    if (!window.confirm(`Kill session "${label}" for all participants? Its running process is terminated.`)) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/sessions/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internalName: sessionKey(sheet.session) })
+      });
+      if (!res.ok) {
+        onNotice("Failed to kill session");
+        return;
+      }
+      onNotice(`Killed ${label}`);
+      setSheet(null);
+      onRefresh();
+    } catch {
+      onNotice("Failed to kill session");
+    }
+  };
+
+  const submitCreate = async (event: FormEvent) => {
+    event.preventDefault();
+    const next = createDraft.trim();
+    if (!next) return;
+    if (!/^[a-zA-Z0-9_-]+$/.test(next)) {
+      onNotice("Only letters, numbers, - and _ allowed");
+      return;
+    }
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: next, type: "terminal", port: null })
+      });
+      const data = await res.json().catch(() => ({} as { name?: string; error?: string }));
+      if (!res.ok || !data.name) {
+        onNotice(data.error || "Failed to create session");
+        return;
+      }
+      setCreating(false);
+      setCreateDraft("");
+      onSwitch({ name: data.name, displayName: data.name, active: false, starting: true, internalName: data.name });
+    } catch {
+      onNotice("Failed to create session");
+    }
+  };
+
+  if (!open) return null;
+
+  const now = Date.now();
+
+  const dots = (s: SwitcherSession) =>
+    (s.bellUnseen || s.unread) && (
+      <span
+        className={`attention-dot ${s.bellUnseen ? "bell" : "output"}`}
+        title={s.bellUnseen ? "Bell rung since last viewed" : "New output since last viewed"}
+      />
+    );
+
+  const meta = (s: SwitcherSession) => {
+    const parts: string[] = [];
+    const app = runningApp(s);
+    if (app) parts.push(app);
+    const rel = relativeTime(s.lastActivityAt || 0, now);
+    if (rel) parts.push(rel);
+    const dir = shortDir(s.cwd);
+    if (dir) parts.push(dir);
+    return parts.join(" · ");
+  };
+
+  const isCurrentSession = (s: SwitcherSession) =>
+    currentRoom !== null && (s.internalName === currentRoom || s.name === currentRoom);
+
+  const pressHandlers = (s: SwitcherSession) => ({
+    onPointerDown: (e: ReactPointerEvent) => startLongPress(e, s),
+    onPointerUp: cancelLongPress,
+    onPointerLeave: cancelLongPress,
+    onPointerMove: moveLongPress,
+    onContextMenu: (e: ReactMouseEvent) => {
+      e.preventDefault();
+      suppressTapRef.current = false;
+      openSheet(s);
+    }
+  });
+
+  const renderCard = (s: SwitcherSession) => {
+    const key = sessionKey(s);
+    const preview = previewCacheRef.current.get(key);
+    const current = isCurrentSession(s);
+    return (
+      <div
+        key={key}
+        role="button"
+        tabIndex={0}
+        className={`switcher-card${current ? " current" : ""}`}
+        onClick={() => handleTap(s)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleTap(s);
+        }}
+        {...pressHandlers(s)}
+      >
+        <div className="switcher-card-head">
+          {dots(s)}
+          <span className="switcher-card-name">{s.displayName}</span>
+          {current && <span className="switcher-chip current">CURRENT</span>}
+          {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
+          <button
+            type="button"
+            className="switcher-more"
+            aria-label={`Actions for ${s.displayName}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              openSheet(s);
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            ⋯
+          </button>
+        </div>
+        <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>
+        <div className="switcher-card-meta">{meta(s) || " "}</div>
+      </div>
+    );
+  };
+
+  const renderRow = (s: SwitcherSession) => {
+    const key = sessionKey(s);
+    return (
+      <div
+        key={key}
+        role="button"
+        tabIndex={0}
+        className={`switcher-row${isCurrentSession(s) ? " current" : ""}`}
+        onClick={() => handleTap(s)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleTap(s);
+        }}
+        {...pressHandlers(s)}
+      >
+        {dots(s)}
+        <span className="switcher-row-name">{s.displayName}</span>
+        {s.type === "port" && <span className="switcher-chip port">PORT {s.port}</span>}
+        <span className="switcher-row-meta">{meta(s)}</span>
+        <button
+          type="button"
+          className="switcher-more"
+          aria-label={`Actions for ${s.displayName}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            openSheet(s);
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          ⋯
+        </button>
+      </div>
+    );
+  };
+
+  const sheetSession = sheet?.session;
+  const sheetAgentPermitted = sheetSession?.agentPermitted === true;
+
+  return (
+    <div className="switcher-overlay" role="dialog" aria-label="Sessions">
+      <header className="switcher-header">
+        <h2>Sessions</h2>
+        <span className="switcher-count">{sessions.length}</span>
+        {(sessions.length > FILTER_THRESHOLD || filter) && (
+          <input
+            className="switcher-filter"
+            placeholder="Filter…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            aria-label="Filter sessions"
+          />
+        )}
+        <button type="button" className="switcher-close" aria-label="Close switcher" onClick={onClose}>
+          ✕
+        </button>
+      </header>
+      <div className="switcher-scroll">
+        {model.mode === "filter" ? (
+          <div className="switcher-rows">
+            {model.rows.length === 0 ? (
+              <div className="switcher-empty">No sessions match “{filter.trim()}”</div>
+            ) : (
+              model.rows.map(renderRow)
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="switcher-grid">
+              {model.hero.map(renderCard)}
+              {creating ? (
+                <form className="switcher-card new inline-edit" onSubmit={submitCreate}>
+                  <input
+                    placeholder="session-name"
+                    value={createDraft}
+                    onChange={(e) => setCreateDraft(e.target.value)}
+                    maxLength={64}
+                    autoFocus
+                    aria-label="New session name"
+                  />
+                  <div className="switcher-new-actions">
+                    <button type="submit">Create</button>
+                    <button type="button" onClick={() => setCreating(false)}>✕</button>
+                  </div>
+                </form>
+              ) : (
+                <button type="button" className="switcher-card new" onClick={() => setCreating(true)}>
+                  <span className="switcher-new-plus">+</span>
+                  <span>New session</span>
+                </button>
+              )}
+            </div>
+            {model.groups.map((group) => (
+              <section key={group.label} className="switcher-group">
+                <h3 className="switcher-group-label">{group.label}</h3>
+                <div className="switcher-rows">{group.rows.map(renderRow)}</div>
+              </section>
+            ))}
+          </>
+        )}
+      </div>
+      {sheet && sheetSession && (
+        <>
+          <div className="switcher-sheet-backdrop" onClick={() => setSheet(null)} />
+          <div className="switcher-sheet" role="menu" aria-label={`Actions for ${sheetSession.displayName}`}>
+            <p className="switcher-sheet-title">{sheetSession.displayName}</p>
+            {sheet.mode === "rename" ? (
+              <form className="inline-edit" onSubmit={submitRename}>
+                <input
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  maxLength={64}
+                  autoFocus
+                  aria-label="New session name"
+                />
+                <button type="submit">Save</button>
+                <button type="button" onClick={() => setSheet({ session: sheetSession, mode: "menu" })}>✕</button>
+              </form>
+            ) : (
+              <>
+                {!isCurrentSession(sheetSession) && (
+                  <button type="button" onClick={() => handleTap(sheetSession)}>Switch to</button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenameDraft(sheetSession.displayName || sheetSession.name);
+                    setSheet({ session: sheetSession, mode: "rename" });
+                  }}
+                >
+                  Rename
+                </button>
+                {sheetSession.type !== "port" && (
+                  <button type="button" onClick={toggleAgentAccess}>
+                    {sheetAgentPermitted ? "Disable agent access" : "Enable agent access"}
+                  </button>
+                )}
+                <button type="button" className="danger" onClick={killSession}>
+                  Kill session
+                </button>
+                <button type="button" onClick={() => setSheet(null)}>Cancel</button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};

@@ -10,6 +10,7 @@ import {
 import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
 import { MobileKeyboard } from "./components/MobileKeyboard";
+import { SessionSwitcher } from "./components/SessionSwitcher";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -183,6 +184,8 @@ type SessionInfo = {
   internalName?: string;
   lastActivityAt?: number;
   bellSeq?: number;
+  foregroundProcess?: string;
+  agentPermitted?: boolean;
   // Computed against the local seen-markers: new output / an unseen bell since
   // this client last viewed the session.
   unread?: boolean;
@@ -290,6 +293,7 @@ const App = () => {
   const [renameDraft, setRenameDraft] = useState("");
   const [creatingSession, setCreatingSession] = useState(false);
   const [newSessionName, setNewSessionName] = useState("");
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
     const saved = localStorage.getItem("hay_session_switch_mode");
     // Keep "page" as a legacy fallback while we validate instant mode end-to-end.
@@ -1593,7 +1597,9 @@ const App = () => {
           cwd: s.cwd,
           internalName: s.internalName || s.name,
           lastActivityAt: Number(s.lastActivityAt) || 0,
-          bellSeq: Number(s.bellSeq) || 0
+          bellSeq: Number(s.bellSeq) || 0,
+          foregroundProcess: s.foregroundProcess,
+          agentPermitted: s.agentPermitted === true
         });
       }
 
@@ -2163,9 +2169,16 @@ const App = () => {
                 <button type="button" className="quick-btn" onClick={() => { fitToViewport(); handleResize(); }}>
                   Fit
                 </button>
-                <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
-                  Manage
-                </button>
+                {/* Mobile gets the in-app switcher; desktop keeps the manager page */}
+                {isMobile && isEmbeddedInHop() ? (
+                  <button type="button" className="quick-btn" onClick={() => { setDrawerOpen(false); setSwitcherOpen(true); }}>
+                    Sessions
+                  </button>
+                ) : (
+                  <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
+                    Manage
+                  </button>
+                )}
                 <button type="button" className="quick-btn danger" onClick={handleKillSession}>
                   Kill
                 </button>
@@ -2326,6 +2339,18 @@ const App = () => {
                 <div className="session-switcher">
                   <div className="session-switcher-head">
                     <p className="session-switcher-label">Switch session</p>
+                    {isMobile && isEmbeddedInHop() && (
+                      <button
+                        type="button"
+                        className="quick-btn"
+                        onClick={() => {
+                          setDrawerOpen(false);
+                          setSwitcherOpen(true);
+                        }}
+                      >
+                        All
+                      </button>
+                    )}
                     {isEmbeddedInHop() && !creatingSession && (
                       <button
                         type="button"
@@ -2483,6 +2508,18 @@ const App = () => {
               </span>
             </div>
           </section>
+          <SessionSwitcher
+            open={switcherOpen}
+            sessions={sessions}
+            currentRoom={session.room}
+            onClose={() => setSwitcherOpen(false)}
+            onSwitch={(next) => {
+              switchSession(next as SessionInfo);
+              setSwitcherOpen(false);
+            }}
+            onRefresh={() => fetchSessions({ showLoading: false })}
+            onNotice={showToast}
+          />
           {isMobile && (
             <MobileKeyboard
               onInput={handleKeyboardInput}

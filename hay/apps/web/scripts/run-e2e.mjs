@@ -53,8 +53,8 @@ const waitForServer = (url, timeoutMs = 15000) => {
 const joinRoom = async (page, name, room) => {
   await page.goto(baseUrl);
   await page.getByLabel("Display name").fill(name);
-  await page.getByLabel("Room").fill(room);
-  await page.getByRole("button", { name: "Start session" }).click();
+  await page.getByLabel("Session").fill(room);
+  await page.getByRole("button", { name: "Connect" }).click();
   await page.locator(".terminal-frame").waitFor({ state: "visible" });
 };
 
@@ -74,7 +74,7 @@ const runE2E = async () => {
     await page1.keyboard.press("Enter");
 
     await page2.waitForFunction(() => {
-      return window.__termshare?.getBufferText().includes("shared");
+      return window.__hay?.getBufferText().includes("shared");
     });
 
     const roomLock = `e2e-${Date.now()}-lock`;
@@ -85,9 +85,10 @@ const runE2E = async () => {
     await joinRoom(page3, "Casey", roomLock);
     await joinRoom(page4, "Drew", roomLock);
 
-    await page3.getByRole("button", { name: "Lock control" }).click();
+    // Lock typing to page3: the Typing segmented control's "One user" option.
+    await page3.getByRole("button", { name: "One user" }).click();
     await page3.waitForFunction(() => {
-      return document.querySelector(".status-main")?.textContent?.includes("Locked");
+      return document.querySelector(".control-state")?.textContent?.includes("You have control");
     });
     await page4.locator(".terminal-frame").click();
     await page4.keyboard.type("whoami");

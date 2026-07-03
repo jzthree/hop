@@ -298,6 +298,30 @@ describe("Room", () => {
     expect(inputs.at(-1)?.clientId).toBe(null);
   });
 
+  it("snaps a losing resize back to the shared active size", () => {
+    const manager = new RoomManager(() => new FakePty() as any);
+    const room = manager.getRoom("election", { cols: 120, rows: 30 }, "/tmp");
+    const typer = new FakeSocket();
+    const viewer = new FakeSocket();
+
+    room.attachClient({ id: "typer", name: "Alex", colorIndex: 0, cols: 120, rows: 30 }, typer);
+    room.attachClient({ id: "viewer", name: "Blake", colorIndex: 1, cols: 60, rows: 20 }, viewer);
+
+    // The typer types (wins future elections), then asserts the big size.
+    typer.emitMessage({ type: "input", data: "ls\r" });
+    typer.emitMessage({ type: "resize", cols: 120, rows: 30 });
+
+    // A passive viewer auto-fits itself smaller — the resize must lose AND
+    // the viewer must be told the real shared size.
+    viewer.emitMessage({ type: "resize", cols: 60, rows: 20 });
+
+    const sizes = findMessages(viewer, "active_size");
+    const last = sizes.at(-1);
+    expect(last?.cols).toBe(120);
+    expect(last?.rows).toBe(30);
+    expect(last?.clientId).toBe("typer");
+  });
+
   it("counts attention bells but not OSC-terminator BELs", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {

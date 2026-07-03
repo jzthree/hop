@@ -324,6 +324,11 @@ const App = () => {
 
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
+  // Last shared size announced by the server (the active typer's size). Used
+  // to restore the remote's true shape when switching view mode to Manual —
+  // fit mode may have resized the local terminal (and re-wrapped the buffer)
+  // to this viewport in the meantime.
+  const activeSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const optimisticEchoRef = useRef(createOptimisticEcho());
@@ -602,6 +607,15 @@ const App = () => {
         handleResize();
       }, 0);
     }
+    // Switching to Manual restores the shared (active) size: fit mode may have
+    // shrunk the local terminal to this viewport, wrapping the buffer at a
+    // width the PTY isn't. Back at the true size, overflow + panning work.
+    if (viewMode === "full" && termRef.current && activeSizeRef.current) {
+      const { cols, rows } = activeSizeRef.current;
+      if (termRef.current.cols !== cols || termRef.current.rows !== rows) {
+        termRef.current.resize(cols, rows);
+      }
+    }
   }, [viewMode]);
 
   const sendMessage = (message: ClientMessage) => {
@@ -825,6 +839,7 @@ const App = () => {
         case "active_size":
           // Resize terminal to match active user's size.
           // This allows overflow/panning when the active user is larger than the viewport.
+          activeSizeRef.current = { cols: message.cols, rows: message.rows };
           if (termRef.current) {
             const currentCols = termRef.current.cols;
             const currentRows = termRef.current.rows;

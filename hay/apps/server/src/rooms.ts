@@ -663,6 +663,19 @@ export class Room extends EventEmitter {
       // Broadcast the new active size to other clients so they can adjust
       this.broadcastActiveSize(client);
       this.emit("pty_resize", { roomId: this.id, clientId: client.id, cols, rows, timestamp: now() });
+    } else if (cols !== this.activeCols || rows !== this.activeRows) {
+      // The resize lost the election (a passive viewer auto-fitted itself).
+      // Snap that client back to the shared size — otherwise its local
+      // terminal re-wraps the buffer at a size the PTY isn't, and it has no
+      // way to learn the real size until the next winning resize.
+      client.socket.send(
+        JSON.stringify({
+          type: "active_size",
+          clientId: this.activeClientId ?? client.id,
+          cols: this.activeCols,
+          rows: this.activeRows
+        } satisfies ServerMessage)
+      );
     }
   }
 

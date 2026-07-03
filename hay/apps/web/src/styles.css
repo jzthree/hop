@@ -1827,14 +1827,43 @@ button.primary {
   background: var(--bg);
 }
 
-.switcher-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px 10px;
+.switcher-top {
   border-bottom: 1px solid var(--line);
   background: var(--topbar-bg);
   backdrop-filter: blur(10px);
+}
+
+.switcher-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px 10px;
+}
+
+.switcher-header-spacer {
+  flex: 1;
+}
+
+.switcher-action {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.switcher-action:active {
+  filter: brightness(0.9);
+}
+
+.switcher-filter-row {
+  padding: 0 16px 10px;
 }
 
 .switcher-header h2 {
@@ -1855,7 +1884,7 @@ button.primary {
 }
 
 .switcher-filter {
-  flex: 1;
+  width: 100%;
   min-width: 0;
   font-family: var(--font-mono);
   font-size: 13px;
@@ -1872,7 +1901,6 @@ button.primary {
 }
 
 .switcher-close {
-  margin-left: auto;
   flex-shrink: 0;
   width: 32px;
   height: 32px;

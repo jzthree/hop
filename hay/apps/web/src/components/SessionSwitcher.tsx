@@ -31,6 +31,12 @@ type Props = {
   onSwitch: (session: SwitcherSession) => void;
   onRefresh: () => void;
   onNotice: (message: string) => void;
+  // Mobile-hub quick actions: the switcher is the front page there, so the
+  // few one-tap-hot actions (keyboard, find) and the settings drawer hang off
+  // its header. Omitted callbacks render no button.
+  onOpenSettings?: () => void;
+  onToggleKeyboard?: () => void;
+  onFind?: () => void;
 };
 
 type Sheet = {
@@ -52,7 +58,18 @@ const runningApp = (s: SwitcherSession) => {
   return proc && !SHELL_PROCS.has(proc.toLowerCase()) ? proc : "";
 };
 
-export const SessionSwitcher = ({ open, sessions, currentRoom, onClose, onSwitch, onRefresh, onNotice }: Props) => {
+export const SessionSwitcher = ({
+  open,
+  sessions,
+  currentRoom,
+  onClose,
+  onSwitch,
+  onRefresh,
+  onNotice,
+  onOpenSettings,
+  onToggleKeyboard,
+  onFind
+}: Props) => {
   const [filter, setFilter] = useState("");
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -402,22 +419,48 @@ export const SessionSwitcher = ({ open, sessions, currentRoom, onClose, onSwitch
 
   return (
     <div className="switcher-overlay" role="dialog" aria-label="Sessions">
-      <header className="switcher-header">
-        <h2>Sessions</h2>
-        <span className="switcher-count">{sessions.length}</span>
+      <div className="switcher-top">
+        <header className="switcher-header">
+          <h2>Sessions</h2>
+          <span className="switcher-count">{sessions.length}</span>
+          <span className="switcher-header-spacer" />
+          {onToggleKeyboard && (
+            <button type="button" className="switcher-action" aria-label="Toggle keyboard" title="Toggle keyboard" onClick={onToggleKeyboard}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="4" width="20" height="14" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/>
+              </svg>
+            </button>
+          )}
+          {onFind && (
+            <button type="button" className="switcher-action" aria-label="Find in terminal" title="Find in terminal" onClick={onFind}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+              </svg>
+            </button>
+          )}
+          {onOpenSettings && (
+            <button type="button" className="switcher-action" aria-label="Settings" title="Settings" onClick={onOpenSettings}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+          )}
+          <button type="button" className="switcher-close" aria-label="Close switcher" onClick={onClose}>
+            ✕
+          </button>
+        </header>
         {(sessions.length > FILTER_THRESHOLD || filter) && (
-          <input
-            className="switcher-filter"
-            placeholder="Filter…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            aria-label="Filter sessions"
-          />
+          <div className="switcher-filter-row">
+            <input
+              className="switcher-filter"
+              placeholder="Filter…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              aria-label="Filter sessions"
+            />
+          </div>
         )}
-        <button type="button" className="switcher-close" aria-label="Close switcher" onClick={onClose}>
-          ✕
-        </button>
-      </header>
+      </div>
       <div className="switcher-scroll">
         {model.mode === "filter" ? (
           <div className="switcher-rows">

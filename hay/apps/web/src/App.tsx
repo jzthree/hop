@@ -1963,7 +1963,14 @@ const App = () => {
 
   const handleFabDragEnd = () => {
     if (fabDragRef.current && !fabDragRef.current.dragging) {
-      setDrawerOpen(true);
+      // Mobile hub inversion: sessions are the front page, settings live
+      // behind the switcher's gear. Standalone (non-hop) keeps the drawer,
+      // since there's no session API to populate the switcher.
+      if (isMobile && isEmbeddedInHop()) {
+        setSwitcherOpen(true);
+      } else {
+        setDrawerOpen(true);
+      }
     }
     fabDragRef.current = null;
   };
@@ -2347,25 +2354,16 @@ const App = () => {
               </div>
             </details>
             {notice && <p className="notice" role="status" aria-live="polite">{notice}</p>}
-            {(() => {
+            {/* Desktop keeps the inline switch list (the drawer is a persistent
+                sidebar there); on mobile the full-screen switcher is the hub,
+                so an inline copy here would be redundant. */}
+            {!isMobile && (() => {
               // Compare against the internal room id — the display label can differ
               const otherSessions = sessions.filter((s) => s.name !== session.room);
               return (
                 <div className="session-switcher">
                   <div className="session-switcher-head">
                     <p className="session-switcher-label">Switch session</p>
-                    {isMobile && isEmbeddedInHop() && (
-                      <button
-                        type="button"
-                        className="quick-btn"
-                        onClick={() => {
-                          setDrawerOpen(false);
-                          setSwitcherOpen(true);
-                        }}
-                      >
-                        All
-                      </button>
-                    )}
                     {isEmbeddedInHop() && !creatingSession && (
                       <button
                         type="button"
@@ -2534,6 +2532,26 @@ const App = () => {
             }}
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
+            onOpenSettings={() => {
+              setSwitcherOpen(false);
+              setDrawerOpen(true);
+            }}
+            onToggleKeyboard={
+              isMobile
+                ? () => {
+                    setSwitcherOpen(false);
+                    handleKeyboardToggle();
+                  }
+                : undefined
+            }
+            onFind={
+              isMobile
+                ? () => {
+                    setSwitcherOpen(false);
+                    openSearch();
+                  }
+                : undefined
+            }
           />
           {isMobile && (
             <MobileKeyboard

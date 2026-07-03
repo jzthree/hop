@@ -42,7 +42,11 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("snapshot"),
     data: z.string(),
     alternateScreen: z.boolean().optional(),
-    cursorHidden: z.boolean().optional()
+    cursorHidden: z.boolean().optional(),
+    // Whether the remote app has enhanced keyboard reporting on (kitty keyboard
+    // protocol / xterm modifyOtherKeys). Lets a reattaching client re-enable it on
+    // its real terminal so keys like Shift+Enter keep their distinct encoding.
+    keyboardEnhanced: z.boolean().optional()
   }),
   z.object({ type: z.literal("collab"), enabled: z.boolean(), controllerId: z.string().nullable() }),
   z.object({ type: z.literal("input_rejected"), reason: z.string() }),

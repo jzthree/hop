@@ -143,6 +143,10 @@ export class Room extends EventEmitter {
   private activeRows: number;
   private outputBuffer = "";
   private alternateScreen = false;
+  // Enhanced keyboard reporting requested by the remote app (kitty keyboard protocol
+  // or xterm modifyOtherKeys). Tracked like alternateScreen so a reattaching client
+  // can restore it on its real terminal (see snapshot below).
+  private keyboardEnhanced = false;
   private cursorHidden = false;
   private controlSequenceTail = "";
   private oscBuffer = "";
@@ -254,7 +258,8 @@ export class Room extends EventEmitter {
         type: "snapshot",
         data: this.outputBuffer,
         alternateScreen: this.alternateScreen,
-        cursorHidden: this.cursorHidden
+        cursorHidden: this.cursorHidden,
+        keyboardEnhanced: this.keyboardEnhanced
       } satisfies ServerMessage));
     }
 
@@ -351,12 +356,33 @@ export class Room extends EventEmitter {
       }
     }
 
+    // Enhanced keyboard reporting: kitty keyboard protocol (CSI >flags u push /
+    // CSI <n u pop / CSI =flags u set) and xterm modifyOtherKeys (CSI >4;n m).
+    let nextKeyboardEnhanced = this.keyboardEnhanced;
+    const kbdRegex = /\x1b\[([<>=])[0-9;:]*u|\x1b\[>([0-9;]*)m/g;
+    let kbdMatch: RegExpExecArray | null;
+    while ((kbdMatch = kbdRegex.exec(combined)) !== null) {
+      if (kbdMatch[1] !== undefined) {
+        nextKeyboardEnhanced = kbdMatch[1] !== "<"; // push/set = on, pop = off
+      } else {
+        const parts = (kbdMatch[2] ?? "").split(";");
+        if (parts[0] === "4") nextKeyboardEnhanced = (parts[1] ?? "0") !== "0";
+      }
+    }
+
     let stateChanged = false;
     if (nextAlternate !== this.alternateScreen) {
       if (DEBUG_STATE) {
         console.log(`[hay] room=${this.id} alternateScreen=${nextAlternate}`);
       }
       this.alternateScreen = nextAlternate;
+      stateChanged = true;
+    }
+    if (nextKeyboardEnhanced !== this.keyboardEnhanced) {
+      if (DEBUG_STATE) {
+        console.log(`[hay] room=${this.id} keyboardEnhanced=${nextKeyboardEnhanced}`);
+      }
+      this.keyboardEnhanced = nextKeyboardEnhanced;
       stateChanged = true;
     }
     if (nextCursorHidden !== this.cursorHidden) {

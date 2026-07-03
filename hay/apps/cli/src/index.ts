@@ -236,6 +236,14 @@ let remoteMouseModes = new Set<number>();
 let remoteAlternateScreen = false;
 let remoteApplicationCursor = false;
 let pendingPrivateMode = "";
+// Enhanced keyboard reporting the remote app asked for (kitty keyboard protocol /
+// xterm modifyOtherKeys). We mirror the NET state onto the real terminal so keys like
+// Shift+Enter get a distinct encoding that we then forward to the remote verbatim.
+let remoteKittyKeyboard = false;
+let remoteModifyOtherKeys = false;
+let outerKbdEnhanced = false; // what we've actually toggled on the real terminal
+let pendingKbdProto = "";
+const KBD_PROTO_TAIL_CHARS = 24;
 type RgbColor = { r: number; g: number; b: number };
 let defaultFg: RgbColor | null = null;
 let defaultBg: RgbColor | null = null;
@@ -1096,6 +1104,78 @@ const trackPrivateModes = (chunk: string) => {
   pendingPrivateMode = combined.slice(-PRIVATE_MODE_TAIL_CHARS);
 };
 
+// Enable/disable enhanced keyboard reporting on the REAL terminal. The remote app
+// (e.g. Claude Code) turns this on so it can see Shift+Enter etc., but because we
+// model its screen in a headless terminal and re-render, that request never reaches
+// the real terminal on its own — so we reflect it here. Idempotent: only writes on a
+// state transition, so plain-shell sessions (no app request) are byte-for-byte
+// unaffected.
+const KBD_ENABLE = "\x1b[>1u\x1b[>4;2m"; // kitty keyboard (disambiguate) + modifyOtherKeys L2
+const KBD_DISABLE = "\x1b[<u\x1b[>4;0m"; // pop kitty + modifyOtherKeys off
+const setOuterKeyboardEnhanced = (on: boolean) => {
+  if (on === outerKbdEnhanced) return;
+  outerKbdEnhanced = on;
+  if (process.stdout.isTTY) process.stdout.write(on ? KBD_ENABLE : KBD_DISABLE);
+};
+
+// Scan remote output for the enhanced-keyboard enable/disable sequences and reflect
+// the resulting NET state onto the real terminal. Claude re-asserts pop+push together
+// (\x1b[<u\x1b[>1u…) so we compute the final state per chunk rather than toggling.
+const KBD_PROTO_REGEX = /\x1b\[([<>=])[0-9;:]*u|\x1b\[>([0-9;]*)m/g;
+const trackKeyboardProtocol = (chunk: string) => {
+  if (!chunk) return;
+  const combined = pendingKbdProto + chunk;
+  KBD_PROTO_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let lastEnd = 0;
+  while ((match = KBD_PROTO_REGEX.exec(combined)) !== null) {
+    lastEnd = KBD_PROTO_REGEX.lastIndex;
+    if (match[1] !== undefined) {
+      remoteKittyKeyboard = match[1] !== "<"; // push/set = on, pop = off
+    } else {
+      const parts = (match[2] ?? "").split(";");
+      if (parts[0] === "4") remoteModifyOtherKeys = (parts[1] ?? "0") !== "0";
+    }
+  }
+  setOuterKeyboardEnhanced(remoteKittyKeyboard || remoteModifyOtherKeys);
+  // Stash a trailing partial CSI so a sequence split across chunks still resolves.
+  const tailStart = combined.lastIndexOf("\x1b[");
+  if (tailStart !== -1 && tailStart >= lastEnd && /^\x1b\[[<>=]?[0-9;:]*$/.test(combined.slice(tailStart))) {
+    pendingKbdProto = combined.slice(tailStart).slice(-KBD_PROTO_TAIL_CHARS);
+  } else {
+    pendingKbdProto = "";
+  }
+};
+
+// When enhanced keyboard reporting is on, the real terminal encodes hop's OWN shortcut
+// keys in the new scheme too. Translate just those reserved combos back to their legacy
+// bytes so Ctrl+G/Ctrl+Q and the Opt+… shortcuts keep working; everything else is
+// forwarded to the remote verbatim. Returns null when the token isn't a reserved key.
+const RESERVED_CTRL_CODES = new Map<number, string>([[103, "\x07"], [113, "\x11"]]); // Ctrl+G, Ctrl+Q
+const normalizeReservedKey = (token: string): string | null => {
+  if (!outerKbdEnhanced) return null;
+  let code: number;
+  let mods: number;
+  const kitty = /^\x1b\[(\d+)(?:;(\d+))?u$/.exec(token);
+  if (kitty) {
+    code = Number.parseInt(kitty[1], 10);
+    mods = kitty[2] ? Number.parseInt(kitty[2], 10) : 1;
+  } else {
+    const modOther = /^\x1b\[27;(\d+);(\d+)~$/.exec(token);
+    if (!modOther) return null;
+    mods = Number.parseInt(modOther[1], 10);
+    code = Number.parseInt(modOther[2], 10);
+  }
+  const bits = mods - 1;
+  const shift = (bits & 1) !== 0;
+  const alt = (bits & 2) !== 0;
+  const ctrl = (bits & 4) !== 0;
+  if (ctrl && !alt && RESERVED_CTRL_CODES.has(code)) return RESERVED_CTRL_CODES.get(code) ?? null;
+  if (alt && !ctrl && code >= 97 && code <= 122) return "\x1b" + String.fromCharCode(shift ? code - 32 : code);
+  if (alt && !ctrl && code === 92) return "\x1b\\"; // Opt+\ (arms literal mode)
+  return null;
+};
+
 terminal.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
   applyPrivateModes(params, false);
   return false;
@@ -1177,10 +1257,16 @@ const handleTyping = () => {
 };
 
 const getUrl = () => {
-  const separator = config.server.includes("?") ? "&" : "?";
-  return `${config.server}${separator}room=${encodeURIComponent(config.room)}&name=${encodeURIComponent(
-    config.name
-  )}&cols=${Math.max(2, localMetrics.viewportCols)}&rows=${Math.max(2, localMetrics.viewportRows)}`;
+  // config.server may already carry query params (e.g. `hop attach` bakes in
+  // room/name/source/cwd). Use searchParams.set so switching rooms REPLACES the
+  // baked-in room= instead of appending a second one — the server reads the first
+  // room= value, so an appended duplicate is ignored and switches never take effect.
+  const url = new URL(config.server);
+  url.searchParams.set("room", config.room);
+  url.searchParams.set("name", config.name);
+  url.searchParams.set("cols", String(Math.max(2, localMetrics.viewportCols)));
+  url.searchParams.set("rows", String(Math.max(2, localMetrics.viewportRows)));
+  return url.toString();
 };
 
 const isPidAlive = (pid: number) => {
@@ -1331,6 +1417,9 @@ const initUi = () => {
 const restoreUi = () => {
   if (!uiInitialized || !process.stdout.isTTY) return;
   disableMouseCapture();
+  // Undo any enhanced keyboard reporting we turned on, so the shell we return to
+  // isn't left sending kitty/modifyOtherKeys encodings.
+  setOuterKeyboardEnhanced(false);
   process.stdout.write("\x1b[?25h\x1b[?1049l\x1b[0m");
   uiInitialized = false;
 };
@@ -1869,7 +1958,8 @@ const renderSessionPanel = (): string[] => {
   lines.push(`${BAR.statusBg}${BAR.fg}${padOrTrim(header, cols)}${reset}`);
 
   const bodyH = Math.max(1, rows - 2);
-  const listW = Math.max(22, Math.min(38, Math.floor(cols * 0.34)));
+  // Wider list column so each row can show its working dir next to the name.
+  const listW = Math.max(26, Math.min(46, Math.floor(cols * 0.40)));
   const prevW = Math.max(10, cols - listW - 3);
   const listStart = panelSessions.length <= bodyH
     ? 0
@@ -1891,9 +1981,16 @@ const renderSessionPanel = (): string[] => {
       const s = panelSessions[absIdx];
       const selected = absIdx === panelIndex;
       const isCurrent = s.id === config.room;
-      const label = `${selected ? "▸ " : "  "}${s.id}${isCurrent ? " ·here" : ""}`;
-      const padded = cell(label, listW);
-      left = selected ? `${BAR.chip}${padded}\x1b[22m${reset}` : `${BAR.fg}${padded}${reset}`;
+      // Session name on the left; working dir dimmed and right-aligned, truncated to fit.
+      const namePart = truncateAnsi(`${selected ? "▸ " : "  "}${s.id}${isCurrent ? " ·here" : ""}`, listW);
+      const nameW = visibleLength(namePart);
+      const avail = Math.max(0, listW - nameW - 1);
+      const cwdText = s.cwd ? formatCwd(s.cwd) : "";
+      const cwd = avail > 0 && cwdText ? truncateAnsi(cwdText, avail) : "";
+      const gap = " ".repeat(Math.max(1, listW - nameW - visibleLength(cwd)));
+      left = selected
+        ? `${BAR.chip}${namePart}${gap}${cwd}\x1b[22m${reset}`
+        : `${BAR.fg}${namePart}${reset}${gap}${BAR.dim}${cwd}${reset}`;
     } else {
       left = cell("", listW);
     }
@@ -2356,6 +2453,11 @@ const connect = () => {
     lastWsError = null;
     remoteMouseModes.clear();
     remoteAlternateScreen = false;
+    // Recompute enhanced-keyboard state from the fresh snapshot; leave the real
+    // terminal as-is (setOuterKeyboardEnhanced reconciles it idempotently).
+    remoteKittyKeyboard = false;
+    remoteModifyOtherKeys = false;
+    pendingKbdProto = "";
     remoteApplicationCursor = false;
     pendingPrivateMode = "";
     pendingOsc = "";
@@ -2422,6 +2524,7 @@ const connect = () => {
       case "output":
         {
           trackPrivateModes(message.data);
+          trackKeyboardProtocol(message.data);
           trackOscColors(message.data);
           const filtered = filterFocusSequences(message.data);
           if (!filtered) return;
@@ -2441,6 +2544,14 @@ const connect = () => {
           if (typeof message.alternateScreen === "boolean") {
             remoteAlternateScreen = message.alternateScreen;
           }
+          // The enable sequence may predate the retained buffer (long-running app), so
+          // trust the server's tracked state to restore enhanced keyboard reporting.
+          if (typeof message.keyboardEnhanced === "boolean") {
+            remoteKittyKeyboard = message.keyboardEnhanced;
+            remoteModifyOtherKeys = message.keyboardEnhanced;
+            setOuterKeyboardEnhanced(message.keyboardEnhanced);
+          }
+          trackKeyboardProtocol(message.data);
           trackOscColors(message.data);
           // reset() (not clear()) so the stale cursor position, SGR attrs, and
           // mode state from the previous connection don't bleed into the replay.
@@ -2928,6 +3039,14 @@ process.stdin.on("data", (data) => {
     // shortcut keys handled locally while the rest is forwarded to the shell.
     const tokens = tokenizeInput(input);
     for (const token of tokens) {
+      // With enhanced keyboard reporting on, hop's shortcut keys arrive re-encoded;
+      // translate just those back so they still trigger locally.
+      const legacy = normalizeReservedKey(token);
+      if (legacy !== null) {
+        if (handleLocalShortcut(legacy)) continue;
+        remote += token; // reserved-looking but not a live shortcut → forward the real key
+        continue;
+      }
       if (handleLocalShortcut(token)) continue;
       remote += token;
     }

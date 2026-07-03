@@ -2061,6 +2061,30 @@ function saveUsers(users) {
     fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
+// Best-effort username for a request. Auth itself is a shared secret with no
+// identity, but multi-user setups give each user a dedicated hostname
+// (<user>.<prefix>.<domain>), so the Host header identifies who is connecting:
+// on the admin host via the users registry, in client mode via the exported
+// tunnel hostname. Returns null when unknown (single-user setups).
+function resolveRequestUsername(req) {
+    try {
+        const host = String(req?.headers?.host || '').split(':')[0].trim().toLowerCase();
+        if (!host) return null;
+        const users = getUsers();
+        for (const [username, info] of Object.entries(users)) {
+            if (info && typeof info.hostname === 'string' && info.hostname.toLowerCase() === host) {
+                return username;
+            }
+        }
+        if (CLIENT_TUNNEL_CONFIG && typeof CLIENT_TUNNEL_CONFIG.hostname === 'string'
+            && CLIENT_TUNNEL_CONFIG.hostname.toLowerCase() === host) {
+            const firstLabel = host.split('.')[0];
+            if (firstLabel) return firstLabel;
+        }
+    } catch (e) { }
+    return null;
+}
+
 // Get base domain from existing config (e.g., hop.example.com -> example.com)
 function getBaseDomain() {
     const config = getDomainConfig();
@@ -2590,6 +2614,18 @@ function log(msg, color = RESET) {
     console.log(`${color}${msg}${RESET}`);
 }
 
+// One consistent "daemon not running" message for every command that needs
+// the daemon (attach, url, qr, health, status, wipe --agent, ...).
+function printNotRunningError() {
+    log(`Hop is not running. Start it with: ${CYAN}hop${RESET}`, RED);
+}
+
+// Shown once right before handing the terminal over to a session, so the
+// escape hatch is visible without opening the Opt+? overlay.
+function printDetachHint() {
+    log(`Ctrl+G detach (keeps running) · Ctrl+Q twice kill · Opt+? shortcuts`, DIM);
+}
+
 // Process-level crash guards. Without these, a single stray throw or rejected
 // promise anywhere in the daemon's async paths kills the process — and with it
 // the cloudflared tunnel and every remote user's session. In the daemon we log
@@ -2744,6 +2780,8 @@ async function listActiveSessionsRuntimeFirst() {
         cwd: room.cwd,
         foregroundProcess: room.foregroundProcess,
         lastActivityAt: room.lastActivityAt,
+        bellSeq: room.bellSeq,
+        lastBellAt: room.lastBellAt,
         hostPort: room.hostPort
     }));
     return { sessions, runtimeAvailable: true };
@@ -4409,6 +4447,14 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                             const lastActivityAt = Number.isFinite(Number(room?.lastActivityAt)) && Number(room.lastActivityAt) > 0
                                 ? Number(room.lastActivityAt)
                                 : undefined;
+                            const bellSeqRaw = Number(room?.bellSeq);
+                            const bellSeq = Number.isFinite(bellSeqRaw) && bellSeqRaw >= 0
+                                ? Math.floor(bellSeqRaw)
+                                : 0;
+                            const lastBellAtRaw = Number(room?.lastBellAt);
+                            const lastBellAt = Number.isFinite(lastBellAtRaw) && lastBellAtRaw >= 0
+                                ? Math.floor(lastBellAtRaw)
+                                : 0;
                             const clientCountRaw = Number(room?.clientCount);
                             const clientCount = Number.isFinite(clientCountRaw) && clientCountRaw >= 0
                                 ? Math.floor(clientCountRaw)
@@ -4422,6 +4468,8 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                                 cwd,
                                 foregroundProcess,
                                 lastActivityAt,
+                                bellSeq,
+                                lastBellAt,
                                 clientCount,
                                 localCliCount,
                                 hasLocalCli: localCliCount > 0,
@@ -5430,6 +5478,8 @@ function startAuthProxy(authEmitter) {
                 cwd: s.cwd,
                 foregroundProcess: s.foregroundProcess,
                 lastActivityAt: s.lastActivityAt,
+                bellSeq: s.bellSeq,
+                lastBellAt: s.lastBellAt,
                 shell: s.shell,
                 env: s.env,
                 cols: s.cols,
@@ -6609,14 +6659,20 @@ function startAuthProxy(authEmitter) {
             let html = content.toString('utf8');
             const sessionBasePath = `/s/${displayName}/`;
 
-            // Inject hop session configuration
+            // Inject hop session configuration. Only include a name when the
+            // request's user is known (multi-user hostnames); the web client
+            // falls back to its own default otherwise.
+            const hopSessionConfig = {
+                room: displayName,
+                wsUrl: '/ws'
+            };
+            const requestUsername = resolveRequestUsername(req);
+            if (requestUsername) {
+                hopSessionConfig.name = requestUsername;
+            }
             const injectScript = `<script>
                 // Hop session configuration - use /ws endpoint with room as query param
-                window.__HOP_SESSION__ = ${JSON.stringify({
-                    room: displayName,
-                    name: 'Guest',
-                    wsUrl: '/ws'
-                })};
+                window.__HOP_SESSION__ = ${JSON.stringify(hopSessionConfig)};
             </script>`;
             html = html.replace('<head>', '<head>' + injectScript);
 
@@ -6979,31 +7035,48 @@ tunnel: ${domainConfig.tunnelName}
                 }
             });
 
-            // Timeout fallback - assume connected after 5 seconds
+            // Timeout fallback after 5 seconds: cloudflared never confirmed the
+            // connection, so verify with a quick HTTP probe instead of assuming.
             setTimeout(() => {
-                if (!resolved) {
-                    resolved = true;
-                    updateTunnelStatus({
-                        connected: true,
-                        lastEvent: 'assumed_connected',
-                        lastError: null,
-                        lastConnectedAt: Date.now()
-                    });
+                if (resolved) return;
+                resolved = true;
+                probeTunnelHealth(publicUrl, 5000).then((health) => {
+                    if (health.ok) {
+                        updateTunnelStatus({
+                            connected: true,
+                            lastEvent: 'assumed_connected',
+                            lastError: null,
+                            lastConnectedAt: Date.now()
+                        });
+                    } else {
+                        updateTunnelStatus({
+                            connected: false,
+                            lastEvent: 'unconfirmed',
+                            lastError: health.error || (health.status ? `HTTP ${health.status}` : 'not reachable')
+                        });
+                        log(`[Tunnel] Tunnel process started but ${publicUrl} is not yet reachable — check ${CYAN}hop health${RESET}.`, YELLOW);
+                    }
                     if (isRestart) {
                         tunnelEmitter.emit('urlChanged', publicUrl);
                     }
                     resolve({ tunnel, publicUrl });
-                }
+                });
             }, 5000);
         });
     }
 
     // For quick tunnels, parse URL from output
     let urlFound = false;
+    const recentTunnelOutput = []; // last cloudflared lines, for timeout diagnostics
     return new Promise((resolve, reject) => {
         tunnel.stderr.on('data', (data) => {
             if (urlFound) return;
             const output = data.toString();
+            for (const line of output.split('\n')) {
+                if (!line.trim()) continue;
+                recentTunnelOutput.push(line);
+                if (recentTunnelOutput.length > 10) recentTunnelOutput.shift();
+            }
             const match = output.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
 
             if (match) {
@@ -7035,7 +7108,12 @@ tunnel: ${domainConfig.tunnelName}
             if (!urlFound) {
                 tunnel.kill();
                 log(`\n${RED}ERROR: Cloudflare tunnel failed to start (timeout after 30s)${RESET}`, RED);
+                if (recentTunnelOutput.length) {
+                    log(`Last ${recentTunnelOutput.length} line(s) of cloudflared output:`, YELLOW);
+                    recentTunnelOutput.forEach((line) => log(`  ${line}`, RESET));
+                }
                 log(`Check your internet connection or try again.`, YELLOW);
+                log(`See ${CYAN}hop logs${RESET} for the full daemon log, or run ${CYAN}hop health --restart${RESET}.`, RESET);
                 process.exit(1);
             }
         }, 30000);
@@ -7125,21 +7203,46 @@ credentials-file: ${path.resolve(credentialsPath)}
             }
         });
 
-        // Timeout fallback - assume connected after 5 seconds
+        // Timeout fallback after 5 seconds: cloudflared never confirmed the
+        // connection. Verify with a quick HTTP probe when we know the URL,
+        // instead of unconditionally assuming success.
         setTimeout(() => {
-            if (!resolved) {
-                resolved = true;
+            if (resolved) return;
+            resolved = true;
+            const finish = () => {
+                if (isRestart && publicUrl) {
+                    tunnelEmitter.emit('urlChanged', publicUrl);
+                }
+                resolve({ tunnel, publicUrl });
+            };
+            if (!publicUrl) {
                 updateTunnelStatus({
                     connected: true,
                     lastEvent: 'assumed_connected',
                     lastError: null,
                     lastConnectedAt: Date.now()
                 });
-                if (isRestart && publicUrl) {
-                    tunnelEmitter.emit('urlChanged', publicUrl);
-                }
-                resolve({ tunnel, publicUrl });
+                finish();
+                return;
             }
+            probeTunnelHealth(publicUrl, 5000).then((health) => {
+                if (health.ok) {
+                    updateTunnelStatus({
+                        connected: true,
+                        lastEvent: 'assumed_connected',
+                        lastError: null,
+                        lastConnectedAt: Date.now()
+                    });
+                } else {
+                    updateTunnelStatus({
+                        connected: false,
+                        lastEvent: 'unconfirmed',
+                        lastError: health.error || (health.status ? `HTTP ${health.status}` : 'not reachable')
+                    });
+                    log(`[Tunnel] Tunnel process started but ${publicUrl} is not yet reachable — check ${CYAN}hop health${RESET}.`, YELLOW);
+                }
+                finish();
+            });
         }, 5000);
     });
 }
@@ -7487,11 +7590,76 @@ function markAuthQrShown() {
 function printStartupAuthSection(label) {
     if (hasShownAuthQr()) {
         log(`Authenticator already configured — run ${CYAN}hop qr auth${RESET} to re-scan.`, RESET);
+    } else {
+        log(`Setup Authenticator (first run):`, BOLD);
+        showAuthQrCode(label || 'Hop');
+        markAuthQrShown();
+    }
+    if (!isPasswordEnabled()) {
+        log(`No password set: this URL is protected by the authenticator (TOTP) code only — ${CYAN}hop password set${RESET} adds one.`, YELLOW);
+    }
+}
+
+// First run only: offer to add a password on top of TOTP. `hop client` forces
+// this during setup; the default self-host path should at least offer it once.
+// Never prompts in daemon mode or non-interactive (agent) runs.
+async function maybeOfferFirstRunPassword() {
+    if (isPasswordEnabled()) return;
+    if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+
+    const config = getHopConfig();
+    if (config.password_offer_shown) return;
+    // Record the offer up front so a declined (or interrupted) prompt is
+    // never repeated on later startups.
+    config.password_offer_shown = true;
+    saveHopConfig(config);
+
+    log(`\nYour tunnel URL will be protected by an authenticator (TOTP) code only.`, YELLOW);
+    log(`A password adds a second factor for remote access.`, RESET);
+
+    const readline = require('readline');
+    const stream = require('stream');
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise((resolve) => {
+        rl.question(`Set a password for remote access? [y/N] `, resolve);
+    });
+    rl.close();
+
+    if (!/^y(es)?$/i.test(String(answer || '').trim())) {
+        log(`Skipped. You can add one anytime with ${CYAN}hop password set${RESET}.`, RESET);
         return;
     }
-    log(`Setup Authenticator (first run):`, BOLD);
-    showAuthQrCode(label || 'Hop');
-    markAuthQrShown();
+
+    // Muted readline for password input (same flow as `hop password set`)
+    const askPassword = (prompt) => new Promise((resolve) => {
+        const mutedRl = readline.createInterface({
+            input: process.stdin,
+            output: new stream.Writable({
+                write: (chunk, encoding, callback) => callback()
+            }),
+            terminal: true
+        });
+        process.stdout.write(prompt);
+        mutedRl.question('', (value) => {
+            mutedRl.close();
+            process.stdout.write('\n');
+            resolve(value);
+        });
+    });
+
+    const password = await askPassword('Set a password: ');
+    if (password.length < 4) {
+        log(`Password too short (min 4 characters). Run ${CYAN}hop password set${RESET} to set one later.`, RED);
+        return;
+    }
+    const confirm = await askPassword('Confirm password: ');
+    if (password !== confirm) {
+        log(`Passwords do not match. Run ${CYAN}hop password set${RESET} to set one later.`, RED);
+        return;
+    }
+    setPassword(password);
+    log(`${GREEN}✓ Password set.${RESET}`, GREEN);
 }
 
 function startDaemon() {
@@ -7512,7 +7680,36 @@ function startDaemon() {
 function waitForDaemonReady(timeoutMs = 20000) {
     return new Promise((resolve) => {
         const start = Date.now();
+        // The daemon logs its startup steps ([2/4], [3/4]) into hop-daemon.log,
+        // which the user can't see. Surface each step here as it happens so the
+        // foreground wait isn't a long silent gap after [1/4]. The log is
+        // append-only, so only scan lines written after this wait began (old
+        // runs left the same markers behind).
+        const daemonLogPath = path.join(LOG_DIR, 'hop-daemon.log');
+        let logScanOffset = 0;
+        try { logScanOffset = fs.statSync(daemonLogPath).size; } catch (e) { }
+        const stepMarkers = [
+            { marker: '[2/4]', message: `[2/4] Starting session manager...` },
+            { marker: '[3/4]', message: `[3/4] Opening Cloudflare tunnel...` }
+        ];
+        const seenSteps = new Set();
+        const reportDaemonProgress = () => {
+            if (seenSteps.size === stepMarkers.length) return;
+            let logText;
+            try {
+                logText = fs.readFileSync(daemonLogPath).slice(logScanOffset).toString('utf8');
+            } catch (e) {
+                return;
+            }
+            for (const step of stepMarkers) {
+                if (!seenSteps.has(step.marker) && logText.includes(step.marker)) {
+                    seenSteps.add(step.marker);
+                    log(step.message, BOLD);
+                }
+            }
+        };
         const check = () => {
+            reportDaemonProgress();
             const state = isServerRunning();
             // State file now written early, so also check that URL is populated
             if (state && state.url) return resolve(state);
@@ -7635,6 +7832,7 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
         });
     };
 
+    printDetachHint();
     runLocalSessionLoop().then((code) => {
         // Ctrl+G (detach) exits hay CLI with code 10; keep tunnel alive.
         if (code === 10) {
@@ -7715,6 +7913,7 @@ async function attachToExistingTunnel(existingTunnel, opts = {}) {
         log(`(Run ${CYAN}hop new${RESET} to start a fresh session here instead.)`, DIM);
     }
 
+    printDetachHint();
     const code = await runHayCliAttach(target, existingTunnel.url || '');
     if (code === 10) {
         log(`\nDetached from local session.`, YELLOW);
@@ -8325,6 +8524,10 @@ async function runLocalOnlyTerminal(nameArg) {
     }
 
     log(`Launching local terminal: ${target.displayName}`, RESET);
+    if (!isServerRunning()) {
+        log(`This session is local only — no daemon or tunnel, so it is not reachable remotely (run ${CYAN}hop${RESET} for that).`, DIM);
+    }
+    printDetachHint();
 
     const code = await runHayCliAttach(target, '');
     if (code === 10) {
@@ -8363,6 +8566,7 @@ async function attachToNamedSession(existingTunnel, displayName) {
     }
     const targetDisplayName = target.displayName || displayName;
     log(`Attaching to ${targetDisplayName}...`, RESET);
+    printDetachHint();
     const code = await runHayCliAttach({
         internalName: target.internalName || toInternalSessionName(targetDisplayName),
         displayName: targetDisplayName,
@@ -8710,7 +8914,7 @@ async function main() {
     if (process.argv[2] === 'attach') {
         const existing = isServerRunning();
         if (!existing) {
-            log(`Hop is not running.`, RED);
+            printNotRunningError();
             process.exit(1);
         }
         const nameArg = process.argv[3];
@@ -8891,7 +9095,9 @@ async function main() {
         if (!state) {
             log(`  Daemon:    ${RED}not running${RESET}`, RESET);
             log(`  Logs:      ${LOG_DIR}`, RESET);
-            log(`\n  Start with: ${CYAN}hop${RESET}\n`, RESET);
+            log('');
+            printNotRunningError();
+            log('');
             process.exit(0);
         }
         const fmtUptime = (ms) => {
@@ -9041,13 +9247,13 @@ async function main() {
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
         log(`${BOLD}Usage:${RESET}`, RESET);
-        log(`  hop                       Start tunnel if needed, then start a NEW session`, RESET);
-        log(`  hop new                   Alias for hop (start a new session)`, RESET);
-        log(`  hop attach                Attach to an unattached session (lists sessions if none are free)`, RESET);
-        log(`  hop attach <name>         Attach to a session by name`, RESET);
-        log(`  hop attach all            Attach to every session in turn`, RESET);
-        log(`  hop start                 Start hop daemon and print QR codes`, RESET);
-        log(`  hop local [session]       Start daemonless local terminal ([session] attaches if present)`, RESET);
+        log(`  hop                       Launch the daemon+tunnel if needed and open a NEW terminal session`, RESET);
+        log(`  hop new                   Same as hop (always opens a new session)`, RESET);
+        log(`  hop attach                Reattach to an existing session (picks an unattached one; lists them if none are free)`, RESET);
+        log(`  hop attach <name>         Reattach to an existing session by name`, RESET);
+        log(`  hop attach all            Reattach to every existing session in turn`, RESET);
+        log(`  hop start                 Start the daemon and tunnel only, then print QR codes (no terminal session)`, RESET);
+        log(`  hop local [session]       Open a terminal with no daemon or tunnel — local only, not reachable remotely`, RESET);
         log(`  hop stop                  Stop hop daemon (terminal sessions keep running)`, RESET);
         log(`  hop stop --all            Stop daemon, hay-host, and all terminal sessions`, RESET);
         log(`  hop status                Show daemon, tunnel, and session status`, RESET);
@@ -9155,7 +9361,7 @@ async function main() {
     if (process.argv[2] === 'url') {
         const state = isServerRunning();
         if (!state) {
-            log(`Hop is not running.`, RED);
+            printNotRunningError();
             process.exit(1);
         }
         // Print just the URL for easy copying/piping
@@ -9188,7 +9394,7 @@ async function main() {
 
         const state = isServerRunning();
         if (!state) {
-            log(`Hop is not running.`, RED);
+            printNotRunningError();
             process.exit(1);
         }
         log(`\nCurrent tunnel URL:`, BOLD);
@@ -9203,7 +9409,7 @@ async function main() {
     if (process.argv[2] === 'health') {
         const state = isServerRunning();
         if (!state) {
-            log(`Hop is not running.`, RED);
+            printNotRunningError();
             process.exit(1);
         }
 
@@ -9698,7 +9904,24 @@ async function main() {
         if (!subcommand || subcommand === 'list') {
             const includeAll = process.argv.includes('--all') || process.argv.includes('-a');
             const snapshot = await listAllSessionEntriesRuntimeFirst();
-            let sessions;
+            const printSessionRow = (s) => {
+                if (s.type === 'port') {
+                    const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
+                        ? `, WORKSPACE ${s.workspaceNames.join(',')}`
+                        : '';
+                    log(`  ${BOLD}${s.displayName}${RESET}  ${YELLOW}[PORT ${s.port}${workspaceSuffix}]${RESET}`, RESET);
+                } else {
+                    const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
+                        ? `, WORKSPACE ${s.workspaceNames.join(',')}`
+                        : '';
+                    const clients = Number(s.clientCount) || 0;
+                    const clientChip = `${DIM} · ${clients} ${clients === 1 ? 'client' : 'clients'}${RESET}`;
+                    const stateLabel = s.live
+                        ? `${GREEN}[TERMINAL, LIVE${workspaceSuffix}]${RESET}${clientChip}`
+                        : `${YELLOW}[TERMINAL${workspaceSuffix}]${RESET}`;
+                    log(`  ${BOLD}${s.displayName}${RESET}  ${stateLabel}`, RESET);
+                }
+            };
             if (includeAll) {
                 const liveSessions = snapshot.entries.filter((session) => session && session.live === true);
                 const workspaceDefs = listWorkspaceSessionDefinitions();
@@ -9728,36 +9951,51 @@ async function main() {
                     }
                 }
 
-                sessions = [
-                    ...liveByName.values(),
-                    ...savedOnly.values()
-                ];
-            } else {
-                sessions = snapshot.entries.filter((session) => session && session.type === 'terminal' && session.live === true);
+                const liveEntries = Array.from(liveByName.values());
+                const savedEntries = Array.from(savedOnly.values());
+                if (liveEntries.length === 0 && savedEntries.length === 0) {
+                    log(`No sessions configured.`, YELLOW);
+                    process.exit(0);
+                }
+
+                log(`\n${BOLD}Live sessions:${RESET}\n`, CYAN);
+                if (liveEntries.length) {
+                    liveEntries.forEach(printSessionRow);
+                } else {
+                    log(`  (none)`, DIM);
+                }
+
+                log(`\n${BOLD}Saved definitions:${RESET}\n`, CYAN);
+                if (savedEntries.length) {
+                    // Group saved definitions by workspace (a definition saved in
+                    // several workspaces is listed under each one).
+                    const byWorkspace = new Map();
+                    for (const def of savedEntries) {
+                        const names = Array.isArray(def.workspaceNames) && def.workspaceNames.length
+                            ? def.workspaceNames
+                            : ['(no workspace)'];
+                        for (const workspaceName of names) {
+                            if (!byWorkspace.has(workspaceName)) byWorkspace.set(workspaceName, []);
+                            byWorkspace.get(workspaceName).push(def);
+                        }
+                    }
+                    for (const workspaceName of Array.from(byWorkspace.keys()).sort((a, b) => a.localeCompare(b))) {
+                        log(`  ${BOLD}Workspace: ${workspaceName}${RESET}`, RESET);
+                        byWorkspace.get(workspaceName).forEach(printSessionRow);
+                    }
+                } else {
+                    log(`  (none)`, DIM);
+                }
+                process.exit(0);
             }
+
+            const sessions = snapshot.entries.filter((session) => session && session.type === 'terminal' && session.live === true);
             if (sessions.length === 0) {
-                log(includeAll ? `No sessions configured.` : `No live sessions.`, YELLOW);
+                log(`No live sessions.`, YELLOW);
                 process.exit(0);
             }
             log(`\n${BOLD}Sessions:${RESET}\n`, CYAN);
-            sessions.forEach(s => {
-                if (s.type === 'port') {
-                    const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
-                        ? `, WORKSPACE ${s.workspaceNames.join(',')}`
-                        : '';
-                    log(`  ${BOLD}${s.displayName}${RESET}  ${YELLOW}[PORT ${s.port}${workspaceSuffix}]${RESET}`, RESET);
-                } else {
-                    const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
-                        ? `, WORKSPACE ${s.workspaceNames.join(',')}`
-                        : '';
-                    const clients = Number(s.clientCount) || 0;
-                    const clientChip = `${DIM} · ${clients} ${clients === 1 ? 'client' : 'clients'}${RESET}`;
-                    const stateLabel = s.live
-                        ? `${GREEN}[TERMINAL, LIVE${workspaceSuffix}]${RESET}${clientChip}`
-                        : `${YELLOW}[TERMINAL${workspaceSuffix}]${RESET}`;
-                    log(`  ${BOLD}${s.displayName}${RESET}  ${stateLabel}`, RESET);
-                }
-            });
+            sessions.forEach(printSessionRow);
             process.exit(0);
         }
 
@@ -10081,7 +10319,7 @@ async function main() {
         // hop wipe --agent: close all agent-created terminal API sessions
         if (wipeAgent) {
             if (!existingTunnel) {
-                log(`Hop server is not running. Start hop first.`, YELLOW);
+                printNotRunningError();
                 process.exit(1);
             }
             const http = require('http');
@@ -10283,6 +10521,7 @@ async function main() {
 
         // No server yet: start daemon and wait for it to come up
         loadAuthSecret();
+        await maybeOfferFirstRunPassword();
         await checkAndInstallDependencies();
         startDaemon();
         const state = await waitForDaemonReady();
@@ -10290,6 +10529,7 @@ async function main() {
         const label = domainConfig?.hostname ? `Hop-${domainConfig.hostname}` : 'Hop';
         loadAuthSecret();
         await waitForStartPolling(state, label);
+        log(`[4/4] Attaching to session...`, BOLD);
         await attachToExistingTunnel(state, { forceNew: true });
         return;
     }

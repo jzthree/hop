@@ -116,6 +116,10 @@ const UI_PARSER_FLUSH_TIMEOUT_MS = 200;
 const DEFAULT_SEND_KEY_REPEAT = 1;
 const WAIT_POLL_INTERVAL_MS = 40;
 const DEFAULT_WAIT_MAX_MS = 30000;
+// Background wait jobs (async=true) watch a turn nobody is blocked on — real
+// agent turns run for minutes, so an unspecified max_wait_ms defaults far
+// higher than the synchronous 30s. hopx_wait_any also re-arms expired watches.
+const DEFAULT_ASYNC_WAIT_MAX_MS = 15 * 60 * 1000;
 const DEFAULT_WAIT_CAPTURE_MAX_EVENTS = 120;
 const DEFAULT_WAIT_AGENT_DONE_IDLE_MS = 2500;
 const DEFAULT_WAIT_POLL_MAX_MS = 30000;
@@ -2874,7 +2878,7 @@ class HopMCPServer {
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, the terminal is quiet, the interactive cursor is visible, and no busy indicator (e.g. "esc to interrupt") is showing.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
             idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
-            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
+            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000 synchronous; 15 minutes when async=true — the job is a background watch nobody blocks on).' },
             capture: { type: 'string', enum: ['raw', 'readable_raw'], description: 'Capture format for returned events (default: readable_raw).' },
             capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 60 for hopx helper).' },
             text_only: { type: 'boolean', description: 'If true and capture="readable_raw", return concatenated wait.text and omit wait.events for smaller payloads. Default is true for readable_raw capture.' },
@@ -2890,7 +2894,7 @@ class HopMCPServer {
       },
       {
         name: 'hopx_exec',
-        description: 'Execute a shell command and return clean stdout — like a Bash tool on a persistent terminal session. Sends the command, waits for the next shell prompt, strips the echoed input and ANSI codes, and returns plain text output. The command is wrapped with a sentinel that captures the real exit status on POSIX-ish shells: `exit_code` in the result is the command\'s numeric exit status, or null if it could not be determined (e.g. timeout or non-POSIX shell). `ok` only means the shell prompt returned within the timeout, NOT that the command succeeded — check exit_code for that. For simple command-then-read workflows that don\'t need raw terminal events.',
+        description: 'Run a shell command on a persistent terminal and return clean stdout — like a Bash tool. Sends the command, waits for the next shell prompt, and strips the echoed input and ANSI codes. ok = the prompt returned before timeout_ms; it does NOT mean the command succeeded. exit_code = the command\'s real exit status, or null if it could not be captured (timeout, or a non-POSIX shell). Use for command-then-read work that does not need raw terminal events.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2924,7 +2928,7 @@ class HopMCPServer {
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion: output has started, the terminal is quiet, the interactive cursor is visible, and no busy indicator (e.g. "esc to interrupt") is showing.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex (default: conservative shell-like prompt).' },
             idle_ms: { type: 'number', description: 'Match when no output-like events arrive for this duration.' },
-            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
+            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000 synchronous; 15 minutes when async=true — the job is a background watch nobody blocks on).' },
             capture: { type: 'string', enum: ['raw', 'readable_raw'], description: 'Capture format for returned events (default: readable_raw).' },
             capture_max_events: { type: 'number', description: 'Max captured tail events to return (default: 120).' },
             maxControlOps: { type: 'number', description: 'In readable_raw capture, max parsed control ops per event (default: 200).' },
@@ -3137,7 +3141,7 @@ class HopMCPServer {
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex.' },
             idle_ms: { type: 'number', description: 'Match when output-like events are quiet for this duration.' },
-            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000).' },
+            max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000 synchronous; 15 minutes when async=true — the job is a background watch nobody blocks on).' },
             capture_max_events: { type: 'number', description: 'Max captured wait events (default: 60 for hopx helper; 0 when selected mode is ui unless overridden).' },
             text_only: { type: 'boolean', description: 'If true, condense readable waits to wait.text + metadata. Ignored for mode="ui" output snapshots. Default is true for readable modes.' },
             clean_text: { type: 'boolean', description: 'If true, strip ANSI escape codes from text output (default: false).' },
@@ -3157,7 +3161,7 @@ class HopMCPServer {
       },
       {
         name: 'hop_read_trajectory',
-        description: 'Read a Claude Code session\'s real conversation history from its on-disk transcript (resolved from the hop session name via the SessionStart hook record). Context-safe: returns a reduced digest by default (never the raw transcript). Use this to see what an agent in a hop session has actually done — far more than the terminal frame shows for an alternate-screen TUI. Gated by the same per-session agent permission as attaching (enable with hop_set_agent_permission). Requires the transcript to be on the same host as the MCP.',
+        description: 'Read a Claude Code session\'s real conversation history — far more than the terminal frame shows for a full-screen TUI. Returns a context-safe reduced digest by default (never the raw transcript). Identify the session by its hop name. Requires the same per-session agent permission as attaching (enable with hop_set_agent_permission), and the transcript file must live on the same host as the MCP (path resolved from the SessionStart hook record).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -3208,15 +3212,16 @@ class HopMCPServer {
       },
       {
         name: 'hopx_wait_any',
-        description: 'Wait until ANY of several background waits completes — the manager loop primitive. Pass wait_ids (from async hopx_agent_turn / hop_wait_terminal) and/or terminal_ids (an until_agent_done wait is auto-started for a terminal with no live wait job). Blocks up to max_wait_ms, then returns completed jobs (with slimmed results) and the still-pending set. Replaces round-robin hop_wait_poll polling across a fleet.',
+        description: 'Block until ANY of several background waits completes — the manager-loop primitive. Pass wait_ids and/or terminal_ids (a terminal with no live wait gets an until_agent_done wait auto-started). Returns completed jobs (with slimmed results) plus the still-pending set. Re-arm rule: a watch that only timed out is re-armed automatically and reappears in pending under a NEW wait_id — carry pending[].wait_id into the next call; only a real condition match counts as completed. Replaces round-robin hop_wait_poll across a fleet.',
         inputSchema: {
           type: 'object',
           properties: {
             wait_ids: { type: 'array', items: { type: 'string' }, description: 'Wait job ids to race.' },
             terminal_ids: { type: 'array', items: { type: 'string' }, description: 'Terminals to watch; reuses each terminal\'s live wait job or starts an until_agent_done wait.' },
-            max_wait_ms: { type: 'number', description: 'Max ms to block for the first completion (default: 30000).' },
+            max_wait_ms: { type: 'number', description: 'Max ms THIS CALL blocks for the first completion (default: 30000). Distinct from each background job\'s own 15-minute wait window.' },
             consume: { type: 'boolean', description: 'Remove returned completed jobs from the registry (default: false).' },
-            include_results: { type: 'boolean', description: 'Include each completed job\'s (slimmed) wait payload (default: true).' }
+            include_results: { type: 'boolean', description: 'Include each completed job\'s (slimmed) wait payload (default: true).' },
+            rearm_timed_out: { type: 'boolean', description: 'Re-arm watches whose wait window expired instead of reporting them as completions (default: true).' }
           }
         }
       },
@@ -3831,6 +3836,9 @@ class HopMCPServer {
     const now = Date.now();
     const waitArgs = { ...args };
     delete waitArgs.async;
+    if (!Number.isFinite(waitArgs.max_wait_ms)) {
+      waitArgs.max_wait_ms = DEFAULT_ASYNC_WAIT_MAX_MS;
+    }
 
     const job = {
       waitId,
@@ -3845,6 +3853,9 @@ class HopMCPServer {
       // Stable link back to the terminal for fleet views (metadata is
       // caller-shaped and not guaranteed to carry it).
       terminalId: typeof args.terminal_id === 'string' ? args.terminal_id : null,
+      // Snapshot of the wait arguments so an expired watch can be re-armed
+      // identically (hopx_wait_any rearm_timed_out).
+      argsSnapshot: { ...waitArgs },
       metadata: metadata && typeof metadata === 'object' ? { ...metadata } : null
     };
 
@@ -4927,18 +4938,55 @@ class HopMCPServer {
       };
     }
 
-    const jobs = waitIds.map((id) => this.waitJobs.get(id));
+    let jobs = waitIds.map((id) => this.waitJobs.get(id));
     const maxWaitMs = Number.isFinite(args.max_wait_ms)
       ? Math.max(1, Math.floor(args.max_wait_ms))
       : DEFAULT_WAIT_POLL_MAX_MS;
-    if (!jobs.some((job) => job.done)) {
+    const rearmTimedOut = args.rearm_timed_out !== false;
+    const includeResults = args.include_results !== false;
+    const deadline = Date.now() + maxWaitMs;
+    const rearmed = [];
+
+    // A watch that merely EXPIRED is not a finished turn. By default such
+    // jobs are re-armed in place (fresh wait, same args) and stay pending —
+    // otherwise a manager mistakes "watch timed out" for "agent done", nudges
+    // a busy agent, and tears down a working fleet.
+    const partition = () => {
+      const completed = [];
+      const stillPending = [];
+      const next = [];
+      for (const job of jobs) {
+        if (job.done && rearmTimedOut && job.status === 'timed_out' && job.argsSnapshot && job.terminalId) {
+          const fresh = this.startWaitJob({ ...job.argsSnapshot }, {
+            ...(job.metadata || {}),
+            terminal_id: job.terminalId,
+            rearmedFrom: job.waitId
+          });
+          this.waitJobs.delete(job.waitId);
+          rearmed.push({ from: job.waitId, wait_id: fresh.waitId, terminal_id: fresh.terminalId });
+          next.push(fresh);
+          stillPending.push(fresh);
+          continue;
+        }
+        next.push(job);
+        if (job.done) completed.push(job);
+        else stillPending.push(job);
+      }
+      jobs = next;
+      return { completed, stillPending };
+    };
+
+    let { completed: completedJobs, stillPending } = partition();
+    while (completedJobs.length === 0 && stillPending.length > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
       await Promise.race([
-        Promise.race(jobs.filter((job) => !job.done).map((job) => job.promise)),
-        new Promise((resolve) => setTimeout(resolve, maxWaitMs))
+        Promise.race(stillPending.map((job) => job.promise)),
+        new Promise((resolve) => setTimeout(resolve, remaining))
       ]);
+      ({ completed: completedJobs, stillPending } = partition());
     }
 
-    const includeResults = args.include_results !== false;
     const completed = [];
     const pending = [];
     for (const job of jobs) {
@@ -4950,6 +4998,7 @@ class HopMCPServer {
         completed.push(summary);
         if (args.consume === true) this.waitJobs.delete(job.waitId);
       } else {
+        if (job.metadata && job.metadata.rearmedFrom) summary.rearmed_from = job.metadata.rearmedFrom;
         pending.push(summary);
       }
     }
@@ -4959,7 +5008,11 @@ class HopMCPServer {
       completed,
       pending,
       started_waits: started,
-      timed_out: completed.length === 0
+      rearmed,
+      timed_out: completed.length === 0,
+      hint: rearmed.length > 0
+        ? 'Some expired watches were re-armed with new wait_ids — use pending[].wait_id for the next hopx_wait_any call.'
+        : undefined
     });
   }
 
@@ -5031,7 +5084,7 @@ class HopMCPServer {
     );
     const ready = !readiness.errorResponse
       && readiness.payload
-      && readiness.payload.status !== 'timeout';
+      && readiness.payload.status !== 'timed_out';
 
     const result = {
       ok: true,
@@ -5735,7 +5788,7 @@ class HopMCPServer {
     }
     stdout = lines.join('\n').trimEnd();
 
-    const timedOut = waitPayload.status === 'timeout';
+    const timedOut = waitPayload.status === 'timed_out';
     // ok = the shell prompt returned within the timeout. It does NOT mean the
     // command succeeded; exit_code carries the command's real status (null if
     // the sentinel was never observed, e.g. timeout or non-POSIX shell).

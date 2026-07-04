@@ -96,6 +96,11 @@ fleet of subagent terminals through hop. The loop:
 2. **Wait for anyone** — block on the whole fleet with one call:
    `hopx_wait_any(wait_ids=[...], max_wait_ms=60000)` returns the first
    completed turn(s) and the still-pending set. No round-robin polling.
+   `completed` means the turn actually finished — a watch whose window merely
+   expired is re-armed under a new wait_id and stays in `pending` (carry those
+   forward to the next call). Two distinct timers: each background job's own
+   wait window defaults to 15 minutes; `max_wait_ms` on the call is only how
+   long that one `hopx_wait_any` invocation blocks (default 30s).
 3. **Read the result** — `hop_read_trajectory(name=<sessionName>)` for the
    full turn (digest mode is context-safe), or use the slimmed wait result
    returned by `hopx_wait_any` directly.
@@ -164,8 +169,10 @@ each. `hopx_` tools are the convenience/specialized layer composed from those
 atomic operations; anything that orchestrates, joins, or wraps multiple
 primitives lives under `hopx_`.
 
-Core tools (`hop_`): stable atomic operations.
+Connection (the one un-prefixed tool):
 - `connect_server` — connect to a Hop API base_url (optional token); use for remote hop instances
+
+Core tools (`hop_`): stable atomic operations.
 - `hop_server_info` — hop-mcp runtime diagnostics (version, script path, read-mode capabilities)
 - `hop_list_sessions` — list Hop sessions and metadata
 - `hop_list_terminals` — list terminal API sessions (created via `hop_create_terminal` / `hop_attach_terminal`)
@@ -192,8 +199,8 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 - `hopx_exec` — Bash-tool-style shell execution: command in, clean stdout + `exit_code` out (see section above)
 - `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`
 - `hopx_capture_scrollback` — capture an alternate-screen TUI's scrollback the way a user would: scroll up page-by-page, snapshot each frame, and stitch newly-revealed rows together (live view restored afterward by default); best-effort and lossy for wrapped/redrawn content; requires agent permission on the session
-- `hopx_agents_overview` — fleet status in one call: every agent-created/agent-permitted session with state (running/busy/idle), cwd, foreground program, Claude turn count, bell counters, last activity, and pending wait jobs
-- `hopx_wait_any` — race several background waits (wait_ids and/or terminal_ids, auto-starting `until_agent_done` waits); returns the first completion(s) plus the still-pending set
+- `hopx_agents_overview` — fleet status in one call: every agent-created/agent-permitted session with state (running/busy/idle), cwd, foreground program, Claude turn count, bell counters, last activity, and pending wait jobs; `include_user_sessions=false` narrows to agent-created only, `include_ports=true` adds proxy sessions
+- `hopx_wait_any` — race several background waits (wait_ids and/or terminal_ids, auto-starting `until_agent_done` waits); returns the first real completion(s) plus the still-pending set; expired watches are re-armed automatically (new wait_id in `pending`) rather than reported as completions
 - `hopx_spawn_agent` — one-call subagent bring-up: create terminal + launch agent CLI (claude/codex/gemini/custom) + wait until ready + optionally dispatch a first task as an async turn
 
 ### Reading terminal history
@@ -271,11 +278,15 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 
 - For long-running conditions, start a background wait with `hop_wait_terminal(terminal_id=<id>, async=true, ...)` (returns `wait_id` immediately) and poll with `hop_wait_poll(wait_id=..., wait=true)`
   - use `consume=true` on poll to remove completed jobs
+  - use `cancel=true` on poll to abort a still-running wait and reclaim it
+  - async jobs default to a 15-minute wait window when `max_wait_ms` is not given (synchronous waits default to 30s)
 - `hop_wait_start` was removed; use `hop_wait_terminal(async=true)`
 
 ### `hopx_send_and_wait`
 
 - `hopx_send_and_wait` combines input send + optional enter/key + wait, and defaults to cursor-based delta capture from just before send.
+  - gotcha: `press_enter` defaults to **false** here but **true** on `hopx_agent_turn` (when data is provided) — sending text without `press_enter=true` types it but never submits it
+  - `clean_text=true` strips ANSI escape codes from captured output (also available on `hopx_agent_turn`)
   - helper defaults are token-thrifty for interactive loops: `capture_max_events=60`, `control_level=none`, `noise_filter=balanced`, `coalesce_ms=350` (unless overridden)
   - for `capture="readable_raw"`, `text_only` defaults to `true`; this condenses wait payloads by returning joined `wait.text`, setting `wait.events=[]`, `wait.eventCount=0`, and preserving prior count in `wait.originalEventCount` (set `text_only=false` to keep full events)
 - `hop_read_terminal` supports deterministic delta reads:

@@ -85,6 +85,35 @@ Safety notes:
 - Keep one subagent per terminal (no multiplexing multiple agent CLIs in one PTY).
 - For existing user sessions, verify `agentPermitted` (or set with `hop_set_agent_permission`) before writing input.
 
+## Manager Agents: Orchestrating a Fleet
+
+A manager agent (any MCP client — Claude Code, Codex, ...) can run a whole
+fleet of subagent terminals through hop. The loop:
+
+1. **Spawn** — one call per subagent:
+   `hopx_spawn_agent(name="worker-1", cwd="/repo", agent="claude", initial_task="<task>")`
+   → `{ terminal_id, sessionName, wait_id }`. Repeat for each worker.
+2. **Wait for anyone** — block on the whole fleet with one call:
+   `hopx_wait_any(wait_ids=[...], max_wait_ms=60000)` returns the first
+   completed turn(s) and the still-pending set. No round-robin polling.
+3. **Read the result** — `hop_read_trajectory(name=<sessionName>)` for the
+   full turn (digest mode is context-safe), or use the slimmed wait result
+   returned by `hopx_wait_any` directly.
+4. **Redispatch** — next task via
+   `hopx_agent_turn(terminal_id=..., data="<task>", async=true)`; collect the
+   new `wait_id` and go back to step 2.
+5. **Check the room** — `hopx_agents_overview()` any time you lose track:
+   who is busy (a live wait job), who is idle, turn counts, and bell counters.
+   Diff `bellSeq`/`turnCount` against your previous call to spot a subagent
+   asking for attention or finishing turns you didn't drive.
+6. **Interrupt / tear down** — `hopx_agent_turn(wait_id=..., control="interrupt")`
+   for a stuck turn; `hop_close_terminal(terminal_id=..., killSession=true)`
+   when a worker is done. Never leave orphaned sessions.
+
+Guardrails (see MULTI-AGENT-CHECKLIST.md): one subagent per terminal, explicit
+deadlines on every wait, never write into a terminal whose overview state is
+`busy`, and gate destructive commands behind user confirmation.
+
 ## Shell Commands: `hopx_exec`
 
 For plain shell work (not interactive TUIs), `hopx_exec` behaves like a Bash
@@ -130,6 +159,11 @@ connect_server(base_url="https://hop2.example.com", token="<token>", verify=true
 
 ## Tools
 
+Naming convention: `hop_` tools are atomic operations — one stable primitive
+each. `hopx_` tools are the convenience/specialized layer composed from those
+atomic operations; anything that orchestrates, joins, or wraps multiple
+primitives lives under `hopx_`.
+
 Core tools (`hop_`): stable atomic operations.
 - `connect_server` — connect to a Hop API base_url (optional token); use for remote hop instances
 - `hop_server_info` — hop-mcp runtime diagnostics (version, script path, read-mode capabilities)
@@ -158,6 +192,9 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 - `hopx_exec` — Bash-tool-style shell execution: command in, clean stdout + `exit_code` out (see section above)
 - `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`
 - `hopx_capture_scrollback` — capture an alternate-screen TUI's scrollback the way a user would: scroll up page-by-page, snapshot each frame, and stitch newly-revealed rows together (live view restored afterward by default); best-effort and lossy for wrapped/redrawn content; requires agent permission on the session
+- `hopx_agents_overview` — fleet status in one call: every agent-created/agent-permitted session with state (running/busy/idle), cwd, foreground program, Claude turn count, bell counters, last activity, and pending wait jobs
+- `hopx_wait_any` — race several background waits (wait_ids and/or terminal_ids, auto-starting `until_agent_done` waits); returns the first completion(s) plus the still-pending set
+- `hopx_spawn_agent` — one-call subagent bring-up: create terminal + launch agent CLI (claude/codex/gemini/custom) + wait until ready + optionally dispatch a first task as an async turn
 
 ### Reading terminal history
 

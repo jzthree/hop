@@ -3194,6 +3194,49 @@ class HopMCPServer {
           },
           required: ['terminal_id']
         }
+      },
+      {
+        name: 'hopx_agents_overview',
+        description: 'Fleet status in one call, for a manager agent orchestrating subagents: every agent-created or agent-permitted session with its state (running/busy/idle), working directory, foreground program, Claude turn count (Stop-hook counter when available), bell counters (a subagent asking for attention), last activity, and any pending wait jobs this MCP holds for it. Diff bellSeq/turnCount across calls to detect progress. Composes hop_list_sessions + local turn counters + the wait-job registry.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            include_user_sessions: { type: 'boolean', description: 'Also include user-created sessions that have agent access enabled (default: true). false = only agent-created sessions.' },
+            include_ports: { type: 'boolean', description: 'Include port (proxy) sessions (default: false).' }
+          }
+        }
+      },
+      {
+        name: 'hopx_wait_any',
+        description: 'Wait until ANY of several background waits completes — the manager loop primitive. Pass wait_ids (from async hopx_agent_turn / hop_wait_terminal) and/or terminal_ids (an until_agent_done wait is auto-started for a terminal with no live wait job). Blocks up to max_wait_ms, then returns completed jobs (with slimmed results) and the still-pending set. Replaces round-robin hop_wait_poll polling across a fleet.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            wait_ids: { type: 'array', items: { type: 'string' }, description: 'Wait job ids to race.' },
+            terminal_ids: { type: 'array', items: { type: 'string' }, description: 'Terminals to watch; reuses each terminal\'s live wait job or starts an until_agent_done wait.' },
+            max_wait_ms: { type: 'number', description: 'Max ms to block for the first completion (default: 30000).' },
+            consume: { type: 'boolean', description: 'Remove returned completed jobs from the registry (default: false).' },
+            include_results: { type: 'boolean', description: 'Include each completed job\'s (slimmed) wait payload (default: true).' }
+          }
+        }
+      },
+      {
+        name: 'hopx_spawn_agent',
+        description: 'One-call subagent bring-up: create a terminal, launch an agent CLI (claude/codex/gemini or a custom command), wait until it is ready for input, and optionally dispatch a first task as an async turn. Returns { terminal_id, sessionName, wait_id? } — collect results with hopx_wait_any / hopx_agent_turn(wait_id=...). Composes hop_create_terminal + hop_write_terminal + hop_wait_terminal + hopx_agent_turn.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Session name for the subagent terminal (default: auto-named).' },
+            cwd: { type: 'string', description: 'Working directory for the terminal.' },
+            agent: { type: 'string', enum: ['claude', 'codex', 'gemini', 'custom'], description: 'Agent CLI preset (default: claude). Use custom with command=... for anything else.' },
+            command: { type: 'string', description: 'Override the launch command (required when agent=custom).' },
+            args: { type: 'string', description: 'Extra CLI arguments appended to the launch command (e.g. "--model opus").' },
+            initial_task: { type: 'string', description: 'First task to dispatch once ready, as an async agent turn (returns its wait_id).' },
+            ready_timeout_ms: { type: 'number', description: 'Max ms to wait for the agent CLI to become ready (default: 60000).' },
+            cols: { type: 'number', description: 'Terminal columns.' },
+            rows: { type: 'number', description: 'Terminal rows.' }
+          }
+        }
       }
     ];
   }
@@ -3447,6 +3490,12 @@ class HopMCPServer {
         return await this.handleReadTrajectory(args);
       case 'hopx_capture_scrollback':
         return await this.handleCaptureScrollback(args);
+      case 'hopx_agents_overview':
+        return await this.handleAgentsOverview(args);
+      case 'hopx_wait_any':
+        return await this.handleWaitAny(args);
+      case 'hopx_spawn_agent':
+        return await this.handleSpawnAgent(args);
       default:
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -3793,6 +3842,9 @@ class HopMCPServer {
       error: null,
       aborted: false,
       promise: null,
+      // Stable link back to the terminal for fleet views (metadata is
+      // caller-shaped and not guaranteed to carry it).
+      terminalId: typeof args.terminal_id === 'string' ? args.terminal_id : null,
       metadata: metadata && typeof metadata === 'object' ? { ...metadata } : null
     };
 
@@ -4757,6 +4809,270 @@ class HopMCPServer {
 
       await new Promise((resolve) => setTimeout(resolve, DEFAULT_HOPX_UI_BUSY_GUARD_POLL_MS));
     }
+  }
+
+  // ── Fleet helpers for manager agents ──
+  // hopx layering: these are convenience tools composed from the atomic hop_
+  // primitives (session list, wait registry, terminal create/write/wait).
+
+  // One-call fleet status: join /api/sessions with the local Stop-hook turn
+  // counters and this MCP's wait-job registry. state is deliberately simple —
+  // "busy" means WE are driving a turn there (a live wait job); everything
+  // else derives from diffing turnCount/bellSeq/lastActivityAt across calls.
+  async handleAgentsOverview(args = {}) {
+    const listed = await this.callApi('GET', '/api/sessions');
+    if (this.isApiFailurePayload(listed)) {
+      return this.wrapApiResult(listed, { endpoint: '/api/sessions' });
+    }
+    const includeUser = args.include_user_sessions !== false;
+    const includePorts = args.include_ports === true;
+    const activeNames = new Set(Array.isArray(listed.active) ? listed.active : []);
+
+    // Reverse-map known terminal handles and live wait jobs onto sessions.
+    const handlesBySession = new Map();
+    for (const [terminalId, handle] of this.terminalHandles.entries()) {
+      const key = handle && (handle.internalName || handle.sessionName);
+      if (key && !handlesBySession.has(key)) handlesBySession.set(key, terminalId);
+    }
+    const waitsByTerminal = new Map();
+    for (const [waitId, job] of this.waitJobs.entries()) {
+      if (job.done || !job.terminalId) continue;
+      const list = waitsByTerminal.get(job.terminalId) || [];
+      list.push(waitId);
+      waitsByTerminal.set(job.terminalId, list);
+    }
+
+    const agents = [];
+    for (const s of Array.isArray(listed.sessions) ? listed.sessions : []) {
+      if (!s || typeof s !== 'object') continue;
+      if (!includePorts && s.type === 'port') continue;
+      const isAgentCreated = s.createdBy === 'agent';
+      const isPermitted = s.agentPermitted === true;
+      if (!isAgentCreated && !(includeUser && isPermitted)) continue;
+      const internalName = s.internalName || s.name;
+      const displayName = s.displayName || s.name;
+      const live = s.live === true || activeNames.has(displayName);
+      const terminalId = handlesBySession.get(internalName) || handlesBySession.get(displayName) || null;
+      const pendingWaits = terminalId ? (waitsByTerminal.get(terminalId) || []) : [];
+      agents.push({
+        sessionName: displayName,
+        internalName,
+        state: !live ? 'not_running' : (pendingWaits.length > 0 ? 'busy' : 'idle'),
+        createdBy: s.createdBy || 'user',
+        agentPermitted: isPermitted,
+        cwd: s.cwd || null,
+        foregroundProcess: s.foregroundProcess || null,
+        lastActivityAt: Number(s.lastActivityAt) || 0,
+        bellSeq: Number(s.bellSeq) || 0,
+        lastBellAt: Number(s.lastBellAt) || 0,
+        turnCount: this.readTurnCount(internalName),
+        terminal_id: terminalId,
+        pending_waits: pendingWaits
+      });
+    }
+    // Most recently active first — the sessions a manager cares about float up.
+    agents.sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+    return this.wrapJson({
+      ok: true,
+      helper: 'hopx_agents_overview',
+      agentCount: agents.length,
+      agents,
+      hint: 'Diff bellSeq (attention) and turnCount (completed Claude turns) against your previous call to detect progress. busy = this MCP holds a live wait job for the terminal.'
+    });
+  }
+
+  // Race several wait jobs: first completion (or timeout) returns control to
+  // the manager, with the still-pending set so the next call can re-arm.
+  async handleWaitAny(args = {}) {
+    const waitIds = [];
+    const seen = new Set();
+    const pushId = (id) => {
+      if (typeof id === 'string' && id.trim() && !seen.has(id.trim())) {
+        seen.add(id.trim());
+        waitIds.push(id.trim());
+      }
+    };
+    for (const id of Array.isArray(args.wait_ids) ? args.wait_ids : []) pushId(id);
+
+    const unknown = waitIds.filter((id) => !this.waitJobs.has(id));
+    if (unknown.length > 0) {
+      return {
+        content: [{ type: 'text', text: `Error: wait job(s) not found: ${unknown.join(', ')}. They may be stale after daemon or MCP restart.` }],
+        isError: true
+      };
+    }
+
+    // Terminals: reuse a live wait job when one exists, else start an
+    // until_agent_done wait so "watch these terminals" is a single call.
+    const started = [];
+    for (const terminalId of Array.isArray(args.terminal_ids) ? args.terminal_ids : []) {
+      if (typeof terminalId !== 'string' || !terminalId.trim()) continue;
+      const existing = [...this.waitJobs.values()].find((job) => !job.done && job.terminalId === terminalId);
+      if (existing) {
+        pushId(existing.waitId);
+        continue;
+      }
+      const job = this.startWaitJob(
+        { terminal_id: terminalId, until_agent_done: true, capture: 'readable_raw', start_from: 'latest' },
+        { terminal_id: terminalId, startedBy: 'hopx_wait_any' }
+      );
+      started.push(job.waitId);
+      pushId(job.waitId);
+    }
+
+    if (waitIds.length === 0) {
+      return {
+        content: [{ type: 'text', text: 'Error: provide wait_ids and/or terminal_ids to wait on.' }],
+        isError: true
+      };
+    }
+
+    const jobs = waitIds.map((id) => this.waitJobs.get(id));
+    const maxWaitMs = Number.isFinite(args.max_wait_ms)
+      ? Math.max(1, Math.floor(args.max_wait_ms))
+      : DEFAULT_WAIT_POLL_MAX_MS;
+    if (!jobs.some((job) => job.done)) {
+      await Promise.race([
+        Promise.race(jobs.filter((job) => !job.done).map((job) => job.promise)),
+        new Promise((resolve) => setTimeout(resolve, maxWaitMs))
+      ]);
+    }
+
+    const includeResults = args.include_results !== false;
+    const completed = [];
+    const pending = [];
+    for (const job of jobs) {
+      const summary = this.summarizeWaitJob(job);
+      summary.terminal_id = job.terminalId || null;
+      if (job.done) {
+        if (job.status === 'error') summary.error = job.error || 'Unknown wait failure';
+        if (includeResults && job.result) summary.result = slimWaitPayload(job.result, null);
+        completed.push(summary);
+        if (args.consume === true) this.waitJobs.delete(job.waitId);
+      } else {
+        pending.push(summary);
+      }
+    }
+    return this.wrapJson({
+      ok: true,
+      helper: 'hopx_wait_any',
+      completed,
+      pending,
+      started_waits: started,
+      timed_out: completed.length === 0
+    });
+  }
+
+  // One-call subagent bring-up: terminal + agent CLI + readiness (+ optional
+  // first task dispatched as an async turn).
+  async handleSpawnAgent(args = {}) {
+    const preset = typeof args.agent === 'string' && args.agent ? args.agent : 'claude';
+    const presetCommands = { claude: 'claude', codex: 'codex', gemini: 'gemini' };
+    let command = typeof args.command === 'string' && args.command.trim() ? args.command.trim() : '';
+    if (!command) {
+      if (preset === 'custom') {
+        return { content: [{ type: 'text', text: 'Error: agent="custom" requires command=...' }], isError: true };
+      }
+      command = presetCommands[preset];
+      if (!command) {
+        return { content: [{ type: 'text', text: `Error: unknown agent preset "${preset}". Use claude, codex, gemini, or custom with command=...` }], isError: true };
+      }
+    }
+    if (typeof args.args === 'string' && args.args.trim()) {
+      command += ` ${args.args.trim()}`;
+    }
+
+    const created = await this.callApi('POST', '/api/terminals', {
+      name: args.name,
+      cwd: args.cwd,
+      cols: args.cols,
+      rows: args.rows
+    });
+    if (this.isApiFailurePayload(created) || !created.id) {
+      return this.wrapApiResult(created, { endpoint: '/api/terminals' });
+    }
+    const terminalId = created.id;
+    await this.prewarmTerminalStream(terminalId, {
+      cols: args.cols,
+      rows: args.rows,
+      waitForOutputMs: CREATE_TERMINAL_OUTPUT_WARMUP_MS
+    });
+    this.rememberTerminalHandleFromPayload(created, {
+      displayName: args.name,
+      cols: args.cols,
+      rows: args.rows
+    });
+
+    const launchData = `${command}\n`;
+    this.streamManager.noteTerminalInput(terminalId, launchData);
+    const launch = await this.callTerminalEndpointWithRecovery(
+      terminalId,
+      'POST',
+      (id) => `/api/terminals/${encodeURIComponent(id)}/write`,
+      { data: launchData }
+    );
+    if (this.isApiFailurePayload(launch.payload)) {
+      return this.wrapApiResult(launch.payload, { endpoint: launch.endpoint });
+    }
+
+    const readyTimeoutMs = Number.isFinite(args.ready_timeout_ms)
+      ? Math.max(1000, Math.floor(args.ready_timeout_ms))
+      : 60000;
+    const readiness = await this.runWaitTerminal(
+      {
+        terminal_id: terminalId,
+        until_agent_done: true,
+        start_from: 'latest',
+        max_wait_ms: readyTimeoutMs,
+        capture: 'readable_raw',
+        capture_max_events: 0
+      },
+      { isAborted: () => false }
+    );
+    const ready = !readiness.errorResponse
+      && readiness.payload
+      && readiness.payload.status !== 'timeout';
+
+    const result = {
+      ok: true,
+      helper: 'hopx_spawn_agent',
+      terminal_id: terminalId,
+      sessionName: created.sessionName || created.displayName || args.name || null,
+      internalName: created.sessionName || null,
+      command,
+      ready,
+      readiness_status: readiness.errorResponse
+        ? 'error'
+        : (readiness.payload && readiness.payload.status) || 'unknown'
+    };
+    if (!ready) {
+      result.hint = 'Agent CLI not confirmed ready within ready_timeout_ms — inspect with hop_read_terminal before dispatching work.';
+    }
+
+    if (ready && typeof args.initial_task === 'string' && args.initial_task.length > 0) {
+      const dispatch = await this.handleHopxAgentTurn({
+        terminal_id: terminalId,
+        data: args.initial_task,
+        async: true
+      });
+      if (!dispatch.isError && dispatch.content && dispatch.content[0] && typeof dispatch.content[0].text === 'string') {
+        try {
+          const parsed = JSON.parse(dispatch.content[0].text);
+          if (parsed && typeof parsed.wait_id === 'string') {
+            result.wait_id = parsed.wait_id;
+            result.dispatched = true;
+          }
+        } catch {
+          /* leave dispatch details out; the task may still be running */
+        }
+      }
+      if (!result.wait_id) {
+        result.dispatched = false;
+        result.hint = 'initial_task dispatch did not return a wait_id — check the terminal with hopx_agent_turn(control="wait").';
+      }
+    }
+
+    return this.wrapJson(result);
   }
 
   async handleHopxAgentTurn(args) {

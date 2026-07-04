@@ -11,12 +11,12 @@ Ensure concurrent agent sessions stay isolated, time-bounded, and recoverable.
 
 ## Execution Loop
 
-1. **Create session** — one `hop_create_terminal` per agent.
-2. **Validate prompt** — use `hop_wait_terminal(until_prompt=true, start_from="latest")` before the first command.
-3. **Preferred turn helper** — use `hopx_agent_turn` or `hopx_send_and_wait` for normal multi-turn work.
+1. **Create session** — `hopx_spawn_agent` (create + launch + ready in one call), or one `hop_create_terminal` per agent for manual control.
+2. **Validate prompt** — `hopx_spawn_agent` waits for readiness itself; manual path: `hop_wait_terminal(until_prompt=true, start_from="latest")` before the first command.
+3. **Preferred turn helper** — use `hopx_agent_turn` or `hopx_send_and_wait` for normal multi-turn work; dispatch fleet work with `async=true` and collect with `hopx_wait_any`.
 4. **Manual fallback** — drop to `hop_write_terminal` + `hop_wait_terminal` only when you need custom wait conditions or lower-level control.
-5. **Assert state** — verify expected output before continuing.
-6. **Repeat** the loop; never write into a terminal that is still busy.
+5. **Assert state** — verify expected output before continuing; `hopx_agents_overview` shows which terminals are busy/idle across the whole fleet.
+6. **Repeat** the loop; never write into a terminal that is still busy (overview state `busy`).
 
 Recommended defaults:
 

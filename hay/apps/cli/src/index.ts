@@ -1346,6 +1346,12 @@ const setStatus = (nextStatus: typeof status) => {
   scheduleRender();
 };
 
+// One-shot autofit claim per connection (see the active_size handler):
+// "pending" = armed at connect, waiting for the room's true size;
+// "claimed" = claim sent, the next active_size may be the corrective echo;
+// "done" = steady state, peer reshape notices apply.
+let sizeClaimPhase: "pending" | "claimed" | "done" = "done";
+
 const applyRemoteSize = (cols: number, rows: number) => {
   localMetrics = getLocalMetrics();
   const nextCols = Math.max(2, Math.min(cols, 500));
@@ -2481,6 +2487,10 @@ const connect = () => {
     if (syncSize) {
       applySyncSize();
     }
+    // The sync above is a no-op on a fresh connect: the local size model
+    // starts equal to this window, and the room's true size is only learned
+    // from the first active_size. Arm a one-shot claim for that moment.
+    sizeClaimPhase = "pending";
     scheduleRender();
   });
 
@@ -2604,9 +2614,23 @@ const connect = () => {
         const prevRows = remoteRows;
         activeSizeClientId = message.clientId || null;
         applyRemoteSize(message.cols, message.rows);
+        // Autofit-at-attach: the first active_size is where we learn the
+        // room's real size, so this is the moment to claim it (the server's
+        // idle election decides). One-shot: if the claim loses, the server's
+        // corrective echo lands here as phase "claimed" and must not re-claim
+        // (that would loop) or fire the reshape notice (nobody resized).
+        const claimPhase = sizeClaimPhase;
+        if (claimPhase === "pending") {
+          sizeClaimPhase = "claimed";
+          if (syncSize) {
+            applySyncSize();
+          }
+        } else if (claimPhase === "claimed") {
+          sizeClaimPhase = "done";
+        }
         // A peer's autofit (or manual resize) just reshaped the shared terminal —
         // say who and to what, so the new shape isn't a surprise.
-        if (message.clientId && message.clientId !== clientId &&
+        if (claimPhase === "done" && message.clientId && message.clientId !== clientId &&
             (message.cols !== prevCols || message.rows !== prevRows)) {
           const who = presence.find((c) => c.id === message.clientId)?.name || "another client";
           pushNotice(`${who} resized the terminal to ${message.cols}×${message.rows}`, "info");
@@ -3056,13 +3080,15 @@ process.stdin.on("data", (data) => {
   const sanitized = filterFocusSequences(remote);
   if (!sanitized) return;
 
-  if (syncSize) {
-    applySyncSize();
-  }
-
   followOutput = true;
   releaseScrollAnchor();
   sendMessage({ type: "input", data: sanitized });
+  // Autofit AFTER the input: the server elects the resize winner by typing
+  // recency, so the keystroke we just sent is what makes this claim win on
+  // the first key instead of silently losing to a stale election.
+  if (syncSize) {
+    applySyncSize();
+  }
   handleTyping();
 });
 

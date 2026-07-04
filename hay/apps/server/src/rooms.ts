@@ -59,6 +59,14 @@ const MAX_BUFFER_SIZE = (() => {
 })();
 // Keep rooms alive indefinitely; only explicit kill/remove should end a session.
 const CLEANUP_DELAY_MS = 0;
+// Autofit-on-attach: a resize may claim the shared size when every OTHER
+// client has been input-idle at least this long. Someone actively typing keeps
+// the size they set; a viewer opening the session after everyone went idle
+// takes it over immediately instead of waiting to type first.
+const RESIZE_CLAIM_IDLE_MS = (() => {
+  const env = Number(process.env.HAY_RESIZE_CLAIM_IDLE_MS);
+  return Number.isFinite(env) && env >= 0 ? env : 60_000;
+})();
 const CONTROL_SEQUENCE_TAIL = 32;
 const DEBUG_STATE = process.env.HAY_DEBUG === "1";
 
@@ -654,7 +662,12 @@ export class Room extends EventEmitter {
     // 0) only wins when no one else has typed either — so the first/sole client
     // can still size the PTY before typing.
     const maxInputAt = Math.max(...[...this.clients.values()].map((c) => c.lastInputAt));
-    const isActive = client.lastInputAt >= maxInputAt;
+    const othersMaxInputAt = Math.max(
+      0,
+      ...[...this.clients.values()].filter((c) => c.id !== client.id).map((c) => c.lastInputAt)
+    );
+    const isActive =
+      client.lastInputAt >= maxInputAt || now() - othersMaxInputAt > RESIZE_CLAIM_IDLE_MS;
     if (isActive) {
       this.pty.resize(cols, rows);
       this.activeCols = cols;

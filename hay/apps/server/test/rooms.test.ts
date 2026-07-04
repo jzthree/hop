@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RoomManager } from "../src/rooms";
 import type { PtyFactory } from "../src/pty";
 
@@ -320,6 +320,43 @@ describe("Room", () => {
     expect(last?.cols).toBe(120);
     expect(last?.rows).toBe(30);
     expect(last?.clientId).toBe("typer");
+  });
+
+  it("lets a resize claim the size once every other client is input-idle", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      let ptyInstance: FakePty | null = null;
+      const factory: PtyFactory = () => {
+        ptyInstance = new FakePty() as unknown as FakePty;
+        return ptyInstance as any;
+      };
+      const manager = new RoomManager(factory);
+      const room = manager.getRoom("claim", { cols: 120, rows: 30 }, "/tmp");
+      const typer = new FakeSocket();
+      const viewer = new FakeSocket();
+      room.attachClient({ id: "typer", name: "Alex", colorIndex: 0, cols: 120, rows: 30 }, typer);
+      room.attachClient({ id: "viewer", name: "Blake", colorIndex: 1, cols: 60, rows: 20 }, viewer);
+
+      typer.emitMessage({ type: "input", data: "ls\r" });
+      typer.emitMessage({ type: "resize", cols: 120, rows: 30 });
+
+      // Recently-typed elsewhere: the viewer's autofit is refused (and snapped back).
+      viewer.emitMessage({ type: "resize", cols: 60, rows: 20 });
+      expect((ptyInstance as unknown as FakePty).resizes.at(-1)).toEqual({ cols: 120, rows: 30 });
+
+      // Everyone else idle past the claim window: the same autofit now wins.
+      vi.setSystemTime(1_000_000 + 61_000);
+      viewer.emitMessage({ type: "resize", cols: 60, rows: 20 });
+      expect((ptyInstance as unknown as FakePty).resizes.at(-1)).toEqual({ cols: 60, rows: 20 });
+
+      // The previous holder is told the size moved.
+      const sizes = findMessages(typer, "active_size");
+      expect(sizes.at(-1)?.cols).toBe(60);
+      expect(sizes.at(-1)?.clientId).toBe("viewer");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("counts attention bells but not OSC-terminator BELs", () => {

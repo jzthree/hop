@@ -21,6 +21,11 @@ const isMacPlatform = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.us
 // iOS 17.4 — so we hide the toggle there rather than show a dead control.
 const hapticsSupported = typeof navigator.vibrate === "function";
 
+// Browser notifications are opt-in and only offered where the Notification
+// API exists (iOS Safari lacks it outside installed PWAs) — hide the toggle
+// elsewhere rather than show a dead control.
+const notificationsSupported = typeof window !== "undefined" && "Notification" in window;
+
 const parseSessionNameFromPath = (pathname: string) => {
   const match = pathname.match(/^\/s\/([^/]+)\/?$/);
   if (!match) {
@@ -277,6 +282,10 @@ const App = () => {
     const saved = localStorage.getItem("hay_haptics_enabled");
     return saved !== "false";
   });
+  const [notifyBells, setNotifyBells] = useState(() => {
+    const saved = localStorage.getItem("hay_notify_bells");
+    return notificationsSupported && saved === "true";
+  });
   type ThemeMode = "system" | "light" | "dark";
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     return (localStorage.getItem("hay_theme") as ThemeMode) || "system";
@@ -361,6 +370,9 @@ const App = () => {
     localStorage.setItem("hay_haptics_enabled", hapticsEnabled ? "true" : "false");
   }, [hapticsEnabled]);
   useEffect(() => {
+    localStorage.setItem("hay_notify_bells", notifyBells ? "true" : "false");
+  }, [notifyBells]);
+  useEffect(() => {
     localStorage.setItem("hay_theme", themeMode);
     const root = document.documentElement;
     if (themeMode === "system") {
@@ -407,6 +419,20 @@ const App = () => {
   const activeSessionRoomRef = useRef<string | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
+  // Bell-notification plumbing: the terminal effect that registers onBell runs
+  // once per session, so it reads the live toggle/label through refs. The seq
+  // map dedupes so each session notifies at most once per bellSeq value.
+  const notifyBellsRef = useRef(notifyBells);
+  const sessionLabelRef = useRef(sessionLabel);
+  const prevBellUnseenRef = useRef<Record<string, boolean>>({});
+  const notifiedBellSeqRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    notifyBellsRef.current = notifyBells;
+  }, [notifyBells]);
+  useEffect(() => {
+    sessionLabelRef.current = sessionLabel;
+  }, [sessionLabel]);
 
   const pushNotice = (message: string) => {
     setNotice(message);
@@ -426,6 +452,24 @@ const App = () => {
     toastTimeout.current = window.setTimeout(() => {
       setToast(null);
     }, durationMs);
+  };
+
+  // Fire a browser notification for a bell. Clicking it focuses this tab and
+  // runs the optional follow-up (e.g. switching to the session that rang).
+  const fireBellNotification = (title: string, onClick?: () => void) => {
+    if (!notificationsSupported || Notification.permission !== "granted") {
+      return;
+    }
+    try {
+      const notification = new Notification(title, { body: "Terminal bell" });
+      notification.onclick = () => {
+        window.focus();
+        onClick?.();
+        notification.close();
+      };
+    } catch {
+      /* constructor can throw (e.g. Android Chrome wants a service worker) */
+    }
   };
 
   const getVisibleText = () => {
@@ -956,6 +1000,11 @@ const App = () => {
     terminal.onBell(() => {
       if (document.hidden) {
         setTitleAlert(true);
+        // One xterm bell is one server bellSeq increment, so firing once per
+        // event keeps the attached session at one notification per bellSeq.
+        if (notifyBellsRef.current) {
+          fireBellNotification(sessionLabelRef.current || activeSessionRoomRef.current || "Terminal");
+        }
       }
     });
 
@@ -1750,6 +1799,30 @@ const App = () => {
     document.title = `${alert ? "● " : ""}${base}`;
   }, [titleAlert, otherAttention.bell, sessionLabel, session?.room]);
 
+  // Notify for bells in other sessions: the 5s poll flips bellUnseen false→true
+  // when a session rings while unwatched. The seq map dedupes so a session that
+  // stays unseen across polls (or re-rings the same seq) fires at most once per
+  // bellSeq; clicking jumps straight to the session that rang.
+  useEffect(() => {
+    const prevUnseen = prevBellUnseenRef.current;
+    const nextUnseen: Record<string, boolean> = {};
+    for (const s of sessions) {
+      const key = s.internalName || s.name;
+      nextUnseen[key] = s.bellUnseen === true;
+      if (!notifyBells || !s.bellUnseen || prevUnseen[key]) {
+        continue;
+      }
+      const seq = s.bellSeq || 0;
+      if ((notifiedBellSeqRef.current[key] ?? 0) >= seq) {
+        continue;
+      }
+      notifiedBellSeqRef.current[key] = seq;
+      fireBellNotification(s.displayName, () => switchSession(s));
+    }
+    prevBellUnseenRef.current = nextUnseen;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, notifyBells]);
+
   // Update terminal font size when it changes
   useEffect(() => {
     if (termRef.current) {
@@ -1934,6 +2007,25 @@ const App = () => {
 
   const handleReleaseControl = () => {
     sendMessage({ type: "release_control" });
+  };
+
+  const handleNotifyToggle = (enabled: boolean) => {
+    if (!enabled) {
+      setNotifyBells(false);
+      return;
+    }
+    // Optimistically flip On while the permission prompt is up; revert if the
+    // user (or a prior browser-level block) denies it.
+    setNotifyBells(true);
+    if (Notification.permission === "granted") {
+      return;
+    }
+    Notification.requestPermission().then((permission) => {
+      if (permission !== "granted") {
+        pushNotice("Notifications are blocked by the browser");
+        setNotifyBells(false);
+      }
+    });
   };
 
   const handleFabDragStart = (clientX: number, clientY: number) => {
@@ -2342,6 +2434,15 @@ const App = () => {
                     <button type="button" className={sessionSwitchMode === "instant" ? "active" : ""} onClick={() => setSessionSwitchMode("instant")}>Instant</button>
                   </div>
                 </div>
+                {notificationsSupported && (
+                  <div className="drawer-row">
+                    <label>Notify</label>
+                    <div className="view-mode-buttons">
+                      <button type="button" className={!notifyBells ? "active" : ""} onClick={() => handleNotifyToggle(false)}>Off</button>
+                      <button type="button" className={notifyBells ? "active" : ""} onClick={() => handleNotifyToggle(true)}>On</button>
+                    </div>
+                  </div>
+                )}
                 {isMobile && hapticsSupported && (
                   <div className="drawer-row">
                     <label>Haptics</label>

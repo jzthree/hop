@@ -27,6 +27,17 @@ describe("buildSwitcherModel", () => {
     expect(model.groups.flatMap((g) => g.rows.map((s) => s.name))).toEqual(["cold"]);
   });
 
+  it("keeps the current session in hero exactly once even when it has a bell", () => {
+    const sessions = [
+      mk({ name: "me", lastActivityAt: 1000, bellUnseen: true }),
+      mk({ name: "other", lastActivityAt: 500, unread: true })
+    ];
+    const model = buildSwitcherModel(sessions, "me", "");
+    if (model.mode !== "tiers") throw new Error("expected tiers");
+    expect(model.hero.filter((s) => s.name === "me")).toHaveLength(1);
+    expect(model.hero[0].name).toBe("me");
+  });
+
   it("never buries attention sessions even past the hero minimum", () => {
     const sessions = [
       mk({ name: "me", lastActivityAt: 100 }),
@@ -66,6 +77,17 @@ describe("buildSwitcherModel", () => {
     expect(model.rows.map((s) => s.name)).toEqual(["hop-b", "hop-a"]);
   });
 
+  it("filter ranking is deterministic: bell beats unread beats plain recency", () => {
+    const sessions = [
+      mk({ name: "hop-plain", lastActivityAt: 1000, cwd: "/Users/x/Code/hop2" }),
+      mk({ name: "hop-unread", lastActivityAt: 500, cwd: "/Users/x/Code/hop2", unread: true }),
+      mk({ name: "hop-bell", lastActivityAt: 100, cwd: "/Users/x/Code/hop2", bellUnseen: true })
+    ];
+    const model = buildSwitcherModel(sessions, null, "hop");
+    if (model.mode !== "filter") throw new Error("expected filter");
+    expect(model.rows.map((s) => s.name)).toEqual(["hop-bell", "hop-unread", "hop-plain"]);
+  });
+
   it("filter matches cwd and foreground process too", () => {
     const sessions = [
       mk({ name: "s1", cwd: "/Users/x/Code/hop2" }),
@@ -98,5 +120,11 @@ describe("relativeTime", () => {
     expect(relativeTime(now - 120_000, now)).toBe("2m ago");
     expect(relativeTime(now - 7_200_000, now)).toBe("2h ago");
     expect(relativeTime(now - 172_800_000, now)).toBe("2d ago");
+  });
+
+  it("rolls unit boundaries up: 60s is minutes, 24h is days", () => {
+    const now = 1_000_000_000;
+    expect(relativeTime(now - 60_000, now)).toBe("1m ago");
+    expect(relativeTime(now - 86_400_000, now)).toBe("1d ago");
   });
 });

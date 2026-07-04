@@ -414,4 +414,69 @@ describe("Room", () => {
     ptyInstance?.emit("\x1b]0;t\x07\x07");
     expect(room.getSummary().bellSeq).toBe(1);
   });
+
+  it("counts a real bell after a lone-ESC-carried split OSC", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("bells-esc-carry", { cols: 80, rows: 24 }, "/tmp");
+
+    // Chunk ends with a lone ESC; the "]" that opens the OSC arrives next. The
+    // OSC's own BEL terminator must not count, but the real BEL after it does.
+    ptyInstance?.emit("some output\x1b");
+    ptyInstance?.emit("]0;title\x07done\x07");
+    expect(room.getSummary().bellSeq).toBe(1);
+  });
+
+  it("lets a passive viewer's resize win when no client has ever typed", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("no-typer", { cols: 80, rows: 24 }, "/tmp");
+    const viewerA = new FakeSocket();
+    const viewerB = new FakeSocket();
+
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, viewerA);
+    room.attachClient({ id: "b", name: "Blake", colorIndex: 1, cols: 80, rows: 24 }, viewerB);
+
+    // Nobody has typed, so a passive viewer's autofit resize wins immediately.
+    viewerB.emitMessage({ type: "resize", cols: 100, rows: 30 });
+
+    expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 100, rows: 30 });
+    const sizes = findMessages(viewerA, "active_size");
+    expect(sizes.at(-1)?.cols).toBe(100);
+    expect(sizes.at(-1)?.rows).toBe(30);
+    expect(sizes.at(-1)?.clientId).toBe("b");
+  });
+
+  it("carries keyboardEnhanced in the snapshot after the app enables kitty keyboard mode", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("kbd", { cols: 80, rows: 24 }, "/tmp");
+    const first = new FakeSocket();
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, first);
+
+    // The app pushes the kitty keyboard protocol flags via PTY output.
+    ptyInstance?.emit("\x1b[>1u");
+
+    // A client attaching now must learn enhanced keyboard is active via the snapshot.
+    const late = new FakeSocket();
+    room.attachClient({ id: "b", name: "Blake", colorIndex: 1, cols: 80, rows: 24 }, late);
+
+    const snapshot = findMessages(late, "snapshot").at(-1);
+    expect(snapshot?.keyboardEnhanced).toBe(true);
+  });
 });

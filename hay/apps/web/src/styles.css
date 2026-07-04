@@ -1851,6 +1851,9 @@ button.primary {
   justify-content: center;
   width: 32px;
   height: 32px;
+  /* The global `button` rule's 11px/15px padding would leave a 0px content
+     box at this size — text overflows visibly but SVG icons collapse. */
+  padding: 0;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--panel);
@@ -1904,6 +1907,7 @@ button.primary {
   flex-shrink: 0;
   width: 32px;
   height: 32px;
+  padding: 0;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--panel);
@@ -2036,6 +2040,7 @@ button.primary {
   flex-shrink: 0;
   width: 26px;
   height: 26px;
+  padding: 0;
   border-radius: 6px;
   border: none;
   background: none;

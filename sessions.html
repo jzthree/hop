@@ -102,6 +102,8 @@
             .btn-secondary { background: var(--panel); border-color: var(--line); color: var(--ink); }
             .btn-secondary:hover { background: var(--bg); border-color: var(--ink-muted); }
             .btn-secondary:active { background: var(--bg-alt); }
+            .btn-danger { background: var(--err); color: #fff; }
+            .btn-danger:hover, .btn-danger:active { opacity: 0.88; }
             .btn:disabled { opacity: 0.5; cursor: wait; }
             .new-session { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
             .new-session input,
@@ -225,6 +227,17 @@
                 </div>
             </div>
         </dialog>
+        <dialog id="modalDialog">
+            <form class="dialog-card" id="modalForm">
+                <p class="dialog-title" id="modalTitle"></p>
+                <p class="dialog-subtitle" id="modalMessage"></p>
+                <input class="dialog-field" id="modalInput" autocomplete="off">
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-secondary" id="modalCancelBtn">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="modalConfirmBtn">OK</button>
+                </div>
+            </form>
+        </dialog>
         <script>
             function showLoading() {
                 document.getElementById('loading').classList.add('show');
@@ -241,6 +254,37 @@
                 document.body.appendChild(el);
                 setTimeout(() => el.remove(), 2200);
             }
+
+            // In-page replacement for browser prompt()/confirm(): one shared
+            // <dialog> styled like the workspace dialogs. Resolves with the input
+            // value (prompt) or true (confirm); null on Cancel/Esc. Enter submits
+            // the form (confirm); the dialog's native cancel handles Esc.
+            function openModal({ title, message, withInput, value, placeholder, confirmLabel, destructive }) {
+                const dlg = document.getElementById('modalDialog');
+                const form = document.getElementById('modalForm');
+                const input = document.getElementById('modalInput');
+                const msg = document.getElementById('modalMessage');
+                const confirmBtn = document.getElementById('modalConfirmBtn');
+                document.getElementById('modalTitle').textContent = title;
+                msg.textContent = message || '';
+                msg.style.display = message ? '' : 'none';
+                input.style.display = withInput ? '' : 'none';
+                input.value = withInput ? (value || '') : '';
+                input.placeholder = placeholder || '';
+                confirmBtn.textContent = confirmLabel || 'OK';
+                confirmBtn.className = 'btn ' + (destructive ? 'btn-danger' : 'btn-primary');
+                return new Promise((resolve) => {
+                    let settled = false;
+                    const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+                    form.onsubmit = (e) => { e.preventDefault(); done(withInput ? input.value : true); dlg.close(); };
+                    document.getElementById('modalCancelBtn').onclick = () => dlg.close();
+                    dlg.onclose = () => done(null);
+                    dlg.showModal();
+                    if (withInput) { input.focus(); input.select(); } else { confirmBtn.focus(); }
+                });
+            }
+            function promptModal(opts) { return openModal({ ...opts, withInput: true }); }
+            async function confirmModal(opts) { return (await openModal(opts)) === true; }
 
             // Escape text destined for innerHTML / attributes (cwd + process come
             // from the server and can contain HTML-special chars).
@@ -551,7 +595,7 @@
                 const input = document.getElementById('newName');
                 const name = input.value.trim();
                 if (!name) { input.focus(); return; }
-                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
+                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return showFlash('Only letters, numbers, - and _ allowed');
 
                 const type = document.getElementById('sessionType').value;
                 const portInput = document.getElementById('portInput');
@@ -560,7 +604,7 @@
                     port = parseInt(portInput.value, 10);
                     if (!Number.isInteger(port) || port < 1 || port > 65535) {
                         portInput.focus();
-                        return alert('Enter a valid port (1-65535)');
+                        return showFlash('Enter a valid port (1-65535)');
                     }
                 }
 
@@ -593,9 +637,9 @@
             }
 
             async function renameSession(oldDisplayName) {
-                const newDisplayName = prompt('Enter new session name:', oldDisplayName);
+                const newDisplayName = await promptModal({ title: 'Rename session', message: 'Enter new session name:', value: oldDisplayName, confirmLabel: 'Rename' });
                 if (!newDisplayName || newDisplayName === oldDisplayName) return;
-                if (!/^[a-zA-Z0-9_-]+$/.test(newDisplayName)) return alert('Only letters, numbers, - and _ allowed');
+                if (!/^[a-zA-Z0-9_-]+$/.test(newDisplayName)) return showFlash('Only letters, numbers, - and _ allowed');
 
                 await fetch('/api/sessions/rename', {
                     method: 'POST',
@@ -615,7 +659,7 @@
             }
 
             async function deleteSession(internalName, displayName) {
-                if (!confirm('Delete session "' + displayName + '"? This will remove the session.')) return;
+                if (!await confirmModal({ title: 'Delete session', message: 'Delete session "' + displayName + '"? This will remove the session.', confirmLabel: 'Delete', destructive: true })) return;
 
                 await fetch('/api/sessions/delete', {
                     method: 'POST',
@@ -626,7 +670,7 @@
             }
 
             async function createFolderPrompt() {
-                const name = prompt('Folder name:');
+                const name = await promptModal({ title: 'New folder', message: 'Folder name:', placeholder: 'Folder name...', confirmLabel: 'Create' });
                 if (!name) return;
                 await fetch('/api/folders', {
                     method: 'POST',
@@ -637,7 +681,7 @@
             }
 
             async function renameFolderPrompt(id, currentName) {
-                const name = prompt('Rename folder:', currentName);
+                const name = await promptModal({ title: 'Rename folder', message: 'Enter new folder name:', value: currentName, confirmLabel: 'Rename' });
                 if (!name || name === currentName) return;
                 await fetch('/api/folders/rename', {
                     method: 'POST',
@@ -648,7 +692,7 @@
             }
 
             async function deleteFolderPrompt(id, name) {
-                if (!confirm('Delete folder "' + name + '"? Sessions will be moved out of the folder.')) return;
+                if (!await confirmModal({ title: 'Delete folder', message: 'Delete folder "' + name + '"? Sessions will be moved out of the folder.', confirmLabel: 'Delete', destructive: true })) return;
                 await fetch('/api/folders/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -662,9 +706,9 @@
             }
 
             async function createWorkspacePrompt() {
-                const name = prompt('Create workspace:');
+                const name = await promptModal({ title: 'Create workspace', message: 'Enter a name for the new workspace:', placeholder: 'Workspace name...', confirmLabel: 'Create' });
                 if (!name) return;
-                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
+                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return showFlash('Only letters, numbers, - and _ allowed');
                 const res = await fetch('/api/workspaces/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -672,7 +716,7 @@
                 });
                 if (!res.ok) {
                     const data = await res.json().catch(() => ({}));
-                    alert(data.error || 'Failed to create workspace.');
+                    showFlash(data.error || 'Failed to create workspace.');
                     return;
                 }
                 showFlash('Workspace "' + name + '" created');
@@ -685,7 +729,7 @@
                 const options = document.getElementById('workspaceSaveOptions');
                 const nameInput = document.getElementById('workspaceSaveName');
                 if (liveSessions.length === 0) {
-                    alert('No live terminal sessions to save.');
+                    showFlash('No live terminal sessions to save.');
                     return;
                 }
                 options.innerHTML = liveSessions.map((entry, index) => `
@@ -764,11 +808,11 @@
 
             async function submitWorkspaceSave() {
                 const name = document.getElementById('workspaceSaveName').value.trim();
-                if (!name) return alert('Enter a workspace name.');
-                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return alert('Only letters, numbers, - and _ allowed');
+                if (!name) return showFlash('Enter a workspace name.');
+                if (!/^[a-zA-Z0-9_-]+$/.test(name)) return showFlash('Only letters, numbers, - and _ allowed');
                 const sessionNames = Array.from(document.querySelectorAll('#workspaceSaveOptions input:checked'))
                     .map((input) => input.value);
-                if (sessionNames.length === 0) return alert('Select at least one live session.');
+                if (sessionNames.length === 0) return showFlash('Select at least one live session.');
                 const res = await fetch('/api/workspaces/save', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -776,7 +820,7 @@
                 });
                 if (!res.ok) {
                     const data = await res.json().catch(() => ({}));
-                    alert(data.error || 'Failed to save workspace.');
+                    showFlash(data.error || 'Failed to save workspace.');
                     return;
                 }
                 closeWorkspaceSaveDialog();
@@ -803,7 +847,7 @@
             // A drop inside the same folder is a reorder. In a non-manual sort that
             // would be overridden on the next render, so offer to switch to manual
             // and freeze exactly what the user just arranged.
-            function handleReorderDrop(list, index) {
+            async function handleReorderDrop(list, index) {
                 const targetFolder = list.dataset.folderId || '';
                 const names = Array.from(list.querySelectorAll('.session-item-wrapper')).map(w => w.dataset.session);
                 const from = names.indexOf(dragSessionId);
@@ -813,7 +857,7 @@
                     reorderBucket(targetFolder || null, names);
                     return;
                 }
-                if (confirm('Keep this order? This switches sorting to Manual.')) {
+                if (await confirmModal({ title: 'Switch to manual sort?', message: 'Keep this order? This switches sorting to Manual.', confirmLabel: 'Keep order' })) {
                     setSortMode('manual');
                     reorderBucket(targetFolder || null, names);
                 } else {

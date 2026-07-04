@@ -103,7 +103,9 @@ fleet of subagent terminals through hop. The loop:
    long that one `hopx_wait_any` invocation blocks (default 30s).
 3. **Read the result** — `hop_read_trajectory(name=<sessionName>)` for the
    full turn (digest mode is context-safe), or use the slimmed wait result
-   returned by `hopx_wait_any` directly.
+   returned by `hopx_wait_any` directly. Give each task a completion phrase
+   and pass `until_reply_regex` at dispatch: completed summaries then carry
+   `reply_matched`, distinguishing "did the assignment" from "stopped talking".
 4. **Redispatch** — next task via
    `hopx_agent_turn(terminal_id=..., data="<task>", async=true)`; collect the
    new `wait_id` and go back to step 2.
@@ -197,7 +199,7 @@ Core tools (`hop_`): stable atomic operations.
 Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 - `hopx_send_and_wait` — single-call send + wait wrapper
 - `hopx_exec` — Bash-tool-style shell execution: command in, clean stdout + `exit_code` out (see section above)
-- `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`
+- `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`; optional `until_reply_regex` reports `reply_matched`/`reply_match` against the agent's actual reply (transcript-sourced when available) — "task finished", not just "turn finished"
 - `hopx_capture_scrollback` — capture an alternate-screen TUI's scrollback the way a user would: scroll up page-by-page, snapshot each frame, and stitch newly-revealed rows together (live view restored afterward by default); best-effort and lossy for wrapped/redrawn content; requires agent permission on the session
 - `hopx_agents_overview` — fleet status in one call: every agent-created/agent-permitted session with state (running/busy/idle), cwd, foreground program, Claude turn count, bell counters, last activity, and pending wait jobs; `include_user_sessions=false` narrows to agent-created only, `include_ports=true` adds proxy sessions
 - `hopx_wait_any` — race several background waits (wait_ids and/or terminal_ids, auto-starting `until_agent_done` waits); returns the first real completion(s) plus the still-pending set; expired watches are re-armed automatically (new wait_id in `pending`) rather than reported as completions

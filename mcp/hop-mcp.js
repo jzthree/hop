@@ -56,7 +56,11 @@ const HOPX_UI_BUSY_LINE_PATTERNS = [
   /\bctrl\+c to (?:interrupt|cancel|stop)\b/i,
   /\bwaiting for (?:process|response|model|tool)\b/i,
   /\b(?:thinking|working|generating|processing|running|compiling|building|loading)[…\.]{1,3}/i,
-  /^\s*[•*]\s+.*\b(working|starting|thinking|running|processing|generating)\b/i
+  /^\s*[•*]\s+.*\b(working|starting|thinking|running|processing|generating)\b/i,
+  // Claude Code status lines use a spinner glyph + a whimsical gerund + "…"
+  // ("✻ Simmering…", "✢ Reticulating…") — the specific verbs are unbounded, so
+  // match the shape, not the vocabulary.
+  /^\s*[✳✢✶✻✽·◐◓◑◒]{1,3}\s?\S{2,}…/u
 ];
 
 // Busy-line patterns = the built-ins plus any from HOP_MCP_BUSY_PATTERNS (one
@@ -81,6 +85,25 @@ function getBusyLinePatterns() {
 // Does the tail of the rendered screen show an agent "busy" indicator? Returns
 // the matching line or null. Used to keep until_agent_done from firing while an
 // inline TUI is still working, in every capture mode (not just mode:ui).
+// Claude config roots that can hold transcripts (projects/<cwd-slug>/*.jsonl):
+// an explicit CLAUDE_CONFIG_DIR, the default ~/.claude, and alternate installs
+// like ~/.claude_fable (the `claude-fable` launcher points CLAUDE_CONFIG_DIR
+// there, so its transcripts never appear under ~/.claude).
+function claudeConfigRoots() {
+  const roots = [];
+  const push = (p) => {
+    if (typeof p === 'string' && p && !roots.includes(p)) roots.push(p);
+  };
+  push(process.env.CLAUDE_CONFIG_DIR);
+  push(path.join(os.homedir(), '.claude'));
+  try {
+    for (const entry of fs.readdirSync(os.homedir())) {
+      if (/^\.claude[_-][A-Za-z0-9_-]+$/.test(entry)) push(path.join(os.homedir(), entry));
+    }
+  } catch { /* home unreadable — stick with the defaults */ }
+  return roots;
+}
+
 function screenTextLooksBusy(screenText) {
   if (typeof screenText !== 'string' || !screenText) return null;
   const lines = screenText.split('\n').map((l) => l.trim()).filter(Boolean).slice(-8);
@@ -470,6 +493,49 @@ function slimWaitPayload(waitPayload, sentData) {
   }
 
   return out;
+}
+
+// Reply text a turn's wait captured, for until_reply_regex evaluation: prefer
+// the condensed wait.text, else join the captured events' text/data.
+function extractWaitReplyText(waitPayload) {
+  if (!waitPayload || typeof waitPayload !== 'object') return '';
+  if (typeof waitPayload.text === 'string' && waitPayload.text.length > 0) {
+    return waitPayload.text;
+  }
+  const events = Array.isArray(waitPayload.events) ? waitPayload.events : [];
+  return events
+    .map((event) => {
+      if (!event || typeof event !== 'object') return '';
+      if (typeof event.text === 'string') return event.text;
+      return typeof event.data === 'string' ? event.data : '';
+    })
+    .join('');
+}
+
+// Evaluate a (pre-validated) until_reply_regex against the reply text.
+// preferredText (the last assistant message from the session transcript) is
+// authoritative when available — a TUI's stream capture often never commits
+// the final reply line, and the rendered screen would false-positive on the
+// echoed instruction. Falls back to the wait-captured text. Case-insensitive
+// by contract; ANSI is stripped so patterns match the visible text.
+function evaluateReplyRegex(pattern, waitPayload, preferredText) {
+  let regex = null;
+  try {
+    regex = new RegExp(pattern, 'i');
+  } catch {
+    return { reply_matched: false, reply_match: null };
+  }
+  let match = null;
+  if (typeof preferredText === 'string' && preferredText) {
+    match = stripAnsi(preferredText).match(regex);
+  }
+  if (!match) {
+    match = stripAnsi(extractWaitReplyText(waitPayload)).match(regex);
+  }
+  return {
+    reply_matched: match !== null,
+    reply_match: match ? match[0] : null
+  };
 }
 
 function extractUiBusyLine(uiPayload) {
@@ -3103,7 +3169,7 @@ class HopMCPServer {
       },
       {
         name: 'hopx_agent_turn',
-        description: 'Convenience helper: send one turn to a terminal agent, wait, and return mode-appropriate output. Built on top of core hop_* tools. Provide terminal_id to start a turn, or wait_id to continue/poll/control an async turn.',
+        description: 'Convenience helper: send one turn to a terminal agent, wait, and return mode-appropriate output. Built on top of core hop_* tools. Provide terminal_id to start a turn, or wait_id to continue/poll/control an async turn. Optional until_reply_regex is evaluated (case-insensitive) against the captured reply text after the turn completes and reported as reply_matched/reply_match — "task finished", not just "turn finished".',
         inputSchema: {
           type: 'object',
           properties: {
@@ -3139,6 +3205,7 @@ class HopMCPServer {
             match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion.' },
+            until_reply_regex: { type: 'string', description: 'Optional case-insensitive regex evaluated against the captured reply text AFTER the turn completes (it does not change when the wait ends); adds reply_matched: true|false and reply_match (first match or null) to the result. For async turns it is evaluated when the background job completes, so hopx_wait_any completed[] summaries carry it too.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex.' },
             idle_ms: { type: 'number', description: 'Match when output-like events are quiet for this duration.' },
             max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000 synchronous; 15 minutes when async=true — the job is a background watch nobody blocks on).' },
@@ -3850,6 +3917,10 @@ class HopMCPServer {
       error: null,
       aborted: false,
       promise: null,
+      // until_reply_regex verdict, filled in when the job completes (only when
+      // the metadata carries the regex).
+      replyMatched: null,
+      replyMatch: null,
       // Stable link back to the terminal for fleet views (metadata is
       // caller-shaped and not guaranteed to carry it).
       terminalId: typeof args.terminal_id === 'string' ? args.terminal_id : null,
@@ -3875,6 +3946,24 @@ class HopMCPServer {
         job.status = 'error';
         job.error = err instanceof Error ? err.message : String(err);
       } finally {
+        // Evaluate an until_reply_regex carried in the job metadata, so
+        // summaries (hopx_wait_any completed[], wait_id polls) report
+        // task-level completion, not just turn completion. The transcript's
+        // last assistant message is the authoritative reply source; the
+        // wait-captured text is the fallback.
+        if (job.metadata && typeof job.metadata.until_reply_regex === 'string') {
+          let transcriptReply = null;
+          try {
+            const handle = this.getTerminalHandle(job.terminalId);
+            const internalName = handle ? (handle.internalName || handle.sessionName || null) : null;
+            transcriptReply = await this.readLastAssistantReplyText(internalName);
+          } catch {
+            /* fall back to wait text */
+          }
+          const reply = evaluateReplyRegex(job.metadata.until_reply_regex, job.result, transcriptReply);
+          job.replyMatched = reply.reply_matched;
+          job.replyMatch = reply.reply_match;
+        }
         job.done = true;
         job.updatedAt = Date.now();
         this.pruneWaitJobs(job.updatedAt);
@@ -3895,6 +3984,10 @@ class HopMCPServer {
     };
     if (job.done && job.metadata && typeof job.metadata === 'object') {
       payload.metadata = job.metadata;
+    }
+    if (job.done && typeof job.replyMatched === 'boolean') {
+      payload.reply_matched = job.replyMatched;
+      payload.reply_match = job.replyMatch;
     }
     return payload;
   }
@@ -4120,6 +4213,43 @@ class HopMCPServer {
     }
   }
 
+  // Authoritative reply text for until_reply_regex: the last assistant message
+  // in the session's Claude transcript. Returns null when no transcript is
+  // resolvable (non-Claude agent, no hook record, remote host) — callers then
+  // fall back to wait-captured text.
+  async readLastAssistantReplyText(internalName) {
+    if (!internalName) return null;
+    try {
+      const source = await this.resolveTrajectorySource(internalName);
+      if (!source || source.error || source.kind !== 'local') return null;
+      const data = await this.loadTrajectory(source, { mode: 'tail', limit: 8, textOnly: true });
+      const tail = Array.isArray(data && data.tail) ? data.tail : [];
+      for (let i = tail.length - 1; i >= 0; i--) {
+        const t = tail[i];
+        if (t && t.kind === 'assistant' && typeof t.text === 'string' && t.text.trim()) {
+          return t.text;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // True when the SessionStart hook has recorded this hop session: the Stop
+  // hook will then bump the turn counter, making the counter the authoritative
+  // agent_done signal — the quiet-screen heuristic alone must not declare a
+  // turn finished (thinking models pause with an idle-looking screen).
+  hasClaudeHookRecord(internalName) {
+    if (!internalName || !/^[A-Za-z0-9_.-]+$/.test(internalName)) return false;
+    try {
+      fs.accessSync(path.join(resolveHomeDir(), 'claude-sessions', `${internalName}.json`));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // Resolve a hop session name to its Claude transcript file. Seam: returns a
   // { kind:'local', path, ... } source today (the MCP runs on the same host as
   // the sessions); a future { kind:'daemon', name } variant can route the read
@@ -4170,37 +4300,47 @@ class HopMCPServer {
       return { error: `Could not resolve a working directory for session "${name}" (not a known hop session, and no claude-sessions record).` };
     }
 
-    const projectDir = path.join(os.homedir(), '.claude', 'projects', encodeClaudeProjectDir(cwd));
+    // Transcripts live under <config-root>/projects/<cwd-slug>/. The root is
+    // NOT always ~/.claude: alternate installs point CLAUDE_CONFIG_DIR at e.g.
+    // ~/.claude_fable, so search every plausible root (exact sessionId match
+    // first across all roots, then newest-fallback across all roots).
+    const projectDirs = claudeConfigRoots().map((root) => path.join(root, 'projects', encodeClaudeProjectDir(cwd)));
     if (sessionId) {
-      const preferred = path.join(projectDir, `${sessionId}.jsonl`);
-      if (fs.existsSync(preferred)) {
-        return { kind: 'local', path: preferred, sessionId, cwd, internalName, fallback: false };
+      for (const projectDir of projectDirs) {
+        const preferred = path.join(projectDir, `${sessionId}.jsonl`);
+        if (fs.existsSync(preferred)) {
+          return { kind: 'local', path: preferred, sessionId, cwd, internalName, fallback: false };
+        }
       }
     }
-    // Fallback: newest .jsonl in the project dir (hook not installed / sessionId stale).
-    // This is AMBIGUOUS when several sessions share a cwd: every one of them maps to
-    // the single newest transcript. We surface that (ambiguous + candidateCount) so a
-    // caller knows the mapping may be wrong and to install the SessionStart hook
-    // (`hop claude-hook install`), which records each session's exact sessionId.
-    try {
-      const files = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'));
-      let best = null; let bestMtime = -1;
-      for (const f of files) {
-        const p = path.join(projectDir, f);
-        let m = 0; try { m = fs.statSync(p).mtimeMs; } catch { /* skip */ }
-        if (m > bestMtime) { bestMtime = m; best = p; }
-      }
-      if (best) {
-        return {
-          kind: 'local', path: best,
-          sessionId: sessionId || path.basename(best, '.jsonl'),
-          cwd, internalName, fallback: true,
-          ambiguous: files.length > 1,
-          candidateCount: files.length
-        };
-      }
-    } catch { /* project dir missing */ }
-    return { error: `No Claude transcript found for "${name}" in ${projectDir}. The SessionStart hook may not be installed, the session may not be Claude, or the transcript isn't on this host.` };
+    // Fallback: newest .jsonl across the project dirs (hook not installed /
+    // sessionId stale). This is AMBIGUOUS when several sessions share a cwd:
+    // every one of them maps to the single newest transcript. We surface that
+    // (ambiguous + candidateCount) so a caller knows the mapping may be wrong
+    // and to install the SessionStart hook (`hop claude-hook install`), which
+    // records each session's exact sessionId.
+    let best = null; let bestMtime = -1; let candidateCount = 0;
+    for (const projectDir of projectDirs) {
+      try {
+        const files = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'));
+        candidateCount += files.length;
+        for (const f of files) {
+          const p = path.join(projectDir, f);
+          let m = 0; try { m = fs.statSync(p).mtimeMs; } catch { /* skip */ }
+          if (m > bestMtime) { bestMtime = m; best = p; }
+        }
+      } catch { /* project dir missing in this root */ }
+    }
+    if (best) {
+      return {
+        kind: 'local', path: best,
+        sessionId: sessionId || path.basename(best, '.jsonl'),
+        cwd, internalName, fallback: true,
+        ambiguous: candidateCount > 1,
+        candidateCount
+      };
+    }
+    return { error: `No Claude transcript found for "${name}" under ${projectDirs.join(', ')}. The SessionStart hook may not be installed, the session may not be Claude, or the transcript isn't on this host.` };
   }
 
   buildFullTrajectoryTurn(obj, rec, summary, textOnly) {
@@ -5071,10 +5211,14 @@ class HopMCPServer {
     const readyTimeoutMs = Number.isFinite(args.ready_timeout_ms)
       ? Math.max(1000, Math.floor(args.ready_timeout_ms))
       : 60000;
+    // Readiness = the CLI painted and went quiet. Launching is not a turn (no
+    // Stop-hook bump), so until_agent_done would hang against the turn-counter
+    // gate for hook-recorded sessions; a plain idle window is the right signal.
     const readiness = await this.runWaitTerminal(
       {
         terminal_id: terminalId,
-        until_agent_done: true,
+        until_agent_done: false,
+        idle_ms: 3000,
         start_from: 'latest',
         max_wait_ms: readyTimeoutMs,
         capture: 'readable_raw',
@@ -5147,6 +5291,19 @@ class HopMCPServer {
     const shouldAsync = args.async === true && shouldWait;
     const hasInputAction = Boolean(data || key || pressEnter);
     const controlMode = this.getHopxControlMode(args, hasInputAction);
+    if (args.until_reply_regex !== undefined && args.until_reply_regex !== null) {
+      if (typeof args.until_reply_regex !== 'string') {
+        return { content: [{ type: 'text', text: 'Error: until_reply_regex must be a string (regex source).' }], isError: true };
+      }
+      try {
+        new RegExp(args.until_reply_regex, 'i');
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Error: invalid until_reply_regex: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true
+        };
+      }
+    }
     const captureMaxEventsProvided = args.capture_max_events !== undefined && args.capture_max_events !== null;
     const selectedModeInput = normalizeHopxTurnMode(args.mode);
     if (!selectedModeInput) {
@@ -5271,13 +5428,14 @@ class HopMCPServer {
       sendOnlyPayload = parsedSend.payload;
     }
 
-    // Verified submit: in a TUI we just pressed Enter — confirm the composer
-    // actually cleared (re-send Enter if it was swallowed). Only meaningful in UI
-    // mode with an actual data+Enter submit; a no-op (and harmless) otherwise.
+    // Verified submit: we just pressed Enter — confirm the composer actually
+    // cleared (re-send Enter if it was swallowed). Runs in EVERY mode, not just
+    // ui: claude normally runs inline (auto -> readable_raw), and an unverified
+    // submit there can leave the prompt parked in the composer indefinitely.
+    // Safe for plain shells — no composer box is found, so nothing is poked.
     let submitVerification = null;
     if (
-      selectedMode === 'ui'
-      && data
+      data
       && pressEnter
       && controlMode === 'send'
       && this.shouldVerifyHopxSubmit(args)
@@ -5304,6 +5462,7 @@ class HopMCPServer {
           : (preSendCursor === null ? undefined : preSendCursor);
         const waitArgs = this.applyHopxWaitDefaults({
           terminal_id: requestedTerminalId,
+          baselineTurnCount: baselineTurnCount === null ? undefined : baselineTurnCount,
           cursor: waitCursor,
           start_from: waitStartFrom,
           until_regex: args.until_regex,
@@ -5334,7 +5493,8 @@ class HopMCPServer {
             text_only: false,
             uiMaxLines: args.uiMaxLines,
             rawTailMaxEvents: args.rawTailMaxEvents,
-            includeUiRawTail
+            includeUiRawTail,
+            ...(typeof args.until_reply_regex === 'string' ? { until_reply_regex: args.until_reply_regex } : {})
           });
           return this.wrapJson({
             ...this.summarizeWaitJob(job),
@@ -5399,6 +5559,7 @@ class HopMCPServer {
     if (shouldAsync && shouldWait) {
       const waitArgs = this.applyHopxWaitDefaults({
         terminal_id: requestedTerminalId,
+        baselineTurnCount: baselineTurnCount === null ? undefined : baselineTurnCount,
         capture: selectedMode,
         cursor: args.cursor,
         start_from: args.start_from,
@@ -5432,7 +5593,8 @@ class HopMCPServer {
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
         selected_mode: selectedMode,
-        text_only: readableTextOnly
+        text_only: readableTextOnly,
+        ...(typeof args.until_reply_regex === 'string' ? { until_reply_regex: args.until_reply_regex } : {})
       });
       return this.wrapJson({
         ...this.summarizeWaitJob(job),
@@ -5550,6 +5712,10 @@ class HopMCPServer {
             events: []
           };
         }
+        if (typeof args.until_reply_regex === 'string') {
+          const transcriptReply = await this.readLastAssistantReplyText(turnInternalName);
+          Object.assign(promotedPayload, evaluateReplyRegex(args.until_reply_regex, promotedPayload.wait, transcriptReply));
+        }
         return this.wrapJson({
           ...promotedPayload
         });
@@ -5560,6 +5726,10 @@ class HopMCPServer {
       ...parsedSendAndWait.payload,
       helper: 'hopx_agent_turn'
     };
+    if (typeof args.until_reply_regex === 'string') {
+      const transcriptReply = await this.readLastAssistantReplyText(turnInternalName);
+      Object.assign(finalPayload, evaluateReplyRegex(args.until_reply_regex, finalPayload.wait, transcriptReply));
+    }
 
     return this.wrapJson(finalPayload);
   }
@@ -5966,6 +6136,17 @@ class HopMCPServer {
     let sawOutputLike = false;
     let recoveredInLoop = false;
 
+    // Turn-counter marker for until_agent_done: authoritative when the Claude
+    // hook has recorded this session. baseline from args when the caller
+    // measured it pre-send (hopx_agent_turn does), else read now.
+    const markerHandle = untilAgentDone ? this.getTerminalHandle(terminalId) : null;
+    const markerName = markerHandle ? (markerHandle.internalName || markerHandle.sessionName || null) : null;
+    const markerBaseline = Number.isFinite(args.baselineTurnCount)
+      ? Math.floor(args.baselineTurnCount)
+      : (markerName ? this.readTurnCount(markerName) : null);
+    const markerExpected = Boolean(markerName && this.hasClaudeHookRecord(markerName));
+    let markerTurnDone = false;
+
     while (true) {
       if (isAborted && isAborted()) {
         status = 'aborted';
@@ -6078,6 +6259,25 @@ class HopMCPServer {
         }
       }
 
+      // Authoritative agent_done: the Stop hook bumped the session's turn
+      // counter. The bump lands after the reply renders, but this pass's read
+      // may predate that render — so drain exactly one more read pass before
+      // breaking, or the captured events miss the reply tail (and downstream
+      // consumers like until_reply_regex see an empty reply).
+      if (untilAgentDone && markerName) {
+        if (markerTurnDone) {
+          matched = 'agent_done';
+          matchedText = null;
+          matchVia = 'turn_counter';
+          status = 'matched';
+          break;
+        }
+        const currentTurnCount = this.readTurnCount(markerName);
+        if (currentTurnCount !== null && currentTurnCount > (markerBaseline ?? 0)) {
+          markerTurnDone = true;
+        }
+      }
+
       const now = Date.now();
       if (untilAgentDone && agentDoneIdleMs !== null && sawOutputLike && (now - lastOutputAt) >= agentDoneIdleMs) {
         const flags = this.streamManager.getTerminalFlags(terminalId);
@@ -6089,9 +6289,13 @@ class HopMCPServer {
         const busyLine = flags.exists && !flags.closed
           ? screenTextLooksBusy(this.streamManager.getScreenText(terminalId))
           : null;
-        if (flags.exists && !flags.closed && !flags.alternateScreen && !flags.cursorHidden && !busyLine) {
+        // When a hook record exists the counter above is the source of truth:
+        // a quiet, idle-looking screen is NOT completion (thinking models
+        // pause before streaming — the exact gap that fired false dones).
+        if (!markerExpected && flags.exists && !flags.closed && !flags.alternateScreen && !flags.cursorHidden && !busyLine) {
           matched = 'agent_done';
           matchedText = null;
+          matchVia = 'heuristic';
           status = 'matched';
           break;
         }

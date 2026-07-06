@@ -3269,7 +3269,7 @@ class HopMCPServer {
       },
       {
         name: 'hopx_agents_overview',
-        description: 'Fleet status in one call, for a manager agent orchestrating subagents: every agent-created or agent-permitted session with its state (running/busy/idle), working directory, foreground program, Claude turn count (Stop-hook counter when available), bell counters (a subagent asking for attention), last activity, and any pending wait jobs this MCP holds for it. Diff bellSeq/turnCount across calls to detect progress. Composes hop_list_sessions + local turn counters + the wait-job registry.',
+        description: 'Fleet status in one call, for a manager agent orchestrating subagents: every agent-created or agent-permitted session with its state (running/busy/needs_input/idle — needs_input = waiting for a human, via a parked composer prompt or a recent unanswered bell), working directory, foreground program, Claude turn count (Stop-hook counter when available), bell counters (a subagent asking for attention), last activity, and any pending wait jobs this MCP holds for it. Diff bellSeq/turnCount across calls to detect progress. Composes hop_list_sessions + local turn counters + the wait-job registry.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -5007,19 +5007,36 @@ class HopMCPServer {
       const live = s.live === true || activeNames.has(displayName);
       const terminalId = handlesBySession.get(internalName) || handlesBySession.get(displayName) || null;
       const pendingWaits = terminalId ? (waitsByTerminal.get(terminalId) || []) : [];
+      const lastActivityAt = Number(s.lastActivityAt) || 0;
+      const lastBellAt = Number(s.lastBellAt) || 0;
+      // needs_input: we hold a terminal handle and can see the session is parked
+      // on a human — either an un-submitted prompt sitting in the composer or a
+      // bell that rang at/after the last output. Ranks above idle, below busy.
+      let needsInputReason = null;
+      if (live && pendingWaits.length === 0 && terminalId) {
+        const composer = this.streamManager.getComposerState(terminalId);
+        if (composer && composer.found && !composer.isEmpty) {
+          needsInputReason = 'parked_composer';
+        } else if (lastBellAt > 0 && lastBellAt >= lastActivityAt - 2000) {
+          needsInputReason = 'recent_bell';
+        }
+      }
       agents.push({
         sessionName: displayName,
         internalName,
-        state: !live ? 'not_running' : (pendingWaits.length > 0 ? 'busy' : 'idle'),
+        state: !live
+          ? 'not_running'
+          : (pendingWaits.length > 0 ? 'busy' : (needsInputReason ? 'needs_input' : 'idle')),
         createdBy: s.createdBy || 'user',
         agentPermitted: isPermitted,
         cwd: s.cwd || null,
         foregroundProcess: s.foregroundProcess || null,
-        lastActivityAt: Number(s.lastActivityAt) || 0,
+        lastActivityAt,
         bellSeq: Number(s.bellSeq) || 0,
-        lastBellAt: Number(s.lastBellAt) || 0,
+        lastBellAt,
         turnCount: this.readTurnCount(internalName),
         terminal_id: terminalId,
+        needs_input_reason: needsInputReason,
         pending_waits: pendingWaits
       });
     }
@@ -5030,7 +5047,7 @@ class HopMCPServer {
       helper: 'hopx_agents_overview',
       agentCount: agents.length,
       agents,
-      hint: 'Diff bellSeq (attention) and turnCount (completed Claude turns) against your previous call to detect progress. busy = this MCP holds a live wait job for the terminal.'
+      hint: 'Diff bellSeq (attention) and turnCount (completed Claude turns) against your previous call to detect progress. busy = this MCP holds a live wait job for the terminal. needs_input = the terminal is parked on a human (un-submitted prompt in the composer, or a recent unanswered bell) — see needs_input_reason.'
     });
   }
 

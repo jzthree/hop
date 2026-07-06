@@ -131,6 +131,11 @@ authenticator.options = { window: 1 };
 // --- Configuration ---
 // Use HOP_HOME env var or default to .hop2 (separate from original hop)
 const HOME_DIR = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
+// Testing-only (undocumented): HOP_NO_TUNNEL=1 runs a fully local stack — no
+// cloudflared, API/web on 127.0.0.1 only. Combined with HOP_HOME=<dir> this
+// yields an isolated hop instance for dogfooding daemon/hay-host changes
+// without touching the production stack. Not a user feature.
+const NO_TUNNEL = process.env.HOP_NO_TUNNEL === '1';
 const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 
@@ -2708,6 +2713,7 @@ async function runCommand(command, args, opts = {}) {
 }
 
 async function checkAndInstallDependencies() {
+    if (NO_TUNNEL) return; // test stack: no cloudflared needed
     log(`[1/4] Checking dependencies...`, BOLD);
     try {
         await runCommand('brew', ['--version'], { stdio: 'ignore' });
@@ -7076,6 +7082,10 @@ function clearPlannedTunnelShutdown(tunnel) {
 }
 
 function startTunnel(isRestart = false) {
+    if (NO_TUNNEL) {
+        log(`[test] tunnel disabled (HOP_NO_TUNNEL=1) — local stack at http://127.0.0.1:${BASE_PORT}`, YELLOW);
+        return Promise.resolve({ tunnel: null, publicUrl: `http://127.0.0.1:${BASE_PORT}` });
+    }
     const domainConfig = getDomainConfig();
     const useNamedTunnel = domainConfig && domainConfig.tunnelName && domainConfig.hostname;
 
@@ -7394,6 +7404,7 @@ let tunnelRestartInProgress = false;
 let tunnelRestartQueued = false;
 
 async function startTunnelWithRestart() {
+    if (NO_TUNNEL) return;
     // Prevent concurrent restarts
     if (tunnelRestartInProgress) {
         tunnelRestartQueued = true;
@@ -7532,6 +7543,7 @@ async function waitForTunnelHealthy(publicUrl, options = {}) {
 }
 
 function startTunnelHealthMonitor() {
+    if (NO_TUNNEL) return;
     if (tunnelHealthInterval) return;
 
     tunnelHealthInterval = setInterval(async () => {

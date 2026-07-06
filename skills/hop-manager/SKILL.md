@@ -24,8 +24,10 @@ ledger, worktrees, and transcripts on disk are the source of truth.
    dispatched (async) finishes and your composer is idle, injects a
    "N task(s) completed — review the ledger" prompt to start your next turn.
    So you can dispatch async and stop — you will be woken; you do not have to
-   hold a turn open. Between events, `hopx_agents_overview()` shows
-   busy / needs_input / idle for the whole fleet.
+   hold a turn open. You are also woken if a dispatched task runs too long
+   without finishing (a worker may be stuck/parked) — the wake says so; read
+   its screen and interrupt or nudge. Between events, `hopx_agents_overview()`
+   shows busy / needs_input / idle for the whole fleet.
 
    If you are NOT registered (or want to block for a specific result), the
    fallback is to stay in your turn and loop on `hopx_wait_any(wait_ids)`

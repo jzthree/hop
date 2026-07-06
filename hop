@@ -2643,6 +2643,36 @@ function printNotRunningError() {
 
 // Shown once right before handing the terminal over to a session, so the
 // escape hatch is visible without opening the Opt+? overlay.
+// `ssh -t host '$SHELL -l -i -c "cmd"'` passes the TTY test: the shell is
+// interactive with a real terminal, so rc files run — but its whole purpose is
+// the -c command, and rc-launched hop would block it until the user exits.
+// Detect that by reading the PARENT process's argv: skip only when the parent
+// is a known shell binary AND carries -c among its option tokens (before its
+// first non-flag argument). Restricting to shell parents keeps coincidental
+// flags in exotic launchers from silently suppressing hop. Diagnose any
+// decision with HOP_DEBUG=1 or `hop doctor`; HOP_AUTOSTART=1/0 overrides.
+const AUTOSTART_SHELLS = new Set(['sh', 'bash', 'zsh', 'fish', 'ksh', 'dash', 'tcsh']);
+function evaluateAutostartCommandShell() {
+    try {
+        const raw = execSync(`ps -o args= -p ${process.ppid}`, { encoding: 'utf8', timeout: 1500 }).trim();
+        const parentArgs = raw.split(/\s+/);
+        const shellName = (parentArgs[0] || '').replace(/^-/, '').split('/').pop();
+        if (!AUTOSTART_SHELLS.has(shellName)) {
+            return { skip: false, parent: raw, reason: 'parent is not a shell' };
+        }
+        for (let i = 1; i < parentArgs.length; i++) {
+            const tok = parentArgs[i];
+            if (tok === '--' || !tok.startsWith('-')) break; // options end here
+            if (/^-[A-Za-z]+$/.test(tok) && tok.includes('c')) {
+                return { skip: true, parent: raw, reason: 'parent shell has -c' };
+            }
+        }
+        return { skip: false, parent: raw, reason: 'interactive shell (no -c)' };
+    } catch (e) {
+        return { skip: false, parent: '(ps unavailable)', reason: 'ps failed — assuming interactive' };
+    }
+}
+
 function printDetachHint() {
     log(`Ctrl+G detach (keeps running) · Ctrl+Q twice kill · Opt+? shortcuts`, DIM);
 }
@@ -9296,6 +9326,13 @@ async function main() {
     // Handle `hop doctor` command - read-only environment/health checks
     if (process.argv[2] === 'doctor') {
         log(`\n${BOLD}Hop Doctor${RESET}\n`, CYAN);
+
+        {
+            const v = evaluateAutostartCommandShell();
+            const inHop = process.env.HOP_SESSION ? ` · inside hop session '${process.env.HOP_SESSION}'` : '';
+            const tty = process.stdin.isTTY && process.stdout.isTTY ? 'tty' : 'no-tty';
+            log(`  Autostart: bare \`hop\` from this shell would ${v.skip || process.env.HOP_SESSION || tty === 'no-tty' ? YELLOW + 'SKIP' + RESET : GREEN + 'launch' + RESET} (${tty}${inHop} · ${v.reason})`, RESET);
+        }
         let problems = 0;
         const ok = (m) => log(`  ${GREEN}✓${RESET} ${m}`, RESET);
         const warn = (m) => log(`  ${YELLOW}!${RESET} ${m}`, RESET);
@@ -10672,21 +10709,13 @@ async function main() {
         }
         if (process.env.HOP_AUTOSTART === '0') process.exit(0);
         if (process.env.HOP_AUTOSTART !== '1') {
-            // `ssh -t host '$SHELL -l -i -c "cmd"'` passes the TTY test: the shell
-            // is interactive with a real terminal, so rc files run — but its whole
-            // purpose is the -c command, and rc-launched hop would block it until
-            // the user exits. Detect the parent shell's -c invocation (option
-            // tokens before its first non-flag argument) and stand down.
-            // HOP_AUTOSTART=1 forces launch anyway; =0 always skips (above).
-            try {
-                const parentArgs = execSync(`ps -o args= -p ${process.ppid}`, { encoding: 'utf8', timeout: 1500 })
-                    .trim().split(/\s+/);
-                for (let i = 1; i < parentArgs.length; i++) {
-                    const tok = parentArgs[i];
-                    if (tok === '--' || !tok.startsWith('-')) break; // options end here
-                    if (/^-[A-Za-z]+$/.test(tok) && tok.includes('c')) process.exit(0);
+            const verdict = evaluateAutostartCommandShell();
+            if (verdict.skip) {
+                if (process.env.HOP_DEBUG === '1') {
+                    console.error(`[hop] autostart skipped: parent shell was started with -c (${verdict.parent}). HOP_AUTOSTART=1 overrides.`);
                 }
-            } catch (e) { /* ps unavailable — assume a real interactive shell */ }
+                process.exit(0);
+            }
         }
     }
 

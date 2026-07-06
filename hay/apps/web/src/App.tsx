@@ -177,6 +177,9 @@ const AUTO_FIT_ON_TYPE = true;
 type SessionSwitchMode = "page" | "instant";
 const DEFAULT_SESSION_SWITCH_MODE: SessionSwitchMode = "instant";
 const SESSION_LIST_STALE_MS = 5000;
+// Offline-typed input: replay window and buffer bound (see pendingInputRef).
+const PENDING_INPUT_MAX_AGE_MS = 15000;
+const PENDING_INPUT_MAX_ENTRIES = 200;
 
 type SessionInfo = {
   name: string;
@@ -416,6 +419,12 @@ const App = () => {
   // app its own scroll keys (PageUp/PageDown). See the mobile touch handler.
   const remoteAltScreenRef = useRef(false);
   const lastDropToastRef = useRef(0);
+  // Keystrokes typed while the socket is down are buffered per room and
+  // replayed in order on reconnect — a mobile radio blip must not eat input.
+  // Entries past the age cap are discarded rather than replayed: firing stale
+  // keystrokes into a shell long after they were typed is worse than losing
+  // them (the user has usually retyped by then).
+  const pendingInputRef = useRef<Array<{ room: string; data: string; at: number }>>([]);
   const activeSessionRoomRef = useRef<string | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
@@ -678,12 +687,20 @@ const App = () => {
     if (!sanitized) {
       return;
     }
-    // Surface dropped input instead of silently no-oping while disconnected
+    // Buffer input while disconnected instead of dropping it; the reconnect
+    // handler replays it in order (same room, age-capped).
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      const room = activeSessionRoomRef.current;
+      if (room) {
+        pendingInputRef.current.push({ room, data: sanitized, at: Date.now() });
+        if (pendingInputRef.current.length > PENDING_INPUT_MAX_ENTRIES) {
+          pendingInputRef.current.shift();
+        }
+      }
       const now = Date.now();
       if (now - lastDropToastRef.current > 2000) {
         lastDropToastRef.current = now;
-        showToast("Disconnected — input not sent");
+        showToast("Reconnecting — input buffered");
       }
       return;
     }
@@ -814,6 +831,22 @@ const App = () => {
       setStatus("connected");
       reconnectAttemptRef.current = 0; // Reset backoff on successful connection
       handleResize();
+      // Replay keystrokes buffered during the outage: this room only, in
+      // order, and only within the age window — stale input is discarded.
+      const queued = pendingInputRef.current;
+      pendingInputRef.current = [];
+      if (queued.length > 0) {
+        const nowMs = Date.now();
+        const sameRoom = queued.filter((entry) => entry.room === targetRoom);
+        const replayable = sameRoom.filter((entry) => nowMs - entry.at <= PENDING_INPUT_MAX_AGE_MS);
+        if (replayable.length > 0) {
+          ws.send(JSON.stringify({ type: "input", data: replayable.map((entry) => entry.data).join("") } satisfies ClientMessage));
+          showToast(`Reconnected — sent ${replayable.length} buffered keystroke${replayable.length === 1 ? "" : "s"}`);
+        }
+        if (sameRoom.length > replayable.length) {
+          showToast("Reconnected — stale buffered input discarded");
+        }
+      }
     });
 
     ws.addEventListener("message", (event) => {
@@ -1878,6 +1911,7 @@ const App = () => {
     }
 
     optimisticEchoRef.current.reset();
+    pendingInputRef.current = [];
     setPresence([]);
     setControllerId(null);
     setClientId(null);

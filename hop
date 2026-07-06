@@ -19,6 +19,11 @@ const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = re
 
 const os = require('os');
 const DAEMON_FLAG = process.argv.includes('--daemon');
+// True only for invocations that actually serve the web bundle: the daemon and
+// the foreground `hop client` tunnel (both call startAuthProxy). Plain CLI
+// subcommands (math, status, help, …) never serve web, so dev banners tied to
+// web serving stay silent unless HOP_DEBUG=1 forces them on.
+const SERVES_WEB = DAEMON_FLAG || process.argv[2] === 'client' || process.env.HOP_DEBUG === '1';
 
 // Hay integration for terminal sharing (built from ./hay)
 const HAY_ROOT = path.join(__dirname, 'hay');
@@ -84,8 +89,12 @@ function resolveHayWebDir() {
     for (const p of devPaths) {
         if (fs.existsSync(p)) {
             // Diagnostic banner → stderr so it never corrupts command stdout
-            // (e.g. `hop math` image escape sequences).
-            console.error(`[Dev] Serving Hay from: ${p}`);
+            // (e.g. `hop math` image escape sequences). Only emit it on paths
+            // that actually serve the web bundle (daemon/`hop client`) or when
+            // HOP_DEBUG=1; plain CLI subcommands must stay silent.
+            if (SERVES_WEB) {
+                console.error(`[Dev] Serving Hay from: ${p}`);
+            }
             return p;
         }
     }

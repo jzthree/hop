@@ -147,6 +147,10 @@ const DEFAULT_ASYNC_WAIT_MAX_MS = 15 * 60 * 1000;
 // How often the standing-manager watcher reconciles the ledger and wakes an
 // idle manager whose dispatched workers have completed (hopx_manager_register).
 const MANAGER_WAKE_POLL_MS = 5000;
+// A dispatched task still pending after this long wakes the manager to check on
+// it (worker parked/crashed/looping) — so a stuck worker can't strand an idle
+// manager that dispatched and ended its turn.
+const MANAGER_STALL_WAKE_MS = 8 * 60 * 1000;
 const DEFAULT_WAIT_CAPTURE_MAX_EVENTS = 120;
 const DEFAULT_WAIT_AGENT_DONE_IDLE_MS = 2500;
 const DEFAULT_WAIT_POLL_MAX_MS = 30000;
@@ -5318,7 +5322,7 @@ class HopMCPServer {
       return { content: [{ type: 'text', text: 'Error: terminal_id is required (this manager session\'s own terminal).' }], isError: true };
     }
     this.stopManagerWatch();
-    this.managerWatch = { terminalId, woken: new Set(), ticking: false };
+    this.managerWatch = { terminalId, woken: new Set(), stallWoken: new Set(), ticking: false };
     // The manager's own terminal is usually created by a DIFFERENT process (the
     // harness that spawned the manager), so this process has no stream for it —
     // and getComposerState (the wake's idle gate) would return unavailable and
@@ -5349,12 +5353,20 @@ class HopMCPServer {
     try {
       await this.reconcileLedger().catch(() => {});
       const mgrTid = watch.terminalId;
-      const fresh = this.listLedgerTasks().filter((t) =>
-        (t.status === 'completed' || t.status === 'failed')
-        && t.managerTerminalId === mgrTid
-        && !watch.woken.has(t.taskId));
-      if (!fresh.length) return;
-      if (process.env.HOP_WAKE_DEBUG === '1') console.error(`[wake] ${fresh.length} completed task(s) for manager ${mgrTid}`);
+      const now = Date.now();
+      const mine = this.listLedgerTasks().filter((t) => t.managerTerminalId === mgrTid);
+      const fresh = mine.filter((t) =>
+        (t.status === 'completed' || t.status === 'failed') && !watch.woken.has(t.taskId));
+      // Stall wake: a dispatched task that never completes (worker parked,
+      // crashed, or looping) would otherwise strand an idle manager forever,
+      // since only completion fires a wake. Surface pending tasks older than the
+      // stall window so the manager can investigate/interrupt. One stall wake
+      // per task (stallWoken), separate from completion (woken).
+      const stalled = mine.filter((t) =>
+        t.status === 'pending'
+        && (now - (t.dispatchedAt || 0)) > MANAGER_STALL_WAKE_MS
+        && !watch.stallWoken.has(t.taskId));
+      if (!fresh.length && !stalled.length) return;
       // Never interrupt a manager that is mid-work: skip if it holds a live wait
       // job, or its composer is absent/non-empty (spinner up, or typing).
       const managerBusy = [...this.waitJobs.values()].some((j) => !j.done && j.terminalId === mgrTid);
@@ -5368,11 +5380,15 @@ class HopMCPServer {
         return;
       }
       if (!composer.found || composer.isEmpty !== true) return;
-      // Claim these tasks before writing so a slow submit can't double-fire.
+      // Claim before writing so a slow submit can't double-fire.
       for (const t of fresh) watch.woken.add(t.taskId);
-      const names = fresh.map((t) => t.sessionName || t.internalName || t.taskId).join(', ');
-      const verb = fresh.length === 1 ? 'task' : 'tasks';
-      const msg = `[hop wake] ${fresh.length} dispatched ${verb} completed: ${names}. Review with hopx_task_ledger, verify/merge, then dispatch the next work or acknowledge.`;
+      for (const t of stalled) watch.stallWoken.add(t.taskId);
+      const nameOf = (t) => t.sessionName || t.internalName || t.taskId;
+      const parts = [];
+      if (fresh.length) parts.push(`${fresh.length} completed: ${fresh.map(nameOf).join(', ')}`);
+      if (stalled.length) parts.push(`${stalled.length} STILL RUNNING >${Math.round(MANAGER_STALL_WAKE_MS / 60000)}min (may be stuck — check/interrupt): ${stalled.map(nameOf).join(', ')}`);
+      if (process.env.HOP_WAKE_DEBUG === '1') console.error(`[wake] fresh=${fresh.length} stalled=${stalled.length} for manager ${mgrTid}`);
+      const msg = `[hop wake] ${parts.join('; ')}. Review with hopx_task_ledger and hopx_agents_overview; verify/merge completed work, check on anything stuck (read its screen, interrupt or nudge), then dispatch next or acknowledge.`;
       try {
         // Inject the wake through the same proven dispatch path workers use
         // (handleHopxAgentTurn), NOT a bare write: it actively drains the stream

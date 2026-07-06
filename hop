@@ -3671,6 +3671,66 @@ function getClaudeSettingsPath() {
     return path.join(dir, 'settings.json');
 }
 
+// Every Claude config root on this machine: CLAUDE_CONFIG_DIR, ~/.claude, and
+// alternate installs like ~/.claude_fable (their agents read their own root's
+// skills/settings, so hop assets must land in each).
+function getClaudeConfigRoots() {
+    const roots = [];
+    const push = (p) => { if (p && !roots.includes(p)) roots.push(p); };
+    push(process.env.CLAUDE_CONFIG_DIR);
+    push(path.join(os.homedir(), '.claude'));
+    try {
+        for (const entry of fs.readdirSync(os.homedir())) {
+            if (/^\.claude[_-][A-Za-z0-9_-]+$/.test(entry)) push(path.join(os.homedir(), entry));
+        }
+    } catch (e) { /* home unreadable — defaults stand */ }
+    return roots.filter((p) => { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } });
+}
+
+// ---- hop-session skill install/remove (<config-root>/skills/hop-session/) --
+// Teaches agents running INSIDE hop terminals the house conventions (render
+// math via `hop math`, ring the bell when blocked, phone-friendly output).
+// Source of truth: skills/hop-session/SKILL.md in the hop install.
+const HOP_SKILL_SOURCE = path.join(__dirname, 'skills', 'hop-session', 'SKILL.md');
+
+function installClaudeSkill() {
+    if (!fs.existsSync(HOP_SKILL_SOURCE)) {
+        return { ok: false, error: `skill source missing: ${HOP_SKILL_SOURCE}` };
+    }
+    const content = fs.readFileSync(HOP_SKILL_SOURCE, 'utf8');
+    const installed = [];
+    const already = [];
+    for (const root of getClaudeConfigRoots()) {
+        const dest = path.join(root, 'skills', 'hop-session', 'SKILL.md');
+        try {
+            if (fs.existsSync(dest) && fs.readFileSync(dest, 'utf8') === content) {
+                already.push(dest);
+                continue;
+            }
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.writeFileSync(dest, content);
+            installed.push(dest);
+        } catch (e) {
+            return { ok: false, error: `${dest}: ${e.message}` };
+        }
+    }
+    return { ok: true, installed, already };
+}
+
+function removeClaudeSkill() {
+    const removed = [];
+    for (const root of getClaudeConfigRoots()) {
+        const dir = path.join(root, 'skills', 'hop-session');
+        try {
+            if (fs.existsSync(dir)) {
+                fs.rmSync(dir, { recursive: true });
+                removed.push(dir);
+            }
+        } catch (e) { /* keep removing the rest */ }
+    }
+    return { ok: true, removed };
+}
+
 function readClaudeSettings() {
     const p = getClaudeSettingsPath();
     try {
@@ -8648,7 +8708,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'math', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'claude-skill', 'math', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -9088,6 +9148,34 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop claude-skill [install|remove|status]` — the hop-session skill
+    // that teaches in-terminal agents to use `hop math`, ring bells, etc.
+    if (process.argv[2] === 'claude-skill') {
+        const sub = process.argv[3] || 'status';
+        if (sub === 'install') {
+            const r = installClaudeSkill();
+            if (!r.ok) { log(`Failed to install skill: ${r.error}`, RED); process.exit(1); }
+            for (const p of r.installed) log(`${GREEN}Installed${RESET} hop-session skill → ${p}`, RESET);
+            for (const p of r.already) log(`hop-session skill already current (${p}).`, DIM);
+            if (r.installed.length) log(`New agent sessions in hop terminals will pick it up automatically.`, DIM);
+            process.exit(0);
+        }
+        if (sub === 'remove') {
+            const r = removeClaudeSkill();
+            for (const p of r.removed) log(`${GREEN}Removed${RESET} ${p}`, RESET);
+            if (!r.removed.length) log(`hop-session skill was not installed.`, RESET);
+            process.exit(0);
+        }
+        // status
+        let any = false;
+        for (const root of getClaudeConfigRoots()) {
+            const dest = path.join(root, 'skills', 'hop-session', 'SKILL.md');
+            if (fs.existsSync(dest)) { any = true; log(`${GREEN}✓${RESET} ${dest}`, RESET); }
+        }
+        if (!any) log(`${YELLOW}!${RESET} hop-session skill not installed. Run ${CYAN}hop claude-skill install${RESET} so agents render math, ring bells, and format for phones.`, RESET);
+        process.exit(0);
+    }
+
     // Handle `hop status` command - concise daemon/tunnel/session overview
     if (process.argv[2] === 'status') {
         const state = isServerRunning();
@@ -9307,6 +9395,8 @@ async function main() {
         log(`  hop restore [--dry-run]   Recreate your saved sessions, resuming claude conversations`, RESET);
         log(`  hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`, RESET);
         log(`  hop claude-hook status|remove   Check or remove the hook`, RESET);
+        log(`  hop claude-skill install  Teach agents hop conventions (hop math, bells, phone output)`, RESET);
+        log(`  hop claude-skill status|remove   Check or remove the skill`, RESET);
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);

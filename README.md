@@ -217,6 +217,8 @@ hop math '\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}'
 echo '\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}' | hop math
 ```
 
+Agents working inside hop terminals can render formulas for the humans watching by invoking the command themselves — install the bundled skill with `hop claude-skill install` so Claude sessions know to do this (plus ring the bell when blocked, and keep output phone-friendly).
+
 `hop math` renders a **2D Unicode layout** — fractions, roots, sums/limits, sub/superscripts, Greek + operators, and accents — with no dependencies. Inline-image rendering (Kitty/iTerm) is deferred until graphics support lands in the web client (xterm.js): the real payoff is math that renders *inside* a shared hop session, which the re-rendering clients can't show yet, so until then it's Unicode everywhere.
 
 ## Operations

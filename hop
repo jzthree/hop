@@ -563,6 +563,8 @@ function deleteSessionConfig(name) {
     // A deleted session should not be resurrected by `hop restore`, so drop its
     // SessionStart-hook record too. (Defined later; hoisted.)
     removeClaudeSessionRecord(name);
+    // ...nor resurrected by a stale rename alias pointing at its old name.
+    pruneSessionAliasesForSession(name);
 }
 
 function getSessionDisplayName(name) {
@@ -641,6 +643,16 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName) {
     } else {
         rememberRuntimeSessionMetadata(internalName, next);
     }
+
+    // newDisplayName now belongs to this session, so any pre-existing alias
+    // that pointed at it (target) or used it as an old name (source) is stale;
+    // drop those before recording the new alias to avoid cross-wired chains.
+    for (const from of Object.keys(sessionAliases)) {
+        if (sessionAliases[from] === newDisplayName) {
+            delete sessionAliases[from];
+        }
+    }
+    delete sessionAliases[newDisplayName];
 
     sessionAliases[resolvedOldDisplayName] = newDisplayName;
     if (oldDisplayName !== resolvedOldDisplayName) {
@@ -3812,6 +3824,30 @@ function resolveDisplayNameAlias(name) {
     return current;
 }
 
+// Drop in-memory rename aliases tied to a deleted/killed session so that
+// navigating an old name can't resolve a stale alias and auto-create a brand
+// new session. Walks the rename chain from every known name for the session
+// and removes any entry whose source or target refers to it (display or
+// internal name). Safe to call from any process/path (no-op if no aliases).
+function pruneSessionAliasesForSession(internalName, displayName) {
+    const names = new Set();
+    for (const seed of [internalName, toDisplaySessionName(internalName), displayName]) {
+        if (!seed || typeof seed !== 'string') continue;
+        let current = seed;
+        while (!names.has(current)) {
+            names.add(current);
+            const nextName = sessionAliases[current];
+            if (!nextName) break;
+            current = nextName;
+        }
+    }
+    for (const from of Object.keys(sessionAliases)) {
+        if (names.has(from) || names.has(sessionAliases[from])) {
+            delete sessionAliases[from];
+        }
+    }
+}
+
 function getSessionSwitcherOverlay() {
     return `
 <style id="hop-session-switcher-style">
@@ -6011,6 +6047,10 @@ function startAuthProxy(authEmitter) {
 
                     if (savedConfig) {
                         deleteSessionConfig(resolved);
+                    } else {
+                        // Runtime-only sessions skip deleteSessionConfig, so drop
+                        // their rename aliases here to avoid stale resurrection.
+                        pruneSessionAliasesForSession(resolved, config?.displayName);
                     }
 
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -6397,6 +6437,10 @@ function startAuthProxy(authEmitter) {
                 const savedConfig = getSessionConfig(entry.sessionName);
                 if (savedConfig) {
                     deleteSessionConfig(entry.sessionName);
+                } else {
+                    // Runtime-only sessions skip deleteSessionConfig, so drop
+                    // their rename aliases here to avoid stale resurrection.
+                    pruneSessionAliasesForSession(entry.sessionName, config?.displayName);
                 }
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });

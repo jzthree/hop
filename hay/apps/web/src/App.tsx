@@ -990,6 +990,16 @@ const App = () => {
       lineHeight: 1.3,
       cursorBlink: true,
       scrollback: 50000,
+      // Mouse-wheel speed. xterm defaults to scrollSensitivity 1 = one line per
+      // wheel notch, with no acceleration — painfully slow over a long history,
+      // and it applies BOTH to the local scrollback viewport and to fullscreen
+      // apps: on the alternate screen (Claude Code, less, man) xterm has no
+      // local scrollback, so it emits one Up/Down arrow per notch — the same
+      // getLinesScrolled() count, scaled by scrollSensitivity. Raising it makes
+      // a notch move several lines everywhere. fastScrollSensitivity is the
+      // Shift+wheel multiplier for blasting through very long transcripts.
+      scrollSensitivity: 4,
+      fastScrollSensitivity: 12,
       theme: resolveTerminalTheme(themeMode)
     });
     const fitAddon = new FitAddon();

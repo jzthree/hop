@@ -18,14 +18,20 @@ ledger, worktrees, and transcripts on disk are the source of truth.
    until_reply_regex:"DONE-<KEY>")`. Every task gets a unique completion
    phrase; instruct the worker to commit to its own fleet/ branch (never push,
    never merge) and to end its reply with the phrase.
-3. **Wait — and do NOT end your turn while workers are pending.** You are a
-   Claude session: you only act during a turn, and nothing wakes you when a
-   worker finishes. After an async dispatch, stay in the same turn and loop on
-   `hopx_wait_any(wait_ids)` (re-arming any that return in pending under new
-   wait_ids) until every worker you care about has completed. Only then verify,
-   escalate, and end your turn. If you dispatch and stop, the fleet finishes
-   into the void and no one notices. `hopx_agents_overview()` between waits
-   shows busy / needs_input / idle for the whole fleet.
+3. **Register for wake, then you MAY end your turn.** Call
+   `hopx_manager_register(terminal_id=<your own terminal>)` once at the start.
+   While registered, hop watches the task ledger and, when a worker you
+   dispatched (async) finishes and your composer is idle, injects a
+   "N task(s) completed — review the ledger" prompt to start your next turn.
+   So you can dispatch async and stop — you will be woken; you do not have to
+   hold a turn open. Between events, `hopx_agents_overview()` shows
+   busy / needs_input / idle for the whole fleet.
+
+   If you are NOT registered (or want to block for a specific result), the
+   fallback is to stay in your turn and loop on `hopx_wait_any(wait_ids)`
+   (re-arming any that return pending under new wait_ids) until the workers you
+   care about complete. Never dispatch async and stop while UNregistered — the
+   fleet would finish into the void with no one to notice.
 4. **Verify before believing**: `reply_matched=true` plus a real branch diff
    plus the task's own verification (run its tests). A worker saying done is
    a claim, not a fact.

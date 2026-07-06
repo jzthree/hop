@@ -84,6 +84,10 @@ source ~/.zshrc
 hop
 ```
 
+`hop` is safe to put at the end of your shell rc (`~/.zshrc`): it only launches
+for interactive terminals — non-interactive shells (`ssh host <cmd>`, scp/rsync,
+scripts, cron) and shells already inside a hop session are silently unaffected.
+
 First run:
 1. Optionally set a password with `hop password set`
 2. Scan the authenticator QR code

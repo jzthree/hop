@@ -10652,6 +10652,26 @@ async function main() {
         process.exit(2);
     }
 
+    // Autostart safety: bare `hop` belongs at the end of a shell rc, so it must
+    // refuse to hijack contexts that aren't an interactive terminal. Without
+    // these guards, `ssh host <command>`, scp/rsync/git-over-ssh (any stray
+    // stdout corrupts their protocol), scripts, and cron would all launch the
+    // interactive attach flow — and inside a hop terminal it would nest a
+    // session in a session.
+    if (!DAEMON_FLAG) {
+        if (process.env.HOP_SESSION) {
+            if (process.stdout.isTTY) {
+                log(`Already inside hop session '${process.env.HOP_SESSION}'. Use ${CYAN}hop attach <name>${RESET} to switch or ${CYAN}hop session list${RESET} to browse.`, DIM);
+            }
+            process.exit(0);
+        }
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+            // Non-interactive invocation (ssh command, pipe, script): do nothing,
+            // print nothing, succeed — the surrounding command must be unaffected.
+            process.exit(0);
+        }
+    }
+
     if (process.stdout.isTTY) console.clear(); // Clear screen without wiping scrollback
 
     // Only one instance allowed

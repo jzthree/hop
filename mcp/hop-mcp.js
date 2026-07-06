@@ -581,7 +581,11 @@ function composerSharesContent(sent, composerText) {
 // '/' and '_' replaced by '-'. Verified: /Users/jianzhou/Code/auto_statistician_claude
 // -> -Users-jianzhou-Code-auto-statistician-claude.
 function encodeClaudeProjectDir(cwd) {
-  return String(cwd || '').replace(/[/_]/g, '-');
+  // Claude Code slugifies the cwd by replacing every non-alphanumeric char
+  // with '-' ('/Code/hop2/.hop-worktrees/x' -> '-Code-hop2--hop-worktrees-x').
+  // The old [/_] rule missed dots, which broke transcript resolution for any
+  // cwd containing one (git worktrees under .hop-worktrees, dotdirs, etc.).
+  return String(cwd || '').replace(/[^A-Za-z0-9]/g, '-');
 }
 
 function firstTrajectoryText(parts, n) {
@@ -4341,6 +4345,21 @@ class HopMCPServer {
         ambiguous: candidateCount > 1,
         candidateCount
       };
+    }
+    // Last resort: the hook recorded an exact sessionId — search every root's
+    // project dirs for it directly, immune to slug-encoding drift.
+    if (sessionId) {
+      for (const root of claudeConfigRoots()) {
+        const projectsDir = path.join(root, 'projects');
+        let entries = [];
+        try { entries = fs.readdirSync(projectsDir); } catch { continue; }
+        for (const entry of entries) {
+          const candidate = path.join(projectsDir, entry, `${sessionId}.jsonl`);
+          if (fs.existsSync(candidate)) {
+            return { kind: 'local', path: candidate, sessionId, cwd, internalName, fallback: false, viaSessionIdScan: true };
+          }
+        }
+      }
     }
     return { error: `No Claude transcript found for "${name}" under ${projectDirs.join(', ')}. The SessionStart hook may not be installed, the session may not be Claude, or the transcript isn't on this host.` };
   }

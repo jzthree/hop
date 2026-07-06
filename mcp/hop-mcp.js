@@ -5278,6 +5278,12 @@ class HopMCPServer {
     }
     this.stopManagerWatch();
     this.managerWatch = { terminalId, woken: new Set(), ticking: false };
+    // The manager's own terminal is usually created by a DIFFERENT process (the
+    // harness that spawned the manager), so this process has no stream for it —
+    // and getComposerState (the wake's idle gate) would return unavailable and
+    // never fire. Prewarm a stream for the manager's own terminal so the watcher
+    // can actually read its composer.
+    await this.prewarmTerminalStream(terminalId).catch(() => {});
     const pollMs = MANAGER_WAKE_POLL_MS;
     this.managerWatch.timer = setInterval(() => { this.managerWatchTick().catch(() => {}); }, pollMs);
     if (this.managerWatch.timer.unref) this.managerWatch.timer.unref();
@@ -5314,7 +5320,13 @@ class HopMCPServer {
       if (managerBusy) return;
       let composer = null;
       try { composer = this.streamManager.getComposerState(mgrTid); } catch { composer = null; }
-      if (!composer || !composer.found || composer.isEmpty !== true) return;
+      // No stream for the manager's own terminal (dropped, or never warmed) →
+      // prewarm and skip this tick; the next tick reads a live composer.
+      if (!composer || composer.available === false) {
+        await this.prewarmTerminalStream(mgrTid).catch(() => {});
+        return;
+      }
+      if (!composer.found || composer.isEmpty !== true) return;
       // Claim these tasks before writing so a slow submit can't double-fire.
       for (const t of fresh) watch.woken.add(t.taskId);
       const names = fresh.map((t) => t.sessionName || t.internalName || t.taskId).join(', ');

@@ -5469,9 +5469,36 @@ class HopMCPServer {
       },
       { isAborted: () => false }
     );
-    const ready = !readiness.errorResponse
+    let ready = !readiness.errorResponse
       && readiness.payload
       && readiness.payload.status !== 'timed_out';
+
+    // Idle alone is a false-positive for TUI agents: a freshly launched Claude
+    // Code (or codex/gemini) paints its welcome banner — and lately a dated
+    // promotional interstitial — then falls quiet for the idle window while the
+    // composer is not yet accepting input. The first dispatched Enter then gets
+    // swallowed by that transition and the task parks unsubmitted. So when we
+    // expect a composer, require it to actually be present before declaring
+    // ready: poll getComposerState (which finds the box or the bare `❯` prompt
+    // line) up to a bounded window, then give it a beat to settle so the first
+    // keystroke isn't racing a final repaint. Plain shells (agent="custom")
+    // have no composer and keep the idle-only signal.
+    const TUI_PRESETS = new Set(['claude', 'codex', 'gemini']);
+    let composerReady = null;
+    if (ready && TUI_PRESETS.has(preset)) {
+      const composerDeadline = Date.now() + Math.min(readyTimeoutMs, 20000);
+      composerReady = false;
+      while (Date.now() < composerDeadline) {
+        let c = null;
+        try { c = this.streamManager.getComposerState(terminalId); } catch { c = null; }
+        if (c && c.found) { composerReady = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+      ready = composerReady;
+      if (composerReady) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
 
     const result = {
       ok: true,
@@ -5484,10 +5511,15 @@ class HopMCPServer {
       ready,
       readiness_status: readiness.errorResponse
         ? 'error'
-        : (readiness.payload && readiness.payload.status) || 'unknown'
+        : (composerReady === false ? 'composer_not_ready' : ((readiness.payload && readiness.payload.status) || 'unknown'))
     };
+    if (composerReady !== null) {
+      result.composer_ready = composerReady;
+    }
     if (!ready) {
-      result.hint = 'Agent CLI not confirmed ready within ready_timeout_ms — inspect with hop_read_terminal before dispatching work.';
+      result.hint = composerReady === false
+        ? 'Agent CLI painted but its input composer never became available within ready_timeout_ms — inspect with hop_read_terminal(mode="ui") before dispatching; the first keystroke may be swallowed.'
+        : 'Agent CLI not confirmed ready within ready_timeout_ms — inspect with hop_read_terminal before dispatching work.';
     }
 
     if (ready && typeof args.initial_task === 'string' && args.initial_task.length > 0) {

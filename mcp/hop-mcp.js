@@ -4397,7 +4397,48 @@ class HopMCPServer {
       });
       changed += 1;
     }
+    await this.pruneOrphanedLedgerTasks().catch(() => {});
     return changed;
+  }
+
+  // Drop pending entries whose session is gone: no on-disk hook record AND not
+  // in the live session list. Without the hook record there is no turn counter,
+  // so reconciliation can never settle the entry — it would sit as 'pending'
+  // forever. A 30-minute grace window keeps freshly dispatched entries safe
+  // (the hook record may not be written yet), and completed/failed entries are
+  // never touched — they live until acknowledged. Requires a live session list
+  // to confirm absence; if the daemon is unreachable, nothing is pruned.
+  async pruneOrphanedLedgerTasks() {
+    const GRACE_MS = 30 * 60 * 1000;
+    const now = Date.now();
+    const stale = this.listLedgerTasks().filter((t) =>
+      t.status === 'pending'
+      && now - (t.dispatchedAt || 0) > GRACE_MS
+      && !this.hasClaudeHookRecord(t.internalName));
+    if (stale.length === 0) return 0;
+    let liveNames = null;
+    try {
+      const listed = await this.callApi('GET', '/api/sessions');
+      if (listed && Array.isArray(listed.sessions)) {
+        liveNames = new Set();
+        for (const s of listed.sessions) {
+          if (!s || typeof s !== 'object') continue;
+          for (const n of [s.internalName, s.name, s.displayName]) {
+            if (typeof n === 'string' && n) liveNames.add(n);
+          }
+        }
+      }
+    } catch { /* daemon unreachable */ }
+    if (!liveNames) return 0;
+    let pruned = 0;
+    for (const t of stale) {
+      if (liveNames.has(t.internalName) || liveNames.has(t.sessionName)) continue;
+      try {
+        fs.rmSync(path.join(this.ledgerDir(), `${t.taskId}.json`));
+        pruned += 1;
+      } catch { /* already gone */ }
+    }
+    return pruned;
   }
 
   // True when the SessionStart hook has recorded this hop session: the Stop

@@ -39,8 +39,8 @@ const DEFAULT_HOPX_UI_SETTLE_CHECKS = 2;
 // Verified submit: after pressing Enter in a TUI composer, re-check that the box
 // actually cleared. A composer still holding our text means Enter was swallowed
 // (a known TUI race), so re-send it up to this many times before giving up.
-const DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES = 2;
-const DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS = 250;
+const DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES = 3;
+const DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS = 300;
 // Box-drawing characters that frame a TUI input box (rounded, square, and heavy
 // variants), plus the column separators. Used to locate the composer and to skip
 // border cells when scraping its contents.
@@ -4966,6 +4966,7 @@ class HopMCPServer {
       : DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS;
     let resends = 0;
     let composer = null;
+    let emptyStreak = 0;
     for (let attempt = 0; attempt <= retries; attempt++) {
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       await this.streamManager.flushVirtualScreen(streamTerminalId);
@@ -4974,12 +4975,25 @@ class HopMCPServer {
         return { applied: true, verified: false, reason: 'composer_not_found', resends, composer: composer || null };
       }
       if (composer.isEmpty) {
-        return {
-          applied: true, verified: true,
-          reason: resends ? 'cleared_after_resend' : 'cleared',
-          resends, composer
-        };
+        // An empty composer right after a send is AMBIGUOUS: either the prompt
+        // submitted, or the just-typed prompt has not rendered into the virtual
+        // screen yet — a swallowed Enter with a slow first-render, which is
+        // exactly what parks a fresh worker's first task. If we have already
+        // re-sent we know our text WAS there, so empty = cleared. Otherwise
+        // require empty to hold across two consecutive reads before trusting it;
+        // a provisional single empty just loops to re-check (so a not-yet-
+        // rendered parked prompt is caught on the next pass and re-submitted).
+        emptyStreak += 1;
+        if (resends > 0 || emptyStreak >= 2 || attempt === retries) {
+          return {
+            applied: true, verified: true,
+            reason: resends ? 'cleared_after_resend' : 'cleared',
+            resends, composer
+          };
+        }
+        continue;
       }
+      emptyStreak = 0;
       if (!composerSharesContent(sentData, composer.text)) {
         // The box holds something other than our un-submitted prompt; don't poke it.
         return { applied: true, verified: false, reason: 'composer_has_other_text', resends, composer };

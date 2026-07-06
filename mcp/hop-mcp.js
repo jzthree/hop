@@ -4388,11 +4388,20 @@ class HopMCPServer {
     // Agent-permission gate: reading a session's transcript is gated by the SAME
     // per-session permission as attaching to its terminal, so a driver can't read
     // history it isn't allowed to drive. We must be able to confirm the permission
-    // from the live session list; if we can't (unknown session / daemon down), deny.
+    // from the live session list; if we can't (unknown session / daemon down), deny —
+    // with one post-mortem exception: a killed/exited session drops out of the live
+    // list, but its SessionStart hook record and transcript survive on disk. The
+    // hook record only exists for sessions that ran under hop with the hook
+    // installed, so its presence proves this was a hop-launched Claude session;
+    // treat it as permission for the read-only post-mortem. Sessions with no hook
+    // record keep the hard deny, and live-but-unpermitted sessions stay denied.
+    let postMortem = false;
     if (!matched) {
-      return { error: `Unknown hop session "${name}" (not in the session list, so access can't be verified).`, denied: true };
-    }
-    if (!agentPermitted) {
+      if (!this.hasClaudeHookRecord(internalName)) {
+        return { error: `Unknown hop session "${name}" (not in the session list and no on-disk hook record, so access can't be verified).`, denied: true };
+      }
+      postMortem = true;
+    } else if (!agentPermitted) {
       return {
         error: `Agent access not permitted for "${name}". Enable with hop_set_agent_permission(name="${name}", allowed=true) or run 'hop session permit ${name}'.`,
         denied: true
@@ -4420,7 +4429,7 @@ class HopMCPServer {
       for (const projectDir of projectDirs) {
         const preferred = path.join(projectDir, `${sessionId}.jsonl`);
         if (fs.existsSync(preferred)) {
-          return { kind: 'local', path: preferred, sessionId, cwd, internalName, fallback: false };
+          return { kind: 'local', path: preferred, sessionId, cwd, internalName, fallback: false, postMortem };
         }
       }
     }
@@ -4446,7 +4455,7 @@ class HopMCPServer {
       return {
         kind: 'local', path: best,
         sessionId: sessionId || path.basename(best, '.jsonl'),
-        cwd, internalName, fallback: true,
+        cwd, internalName, fallback: true, postMortem,
         ambiguous: candidateCount > 1,
         candidateCount
       };
@@ -4461,7 +4470,7 @@ class HopMCPServer {
         for (const entry of entries) {
           const candidate = path.join(projectsDir, entry, `${sessionId}.jsonl`);
           if (fs.existsSync(candidate)) {
-            return { kind: 'local', path: candidate, sessionId, cwd, internalName, fallback: false, viaSessionIdScan: true };
+            return { kind: 'local', path: candidate, sessionId, cwd, internalName, fallback: false, viaSessionIdScan: true, postMortem };
           }
         }
       }
@@ -4606,6 +4615,9 @@ class HopMCPServer {
       sessionId: source.sessionId, cwd: source.cwd, internalName: source.internalName,
       path: source.path, fallback: source.fallback === true
     };
+    if (source.postMortem === true) {
+      sourceInfo.postMortem = true; // session no longer live; read allowed via its on-disk hook record
+    }
     if (source.ambiguous) {
       sourceInfo.ambiguous = true;
       sourceInfo.candidateCount = source.candidateCount;

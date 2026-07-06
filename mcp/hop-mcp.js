@@ -2139,8 +2139,20 @@ class TerminalStreamManager {
     const cols = state.cols;
     const viewportStart = buffer.baseY;
     const scanRows = Math.min(rows, Number.isFinite(options.scanRows) ? Math.max(1, Math.floor(options.scanRows)) : 16);
-    const firstScanRow = viewportStart + Math.max(0, rows - scanRows);
-    const lastRow = viewportStart + rows - 1;
+    // The composer is usually pinned near the bottom, but a near-empty screen
+    // (e.g. a freshly launched Claude Code with only a welcome banner) draws it
+    // top-aligned with empty rows below it. Anchoring the scan to the physical
+    // bottom would then look only at those empty trailing rows and miss the
+    // composer entirely — which silently defeats both verified-submit and
+    // needs_input(parked_composer). Anchor to the last non-empty row instead.
+    const viewportTop = viewportStart;
+    const viewportBottom = viewportStart + rows - 1;
+    let lastRow = viewportBottom;
+    for (let row = viewportBottom; row >= viewportTop; row--) {
+      const line = buffer.getLine(row);
+      if (line && line.translateToString(true).trim()) { lastRow = row; break; }
+    }
+    const firstScanRow = Math.max(viewportTop, lastRow - scanRows + 1);
 
     const cell = buffer.getNullCell ? buffer.getNullCell() : undefined;
     const firstChar = (row) => {

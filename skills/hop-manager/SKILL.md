@@ -18,10 +18,14 @@ ledger, worktrees, and transcripts on disk are the source of truth.
    until_reply_regex:"DONE-<KEY>")`. Every task gets a unique completion
    phrase; instruct the worker to commit to its own fleet/ branch (never push,
    never merge) and to end its reply with the phrase.
-3. **Wait** with `hopx_wait_any(wait_ids)` — completed means the turn truly
-   finished; re-armed watches return in pending under new wait_ids (carry them
-   forward). Between rounds, `hopx_agents_overview()` shows busy /
-   needs_input / idle for the whole fleet.
+3. **Wait — and do NOT end your turn while workers are pending.** You are a
+   Claude session: you only act during a turn, and nothing wakes you when a
+   worker finishes. After an async dispatch, stay in the same turn and loop on
+   `hopx_wait_any(wait_ids)` (re-arming any that return in pending under new
+   wait_ids) until every worker you care about has completed. Only then verify,
+   escalate, and end your turn. If you dispatch and stop, the fleet finishes
+   into the void and no one notices. `hopx_agents_overview()` between waits
+   shows busy / needs_input / idle for the whole fleet.
 4. **Verify before believing**: `reply_matched=true` plus a real branch diff
    plus the task's own verification (run its tests). A worker saying done is
    a claim, not a fact.

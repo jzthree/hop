@@ -8,6 +8,7 @@ const http = require('http');
 const https = require('https');
 const readline = require('readline');
 const { randomUUID } = require('crypto');
+const { execSync } = require('child_process');
 
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2024-11-05'];
 const DEFAULT_PROTOCOL = '2024-11-05';
@@ -3306,7 +3307,8 @@ class HopMCPServer {
             initial_task: { type: 'string', description: 'First task to dispatch once ready, as an async agent turn (returns its wait_id).' },
             ready_timeout_ms: { type: 'number', description: 'Max ms to wait for the agent CLI to become ready (default: 60000).' },
             cols: { type: 'number', description: 'Terminal columns.' },
-            rows: { type: 'number', description: 'Terminal rows.' }
+            rows: { type: 'number', description: 'Terminal rows.' },
+            isolation: { type: 'string', enum: ['none', 'worktree'], description: 'worktree: give the worker its own git worktree + fleet/<name> branch under <repo>/.hop-worktrees so parallel workers can edit overlapping files; result carries { worktree: { path, branch, repoRoot } }. Manager merges the branch and runs `git worktree remove` when done.' }
           }
         }
       }
@@ -5175,9 +5177,34 @@ class HopMCPServer {
       command += ` ${args.args.trim()}`;
     }
 
+    // isolation:"worktree" — each worker gets its own git worktree + branch so
+    // fleets can edit overlapping files without racing. Mechanism only: the
+    // manager reviews/merges the branch and removes the worktree afterwards.
+    let spawnCwd = args.cwd;
+    let worktree = null;
+    if (args.isolation === 'worktree') {
+      if (!spawnCwd) {
+        return { content: [{ type: 'text', text: 'Error: isolation="worktree" requires cwd (a path inside a git repo).' }], isError: true };
+      }
+      try {
+        const repoRoot = execSync(`git -C ${JSON.stringify(spawnCwd)} rev-parse --show-toplevel`, { encoding: 'utf8' }).trim();
+        const slug = `${(args.name || 'agent').replace(/[^A-Za-z0-9_-]/g, '-')}-${Date.now().toString(36)}`;
+        const branch = `fleet/${slug}`;
+        const wtPath = require('path').join(repoRoot, '.hop-worktrees', slug);
+        execSync(`git -C ${JSON.stringify(repoRoot)} worktree add -b ${JSON.stringify(branch)} ${JSON.stringify(wtPath)}`, { encoding: 'utf8', stdio: 'pipe' });
+        spawnCwd = wtPath;
+        worktree = { path: wtPath, branch, repoRoot };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Error: worktree isolation failed: ${err && err.stderr ? String(err.stderr).trim() : (err instanceof Error ? err.message : String(err))}` }],
+          isError: true
+        };
+      }
+    }
+
     const created = await this.callApi('POST', '/api/terminals', {
       name: args.name,
-      cwd: args.cwd,
+      cwd: spawnCwd,
       cols: args.cols,
       rows: args.rows
     });
@@ -5233,6 +5260,7 @@ class HopMCPServer {
     const result = {
       ok: true,
       helper: 'hopx_spawn_agent',
+      worktree,
       terminal_id: terminalId,
       sessionName: created.sessionName || created.displayName || args.name || null,
       internalName: created.sessionName || null,

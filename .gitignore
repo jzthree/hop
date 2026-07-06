@@ -29,3 +29,4 @@ Thumbs.db
 demo-output/
 .tmp-demo-playwright/
 .tmp-demo-playwright-local/
+.hop-worktrees/

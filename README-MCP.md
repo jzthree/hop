@@ -116,6 +116,13 @@ fleet of subagent terminals through hop. The loop:
 6. **Interrupt / tear down** — `hopx_agent_turn(wait_id=..., control="interrupt")`
    for a stuck turn; `hop_close_terminal(terminal_id=..., killSession=true)`
    when a worker is done. Never leave orphaned sessions.
+7. **Survive your own restart** — every async dispatch is recorded in the
+   durable task ledger. If the manager process dies, start fresh and call
+   `hopx_task_ledger`: turns that finished unwatched are reconciled (contract
+   verdicts included), still-pending ones can be re-armed with
+   `hopx_wait_any(terminal_ids=[...])`. Workers commit to their own fleet/
+   branch when using worktree isolation, so no work is ever trapped in a dead
+   manager's memory.
 
 Guardrails (see MULTI-AGENT-CHECKLIST.md): one subagent per terminal, explicit
 deadlines on every wait, never write into a terminal whose overview state is
@@ -203,7 +210,8 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 - `hopx_capture_scrollback` — capture an alternate-screen TUI's scrollback the way a user would: scroll up page-by-page, snapshot each frame, and stitch newly-revealed rows together (live view restored afterward by default); best-effort and lossy for wrapped/redrawn content; requires agent permission on the session
 - `hopx_agents_overview` — fleet status in one call: every agent-created/agent-permitted session with state (running/busy/idle), cwd, foreground program, Claude turn count, bell counters, last activity, and pending wait jobs; `include_user_sessions=false` narrows to agent-created only, `include_ports=true` adds proxy sessions
 - `hopx_wait_any` — race several background waits (wait_ids and/or terminal_ids, auto-starting `until_agent_done` waits); returns the first real completion(s) plus the still-pending set; expired watches are re-armed automatically (new wait_id in `pending`) rather than reported as completions
-- `hopx_spawn_agent` — one-call subagent bring-up: create terminal + launch agent CLI (claude/codex/gemini/custom) + wait until ready + optionally dispatch a first task as an async turn
+- `hopx_spawn_agent` — one-call subagent bring-up: create terminal + launch agent CLI (claude/codex/gemini/custom) + wait until ready + optionally dispatch a first task as an async turn; `isolation="worktree"` gives the worker its own git worktree + fleet/ branch for overlapping-file fleets
+- `hopx_task_ledger` — the durable orchestration ledger (~/.hop2/orchestration): async dispatches with contracts survive manager/MCP restarts; pending entries reconcile lazily from turn counters + transcripts; acknowledge to consume
 
 ### Reading terminal history
 

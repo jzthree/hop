@@ -3315,6 +3315,19 @@ class HopMCPServer {
             isolation: { type: 'string', enum: ['none', 'worktree'], description: 'worktree: give the worker its own git worktree + fleet/<name> branch under <repo>/.hop-worktrees so parallel workers can edit overlapping files; result carries { worktree: { path, branch, repoRoot } }. Manager merges the branch and runs `git worktree remove` when done.' }
           }
         }
+      },
+      {
+        name: 'hopx_task_ledger',
+        description: 'The durable orchestration ledger: every async agent turn dispatched with hopx_agent_turn is recorded on disk (~/.hop2/orchestration) and survives manager/MCP restarts. Lists tasks with status pending/completed/failed, contract verdicts (replyMatched), and per-session grouping; pending entries are lazily reconciled from turn counters + transcripts on every call, so a freshly restarted manager sees which turns finished while nobody was watching. Use acknowledge to delete consumed entries.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['pending', 'completed', 'failed', 'all'], description: 'Filter (default: all).' },
+            session: { type: 'string', description: 'Filter to one session (name or internalName).' },
+            acknowledge: { type: 'array', items: { type: 'string' }, description: 'Task ids to delete from the ledger (consume after reading results).' },
+            limit: { type: 'number', description: 'Max entries returned (default 50, newest first).' }
+          }
+        }
       }
     ];
   }
@@ -3574,6 +3587,8 @@ class HopMCPServer {
         return await this.handleWaitAny(args);
       case 'hopx_spawn_agent':
         return await this.handleSpawnAgent(args);
+      case 'hopx_task_ledger':
+        return await this.handleTaskLedger(args);
       default:
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -3972,12 +3987,34 @@ class HopMCPServer {
         }
         job.done = true;
         job.updatedAt = Date.now();
+        if (job.metadata && job.metadata.ledger) {
+          this.updateLedgerTask(job.waitId, {
+            status: job.status === 'error' ? 'failed' : (job.status === 'timed_out' ? 'pending' : 'completed'),
+            completedAt: job.status === 'error' || job.status === 'timed_out' ? undefined : job.updatedAt,
+            replyMatched: job.replyMatched,
+            replyMatch: job.replyMatch,
+            error: job.status === 'error' ? (job.error || 'unknown') : undefined
+          });
+        }
         this.pruneWaitJobs(job.updatedAt);
       }
     })();
 
     this.waitJobs.set(waitId, job);
     this.pruneWaitJobs(now);
+    if (job.metadata && job.metadata.ledger) {
+      const handle = this.getTerminalHandle(job.terminalId);
+      this.writeLedgerTask({
+        taskId: waitId,
+        internalName: handle ? (handle.internalName || handle.sessionName || null) : null,
+        sessionName: handle ? (handle.displayName || handle.sessionName || null) : null,
+        task: typeof job.metadata.task_summary === 'string' ? job.metadata.task_summary : null,
+        contract: typeof job.metadata.until_reply_regex === 'string' ? job.metadata.until_reply_regex : null,
+        baselineTurnCount: Number.isFinite(args.baselineTurnCount) ? Math.floor(args.baselineTurnCount) : null,
+        dispatchedAt: now,
+        status: 'pending'
+      });
+    }
     return job;
   }
 
@@ -4240,6 +4277,74 @@ class HopMCPServer {
     } catch {
       return null;
     }
+  }
+
+  // ── Durable task ledger (~/.hop2/orchestration/tasks/<id>.json) ─────────
+  // Orchestration state that survives manager/MCP restarts: every async
+  // dispatched turn with a contract is recorded on disk and lazily reconciled
+  // from the turn counters + transcripts. One file per task — no locking.
+  ledgerDir() {
+    return path.join(resolveHomeDir(), 'orchestration', 'tasks');
+  }
+
+  writeLedgerTask(entry) {
+    try {
+      const dir = this.ledgerDir();
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `${entry.taskId}.json`);
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(entry, null, 2));
+      fs.renameSync(tmp, file);
+    } catch { /* ledger is best-effort; never break the dispatch */ }
+  }
+
+  updateLedgerTask(taskId, patch) {
+    try {
+      const file = path.join(this.ledgerDir(), `${taskId}.json`);
+      const entry = JSON.parse(fs.readFileSync(file, 'utf8'));
+      this.writeLedgerTask({ ...entry, ...patch });
+    } catch { /* entry may not exist (ledger disabled or pruned) */ }
+  }
+
+  listLedgerTasks() {
+    const out = [];
+    try {
+      for (const f of fs.readdirSync(this.ledgerDir())) {
+        if (!f.endsWith('.json')) continue;
+        try { out.push(JSON.parse(fs.readFileSync(path.join(this.ledgerDir(), f), 'utf8'))); }
+        catch { /* skip unreadable */ }
+      }
+    } catch { /* no ledger yet */ }
+    out.sort((a, b) => (b.dispatchedAt || 0) - (a.dispatchedAt || 0));
+    return out;
+  }
+
+  // Settle pending entries without any live wait job: if the session's turn
+  // counter advanced past the dispatch baseline, the turn finished while
+  // nobody was watching (e.g. the manager died) — evaluate the contract from
+  // the transcript and complete the entry. Called lazily on ledger reads and
+  // overview calls, so a restarted manager sees truth immediately.
+  async reconcileLedger() {
+    let changed = 0;
+    for (const entry of this.listLedgerTasks()) {
+      if (entry.status !== 'pending') continue;
+      const current = this.readTurnCount(entry.internalName);
+      if (current === null || current <= (entry.baselineTurnCount ?? 0)) continue;
+      let replyMatched = null;
+      let replyMatch = null;
+      if (typeof entry.contract === 'string' && entry.contract) {
+        const replyText = await this.readLastAssistantReplyText(entry.internalName);
+        const verdict = evaluateReplyRegex(entry.contract, null, replyText);
+        replyMatched = verdict.reply_matched;
+        replyMatch = verdict.reply_match;
+      }
+      this.updateLedgerTask(entry.taskId, {
+        status: 'completed', completedAt: Date.now(), turnCount: current,
+        replyMatched, replyMatch, reconciled: true
+      });
+      changed += 1;
+    }
+    return changed;
   }
 
   // True when the SessionStart hook has recorded this hop session: the Stop
@@ -4992,6 +5097,20 @@ class HopMCPServer {
   // "busy" means WE are driving a turn there (a live wait job); everything
   // else derives from diffing turnCount/bellSeq/lastActivityAt across calls.
   async handleAgentsOverview(args = {}) {
+    // Settle any orphaned pending tasks first so state reflects reality even
+    // after a manager restart (ledger survives; wait jobs do not).
+    await this.reconcileLedger().catch(() => {});
+    const ledgerBySession = new Map();
+    for (const t of this.listLedgerTasks()) {
+      const key = t.internalName || t.sessionName;
+      if (!key) continue;
+      const rec = ledgerBySession.get(key) || { pending: 0, lastCompleted: null };
+      if (t.status === 'pending') rec.pending += 1;
+      else if (t.status === 'completed' && (!rec.lastCompleted || t.completedAt > rec.lastCompleted.completedAt)) {
+        rec.lastCompleted = { taskId: t.taskId, replyMatched: t.replyMatched ?? null, completedAt: t.completedAt, task: t.task };
+      }
+      ledgerBySession.set(key, rec);
+    }
     const listed = await this.callApi('GET', '/api/sessions');
     if (this.isApiFailurePayload(listed)) {
       return this.wrapApiResult(listed, { endpoint: '/api/sessions' });
@@ -5026,6 +5145,8 @@ class HopMCPServer {
       const live = s.live === true || activeNames.has(displayName);
       const terminalId = handlesBySession.get(internalName) || handlesBySession.get(displayName) || null;
       const pendingWaits = terminalId ? (waitsByTerminal.get(terminalId) || []) : [];
+      const ledger = ledgerBySession.get(internalName) || ledgerBySession.get(displayName) || null;
+      const ledgerPending = ledger ? ledger.pending : 0;
       const lastActivityAt = Number(s.lastActivityAt) || 0;
       const lastBellAt = Number(s.lastBellAt) || 0;
       // needs_input: we hold a terminal handle and can see the session is parked
@@ -5043,9 +5164,11 @@ class HopMCPServer {
       agents.push({
         sessionName: displayName,
         internalName,
+        // busy counts BOTH this process's live waits and ledger-pending tasks
+        // dispatched by any manager (the ledger is cross-process truth).
         state: !live
           ? 'not_running'
-          : (pendingWaits.length > 0 ? 'busy' : (needsInputReason ? 'needs_input' : 'idle')),
+          : ((pendingWaits.length > 0 || ledgerPending > 0) ? 'busy' : (needsInputReason ? 'needs_input' : 'idle')),
         createdBy: s.createdBy || 'user',
         agentPermitted: isPermitted,
         cwd: s.cwd || null,
@@ -5056,7 +5179,9 @@ class HopMCPServer {
         turnCount: this.readTurnCount(internalName),
         terminal_id: terminalId,
         needs_input_reason: needsInputReason,
-        pending_waits: pendingWaits
+        pending_waits: pendingWaits,
+        tasks_pending: ledgerPending,
+        last_completed_task: ledger ? ledger.lastCompleted : null
       });
     }
     // Most recently active first — the sessions a manager cares about float up.
@@ -5067,6 +5192,37 @@ class HopMCPServer {
       agentCount: agents.length,
       agents,
       hint: 'Diff bellSeq (attention) and turnCount (completed Claude turns) against your previous call to detect progress. busy = this MCP holds a live wait job for the terminal. needs_input = the terminal is parked on a human (un-submitted prompt in the composer, or a recent unanswered bell) — see needs_input_reason.'
+    });
+  }
+
+  async handleTaskLedger(args = {}) {
+    const acknowledged = [];
+    if (Array.isArray(args.acknowledge)) {
+      for (const id of args.acknowledge) {
+        if (typeof id !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(id)) continue;
+        try {
+          fs.rmSync(path.join(this.ledgerDir(), `${id}.json`));
+          acknowledged.push(id);
+        } catch { /* already gone */ }
+      }
+    }
+    const reconciled = await this.reconcileLedger().catch(() => 0);
+    const statusFilter = typeof args.status === 'string' && args.status !== 'all' ? args.status : null;
+    const sessionFilter = typeof args.session === 'string' && args.session ? args.session : null;
+    const limit = Number.isFinite(args.limit) ? Math.max(1, Math.floor(args.limit)) : 50;
+    let tasks = this.listLedgerTasks();
+    if (statusFilter) tasks = tasks.filter((t) => t.status === statusFilter);
+    if (sessionFilter) tasks = tasks.filter((t) => t.internalName === sessionFilter || t.sessionName === sessionFilter);
+    const total = tasks.length;
+    tasks = tasks.slice(0, limit);
+    return this.wrapJson({
+      ok: true,
+      helper: 'hopx_task_ledger',
+      reconciled_now: reconciled,
+      acknowledged,
+      taskCount: total,
+      tasks,
+      hint: 'pending = dispatched but turn not yet finished (or manager died mid-watch — reconciliation settles it once the turn counter advances). Re-arm watches with hopx_wait_any(terminal_ids=[...]) after a restart; acknowledge consumed entries to keep the ledger small.'
     });
   }
 
@@ -5553,6 +5709,8 @@ class HopMCPServer {
           const job = this.startWaitJob(waitArgs, {
             helper: 'hopx_agent_turn',
             terminal_id: requestedTerminalId,
+            ledger: true,
+            task_summary: data ? data.slice(0, 200) : null,
             selected_mode: 'ui',
             text_only: false,
             uiMaxLines: args.uiMaxLines,
@@ -5656,6 +5814,8 @@ class HopMCPServer {
       const job = this.startWaitJob(waitArgs, {
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
+        ledger: true,
+        task_summary: data ? data.slice(0, 200) : null,
         selected_mode: selectedMode,
         text_only: readableTextOnly,
         ...(typeof args.until_reply_regex === 'string' ? { until_reply_regex: args.until_reply_regex } : {})

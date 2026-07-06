@@ -3748,27 +3748,33 @@ function getClaudeConfigRoots() {
 // Teaches agents running INSIDE hop terminals the house conventions (render
 // math via `hop math`, ring the bell when blocked, phone-friendly output).
 // Source of truth: skills/hop-session/SKILL.md in the hop install.
-const HOP_SKILL_SOURCE = path.join(__dirname, 'skills', 'hop-session', 'SKILL.md');
+const HOP_SKILLS_DIR = path.join(__dirname, 'skills');
 
 function installClaudeSkill() {
-    if (!fs.existsSync(HOP_SKILL_SOURCE)) {
-        return { ok: false, error: `skill source missing: ${HOP_SKILL_SOURCE}` };
+    let names = [];
+    try {
+        names = fs.readdirSync(HOP_SKILLS_DIR).filter((n) => fs.existsSync(path.join(HOP_SKILLS_DIR, n, 'SKILL.md')));
+    } catch (e) {
+        return { ok: false, error: `skills dir missing: ${HOP_SKILLS_DIR}` };
     }
-    const content = fs.readFileSync(HOP_SKILL_SOURCE, 'utf8');
+    if (!names.length) return { ok: false, error: `no skills found in ${HOP_SKILLS_DIR}` };
     const installed = [];
     const already = [];
-    for (const root of getClaudeConfigRoots()) {
-        const dest = path.join(root, 'skills', 'hop-session', 'SKILL.md');
-        try {
-            if (fs.existsSync(dest) && fs.readFileSync(dest, 'utf8') === content) {
-                already.push(dest);
-                continue;
+    for (const name of names) {
+        const content = fs.readFileSync(path.join(HOP_SKILLS_DIR, name, 'SKILL.md'), 'utf8');
+        for (const root of getClaudeConfigRoots()) {
+            const dest = path.join(root, 'skills', name, 'SKILL.md');
+            try {
+                if (fs.existsSync(dest) && fs.readFileSync(dest, 'utf8') === content) {
+                    already.push(dest);
+                    continue;
+                }
+                fs.mkdirSync(path.dirname(dest), { recursive: true });
+                fs.writeFileSync(dest, content);
+                installed.push(dest);
+            } catch (e) {
+                return { ok: false, error: `${dest}: ${e.message}` };
             }
-            fs.mkdirSync(path.dirname(dest), { recursive: true });
-            fs.writeFileSync(dest, content);
-            installed.push(dest);
-        } catch (e) {
-            return { ok: false, error: `${dest}: ${e.message}` };
         }
     }
     return { ok: true, installed, already };
@@ -3776,8 +3782,10 @@ function installClaudeSkill() {
 
 function removeClaudeSkill() {
     const removed = [];
-    for (const root of getClaudeConfigRoots()) {
-        const dir = path.join(root, 'skills', 'hop-session');
+    let names = [];
+    try { names = fs.readdirSync(HOP_SKILLS_DIR); } catch (e) { names = ['hop-session', 'hop-manager']; }
+    for (const root of getClaudeConfigRoots()) for (const name of names) {
+        const dir = path.join(root, 'skills', name);
         try {
             if (fs.existsSync(dir)) {
                 fs.rmSync(dir, { recursive: true });
@@ -9263,8 +9271,10 @@ async function main() {
         }
         // status
         let any = false;
-        for (const root of getClaudeConfigRoots()) {
-            const dest = path.join(root, 'skills', 'hop-session', 'SKILL.md');
+        let skillNames = [];
+        try { skillNames = fs.readdirSync(HOP_SKILLS_DIR); } catch (e) { skillNames = []; }
+        for (const root of getClaudeConfigRoots()) for (const name of skillNames) {
+            const dest = path.join(root, 'skills', name, 'SKILL.md');
             if (fs.existsSync(dest)) { any = true; log(`${GREEN}✓${RESET} ${dest}`, RESET); }
         }
         if (!any) log(`${YELLOW}!${RESET} hop-session skill not installed. Run ${CYAN}hop claude-skill install${RESET} so agents render math, ring bells, and format for phones.`, RESET);

@@ -10670,6 +10670,24 @@ async function main() {
             // print nothing, succeed — the surrounding command must be unaffected.
             process.exit(0);
         }
+        if (process.env.HOP_AUTOSTART === '0') process.exit(0);
+        if (process.env.HOP_AUTOSTART !== '1') {
+            // `ssh -t host '$SHELL -l -i -c "cmd"'` passes the TTY test: the shell
+            // is interactive with a real terminal, so rc files run — but its whole
+            // purpose is the -c command, and rc-launched hop would block it until
+            // the user exits. Detect the parent shell's -c invocation (option
+            // tokens before its first non-flag argument) and stand down.
+            // HOP_AUTOSTART=1 forces launch anyway; =0 always skips (above).
+            try {
+                const parentArgs = execSync(`ps -o args= -p ${process.ppid}`, { encoding: 'utf8', timeout: 1500 })
+                    .trim().split(/\s+/);
+                for (let i = 1; i < parentArgs.length; i++) {
+                    const tok = parentArgs[i];
+                    if (tok === '--' || !tok.startsWith('-')) break; // options end here
+                    if (/^-[A-Za-z]+$/.test(tok) && tok.includes('c')) process.exit(0);
+                }
+            } catch (e) { /* ps unavailable — assume a real interactive shell */ }
+        }
     }
 
     if (process.stdout.isTTY) console.clear(); // Clear screen without wiping scrollback

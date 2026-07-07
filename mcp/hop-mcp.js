@@ -144,13 +144,6 @@ const DEFAULT_WAIT_MAX_MS = 30000;
 // agent turns run for minutes, so an unspecified max_wait_ms defaults far
 // higher than the synchronous 30s. hopx_wait_any also re-arms expired watches.
 const DEFAULT_ASYNC_WAIT_MAX_MS = 15 * 60 * 1000;
-// How often the standing-manager watcher reconciles the ledger and wakes an
-// idle manager whose dispatched workers have completed (hopx_manager_register).
-const MANAGER_WAKE_POLL_MS = 5000;
-// A dispatched task still pending after this long wakes the manager to check on
-// it (worker parked/crashed/looping) — so a stuck worker can't strand an idle
-// manager that dispatched and ended its turn.
-const MANAGER_STALL_WAKE_MS = 8 * 60 * 1000;
 const DEFAULT_WAIT_CAPTURE_MAX_EVENTS = 120;
 const DEFAULT_WAIT_AGENT_DONE_IDLE_MS = 2500;
 const DEFAULT_WAIT_POLL_MAX_MS = 30000;
@@ -2687,7 +2680,6 @@ class HopMCPServer {
     this.waitJobs = new Map();
     this.terminalHandles = new Map(); // terminalId -> { internalName, sessionName, displayName, cols, rows }
     this.terminalAliases = new Map(); // staleTerminalId -> liveTerminalId
-    this.managerWatch = null; // standing-manager wake registration (hopx_manager_register)
 
     const resolved = resolveDefaultConnection();
     if (resolved) {
@@ -3358,17 +3350,6 @@ class HopMCPServer {
         }
       },
       {
-        name: 'hopx_manager_register',
-        description: 'Register THIS session as a standing manager so hop wakes it when its dispatched workers finish — instead of the manager holding a turn open polling hopx_wait_any. Pass your own terminal_id. While registered, a background watcher reconciles the task ledger and, when a task you dispatched completes AND your terminal is idle at an empty composer, injects a short "N task(s) completed — review the ledger" prompt to start your next turn. Tasks dispatched after registering are tagged with your terminal so only your fleet wakes you. Call with enabled=false to stop. Event-driven managers can dispatch async, end their turn, and be woken cheaply.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            terminal_id: { type: 'string', description: "This manager session's own terminal_id (from hop_list_terminals / the session you are running in)." },
-            enabled: { type: 'boolean', description: 'true (default) to start watching; false to stop and clear the registration.' }
-          }
-        }
-      },
-      {
         name: 'hopx_task_ledger',
         description: 'The durable orchestration ledger: every async agent turn dispatched with hopx_agent_turn is recorded on disk (~/.hop2/orchestration) and survives manager/MCP restarts. Lists tasks with status pending/completed/failed, contract verdicts (replyMatched), and per-session grouping; pending entries are lazily reconciled from turn counters + transcripts on every call, so a freshly restarted manager sees which turns finished while nobody was watching. Use acknowledge to delete consumed entries.',
         inputSchema: {
@@ -3641,8 +3622,6 @@ class HopMCPServer {
         return await this.handleSpawnAgent(args);
       case 'hopx_task_ledger':
         return await this.handleTaskLedger(args);
-      case 'hopx_manager_register':
-        return await this.handleManagerRegister(args);
       default:
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -4066,9 +4045,6 @@ class HopMCPServer {
         contract: typeof job.metadata.until_reply_regex === 'string' ? job.metadata.until_reply_regex : null,
         baselineTurnCount: Number.isFinite(args.baselineTurnCount) ? Math.floor(args.baselineTurnCount) : null,
         dispatchedAt: now,
-        // The manager terminal that dispatched this task (if one registered for
-        // wake), so the background watcher can nudge it awake on completion.
-        managerTerminalId: this.managerWatch ? this.managerWatch.terminalId : null,
         status: 'pending'
       });
     }
@@ -5319,129 +5295,6 @@ class HopMCPServer {
     });
   }
 
-  // ── Standing-manager wake ──────────────────────────────────────────────
-  // Register this session's terminal as a manager; a background timer wakes it
-  // when its dispatched workers complete, so it need not hold a turn open on
-  // hopx_wait_any. Lives in the MCP process (respawns fresh — no host restart);
-  // a future step can migrate the watcher into the daemon so managers that are
-  // fully disconnected still get woken.
-  async handleManagerRegister(args = {}) {
-    const enable = args.enabled !== false;
-    if (!enable) {
-      this.stopManagerWatch();
-      return this.wrapJson({ ok: true, helper: 'hopx_manager_register', watching: false });
-    }
-    const terminalId = typeof args.terminal_id === 'string' && args.terminal_id ? args.terminal_id : null;
-    if (!terminalId) {
-      return { content: [{ type: 'text', text: 'Error: terminal_id is required (this manager session\'s own terminal).' }], isError: true };
-    }
-    this.stopManagerWatch();
-    this.managerWatch = { terminalId, woken: new Set(), stallWoken: new Set(), ticking: false };
-    // The manager's own terminal is usually created by a DIFFERENT process (the
-    // harness that spawned the manager), so this process has no stream for it —
-    // and getComposerState (the wake's idle gate) would return unavailable and
-    // never fire. Prewarm a stream for the manager's own terminal so the watcher
-    // can actually read its composer.
-    await this.prewarmTerminalStream(terminalId).catch(() => {});
-    const pollMs = MANAGER_WAKE_POLL_MS;
-    this.managerWatch.timer = setInterval(() => { this.managerWatchTick().catch(() => {}); }, pollMs);
-    if (this.managerWatch.timer.unref) this.managerWatch.timer.unref();
-    return this.wrapJson({
-      ok: true, helper: 'hopx_manager_register', watching: true,
-      terminal_id: terminalId, poll_ms: pollMs,
-      hint: 'You will be woken with a prompt when a task you dispatch (async, ledger-tracked) completes and your composer is idle. You can now dispatch async and end your turn.'
-    });
-  }
-
-  stopManagerWatch() {
-    if (this.managerWatch && this.managerWatch.timer) {
-      clearInterval(this.managerWatch.timer);
-    }
-    this.managerWatch = null;
-  }
-
-  async managerWatchTick() {
-    const watch = this.managerWatch;
-    if (!watch || watch.ticking) return;
-    watch.ticking = true;
-    try {
-      await this.reconcileLedger().catch(() => {});
-      const mgrTid = watch.terminalId;
-      const now = Date.now();
-      const mine = this.listLedgerTasks().filter((t) => t.managerTerminalId === mgrTid);
-      const fresh = mine.filter((t) =>
-        (t.status === 'completed' || t.status === 'failed') && !watch.woken.has(t.taskId));
-      // Stall wake: a dispatched task that never completes (worker parked,
-      // crashed, or looping) would otherwise strand an idle manager forever,
-      // since only completion fires a wake. Surface pending tasks older than the
-      // stall window so the manager can investigate/interrupt. One stall wake
-      // per task (stallWoken), separate from completion (woken).
-      const stalled = mine.filter((t) =>
-        t.status === 'pending'
-        && (now - (t.dispatchedAt || 0)) > MANAGER_STALL_WAKE_MS
-        && !watch.stallWoken.has(t.taskId));
-      if (!fresh.length && !stalled.length) return;
-      // Never interrupt a manager that is mid-work: skip if it holds a live wait
-      // job, or its composer is absent/non-empty (spinner up, or typing).
-      const managerBusy = [...this.waitJobs.values()].some((j) => !j.done && j.terminalId === mgrTid);
-      if (managerBusy) return;
-      let composer = null;
-      try { composer = this.streamManager.getComposerState(mgrTid); } catch { composer = null; }
-      // No stream for the manager's own terminal (dropped, or never warmed) →
-      // prewarm and skip this tick; the next tick reads a live composer.
-      if (!composer || composer.available === false) {
-        await this.prewarmTerminalStream(mgrTid).catch(() => {});
-        return;
-      }
-      if (!composer.found || composer.isEmpty !== true) return;
-      // Claim before writing so a slow submit can't double-fire.
-      for (const t of fresh) watch.woken.add(t.taskId);
-      for (const t of stalled) watch.stallWoken.add(t.taskId);
-      const nameOf = (t) => t.sessionName || t.internalName || t.taskId;
-      const parts = [];
-      if (fresh.length) parts.push(`${fresh.length} completed: ${fresh.map(nameOf).join(', ')}`);
-      if (stalled.length) parts.push(`${stalled.length} STILL RUNNING >${Math.round(MANAGER_STALL_WAKE_MS / 60000)}min (may be stuck — check/interrupt): ${stalled.map(nameOf).join(', ')}`);
-      if (process.env.HOP_WAKE_DEBUG === '1') console.error(`[wake] fresh=${fresh.length} stalled=${stalled.length} for manager ${mgrTid}`);
-      const msg = `[hop wake] ${parts.join('; ')}. Review with hopx_task_ledger and hopx_agents_overview; verify/merge completed work, check on anything stuck (read its screen, interrupt or nudge), then dispatch next or acknowledge.`;
-      try {
-        // Inject the wake through the same proven dispatch path workers use
-        // (handleHopxAgentTurn), NOT a bare write: it actively drains the stream
-        // so its verified-submit sees a FRESH screen and re-sends a swallowed
-        // Enter. A bare write leaves the virtualScreen stale, so a parked prompt
-        // is never detected and the manager is never actually woken. async so
-        // the tick returns promptly; _skipLedger so the wake is not itself a task.
-        const dispatch = await this.handleHopxAgentTurn({
-          terminal_id: mgrTid, data: msg, async: true, _skipLedger: true
-        });
-        const failed = dispatch && dispatch.isError;
-        if (failed) throw new Error('wake dispatch failed');
-        // The async dispatch types the message and does an inline verified-submit
-        // — but for a long-idle manager that check can run before the message
-        // renders, so a swallowed Enter is missed and the prompt parks. Re-confirm
-        // with patience: wait for the composer to hold our text, then press Enter
-        // until it clears. This is what actually makes the wake reliable.
-        let submitted = false;
-        for (let k = 0; k < 6; k++) {
-          await new Promise((r) => setTimeout(r, 800));
-          await this.streamManager.flushVirtualScreen(mgrTid);
-          const c = this.streamManager.getComposerState(mgrTid);
-          if (!c || !c.found) { submitted = true; break; }
-          if (c.isEmpty === true) { submitted = true; break; }
-          // Our wake text is parked in the composer → the Enter was swallowed.
-          await this.handleSendAndWait({ terminal_id: mgrTid, key: 'enter', wait: false });
-        }
-        if (process.env.HOP_WAKE_DEBUG === '1') {
-          console.error(`[wake] dispatched+confirmed: submitted=${submitted}`);
-        }
-      } catch {
-        // Dispatch failed (terminal gone?) — unclaim so a later tick can retry.
-        for (const t of fresh) watch.woken.delete(t.taskId);
-      }
-    } finally {
-      watch.ticking = false;
-    }
-  }
-
   async handleTaskLedger(args = {}) {
     const acknowledged = [];
     if (Array.isArray(args.acknowledge)) {
@@ -5988,7 +5841,7 @@ class HopMCPServer {
           const job = this.startWaitJob(waitArgs, {
             helper: 'hopx_agent_turn',
             terminal_id: requestedTerminalId,
-            ledger: args._skipLedger !== true,
+            ledger: true,
             task_summary: data ? data.slice(0, 200) : null,
             selected_mode: 'ui',
             text_only: false,
@@ -6093,7 +5946,7 @@ class HopMCPServer {
       const job = this.startWaitJob(waitArgs, {
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
-        ledger: args._skipLedger !== true,
+        ledger: true,
         task_summary: data ? data.slice(0, 200) : null,
         selected_mode: selectedMode,
         text_only: readableTextOnly,

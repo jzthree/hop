@@ -18,22 +18,14 @@ ledger, worktrees, and transcripts on disk are the source of truth.
    until_reply_regex:"DONE-<KEY>")`. Every task gets a unique completion
    phrase; instruct the worker to commit to its own fleet/ branch (never push,
    never merge) and to end its reply with the phrase.
-3. **Register for wake, then you MAY end your turn.** Call
-   `hopx_manager_register(terminal_id=<your own terminal>)` once at the start.
-   While registered, hop watches the task ledger and, when a worker you
-   dispatched (async) finishes and your composer is idle, injects a
-   "N task(s) completed — review the ledger" prompt to start your next turn.
-   So you can dispatch async and stop — you will be woken; you do not have to
-   hold a turn open. You are also woken if a dispatched task runs too long
-   without finishing (a worker may be stuck/parked) — the wake says so; read
-   its screen and interrupt or nudge. Between events, `hopx_agents_overview()`
-   shows busy / needs_input / idle for the whole fleet.
-
-   If you are NOT registered (or want to block for a specific result), the
-   fallback is to stay in your turn and loop on `hopx_wait_any(wait_ids)`
-   (re-arming any that return pending under new wait_ids) until the workers you
-   care about complete. Never dispatch async and stop while UNregistered — the
-   fleet would finish into the void with no one to notice.
+3. **Stay in your turn and wait.** After dispatching async, loop on
+   `hopx_wait_any(wait_ids)` (re-arming any that return pending under new
+   wait_ids) until the workers you care about complete. Between polls,
+   `hopx_agents_overview()` shows busy / needs_input / idle for the whole fleet,
+   and `hopx_task_ledger` is the durable record of what you dispatched. Do NOT
+   dispatch async and end your turn — nothing wakes you, and the fleet finishes
+   into the void with no one to notice. (Being woken on completion is a
+   deliberately undesigned capability; until it exists, hold the turn.)
 4. **Verify before believing**: `reply_matched=true` plus a real branch diff
    plus the task's own verification (run its tests). A worker saying done is
    a claim, not a fact.

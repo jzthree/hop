@@ -1,17 +1,18 @@
 {
   "name": "hop2",
   "version": "0.11.0",
-  "description": "🐰 Hop into your terminal from anywhere. Secure remote shell access with 2FA via Cloudflare Tunnel. Next-gen rewrite with native terminal sharing.",
+  "description": "\ud83d\udc30 Hop into your terminal from anywhere. Secure remote shell access with 2FA via Cloudflare Tunnel. Next-gen rewrite with native terminal sharing.",
   "main": "hop",
   "bin": {
     "hop": "./hop",
     "hop-mcp": "./mcp/hop-mcp.js",
-    "hop-mcp-setup": "./setup-mcp.js"
+    "hop-mcp-setup": "./setup-mcp.js",
+    "hopa": "./hopa"
   },
   "scripts": {
     "start": "node hop",
     "build": "npm --prefix hay install && npm --prefix hay run build && rsync -a --delete hay/apps/web/dist/ hay-web/",
-    "test": "node --check hop",
+    "test": "node --check hop && node --check hopa && node --test tests/*.unit.test.cjs",
     "setup-mcp": "node setup-mcp.js"
   },
   "keywords": [

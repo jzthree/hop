@@ -1,0 +1,361 @@
+#!/usr/bin/env node
+'use strict';
+
+// hopa — the agent-facing CLI for hop.
+//
+// Same core as the MCP server: every verb dispatches through
+// HopMCPServer.handleToolCall(), so hopa and hop-mcp cannot drift apart
+// (tests/hopa-parity.unit.test.cjs enforces full tool coverage).
+//
+// Deliberately separate from `hop`: `hop` is the human/admin surface (daemon,
+// tunnel, users, passwords); hopa is terminal orchestration only and contains
+// no admin verbs at all — allowlisting `hopa *` never grants host control.
+//
+// Behavior contract (agent-experience rules):
+//   - never interactive: no prompts, ever
+//   - structured output on stdout, debug on stderr (opt-in via HOP_DEBUG=1)
+//   - exit codes: 0 ok, 1 tool/connection error, 2 usage error, 124 cli timeout
+//
+// Known per-process limits vs a long-lived MCP session (document, don't hide):
+//   - async wait jobs (`term wait --async` → `term poll`) live inside one
+//     process; across hopa invocations use blocking waits or `wait-any`
+//     with terminal_ids instead of wait_ids.
+//   - read cursors are best-effort across invocations; prefer --start-from.
+
+const path = require('path');
+
+const DEBUG = process.env.HOP_DEBUG === '1';
+if (require.main === module && !DEBUG) {
+  // hop-mcp logs banners via console.error; keep agent transcripts clean.
+  // Only when running as the CLI — never clobber console for requiring tests.
+  console.error = () => {};
+}
+
+const { HopMCPServer } = require(path.join(__dirname, 'mcp', 'hop-mcp.js'));
+
+// verb path -> { tool, pos } where pos entries are tool arg names:
+//   'name'      required positional
+//   'name?'     optional positional (skipped if next token is a flag)
+//   'name...'   rest-of-line joined with spaces (supports `--` separator)
+//   'name*'     rest-of-line collected as an array
+// preset: fixed args merged in. alias: extra flag spellings -> tool arg name.
+const VERBS = {
+  'agents':          { tool: 'hopx_agents_overview', pos: [] },
+  'sessions':        { tool: 'hop_list_sessions', pos: [] },
+  'info':            { tool: 'hop_server_info', pos: [] },
+  'connect':         { tool: 'connect_server', pos: ['base_url'] },
+
+  'term ls':         { tool: 'hop_list_terminals', pos: [] },
+  'term new':        { tool: 'hop_create_terminal', pos: ['name?'] },
+  'term attach':     { tool: 'hop_attach_terminal', pos: ['name?'] },
+  'term read':       { tool: 'hop_read_terminal', pos: ['terminal_id'] },
+  'term write':      { tool: 'hop_write_terminal', pos: ['terminal_id', 'data...'] },
+  'term key':        { tool: 'hop_send_key', pos: ['terminal_id', 'key'] },
+  'term wait':       { tool: 'hop_wait_terminal', pos: ['terminal_id'] },
+  'term poll':       { tool: 'hop_wait_poll', pos: ['wait_id'] },
+  'term resize':     { tool: 'hop_resize_terminal', pos: ['terminal_id', 'cols', 'rows'] },
+  'term close':      { tool: 'hop_close_terminal', pos: ['terminal_id'] },
+
+  'exec':            { tool: 'hopx_exec', pos: ['terminal_id', 'command...'] },
+  'send':            { tool: 'hopx_send_and_wait', pos: ['terminal_id', 'data...'] },
+  'turn':            { tool: 'hopx_agent_turn', pos: ['terminal_id?', 'message...'] },
+  'spawn':           { tool: 'hopx_spawn_agent', pos: ['name?'], alias: { task: 'initial_task', cmd: 'command' } },
+  'scrollback':      { tool: 'hopx_capture_scrollback', pos: ['terminal_id'] },
+  'ledger':          { tool: 'hopx_task_ledger', pos: [] },
+  'wait-any':        { tool: 'hopx_wait_any', pos: ['terminal_ids*'] },
+  'trajectory':      { tool: 'hop_read_trajectory', pos: ['name'] },
+
+  'ws ls':           { tool: 'hop_list_workspaces', pos: [] },
+  'ws new':          { tool: 'hop_create_workspace', pos: ['name'] },
+  'ws show':         { tool: 'hop_show_workspace', pos: ['name'] },
+  'ws save':         { tool: 'hop_save_workspace', pos: ['name'] },
+  'ws load':         { tool: 'hop_load_workspace', pos: ['name'] },
+  'ws rm':           { tool: 'hop_delete_workspace', pos: ['name'] },
+
+  'permit':          { tool: 'hop_set_agent_permission', pos: ['name'], preset: { allowed: true } },
+  'block':           { tool: 'hop_set_agent_permission', pos: ['name'], preset: { allowed: false } }
+};
+
+const GROUP_ALIASES = { t: 'term' };
+
+const USAGE = `hopa — agent-facing hop CLI (terminal orchestration; no admin verbs)
+
+  hopa                                live overview of agent terminals (same as: hopa agents)
+  hopa sessions | info | ledger       list sessions / server info / task ledger
+
+  hopa term ls                        list terminals
+  hopa term new [name] [--cwd P]      create a terminal
+  hopa term read <term> [--mode ui]   read output (modes: raw, ui, readable_raw)
+  hopa term write <term> <text...>    write raw input (no submit; see: hopa send)
+  hopa term key <term> <key>          send a key (enter, up, ctrl+c, ...) [--repeat N]
+  hopa term wait <term> [--until-regex R | --until-prompt | --until-agent-done]
+  hopa term resize <term> <cols> <rows>
+  hopa term close <term> [--killSession]
+
+  hopa exec <term> -- <command...>    run a shell command, wait, return output
+  hopa send <term> <text...>          type + submit + wait for the reply
+  hopa turn <term> <message...>       full agent turn (verified submit + wait)
+  hopa spawn [name] --agent claude [--task "..."] [--cwd P]
+  hopa scrollback <term>              capture full scrollback
+  hopa wait-any <term1> <term2> ...   wait for whichever finishes first
+  hopa trajectory <session>           read a claude session's conversation
+
+  hopa ws ls|new|show|save|load|rm    workspaces
+  hopa permit <session> | block <session>   allow/deny agent access
+
+  hopa tool <tool_name> ['{json}']    raw passthrough to any MCP tool
+  hopa tools                          list every tool with its arguments
+
+Flags map to tool arguments: --until-regex X == until_regex, --uiMaxLines 40, etc.
+Global: --json (machine output), --cli-timeout <ms>, HOP_DEBUG=1 for stderr logs.
+Exit codes: 0 ok, 1 error, 2 usage, 124 timeout.`;
+
+function fail(msg, code) {
+  process.stderr.write(`hopa: ${msg}\n`);
+  process.exit(code);
+}
+
+function getSchemas() {
+  const proto = Object.create(HopMCPServer.prototype);
+  const defs = proto.getToolDefinitions();
+  const map = new Map();
+  for (const d of defs) map.set(d.name, d);
+  return map;
+}
+
+// '--until-regex' -> the schema's real key ('until_regex' or 'uiMaxLines'),
+// trying exact, snake_case, and camelCase spellings.
+function normalizeFlagKey(raw, props, alias) {
+  if (alias && alias[raw]) return alias[raw];
+  const snake = raw.replace(/-/g, '_');
+  const camel = raw.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  for (const cand of [raw, snake, camel]) {
+    if (props && Object.prototype.hasOwnProperty.call(props, cand)) return cand;
+  }
+  return snake; // best effort for undocumented args
+}
+
+function coerceValue(value, propSchema) {
+  if (value === true) return true;
+  const type = propSchema && propSchema.type;
+  if (type === 'number' || type === 'integer') {
+    const n = Number(value);
+    if (Number.isNaN(n)) throw new Error(`expected a number, got "${value}"`);
+    return n;
+  }
+  if (type === 'boolean') return value !== 'false' && value !== '0';
+  if (type === 'array' || type === 'object') {
+    try { return JSON.parse(value); } catch {
+      if (type === 'array') return String(value).split(',');
+      throw new Error(`expected JSON for object arg, got "${value}"`);
+    }
+  }
+  return value;
+}
+
+// Parse one verb invocation: fill positionals, map flags via the tool schema.
+// For rest positionals ('...' / '*'), a literal `--` ends flag parsing and the
+// remainder is taken verbatim; otherwise the rest starts at the first token
+// that is not a recognized --flag.
+function buildArgs(spec, tokens, schema) {
+  const props = (schema && schema.inputSchema && schema.inputSchema.properties) || {};
+  const args = Object.assign({}, spec.preset);
+  const global = { json: false, cliTimeout: 0 };
+  const queue = tokens.slice();
+  const rest = [];
+  let restName = null;
+  let restIsArray = false;
+
+  const positionals = spec.pos.filter((p) => !p.endsWith('...') && !p.endsWith('*'));
+  const restSpec = spec.pos.find((p) => p.endsWith('...') || p.endsWith('*'));
+  if (restSpec) {
+    restIsArray = restSpec.endsWith('*');
+    restName = restSpec.replace(/(\.\.\.|\*)$/, '');
+  }
+
+  let posIndex = 0;
+  let verbatim = false;
+  while (queue.length) {
+    const token = queue.shift();
+    if (verbatim) { rest.push(token); continue; }
+    if (token === '--' && restName) { verbatim = true; continue; }
+    if (token.startsWith('--') && token.length > 2) {
+      let raw = token.slice(2);
+      let value = true;
+      const eq = raw.indexOf('=');
+      if (eq !== -1) { value = raw.slice(eq + 1); raw = raw.slice(0, eq); }
+      if (raw === 'json') { global.json = true; continue; }
+      if (raw === 'cli-timeout') {
+        global.cliTimeout = Number(value === true ? queue.shift() : value) || 0;
+        continue;
+      }
+      if (raw === 'help') return { help: true };
+      const key = normalizeFlagKey(raw, props, spec.alias);
+      if (value === true && queue.length && !(props[key] && props[key].type === 'boolean') && !queue[0].startsWith('--')) {
+        value = queue.shift();
+      }
+      try {
+        args[key] = coerceValue(value, props[key]);
+      } catch (err) {
+        fail(`--${raw}: ${err.message}`, 2);
+      }
+      continue;
+    }
+    if (posIndex < positionals.length) {
+      const name = positionals[posIndex].replace(/\?$/, '');
+      try {
+        args[name] = coerceValue(token, props[name]);
+      } catch (err) {
+        fail(`<${name}>: ${err.message}`, 2);
+      }
+      posIndex++;
+      continue;
+    }
+    if (restName) { rest.push(token); continue; }
+    fail(`unexpected argument: ${token}`, 2);
+  }
+
+  // Missing required positionals (optional '?' ones may stay unset)
+  for (let i = posIndex; i < positionals.length; i++) {
+    if (!positionals[i].endsWith('?')) {
+      fail(`missing <${positionals[i]}>  (try: hopa help)`, 2);
+    }
+  }
+  if (restName && rest.length) {
+    args[restName] = restIsArray ? rest : rest.join(' ');
+  }
+  return { args, global };
+}
+
+function resolveVerb(argv) {
+  if (!argv.length) return { spec: VERBS.agents, tokens: [] };
+  const first = GROUP_ALIASES[argv[0]] || argv[0];
+  const two = argv.length > 1 ? `${first} ${argv[1]}` : null;
+  if (two && VERBS[two]) return { spec: VERBS[two], tokens: argv.slice(2) };
+  if (VERBS[first]) return { spec: VERBS[first], tokens: argv.slice(1) };
+  return null;
+}
+
+// A long-lived MCP session resolves session names to terminal ids through its
+// in-process handle map; a per-invocation CLI has to rebuild that from the
+// daemon. Accepts t_... ids untouched; resolves anything else by exact
+// sessionName/displayName match against /api/terminals.
+async function resolveTerminalRef(server, ref) {
+  if (typeof ref !== 'string' || !ref || /^t_[0-9a-f]+$/i.test(ref)) return ref;
+  const listed = await server.handleToolCall({ name: 'hop_list_terminals', arguments: {} });
+  let terminals = [];
+  try {
+    const parsed = JSON.parse((listed.content || []).map((c) => c.text || '').join(''));
+    terminals = Array.isArray(parsed.terminals) ? parsed.terminals : [];
+  } catch { return ref; }
+  const matches = terminals.filter((t) => t && (t.sessionName === ref || t.displayName === ref || t.id === ref));
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) {
+    fail(`"${ref}" matches ${matches.length} terminals: ${matches.map((t) => t.id).join(', ')}`, 2);
+  }
+  return ref; // not found: let the tool report it (may be a user session needing attach/permit)
+}
+
+// The MCP surface reports API failures inside the payload (agents inspect it);
+// a CLI must also signal them through the exit code.
+function payloadIndicatesError(text) {
+  if (/^Error[:\s]/.test(text)) return true;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      if (parsed.ok === false) return true;
+      if (parsed.error != null && parsed.ok !== true) return true;
+    }
+  } catch { /* non-JSON text payload */ }
+  return false;
+}
+
+async function runTool(toolName, toolArgs, global) {
+  const server = new HopMCPServer();
+  if (global.cliTimeout > 0) {
+    setTimeout(() => {
+      process.stderr.write(`hopa: timed out after ${global.cliTimeout}ms\n`);
+      process.exit(124);
+    }, global.cliTimeout);
+  }
+  let result;
+  try {
+    if (toolArgs.terminal_id !== undefined) {
+      toolArgs.terminal_id = await resolveTerminalRef(server, toolArgs.terminal_id);
+    }
+    if (Array.isArray(toolArgs.terminal_ids)) {
+      toolArgs.terminal_ids = await Promise.all(toolArgs.terminal_ids.map((r) => resolveTerminalRef(server, r)));
+    }
+    result = await server.handleToolCall({ name: toolName, arguments: toolArgs });
+  } catch (err) {
+    fail(err && err.message ? err.message : String(err), 1);
+  }
+  let text = (result.content || [])
+    .map((c) => (c && typeof c.text === 'string' ? c.text : ''))
+    .filter(Boolean)
+    .join('\n');
+  if (global.json) {
+    try { JSON.parse(text); } catch { text = JSON.stringify({ text }); }
+  }
+  await new Promise((resolve) => process.stdout.write(text + '\n', resolve));
+  process.exit(result.isError || payloadIndicatesError(text) ? 1 : 0);
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+
+  if (argv[0] === 'help' || argv[0] === '--help' || argv[0] === '-h') {
+    process.stdout.write(USAGE + '\n');
+    process.exit(0);
+  }
+
+  if (argv[0] === 'tools') {
+    const schemas = getSchemas();
+    for (const [name, def] of schemas) {
+      const props = Object.keys((def.inputSchema && def.inputSchema.properties) || {});
+      const req = new Set((def.inputSchema && def.inputSchema.required) || []);
+      const shown = props.map((p) => (req.has(p) ? `<${p}>` : `[${p}]`)).join(' ');
+      process.stdout.write(`${name} ${shown}\n`);
+    }
+    process.exit(0);
+  }
+
+  if (argv[0] === 'tool') {
+    const toolName = argv[1];
+    if (!toolName) fail('usage: hopa tool <tool_name> [\'{"json":"args"}\']', 2);
+    let toolArgs = {};
+    if (argv[2]) {
+      try { toolArgs = JSON.parse(argv[2]); } catch (err) {
+        fail(`invalid JSON args: ${err.message}`, 2);
+      }
+    }
+    const global = { json: argv.includes('--json'), cliTimeout: 0 };
+    return runTool(toolName, toolArgs, global);
+  }
+
+  const resolved = resolveVerb(argv);
+  if (!resolved) fail(`unknown command: ${argv[0]}  (try: hopa help)`, 2);
+
+  const schemas = getSchemas();
+  const schema = schemas.get(resolved.spec.tool);
+  const built = buildArgs(resolved.spec, resolved.tokens, schema);
+  if (built.help) {
+    const props = (schema && schema.inputSchema && schema.inputSchema.properties) || {};
+    const req = new Set((schema && schema.inputSchema && schema.inputSchema.required) || []);
+    process.stdout.write(`tool: ${resolved.spec.tool}\n`);
+    for (const [p, s] of Object.entries(props)) {
+      process.stdout.write(`  --${p}${req.has(p) ? ' (required)' : ''}${s.type ? `  ${s.type}` : ''}${s.description ? `  ${s.description}` : ''}\n`);
+    }
+    process.exit(0);
+  }
+  return runTool(resolved.spec.tool, built.args, built.global);
+}
+
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`hopa: ${err && err.message ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+} else {
+  module.exports = { VERBS, GROUP_ALIASES, resolveVerb, normalizeFlagKey, coerceValue, buildArgs };
+}

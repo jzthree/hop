@@ -1687,6 +1687,63 @@ button.primary {
   padding: 8px 0;
 }
 
+/* iOS-style loading overlay while a mobile session connects. Sits over the
+   terminal, dims it slightly, and centers the activity indicator. */
+.terminal-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: color-mix(in srgb, var(--bg, #000) 62%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  pointer-events: none;
+  animation: terminal-loading-in 0.18s ease both;
+}
+@keyframes terminal-loading-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.terminal-loading-label {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--ink-muted, #9aa0aa);
+}
+
+/* The 12-blade iOS activity indicator. Each child span is one rounded blade,
+   positioned by an inline rotate+translate; the shared fade animation is offset
+   per blade (inline animation-delay) so the highlight chases around the ring. */
+.ios-spinner {
+  position: relative;
+  display: inline-block;
+}
+.ios-spinner > span {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8.5%;
+  height: 26%;
+  margin-left: -4.25%;
+  margin-top: -13%;
+  border-radius: 999px;
+  background: var(--ink, #e7e9ee);
+  transform-origin: center;
+  animation: ios-spinner-fade 1s linear infinite;
+}
+@keyframes ios-spinner-fade {
+  0% { opacity: 1; }
+  100% { opacity: 0.15; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ios-spinner > span { animation-duration: 0s; opacity: 0.5; }
+  .terminal-loading { animation: none; }
+}
+
 .session-list-error {
   display: flex;
   align-items: center;

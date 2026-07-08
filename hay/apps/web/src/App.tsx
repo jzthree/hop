@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent } from "react";
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "xterm";
-import "xterm/css/xterm.css";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
+import { WebglAddon } from "@xterm/addon-webgl";
 import {
   safeParseServerMessage,
   type PresenceClient,
@@ -237,6 +238,22 @@ const saveSeenMarkers = (markers: Record<string, SeenMarker>) => {
   }
 };
 
+// The classic iOS activity indicator: 12 tapered blades around a circle, each
+// fading in turn so the "light" chases around the ring. Pure CSS/DOM — no image.
+const IosSpinner = ({ size = 34 }: { size?: number }) => (
+  <span className="ios-spinner" style={{ width: size, height: size }} aria-hidden="true">
+    {Array.from({ length: 12 }).map((_, i) => (
+      <span
+        key={i}
+        style={{
+          transform: `rotate(${i * 30}deg) translate(0, -${size * 0.34}px)`,
+          animationDelay: `${-(11 - i) / 12}s`
+        }}
+      />
+    ))}
+  </span>
+);
+
 const App = () => {
   const hopSession = getHopSession();
   const initialRoom = hopSession?.room ?? getLocationRoom() ?? createRoomId();
@@ -305,7 +322,12 @@ const App = () => {
   const [renameDraft, setRenameDraft] = useState("");
   const [creatingSession, setCreatingSession] = useState(false);
   const [newSessionName, setNewSessionName] = useState("");
-  const [switcherOpen, setSwitcherOpen] = useState(false);
+  // On mobile the preview-grid switcher is the home screen: land on it so the
+  // first thing you see is your sessions, not a single terminal. The current
+  // session still connects underneath, so tapping its card is instant. Desktop
+  // (persistent sidebar) and standalone (no session API) keep the terminal-first
+  // landing.
+  const [switcherOpen, setSwitcherOpen] = useState(() => isMobileDevice() && isEmbeddedInHop());
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
     const saved = localStorage.getItem("hay_session_switch_mode");
     // Keep "page" as a legacy fallback while we validate instant mode end-to-end.
@@ -735,21 +757,26 @@ const App = () => {
 
   // Fit based on the scroll container viewport rather than the terminal element itself.
   // This ensures correct sizing across desktop padding and mobile full-bleed layouts.
-  const fitToViewport = () => {
-    if (!termRef.current || !containerRef.current) return;
+  // Returns false when it couldn't measure yet (render service not ready, or the
+  // container has no layout) so callers can retry on a later frame.
+  const fitToViewport = (): boolean => {
+    if (!termRef.current || !containerRef.current) return false;
 
     const terminal = termRef.current;
     const core = (terminal as any)._core;
-    if (!core?._renderService?.dimensions?.css?.cell) return;
+    if (!core?._renderService?.dimensions?.css?.cell) return false;
 
     const cellWidth = core._renderService.dimensions.css.cell.width;
     const cellHeight = core._renderService.dimensions.css.cell.height;
-    if (!cellWidth || !cellHeight) return;
+    if (!cellWidth || !cellHeight) return false;
 
     const scrollContainer = containerRef.current.closest(".terminal-scroll");
-    if (!scrollContainer) return;
+    if (!scrollContainer) return false;
 
     const rect = scrollContainer.getBoundingClientRect();
+    // No layout yet (e.g. the terminal mounted while the switcher covered it) —
+    // report not-ready so the caller retries once it has real dimensions.
+    if (rect.width < 1 || rect.height < 1) return false;
     const styles = window.getComputedStyle(scrollContainer);
     const paddingLeft = parseFloat(styles.paddingLeft) || 0;
     const paddingRight = parseFloat(styles.paddingRight) || 0;
@@ -764,6 +791,24 @@ const App = () => {
 
     if (terminal.cols !== cols || terminal.rows !== rows) {
       terminal.resize(cols, rows);
+    }
+    return true;
+  };
+
+  // Fit as soon as xterm can be measured, retrying across frames. A fresh session
+  // load often calls fit before the render service has measured cell metrics (or
+  // before the container is laid out), so a single pass silently bails and the
+  // terminal is left at its stale size. Retrying until ready is what actually
+  // makes "autofit after loading" reliable.
+  const fitWhenReady = (attempts = 12, onFit?: () => void) => {
+    if (viewModeRef.current !== "fit") return;
+    if (fitToViewport()) {
+      handleResize();
+      onFit?.();
+      return;
+    }
+    if (attempts > 0) {
+      requestAnimationFrame(() => fitWhenReady(attempts - 1, onFit));
     }
   };
 
@@ -896,13 +941,11 @@ const App = () => {
               termRef.current.write('\x1b[?25l');
             }
           }
-          // Auto-fit and scroll to end once after snapshot load
+          // Auto-fit and scroll to end once after snapshot load. Retry across
+          // frames so a not-yet-measured render service doesn't leave the fresh
+          // session at a stale (often too-wide) size.
           if (viewModeRef.current === "fit") {
-            setTimeout(() => {
-              fitToViewport();
-              handleResize();
-              termRef.current?.scrollToBottom();
-            }, 0);
+            fitWhenReady(12, () => termRef.current?.scrollToBottom());
           }
           break;
         case "collab":
@@ -914,10 +957,13 @@ const App = () => {
           pushNotice(message.reason);
           break;
         case "active_size":
-          // Resize terminal to match active user's size.
-          // This allows overflow/panning when the active user is larger than the viewport.
+          // Remember the active user's size for Manual mode (overflow/panning),
+          // but in Auto-fit mode DON'T resize to it — the local terminal is sized
+          // to this viewport, and applying the active size here is exactly what
+          // clobbered the post-load autofit (mobile snapping to a desktop/PTY
+          // 80×24). Manual mode still matches the active size for correct render.
           activeSizeRef.current = { cols: message.cols, rows: message.rows };
-          if (termRef.current) {
+          if (termRef.current && viewModeRef.current !== "fit") {
             const currentCols = termRef.current.cols;
             const currentRows = termRef.current.rows;
             if (message.cols !== currentCols || message.rows !== currentRows) {
@@ -1005,16 +1051,30 @@ const App = () => {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(containerRef.current);
+
+    // GPU-accelerated rendering (same renderer VS Code uses). Must load after
+    // open(). If WebGL isn't available (old GPU, blocklisted driver) the
+    // constructor/load throws and we silently stay on the DOM renderer; if the
+    // browser evicts the context later (backgrounded mobile tab), dispose the
+    // addon and xterm falls back to the DOM renderer on its own.
+    let webglAddon: WebglAddon | null = null;
+    try {
+      webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => {
+        webglAddon?.dispose();
+        webglAddon = null;
+      });
+      terminal.loadAddon(webglAddon);
+    } catch {
+      webglAddon?.dispose();
+      webglAddon = null;
+    }
+
     fitAddon.fit();
 
     termRef.current = terminal;
     fitRef.current = fitAddon;
-    if (viewModeRef.current === "fit") {
-      setTimeout(() => {
-        fitToViewport();
-        handleResize();
-      }, 0);
-    }
+    fitWhenReady();
 
     // Register OSC handlers for sequences xterm.js doesn't fully support
     // These swallow the sequences so they don't appear as visible text
@@ -2591,6 +2651,12 @@ const App = () => {
               <div className="terminal-scroll">
                 <div className="terminal-inner" ref={containerRef} />
               </div>
+              {isMobile && status === "connecting" && (
+                <div className="terminal-loading" role="status" aria-live="polite">
+                  <IosSpinner />
+                  <span className="terminal-loading-label">Loading session…</span>
+                </div>
+              )}
               {searchActive && (
                 <div className="terminal-find" onClick={(e) => e.stopPropagation()}>
                   <input

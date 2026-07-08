@@ -11,11 +11,12 @@
     "test:e2e": "node scripts/run-e2e.mjs"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
     "hay-shared": "*",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "xterm": "^5.3.0",
-    "@xterm/addon-fit": "^0.11.0"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",

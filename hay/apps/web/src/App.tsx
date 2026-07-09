@@ -327,7 +327,13 @@ const App = () => {
   // session still connects underneath, so tapping its card is instant. Desktop
   // (persistent sidebar) and standalone (no session API) keep the terminal-first
   // landing.
-  const [switcherOpen, setSwitcherOpen] = useState(() => isMobileDevice() && isEmbeddedInHop());
+  //
+  // Deep links are the exception: opening /s/Venus/ names a session — go
+  // straight to it instead of parking the visitor on the grid while every
+  // other session's preview loads. The grid stays one FAB tap away.
+  const [switcherOpen, setSwitcherOpen] = useState(
+    () => isMobileDevice() && isEmbeddedInHop() && !window.location.pathname.startsWith("/s/")
+  );
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
     const saved = localStorage.getItem("hay_session_switch_mode");
     // Keep "page" as a legacy fallback while we validate instant mode end-to-end.

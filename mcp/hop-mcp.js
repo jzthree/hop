@@ -2512,6 +2512,38 @@ class TerminalStreamManager {
     };
   }
 
+  // The balanced noise filter holds the newest \r-rewrite line as "pending"
+  // until a later parse pass sees it stable (READABLE_NOISE_STABLE_MS). But
+  // parse passes only run when new records arrive — so when a shell goes
+  // quiet right after printing its prompt (always a \r-rewrite line), the
+  // prompt never commits and stream-based until_prompt/until_regex matching
+  // starves forever. The wait loop calls this on idle passes to commit a
+  // pending line once it has aged past the stability window.
+  flushReadablePending(terminalId) {
+    const state = this.streams.get(terminalId);
+    const noiseState = state && state.readableRaw ? state.readableRaw.noise : null;
+    if (!noiseState || !noiseState.pendingRewrite) return [];
+    const pending = noiseState.pendingRewrite;
+    const elapsed = Date.now() - (Number.isFinite(pending.lastTs) ? pending.lastTs : 0);
+    if (elapsed < READABLE_NOISE_STABLE_MS) return [];
+    // Unlike the map-time flush, commit even a "noisy" pending line: noisy
+    // means it was being rewritten (spinner, fresh-shell prompt redraws), but
+    // a line that has now sat unchanged for the stability window is the
+    // rewrite's FINAL state — suppressing it here would silently drop real
+    // content ("Downloaded 100%", the shell prompt). lastCommittedKey still
+    // dedupes repeats.
+    const flushed = [];
+    const committed = maybeEmitReadableCommittedEvent(
+      noiseState,
+      pending.templateEvent,
+      pending.text,
+      pending.lastTs
+    );
+    if (committed) flushed.push(committed);
+    noiseState.pendingRewrite = null;
+    return flushed;
+  }
+
   mapReadableRawEvents(terminalId, records, options = {}) {
     const state = this.streams.get(terminalId);
     if (!state || !state.readableRaw) {
@@ -6287,7 +6319,11 @@ class HopMCPServer {
     let stdout = typeof waitPayload.text === 'string' ? waitPayload.text : '';
     stdout = stripAnsi(stdout);
 
-    // Extract the exit-code sentinel and drop its line(s) from stdout.
+    // Extract the exit-code sentinel and drop its line(s) from stdout. Also
+    // drop any other line carrying the sentinel prefix: that's the echo of
+    // the typed command (which contains `<rcPrefix>%d`), which survives
+    // echo-suppression whenever the readable parser garbles it (zsh line
+    // editor redraws mangle the echo, so exact-match stripping misses it).
     let exitCode = null;
     const rcLineRe = new RegExp(`^${rcPrefix}(\\d+)$`);
     const lines = stdout.split('\n').filter((line) => {
@@ -6296,6 +6332,7 @@ class HopMCPServer {
         exitCode = parseInt(m[1], 10);
         return false;
       }
+      if (line.includes('__HOPX_RC_')) return false;
       return true;
     });
     while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
@@ -6546,6 +6583,22 @@ class HopMCPServer {
             sawOutputLike = true;
             lastOutputAt = Date.now();
           }
+          textWindow = appendRollingText(textWindow, getOutputTextFromEvent(event, captureMode));
+          if (captureMaxEvents > 0) {
+            capturedEvents.push(event);
+            if (capturedEvents.length > captureMaxEvents) {
+              capturedEvents.splice(0, capturedEvents.length - captureMaxEvents);
+            }
+          }
+        }
+      } else if (captureMode === 'readable_raw') {
+        // Idle pass: commit any pending \r-rewrite line (e.g. the shell prompt
+        // printed just before the stream went quiet) so stream matching can
+        // see it. Deliberately does NOT touch lastOutputAt/sawOutputLike —
+        // this is old output finally committing, not new activity, and
+        // bumping the idle clock here would delay until_agent_done.
+        const flushedEvents = this.streamManager.flushReadablePending(terminalId);
+        for (const event of flushedEvents) {
           textWindow = appendRollingText(textWindow, getOutputTextFromEvent(event, captureMode));
           if (captureMaxEvents > 0) {
             capturedEvents.push(event);

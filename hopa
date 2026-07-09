@@ -298,6 +298,16 @@ async function runTool(toolName, toolArgs, global) {
     try { JSON.parse(text); } catch { text = JSON.stringify({ text }); }
   }
   await new Promise((resolve) => process.stdout.write(text + '\n', resolve));
+  // exec mirrors the command's own exit code (Bash semantics: `hopa exec t --
+  // false && ...` short-circuits). 125 caps it below the shell's special codes.
+  if (toolName === 'hopx_exec') {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && parsed.ok === true && Number.isInteger(parsed.exit_code)) {
+        process.exit(Math.min(parsed.exit_code, 125));
+      }
+    } catch { /* fall through to generic exit */ }
+  }
   process.exit(result.isError || payloadIndicatesError(text) ? 1 : 0);
 }
 

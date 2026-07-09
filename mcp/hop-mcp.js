@@ -1160,9 +1160,17 @@ function applyBalancedReadableNoiseFilter(noiseState, event) {
     commitText = stripNoisyRewriteKeyPrefix(commitText, noiseState.lastSuppressedRewrite.key);
   }
   flushReadablePendingRewrite(noiseState, eventTs, output, true);
-  const committed = maybeEmitReadableCommittedEvent(noiseState, event, commitText, eventTs);
-  if (committed) {
-    output.push(committed);
+  // Direct commits are often partial-line deltas (keystroke echo, streamed
+  // fragments), so emit them verbatim: normalizing here used to trim real
+  // trailing spaces at chunk boundaries ("printf " + "'…" → "printf'…"),
+  // drop space-only fragments outright (empty canonical key), and let the
+  // lastCommittedKey dedupe — meant for repeated status LINES — swallow
+  // consecutive identical fragments. Still record the canonical key so a
+  // later pending-rewrite flush of the same line dedupes against this.
+  if (typeof commitText === 'string' && commitText.length > 0) {
+    const commitKey = canonicalizeReadableNoiseText(commitText);
+    if (commitKey) noiseState.lastCommittedKey = commitKey;
+    output.push(createReadableEventFromTemplate(event, commitText, eventTs));
     noiseState.lastSuppressedRewrite = null;
   }
   return output;
@@ -1711,7 +1719,14 @@ class ReadableOutputParser {
         outputParts.push(endLine);
       }
     } else if (lineChanged) {
-      if (!destructiveEdit && endLine.startsWith(chunkStartLine)) {
+      // Emit only the suffix whenever the line still extends what this chunk
+      // started with — even after a "destructive" edit. zsh's line editor
+      // echoes keystrokes as backspace-and-rewrite (\b + "ec" to append "c"),
+      // which used to force a whole-line re-emission on top of the deltas
+      // already emitted, duplicating the prefix ("e" + "…% ec" → "eec…").
+      // A net-effect prefix extension is a pure append regardless of how the
+      // cursor got there; identical redraws now emit nothing at all.
+      if (endLine.startsWith(chunkStartLine)) {
         outputParts.push(endLine.slice(chunkStartLine.length));
       } else {
         outputParts.push(endLine);
@@ -6961,6 +6976,9 @@ if (require.main === module) {
   module.exports = {
     HopMCPServer,
     TerminalStreamManager,
+    ReadableOutputParser,
+    applyBalancedReadableNoiseFilter,
+    createReadableNoiseState,
     extractUiBusyLine,
     getBusyLinePatterns,
     COMPOSER_BORDER_CHARS,

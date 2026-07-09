@@ -222,6 +222,52 @@ describe("Room", () => {
     expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 90, rows: 20 });
   });
 
+  it('claim:"attach" takes the size unless a peer typed seconds ago', () => {
+    vi.useFakeTimers();
+    try {
+      let ptyInstance: FakePty | null = null;
+      const factory: PtyFactory = () => {
+        ptyInstance = new FakePty() as unknown as FakePty;
+        return ptyInstance as any;
+      };
+      const manager = new RoomManager(factory);
+      const room = manager.getRoom("attach-claim", { cols: 80, rows: 24 }, "/tmp");
+      const cli = new FakeSocket();
+      room.attachClient({ id: "cli", name: "Local", colorIndex: 0, cols: 80, rows: 24 }, cli);
+
+      // The desktop CLI is actively typing right now.
+      cli.emitMessage({ type: "input", data: "ls" });
+
+      // A phone opens the session 2s later and attach-claims its fitted size:
+      // an actively-typing peer keeps the size — the claim loses.
+      vi.advanceTimersByTime(2_000);
+      const phone = new FakeSocket();
+      room.attachClient({ id: "ph", name: "Phone", colorIndex: 1, cols: 46, rows: 28 }, phone);
+      const before = ptyInstance!.resizes.length;
+      phone.emitMessage({ type: "resize", cols: 46, rows: 28, claim: "attach" });
+      expect(ptyInstance!.resizes.length).toBe(before);
+
+      // 10s after the CLI's last keystroke (well inside the 60s a plain
+      // resize would need), the attach claim wins: opening a session is
+      // intent, and nobody is typing anymore.
+      vi.advanceTimersByTime(10_000);
+      phone.emitMessage({ type: "resize", cols: 46, rows: 28, claim: "attach" });
+      expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 46, rows: 28 });
+
+      // A plain (unclaimed) resize from another fresh viewer still cannot
+      // yank the size at 10s idle — the 60s election guards those.
+      const viewer = new FakeSocket();
+      room.attachClient({ id: "v", name: "Viewer", colorIndex: 2, cols: 200, rows: 50 }, viewer);
+      phone.emitMessage({ type: "input", data: "x" });
+      vi.advanceTimersByTime(10_000);
+      const beforeViewer = ptyInstance!.resizes.length;
+      viewer.emitMessage({ type: "resize", cols: 200, rows: 50 });
+      expect(ptyInstance!.resizes.length).toBe(beforeViewer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("updates presence on disconnect", () => {
     const manager = new RoomManager(() => new FakePty() as any);
     const room = manager.getRoom("charlie", { cols: 80, rows: 24 }, "/tmp");

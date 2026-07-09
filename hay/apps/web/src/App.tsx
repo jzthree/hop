@@ -754,11 +754,22 @@ const App = () => {
     }, 1200);
   };
 
+  // One-shot: armed when a snapshot loads (fresh session open/switch), consumed
+  // by the next resize so it goes out as an attach claim.
+  const attachClaimPendingRef = useRef(false);
+
   const handleResize = () => {
     if (!termRef.current) {
       return;
     }
-    sendMessage({ type: "resize", cols: termRef.current.cols, rows: termRef.current.rows });
+    const claim = attachClaimPendingRef.current ? ("attach" as const) : undefined;
+    attachClaimPendingRef.current = false;
+    sendMessage({
+      type: "resize",
+      cols: termRef.current.cols,
+      rows: termRef.current.rows,
+      ...(claim ? { claim } : {})
+    });
   };
 
   // Fit based on the scroll container viewport rather than the terminal element itself.
@@ -949,8 +960,14 @@ const App = () => {
           }
           // Auto-fit and scroll to end once after snapshot load. Retry across
           // frames so a not-yet-measured render service doesn't leave the fresh
-          // session at a stale (often too-wide) size.
+          // session at a stale (often too-wide) size. The fit's resize goes out
+          // as claim:"attach": opening a session is intent, so it takes the
+          // shared size immediately unless a peer typed in the last few seconds
+          // — without the claim it lost the 60s idle election to any recently
+          // active client and the page sat mis-wrapped until the first
+          // keystroke ("one autofit away").
           if (viewModeRef.current === "fit") {
+            attachClaimPendingRef.current = true;
             fitWhenReady(12, () => termRef.current?.scrollToBottom());
           }
           break;

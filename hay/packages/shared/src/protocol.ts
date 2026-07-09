@@ -2,7 +2,16 @@ import { z } from "zod";
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("input"), data: z.string().min(1) }),
-  z.object({ type: z.literal("resize"), cols: z.number().int().min(2), rows: z.number().int().min(2) }),
+  // claim:"attach" marks a fresh client's first autofit after connecting.
+  // Opening a session is user intent: the server lets it take the shared size
+  // unless someone else typed within the last few seconds, instead of the
+  // 60s idle window a background resize needs.
+  z.object({
+    type: z.literal("resize"),
+    cols: z.number().int().min(2),
+    rows: z.number().int().min(2),
+    claim: z.enum(["attach"]).optional()
+  }),
   z.object({ type: z.literal("typing"), active: z.boolean() }),
   z.object({ type: z.literal("toggle_collab"), enabled: z.boolean() }),
   z.object({ type: z.literal("take_control") }),

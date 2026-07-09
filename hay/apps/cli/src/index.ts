@@ -1369,7 +1369,7 @@ const applyRemoteSize = (cols: number, rows: number) => {
   scheduleRender();
 };
 
-const applySyncSize = () => {
+const applySyncSize = (claim?: "attach") => {
   if (!syncSize) return;
   localMetrics = getLocalMetrics();
   const cols = localMetrics.viewportCols;
@@ -1378,8 +1378,10 @@ const applySyncSize = () => {
   applyRemoteSize(cols, rows);
   if (needsResize) {
     // Protocol rejects resize below 2x2 — clamp so tiny terminals don't send
-    // messages the server refuses.
-    sendMessage({ type: "resize", cols: Math.max(2, cols), rows: Math.max(2, rows) });
+    // messages the server refuses. claim:"attach" (the one-shot claim at
+    // connect) beats the 60s idle election unless a peer typed seconds ago —
+    // attaching is intent, same as the web client opening a session.
+    sendMessage({ type: "resize", cols: Math.max(2, cols), rows: Math.max(2, rows), claim });
   }
 };
 
@@ -2623,7 +2625,7 @@ const connect = () => {
         if (claimPhase === "pending") {
           sizeClaimPhase = "claimed";
           if (syncSize) {
-            applySyncSize();
+            applySyncSize("attach");
           }
         } else if (claimPhase === "claimed") {
           sizeClaimPhase = "done";

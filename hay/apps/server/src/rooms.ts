@@ -67,6 +67,13 @@ const RESIZE_CLAIM_IDLE_MS = (() => {
   const env = Number(process.env.HAY_RESIZE_CLAIM_IDLE_MS);
   return Number.isFinite(env) && env >= 0 ? env : 60_000;
 })();
+// A claim:"attach" resize (a fresh client's first autofit) is deliberate:
+// someone just opened the session there. It takes the shared size unless a
+// peer typed within this window — only an actively-typing peer holds it.
+const ATTACH_CLAIM_IDLE_MS = (() => {
+  const env = Number(process.env.HAY_ATTACH_CLAIM_IDLE_MS);
+  return Number.isFinite(env) && env >= 0 ? env : 5_000;
+})();
 const CONTROL_SEQUENCE_TAIL = 32;
 const DEBUG_STATE = process.env.HAY_DEBUG === "1";
 
@@ -319,7 +326,7 @@ export class Room extends EventEmitter {
         this.handleInput(client, message.data);
         break;
       case "resize":
-        this.handleResize(client, message.cols, message.rows);
+        this.handleResize(client, message.cols, message.rows, message.claim);
         break;
       case "typing":
         client.typing = message.active;
@@ -647,7 +654,7 @@ export class Room extends EventEmitter {
     this.emit("pty_input", { roomId: this.id, clientId: client.id, data, timestamp: now() });
   }
 
-  private handleResize(client: ClientState, cols: number, rows: number) {
+  private handleResize(client: ClientState, cols: number, rows: number, claim?: "attach") {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
     if (cols < 1 || cols > 500 || rows < 1 || rows > 200) return;
 
@@ -666,8 +673,9 @@ export class Room extends EventEmitter {
       0,
       ...[...this.clients.values()].filter((c) => c.id !== client.id).map((c) => c.lastInputAt)
     );
+    const claimIdleMs = claim === "attach" ? ATTACH_CLAIM_IDLE_MS : RESIZE_CLAIM_IDLE_MS;
     const isActive =
-      client.lastInputAt >= maxInputAt || now() - othersMaxInputAt > RESIZE_CLAIM_IDLE_MS;
+      client.lastInputAt >= maxInputAt || now() - othersMaxInputAt > claimIdleMs;
     if (isActive) {
       this.pty.resize(cols, rows);
       this.activeCols = cols;

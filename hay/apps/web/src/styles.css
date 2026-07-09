@@ -868,10 +868,12 @@ button.primary {
   overflow: hidden;
 }
 
-/* Force canvas to not exceed viewport */
-.terminal-frame .xterm-screen canvas {
-  position: relative !important;
-}
+/* NOTE: never force `position` on .xterm-screen canvas. xterm stacks its
+   renderer canvases absolutely at the screen's top-left; a legacy
+   `position: relative !important` here (inert under the old DOM renderer,
+   which has no canvases) pushed the WebGL canvas into flow — it wrapped
+   below the link-layer canvas and the whole terminal rendered one
+   screen-height down, clipped: a blank terminal on every device. */
 
 /* Status bar — same visual language as the CLI client's bottom bar:
    accent session chip flush-left, dim cwd, semantic state dot at the right. */

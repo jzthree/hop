@@ -69,6 +69,22 @@ const runE2E = async () => {
     await joinRoom(page1, "Alex", room);
     await joinRoom(page2, "Blake", room);
 
+    // Renderer-geometry regression guard: xterm stacks its renderer canvases
+    // absolutely at the screen's top-left. A stray CSS override once forced
+    // them into flow — the WebGL canvas wrapped one screen-height down and
+    // every terminal rendered blank while the buffer stayed correct (so
+    // buffer-level asserts alone missed it). Fail fast if any canvas drifts.
+    const canvasOffsets = await page1.evaluate(() =>
+      [...document.querySelectorAll(".xterm-screen canvas")].map((c) => ({
+        top: c.offsetTop, left: c.offsetLeft, pos: getComputedStyle(c).position
+      }))
+    );
+    for (const c of canvasOffsets) {
+      assert.equal(c.top, 0, `renderer canvas pushed out of view: ${JSON.stringify(canvasOffsets)}`);
+      assert.equal(c.left, 0, `renderer canvas pushed out of view: ${JSON.stringify(canvasOffsets)}`);
+      assert.equal(c.pos, "absolute", `renderer canvas must stay position:absolute: ${JSON.stringify(canvasOffsets)}`);
+    }
+
     await page1.locator(".terminal-frame").click();
     await page1.keyboard.type("echo shared");
     await page1.keyboard.press("Enter");

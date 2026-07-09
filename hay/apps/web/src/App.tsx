@@ -1195,6 +1195,8 @@ const App = () => {
 
     if (import.meta.env.VITE_E2E === "true") {
       (window as any).__hay = {
+        terminal,
+        getWebglAddon: () => webglAddon,
         getBufferText: () => {
           const buffer = terminal.buffer.active;
           let text = "";

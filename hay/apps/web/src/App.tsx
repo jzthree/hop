@@ -1447,6 +1447,41 @@ const App = () => {
       momentumVelocity = 0;
     };
 
+    // Apply accumulated touch-scroll debt at most once per frame. touchmove
+    // fires at the digitizer rate (up to 120Hz), and applying scrollLines
+    // synchronously per event meant several full render passes per display
+    // frame while the main thread also parses streamed output — the source of
+    // scroll jank on phones. rAF-coalescing caps it at one render per frame
+    // without changing scroll distance (the debt accumulator already carries
+    // fractional remainders).
+    let scrollApplyId: number | null = null;
+    const applyScrollDebt = () => {
+      scrollApplyId = null;
+      if (remoteAltScreenRef.current) {
+        // Alt-screen app: drive its own paging keys instead of the (no-op) local
+        // viewport scroll. pages > 0 → scroll down (PageDown); < 0 → up (PageUp).
+        const pagePx = getCellHeight() * ALT_SCREEN_DRAG_LINES_PER_PAGE;
+        const pages = Math.trunc(scrollDebt / pagePx);
+        if (pages !== 0) {
+          const key = pages > 0 ? PAGE_DOWN_KEY : PAGE_UP_KEY;
+          for (let i = 0; i < Math.abs(pages); i++) sendScrollKey(key);
+          scrollDebt -= pages * pagePx;
+        }
+      } else {
+        // Normal screen: scroll the local xterm viewport (whole lines).
+        const lines = Math.trunc(scrollDebt / getCellHeight());
+        if (lines !== 0) {
+          terminal.scrollLines(lines);
+          scrollDebt -= lines * getCellHeight();
+        }
+      }
+    };
+    const scheduleScrollApply = () => {
+      if (scrollApplyId === null) {
+        scrollApplyId = requestAnimationFrame(applyScrollDebt);
+      }
+    };
+
     const applyMomentum = () => {
       if (Math.abs(momentumVelocity) < minMomentumVelocity) {
         momentumId = null;
@@ -1546,25 +1581,7 @@ const App = () => {
       e.preventDefault();
       // Accumulate scroll; deltaY > 0 = finger up = scroll toward newer/bottom.
       scrollDebt += deltaY;
-
-      if (remoteAltScreenRef.current) {
-        // Alt-screen app: drive its own paging keys instead of the (no-op) local
-        // viewport scroll. pages > 0 → scroll down (PageDown); < 0 → up (PageUp).
-        const pagePx = getCellHeight() * ALT_SCREEN_DRAG_LINES_PER_PAGE;
-        const pages = Math.trunc(scrollDebt / pagePx);
-        if (pages !== 0) {
-          const key = pages > 0 ? PAGE_DOWN_KEY : PAGE_UP_KEY;
-          for (let i = 0; i < Math.abs(pages); i++) sendScrollKey(key);
-          scrollDebt -= pages * pagePx;
-        }
-      } else {
-        // Normal screen: scroll the local xterm viewport (whole lines).
-        const lines = Math.trunc(scrollDebt / getCellHeight());
-        if (lines !== 0) {
-          terminal.scrollLines(lines);
-          scrollDebt -= lines * getCellHeight();
-        }
-      }
+      scheduleScrollApply();
 
       lastY = touchY;
       lastMoveTime = now;
@@ -1608,6 +1625,10 @@ const App = () => {
     // Store cleanup handlers
     (terminal as any).__touchCleanup = () => {
       stopMomentum();
+      if (scrollApplyId !== null) {
+        cancelAnimationFrame(scrollApplyId);
+        scrollApplyId = null;
+      }
       container.removeEventListener('touchstart', handleTouchStart, { capture: true });
       container.removeEventListener('touchmove', handleTouchMove, { capture: true });
       container.removeEventListener('touchend', handleTouchEnd, { capture: true });

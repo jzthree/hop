@@ -6277,7 +6277,11 @@ class HopMCPServer {
     // and join with a space after a trailing `&` (`cmd &; ...` is a syntax error).
     const commandBody = command.replace(/[\s;]+$/, '');
     const joiner = /&$/.test(commandBody) ? ' ' : '; ';
-    const wrappedCommand = `${commandBody}${joiner}printf '\\n${rcPrefix}%d\\n' "$?"`;
+    // SGR 8 (conceal) hides the sentinel line on every viewer's screen while
+    // keeping the marker text in the byte stream, where the readable parser
+    // (which strips SGR) still matches it for exit-code extraction. Octal
+    // escapes (\033) because POSIX printf doesn't guarantee \x.
+    const wrappedCommand = `${commandBody}${joiner}printf '\\n\\033[8m${rcPrefix}%d\\033[28m\\n' "$?"`;
 
     // Send the command + Enter
     this.streamManager.noteTerminalInput(terminalId, wrappedCommand);
@@ -6347,7 +6351,10 @@ class HopMCPServer {
         exitCode = parseInt(m[1], 10);
         return false;
       }
-      if (line.includes('__HOPX_RC_')) return false;
+      // One underscore, not two: zsh line-editor redraws can garble the echo
+      // enough to eat a leading underscore, and the echoed command is the only
+      // legitimate carrier of this marker besides the sentinel itself.
+      if (line.includes('_HOPX_RC_')) return false;
       return true;
     });
     while (lines.length > 0 && lines[lines.length - 1].trim() === '') {

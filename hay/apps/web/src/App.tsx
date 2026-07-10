@@ -744,9 +744,19 @@ const App = () => {
       writeToTerminal(echoed);
     }
     sendMessage({ type: "input", data: sanitized });
+    // Fit-on-type exists to reclaim the shared size when the user STARTS
+    // typing (the input above makes this client the election winner) — once
+    // per burst is enough. Running it on every keystroke forced a synchronous
+    // layout (getComputedStyle/getBoundingClientRect) plus a resize message
+    // per key, which on phones stalls the main thread long enough for iOS to
+    // drop touches on the on-screen keyboard at normal typing speed.
     if (AUTO_FIT_ON_TYPE && viewModeRef.current === "fit") {
-      fitToViewport();
-      handleResize();
+      const nowFit = Date.now();
+      if (nowFit - lastTypeFitAtRef.current > 500) {
+        lastTypeFitAtRef.current = nowFit;
+        fitToViewport();
+        handleResize();
+      }
     }
     if (!typingActive.current) {
       typingActive.current = true;
@@ -764,6 +774,11 @@ const App = () => {
   // One-shot: armed when a snapshot loads (fresh session open/switch), consumed
   // by the next resize so it goes out as an attach claim.
   const attachClaimPendingRef = useRef(false);
+  // Throttle gate for fit-on-type (one fit per typing burst, not per key).
+  const lastTypeFitAtRef = useRef(0);
+  // Last size actually sent, to skip redundant resize messages. Reset when a
+  // new connection opens so the server always learns the size once.
+  const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
 
   const handleResize = () => {
     if (!termRef.current) {
@@ -771,10 +786,16 @@ const App = () => {
     }
     const claim = attachClaimPendingRef.current ? ("attach" as const) : undefined;
     attachClaimPendingRef.current = false;
+    const cols = termRef.current.cols;
+    const rows = termRef.current.rows;
+    if (!claim && lastSentSizeRef.current && lastSentSizeRef.current.cols === cols && lastSentSizeRef.current.rows === rows) {
+      return;
+    }
+    lastSentSizeRef.current = { cols, rows };
     sendMessage({
       type: "resize",
-      cols: termRef.current.cols,
-      rows: termRef.current.rows,
+      cols,
+      rows,
       ...(claim ? { claim } : {})
     });
   };
@@ -899,6 +920,7 @@ const App = () => {
       }
       setStatus("connected");
       reconnectAttemptRef.current = 0; // Reset backoff on successful connection
+      lastSentSizeRef.current = null; // fresh connection must learn the size once
       handleResize();
       // Replay keystrokes buffered during the outage: this room only, in
       // order, and only within the age window — stale input is discarded.

@@ -121,6 +121,7 @@ export const MobileKeyboard = ({
 
   // Use refs to avoid stale closures in rapid key presses
   const onInputRef = useRef(onInput);
+  const handleCharKeyRef = useRef<(k: string) => void>(() => {});
   const shiftRef = useRef(shift);
   const capsRef = useRef(caps);
   const ctrlRef = useRef(ctrl);
@@ -233,6 +234,8 @@ export const MobileKeyboard = ({
     },
     [] // No dependencies - we read from refs
   );
+
+  handleCharKeyRef.current = handleCharKey;
 
   const handlePaste = useCallback(async () => {
     try {
@@ -426,6 +429,33 @@ export const MobileKeyboard = ({
   }, [visible, sysKbHintShown]);
 
   // Use refs to avoid stale closures during rapid typing
+  // Container-level character dispatch: every pointerdown in the key area is
+  // hit-tested against the character keys, snapping to the nearest key center
+  // within a thumb's reach when the touch lands on an edge or a gap. This is
+  // how real keyboards avoid dropping keys at speed: dispatch can't be lost
+  // to a button boundary, and each finger of a rolling multi-touch gets its
+  // own pointerdown.
+  const onKeysPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    const direct = (e.target as HTMLElement).closest?.("[data-kb-char]") as HTMLElement | null;
+    let key = direct?.dataset.kbChar ?? null;
+    if (!key) {
+      // Landed on a gap/edge: snap to the nearest character key within 30px.
+      let best: { key: string; d: number } | null = null;
+      for (const el of container.querySelectorAll<HTMLElement>("[data-kb-char]")) {
+        const r = el.getBoundingClientRect();
+        const dx = Math.max(r.left - e.clientX, 0, e.clientX - r.right);
+        const dy = Math.max(r.top - e.clientY, 0, e.clientY - r.bottom);
+        const d = Math.hypot(dx, dy);
+        if (d <= 30 && (!best || d < best.d)) best = { key: el.dataset.kbChar as string, d };
+      }
+      key = best?.key ?? null;
+    }
+    if (key) {
+      handleCharKeyRef.current(key);
+    }
+  }, []);
+
   const handleCharKey = useCallback(
     (char: string) => {
       const ch = shiftRef.current || capsRef.current ? char.toUpperCase() : char;
@@ -592,17 +622,21 @@ export const MobileKeyboard = ({
       );
     }
 
-    // Character key
+    // Character key. Dispatch happens in the container's pointerdown hit-test
+    // (see onKeysPointerDown), NOT here: per-button touchstart missed real
+    // fast typing — rolling multi-touch and slightly-off-center taps land on
+    // key edges or the gaps between keys and dispatched nothing. The button
+    // keeps only the pressed visual.
     const displayChar = shift || caps ? keyStr.toUpperCase() : keyStr;
     return (
       <button
         key={`${keyStr}-${index}`}
         type="button"
         className="kb-key"
+        data-kb-char={keyStr}
         onTouchStart={(e) => {
           e.preventDefault();
           addPressed(e);
-          handleCharKey(keyStr);
         }}
         onTouchEnd={removePressed}
         onTouchCancel={removePressed}
@@ -724,7 +758,7 @@ export const MobileKeyboard = ({
         </div>
 
         {/* Main keyboard rows */}
-        <div className="kb-keys">
+        <div className="kb-keys" onPointerDown={onKeysPointerDown}>
           {LAYOUTS[view].map((row, ri) => {
             const isThirdRow = ri === 2;
             return (

@@ -1198,6 +1198,16 @@ const pushNotice = (message: string, kind: NoticeKind = "info") => {
   scheduleRender();
 };
 
+// Brand context: when a host product (hop) spawns this CLI it sets
+// HAY_BRAND and HAY_REATTACH_CMD so user-facing messages speak the host's
+// language ("[hop] ... Reattach with: hop attach <room>") instead of leaking
+// the internal hay layer. Standalone use keeps the hay defaults.
+const BRAND = process.env.HAY_BRAND || "hay";
+const reattachHint = (room: string) =>
+  process.env.HAY_REATTACH_CMD
+    ? `${process.env.HAY_REATTACH_CMD} ${room}`
+    : `hay -r ${room}`;
+
 const sendMessage = (message: ClientMessage) => {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
@@ -2722,13 +2732,13 @@ const cleanupAndExit = () => {
   process.stdin.pause();
   restoreUi();
   if (exitMessage) {
-    console.log(`[hay] ${exitMessage}`);
+    console.log(`[${BRAND}] ${exitMessage}`);
   } else if (exitCode === DETACH_EXIT_CODE) {
-    console.log(`[hay] Detached — session continues in background. Reattach with: hay -r ${config.room}`);
+    console.log(`[${BRAND}] Detached — session continues in background. Reattach with: ${reattachHint(config.room)}`);
   } else if (exitCode === KILL_EXIT_CODE) {
-    console.log("[hay] Session terminated.");
+    console.log(`[${BRAND}] Session terminated.`);
   } else {
-    console.log("[hay] Disconnected");
+    console.log(`[${BRAND}] Disconnected`);
   }
   process.exit(exitCode);
 };
@@ -2787,7 +2797,7 @@ const handleLocalShortcut = (input: string) => {
     } else {
       // Nothing was killed — don't claim the session ended.
       exitCode = KILL_UNREACHABLE_EXIT_CODE;
-      exitMessage = `Could not reach server — the session may still be running. Reattach with: hay -r ${config.room}`;
+      exitMessage = `Could not reach server — the session may still be running. Reattach with: ${reattachHint(config.room)}`;
       try { ws?.close(); } catch (e) { /* connecting socket */ }
       cleanupAndExit();
     }

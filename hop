@@ -8518,7 +8518,16 @@ async function runHayCliConnect(wsUrl, roomName, shareUrl) {
     return new Promise((resolve) => {
         const cliProc = spawn('node', [hayCli, '-s', wsUrl, '-r', roomName, '-n', 'Local'], {
             stdio: 'inherit',
-            env: { ...process.env, FORCE_COLOR: '1', HAY_SHARE_URL: shareUrl || '' }
+            // Brand context: the hay CLI is hop's terminal client — its
+            // user-facing messages must speak hop ("hop attach <name>"),
+            // never leak the internal hay layer.
+            env: {
+                ...process.env,
+                FORCE_COLOR: '1',
+                HAY_SHARE_URL: shareUrl || '',
+                HAY_BRAND: 'hop',
+                HAY_REATTACH_CMD: 'hop attach'
+            }
         });
 
         cliProc.on('close', (code) => {

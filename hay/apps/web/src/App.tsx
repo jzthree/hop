@@ -1098,6 +1098,12 @@ const App = () => {
       // Shift+wheel multiplier for blasting through very long transcripts.
       scrollSensitivity: 4,
       fastScrollSensitivity: 12,
+      // Sessions are one shared byte stream viewed on different backgrounds:
+      // an agent theme tuned for a dark terminal prints near-white code text,
+      // unreadable on our light theme. Let the renderer nudge foreground
+      // colors to WCAG-AA contrast against the actual background (same
+      // default VS Code ships) instead of rendering white-on-white.
+      minimumContrastRatio: 4.5,
       theme: resolveTerminalTheme(themeMode)
     });
     const fitAddon = new FitAddon();
@@ -2275,8 +2281,10 @@ const App = () => {
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">🐰</span>
           <div>
-            <p className="brand-title">Hay</p>
-            <p className="brand-subtitle">Collaborative terminal sharing for Hop.</p>
+            <p className="brand-title">{isEmbeddedInHop() ? "hop" : "Hay"}</p>
+            <p className="brand-subtitle">
+              {isEmbeddedInHop() ? "terminals for humans and agents." : "Collaborative terminal sharing for Hop."}
+            </p>
           </div>
         </div>
         <div className="presence-strip">

@@ -331,8 +331,15 @@ const App = () => {
   // Deep links are the exception: opening /s/Venus/ names a session — go
   // straight to it instead of parking the visitor on the grid while every
   // other session's preview loads. The grid stays one FAB tap away.
+  // ?home=1 overrides: the daemon redirects mobile roots to the most recent
+  // session with that flag, so the grid is still the first paint on "home"
+  // while the freshest session connects underneath.
   const [switcherOpen, setSwitcherOpen] = useState(
-    () => isMobileDevice() && isEmbeddedInHop() && !window.location.pathname.startsWith("/s/")
+    () =>
+      isMobileDevice() &&
+      isEmbeddedInHop() &&
+      (!window.location.pathname.startsWith("/s/") ||
+        new URLSearchParams(window.location.search).has("home"))
   );
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
     const saved = localStorage.getItem("hay_session_switch_mode");

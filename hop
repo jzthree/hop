@@ -6657,6 +6657,26 @@ function startAuthProxy(authEmitter) {
             return;
         }
         if (!sessionName) {
+            // Mobile home: the hay app's preview grid is the session manager
+            // now. Send phones to the most recently active live session with
+            // ?home=1 — the client opens the switcher over it, so the first
+            // paint is the grid and the freshest session is already connecting
+            // underneath. Desktop keeps sessions.html (folders, workspaces,
+            // bulk management). Falls through when there's nothing live yet.
+            const uaRoot = req.headers['user-agent'] || '';
+            if ((parsedUrl.pathname === '/' || parsedUrl.pathname === '') && /iPad|iPhone|iPod|Android/i.test(uaRoot)) {
+                try {
+                    const snapshotHome = await listAllSessionEntriesRuntimeFirst();
+                    const liveHome = (snapshotHome.entries || [])
+                        .filter((s) => s.live === true && s.type !== 'port' && s.displayName)
+                        .sort((a, b) => (Number(b.lastActivityAt) || 0) - (Number(a.lastActivityAt) || 0));
+                    if (liveHome.length > 0) {
+                        res.writeHead(302, { Location: `/s/${encodeURIComponent(liveHome[0].displayName)}/?home=1` });
+                        res.end();
+                        return;
+                    }
+                } catch (e) { /* fall through to the management page */ }
+            }
             const sessionsFile = path.join(__dirname, 'sessions.html');
             let sessionsHtml = '<!-- sessions.html not found -->';
             try {

@@ -235,8 +235,6 @@ export const MobileKeyboard = ({
     [] // No dependencies - we read from refs
   );
 
-  handleCharKeyRef.current = handleCharKey;
-
   const handlePaste = useCallback(async () => {
     try {
       if (navigator.clipboard && navigator.clipboard.readText) {
@@ -466,6 +464,10 @@ export const MobileKeyboard = ({
     },
     [send] // send is stable (empty deps)
   );
+  // Keep the container dispatcher's ref current. Must sit AFTER the const
+  // declaration above — reading it earlier in the render is a TDZ
+  // ReferenceError that blanked the entire mobile page.
+  handleCharKeyRef.current = handleCharKey;
 
   const renderKey = (keyStr: string, index: number, isThirdRow: boolean) => {
     const isOn = shift || caps;

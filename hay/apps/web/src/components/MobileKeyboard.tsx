@@ -435,8 +435,12 @@ export const MobileKeyboard = ({
   // own pointerdown.
   const onKeysPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
-    const direct = (e.target as HTMLElement).closest?.("[data-kb-char]") as HTMLElement | null;
-    let key = direct?.dataset.kbChar ?? null;
+    const hitKey = (e.target as HTMLElement).closest?.(".kb-key") as HTMLElement | null;
+    // A special key (backspace/shift/return/space/...) owns its touch outright:
+    // snapping those to the nearest character made backspace also type the
+    // adjacent letter. Only character hits and true gap hits dispatch here.
+    if (hitKey && !hitKey.dataset.kbChar) return;
+    let key = hitKey?.dataset.kbChar ?? null;
     if (!key) {
       // Landed on a gap/edge: snap to the nearest character key within 30px.
       let best: { key: string; d: number } | null = null;

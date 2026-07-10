@@ -37,6 +37,12 @@ export const createPty: PtyFactory = ({ cols, rows, cwd, env: envOverrides, shel
         env[key] = value;
       }
     }
+    // Shared PTYs get resized whenever a differently-sized device attaches
+    // (autofit claims), and every resize makes zsh re-emit its end-of-line
+    // mark ("%" + a line of spaces + CR) into history at the OLD width —
+    // rendering as stray reverse-video % at line ends for every later viewer.
+    // Suppress the mark for hop-spawned shells; user env overrides still win.
+    env.PROMPT_EOL_MARK = "";
     if (envOverrides && typeof envOverrides === "object") {
       for (const [key, value] of Object.entries(envOverrides)) {
         if (!key || typeof value !== "string") continue;

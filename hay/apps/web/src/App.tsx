@@ -460,6 +460,9 @@ const App = () => {
   // keystrokes into a shell long after they were typed is worse than losing
   // them (the user has usually retyped by then).
   const pendingInputRef = useRef<Array<{ room: string; data: string; at: number }>>([]);
+  // Presence re-render throttle (see the "presence" message handler).
+  const presenceThrottleRef = useRef<number | null>(null);
+  const presencePendingRef = useRef<PresenceClient[] | null>(null);
   const activeSessionRoomRef = useRef<string | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
@@ -952,7 +955,22 @@ const App = () => {
           setControllerId(message.controllerId);
           break;
         case "presence":
-          setPresence(message.clients);
+          // Presence broadcasts arrive on every peer keystroke (typing
+          // indicator) — re-rendering the whole app tree per remote key is
+          // wasted main-thread time while output streams. Leading update for
+          // immediacy, then at most one trailing update per 300ms window.
+          if (presenceThrottleRef.current === null) {
+            setPresence(message.clients);
+            presenceThrottleRef.current = window.setTimeout(() => {
+              presenceThrottleRef.current = null;
+              if (presencePendingRef.current) {
+                setPresence(presencePendingRef.current);
+                presencePendingRef.current = null;
+              }
+            }, 300);
+          } else {
+            presencePendingRef.current = message.clients;
+          }
           break;
         case "output":
           {

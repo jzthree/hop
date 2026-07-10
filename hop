@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { spawn, execSync, execFileSync } = require('child_process');
+const { spawn, execSync, execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -234,7 +234,7 @@ const HAY_HOST_STATE_FILE = path.join(HOME_DIR, '.hay-host-state');
 // Marker so the authenticator setup QR is only shown on first run (UX only; no auth logic).
 const AUTH_QR_SHOWN_FILE = path.join(HOME_DIR, '.auth_qr_shown');
 const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 5000);
-const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_CACHE_MS', 1500);
+const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_CACHE_MS', 10000);
 const HAY_HOST_HOME_HASH = crypto.createHash('sha256').update(path.resolve(HOME_DIR)).digest('hex').slice(0, 24);
 const HAY_HOST_HOME_FLAG = `--hop-home-hash=${HAY_HOST_HOME_HASH}`;
 let hayHostState = null;
@@ -3115,8 +3115,12 @@ function listAllSessionEntries() {
 }
 
 async function listAllSessionEntriesRuntimeFirst() {
+    const __t0 = Date.now();
     const runtime = await listActiveSessionsRuntimeFirst();
+    const __t1 = Date.now();
     const entries = buildSessionEntries(runtime.sessions, { includeStoredTerminalSessions: true });
+    const __t2 = Date.now();
+    if (__t2 - __t0 > 200) log(`[perf] sessions: runtime=${__t1-__t0}ms build=${__t2-__t1}ms`, YELLOW);
     const activeDisplayNames = (Array.isArray(runtime.sessions) ? runtime.sessions : [])
         .map((entry) => {
             if (!entry || entry.type === 'port') return null;
@@ -4365,6 +4369,15 @@ function readHayHostStateFile() {
 
 function writeHayHostStateFile(state) {
     if (!state) return;
+    // Only invalidate + persist when the host actually changed. This runs on
+    // every session-list request (ensure + fetch both call it); unconditionally
+    // zeroing the discovery cache here forced a full synchronous ps+lsof
+    // rebuild (~500ms, event-loop-blocking) for EACH of the three stages of
+    // every /api/sessions call — the whole reason listing sessions took ~1.6s.
+    const changed = !hayHostState
+        || hayHostState.pid !== state.pid
+        || hayHostState.port !== state.port;
+    if (!changed) return;
     hayHostState = { pid: state.pid, port: state.port, startedAt: state.startedAt || Date.now() };
     hayHostDiscoveryCache = { expiresAt: 0, hosts: [] };
     writePrivateFile(HAY_HOST_STATE_FILE, JSON.stringify(hayHostState));
@@ -4408,10 +4421,78 @@ function parseListeningPortForPid(pid) {
     return null;
 }
 
+// Background refresh for host discovery. The sync builder below runs ps plus
+// one lsof per candidate pid (~1.8s wall, and it BLOCKS the event loop — the
+// daemon can't proxy websockets or serve requests while it runs). With the
+// cache TTL shorter than the rebuild cost, every /api/sessions call paid it.
+// Serve the stale cache immediately and rebuild off the request path instead;
+// host membership only changes when a hay-host starts or stops.
+let hayHostDiscoveryRefreshing = false;
+function refreshHayHostDiscoveryAsync() {
+    if (hayHostDiscoveryRefreshing) return;
+    hayHostDiscoveryRefreshing = true;
+    const hostScript = path.join(__dirname, 'scripts', 'hay-host.js');
+    execFile('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' }, (psErr, psOut) => {
+        if (psErr) { hayHostDiscoveryRefreshing = false; return; }
+        const recorded = hayHostState || readHayHostStateFile();
+        const pids = [];
+        const scopedByPid = new Map();
+        for (const line of String(psOut || '').split(/\r?\n/)) {
+            const match = line.trim().match(/^(\d+)\s+(.+)$/);
+            if (!match) continue;
+            const pid = Number.parseInt(match[1], 10);
+            const command = match[2] || '';
+            if (!Number.isInteger(pid) || pid <= 0 || !command.includes(hostScript)) continue;
+            pids.push(pid);
+            scopedByPid.set(pid, command.includes(HAY_HOST_HOME_FLAG));
+        }
+        if (pids.length === 0) {
+            hayHostDiscoveryCache = { expiresAt: Date.now() + HAY_HOST_DISCOVERY_CACHE_MS, hosts: [] };
+            hayHostDiscoveryRefreshing = false;
+            return;
+        }
+        // One lsof for every candidate pid instead of one per pid.
+        execFile('lsof', ['-nP', '-a', '-p', pids.join(','), '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8' }, (lsofErr, lsofOut) => {
+            const candidates = [];
+            const seen = new Set();
+            if (!lsofErr || lsofOut) {
+                for (const line of String(lsofOut || '').split(/\r?\n/)) {
+                    const cols = line.trim().split(/\s+/);
+                    const pid = Number.parseInt(cols[1], 10);
+                    if (!pids.includes(pid)) continue;
+                    const portMatch = (cols[cols.length - 2] || '').match(/:(\d+)$/) || line.match(/:(\d+)\s+\(LISTEN\)/);
+                    if (!portMatch) continue;
+                    const port = Number.parseInt(portMatch[1], 10);
+                    if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
+                    const key = `${pid}:${port}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    candidates.push({
+                        pid,
+                        port,
+                        startedAt: recorded && recorded.pid === pid && recorded.port === port ? recorded.startedAt : 0,
+                        scoped: scopedByPid.get(pid) === true
+                    });
+                }
+            }
+            if (candidates.length > 0 || !lsofErr) {
+                hayHostDiscoveryCache = { expiresAt: Date.now() + HAY_HOST_DISCOVERY_CACHE_MS, hosts: candidates };
+            }
+            hayHostDiscoveryRefreshing = false;
+        });
+    });
+}
+
 function listDiscoveredHayHostCandidates(force = false) {
     if (!isExternalTerminalBackend()) return [];
     const now = Date.now();
     if (!force && hayHostDiscoveryCache.expiresAt > now) {
+        return hayHostDiscoveryCache.hosts.map((host) => ({ ...host }));
+    }
+    // Stale-while-revalidate: never make a request wait on process discovery
+    // once we have any prior answer.
+    if (!force && hayHostDiscoveryCache.hosts.length > 0) {
+        refreshHayHostDiscoveryAsync();
         return hayHostDiscoveryCache.hosts.map((host) => ({ ...host }));
     }
 
@@ -4705,11 +4786,15 @@ async function inspectExternalHayHosts(force = false) {
     if (!isExternalTerminalBackend()) return [];
     const candidates = listDiscoveredHayHostCandidates(force);
     if (candidates.length === 0) return [];
-    const inspected = await Promise.all(candidates.map(async (host) => ({
-        host,
-        healthy: await probeExternalHayHostFromHost(host),
-        rooms: await fetchExternalHayRuntimeRoomsFromHost(host)
-    })));
+    const inspected = await Promise.all(candidates.map(async (host) => {
+        const __h0 = Date.now();
+        const healthy = await probeExternalHayHostFromHost(host);
+        const __h1 = Date.now();
+        const rooms = await fetchExternalHayRuntimeRoomsFromHost(host);
+        const __h2 = Date.now();
+        if (__h2 - __h0 > 150) log(`[perf] inspect host pid=${host.pid} port=${host.port}: probe=${__h1-__h0}ms rooms=${__h2-__h1}ms`, YELLOW);
+        return { host, healthy, rooms };
+    }));
     return inspected.filter((entry) => entry.healthy === true && Array.isArray(entry.rooms));
 }
 
@@ -5000,8 +5085,12 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
 
 async function reconcileExternalRuntimeSessions() {
     if (!isExternalTerminalBackend()) return { rooms: [], runtimeAvailable: false };
+    const __r0 = Date.now();
     await ensureExternalHayHostReady();
+    const __r1 = Date.now();
     const rooms = await fetchExternalHayRuntimeRooms();
+    const __r2 = Date.now();
+    if (__r2 - __r0 > 200) log(`[perf] reconcile: ensure=${__r1-__r0}ms fetchRooms=${__r2-__r1}ms`, YELLOW);
     if (!Array.isArray(rooms)) {
         return { rooms: [], runtimeAvailable: false };
     }

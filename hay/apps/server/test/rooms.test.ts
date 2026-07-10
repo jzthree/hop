@@ -268,6 +268,25 @@ describe("Room", () => {
     }
   });
 
+  it("bounds the join-time snapshot replay to a tail cut at a line boundary", () => {
+    const manager = new RoomManager(() => new FakePty() as any);
+    // 3MB of history: 30k lines of 100 chars
+    const line = "x".repeat(99) + "\n";
+    const seed = line.repeat(30_000);
+    const room = manager.getRoom("bigbuf", { cols: 80, rows: 24 }, { cwd: "/tmp", seedOutput: seed });
+    const socket = new FakeSocket();
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socket);
+    const snapshot = socket.messages
+      .map((raw: string) => JSON.parse(raw))
+      .find((m: any) => m.type === "snapshot");
+    expect(snapshot).toBeTruthy();
+    // bounded well below the full 3MB, and not starting mid-line
+    expect(snapshot.data.length).toBeLessThanOrEqual(1_500_000);
+    expect(snapshot.data.length).toBeGreaterThan(1_000_000);
+    expect(seed.endsWith(snapshot.data)).toBe(true);
+    expect(snapshot.data.startsWith("x".repeat(99))).toBe(true);
+  });
+
   it("updates presence on disconnect", () => {
     const manager = new RoomManager(() => new FakePty() as any);
     const room = manager.getRoom("charlie", { cols: 80, rows: 24 }, "/tmp");

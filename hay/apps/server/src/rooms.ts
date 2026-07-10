@@ -59,6 +59,28 @@ const MAX_BUFFER_SIZE = (() => {
 })();
 // Keep rooms alive indefinitely; only explicit kill/remove should end a session.
 const CLEANUP_DELAY_MS = 0;
+// Join-time replay bound: the room keeps up to MAX_BUFFER_SIZE of history,
+// but replaying tens of MB through the client's parser on every open/switch
+// is what made sessions feel slow to load (a phone on a tunnel downloads and
+// parses all of it before first paint). Send a bounded tail instead; the cut
+// avoids starting mid-line so a partial escape sequence can't corrupt the
+// replay. Alt-screen apps redraw fully, and mode flags (alternateScreen,
+// cursorHidden, keyboardEnhanced) travel separately, so a tail is safe.
+const SNAPSHOT_REPLAY_BYTES = (() => {
+  const env = Number(process.env.HAY_SNAPSHOT_REPLAY_BYTES);
+  return Number.isFinite(env) && env > 0 ? env : 1_500_000;
+})();
+
+const boundSnapshotReplay = (buffer: string): string => {
+  if (buffer.length <= SNAPSHOT_REPLAY_BYTES) return buffer;
+  let tail = buffer.slice(buffer.length - SNAPSHOT_REPLAY_BYTES);
+  const nl = tail.indexOf("\n");
+  if (nl !== -1 && nl < 8192) {
+    tail = tail.slice(nl + 1);
+  }
+  return tail;
+};
+
 // Autofit-on-attach: a resize may claim the shared size when every OTHER
 // client has been input-idle at least this long. Someone actively typing keeps
 // the size they set; a viewer opening the session after everyone went idle
@@ -282,7 +304,7 @@ export class Room extends EventEmitter {
     if (this.outputBuffer) {
       socket.send(JSON.stringify({
         type: "snapshot",
-        data: this.outputBuffer,
+        data: boundSnapshotReplay(this.outputBuffer),
         alternateScreen: this.alternateScreen,
         cursorHidden: this.cursorHidden,
         keyboardEnhanced: this.keyboardEnhanced

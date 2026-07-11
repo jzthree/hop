@@ -735,6 +735,8 @@ const App = () => {
           pendingInputRef.current.shift();
         }
       }
+      const kbDiagBuf = (window as any).__hopKbDiag;
+      if (kbDiagBuf) kbDiagBuf.buf++;
       const now = Date.now();
       if (now - lastDropToastRef.current > 2000) {
         lastDropToastRef.current = now;
@@ -747,6 +749,8 @@ const App = () => {
       writeToTerminal(echoed);
     }
     sendMessage({ type: "input", data: sanitized });
+    const kbDiag = (window as any).__hopKbDiag;
+    if (kbDiag) kbDiag.sent++;
     // Fit-on-type exists to reclaim the shared size when the user STARTS
     // typing (the input above makes this client the election winner) — once
     // per burst is enough. Running it on every keystroke forced a synchronous

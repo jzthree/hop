@@ -120,6 +120,22 @@ export const MobileKeyboard = ({
   const keyboardRef = useRef<HTMLDivElement>(null);
 
   // Use refs to avoid stale closures in rapid key presses
+  // Input-loss diagnostics (default ON; disable with ?diag=0): counts every
+  // pointerdown in the key area (taps), every key actually dispatched (disp),
+  // and — incremented by App — every input frame sent on the socket (sent) or
+  // buffered while disconnected (buf). A typing burst pinpoints which layer
+  // loses keys: taps==disp==sent means the loss is upstream of the client.
+  const diagEnabled = (() => {
+    try { return new URLSearchParams(window.location.search).get("diag") !== "0"; } catch { return true; }
+  })();
+  const diag = ((window as any).__hopKbDiag = (window as any).__hopKbDiag || { taps: 0, disp: 0, sent: 0, buf: 0 });
+  const [diagView, setDiagView] = useState({ taps: 0, disp: 0, sent: 0, buf: 0 });
+  useEffect(() => {
+    if (!diagEnabled) return;
+    const id = window.setInterval(() => setDiagView({ ...diag }), 300);
+    return () => window.clearInterval(id);
+  }, [diagEnabled]);
+
   const onInputRef = useRef(onInput);
   const handleCharKeyRef = useRef<(k: string) => void>(() => {});
   const shiftRef = useRef(shift);
@@ -225,6 +241,7 @@ export const MobileKeyboard = ({
       }
 
       // Call onInput via ref to always use current callback
+      diag.disp++;
       onInputRef.current(data);
 
       // Clear shift after character input (unless caps lock)
@@ -435,6 +452,7 @@ export const MobileKeyboard = ({
   // own pointerdown.
   const onKeysPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
+    diag.taps++;
     const hitKey = (e.target as HTMLElement).closest?.(".kb-key") as HTMLElement | null;
     // A special key (backspace/shift/return/space/...) owns its touch outright:
     // snapping those to the nearest character made backspace also type the
@@ -763,6 +781,11 @@ export const MobileKeyboard = ({
           })}
         </div>
 
+        {diagEnabled && (
+          <div style={{ position: "absolute", top: -22, left: 8, zIndex: 60, fontFamily: "monospace", fontSize: 12, lineHeight: "18px", color: "#fff", background: "rgba(0,0,0,0.65)", borderRadius: 6, padding: "1px 8px", pointerEvents: "none" }}>
+            taps {diagView.taps} · disp {diagView.disp} · sent {diagView.sent}{diagView.buf ? ` · buf ${diagView.buf}` : ""}
+          </div>
+        )}
         {/* Main keyboard rows */}
         <div className="kb-keys" onPointerDown={onKeysPointerDown}>
           {LAYOUTS[view].map((row, ri) => {

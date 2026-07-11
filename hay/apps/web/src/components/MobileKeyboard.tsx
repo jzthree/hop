@@ -133,7 +133,16 @@ export const MobileKeyboard = ({
   useEffect(() => {
     if (!diagEnabled) return;
     const id = window.setInterval(() => setDiagView({ ...diag }), 300);
-    return () => window.clearInterval(id);
+    // Server-side mirror: post the counters so the daemon log carries them —
+    // the developer can read a typing-burst result without a screenshot.
+    let lastSent = "";
+    const beacon = window.setInterval(() => {
+      const body = JSON.stringify({ ...diag, at: Date.now() });
+      if (body.slice(0, body.lastIndexOf(",")) === lastSent.slice(0, lastSent.lastIndexOf(","))) return;
+      lastSent = body;
+      fetch("/api/diag", { method: "POST", body, keepalive: true }).catch(() => {});
+    }, 4000);
+    return () => { window.clearInterval(id); window.clearInterval(beacon); };
   }, [diagEnabled]);
 
   const onInputRef = useRef(onInput);
@@ -782,7 +791,7 @@ export const MobileKeyboard = ({
         </div>
 
         {diagEnabled && (
-          <div style={{ position: "absolute", top: -22, left: 8, zIndex: 60, fontFamily: "monospace", fontSize: 12, lineHeight: "18px", color: "#fff", background: "rgba(0,0,0,0.65)", borderRadius: 6, padding: "1px 8px", pointerEvents: "none" }}>
+          <div style={{ position: "absolute", top: 2, left: 8, zIndex: 60, fontFamily: "monospace", fontSize: 12, lineHeight: "18px", color: "#fff", background: "rgba(0,0,0,0.65)", borderRadius: 6, padding: "1px 8px", pointerEvents: "none" }}>
             taps {diagView.taps} · disp {diagView.disp} · sent {diagView.sent}{diagView.buf ? ` · buf ${diagView.buf}` : ""}
           </div>
         )}

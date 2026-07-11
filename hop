@@ -5699,6 +5699,20 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: keyboard input-loss diagnostics beacon — the mobile client posts
+        // its tap/dispatch/send counters here so a typing-burst result can be
+        // read from the daemon log without a device screenshot.
+        if (parsedUrl.pathname === '/api/diag' && req.method === 'POST') {
+            let diagBody = '';
+            req.on('data', (chunk) => { diagBody += chunk; if (diagBody.length > 2048) req.destroy(); });
+            req.on('end', () => {
+                log(`[kbdiag] ${String(diagBody).slice(0, 500)}`, CYAN);
+                res.writeHead(204);
+                res.end();
+            });
+            return;
+        }
+
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
             const snapshot = await listAllSessionEntriesRuntimeFirst();

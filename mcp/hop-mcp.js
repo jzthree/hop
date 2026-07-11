@@ -10,6 +10,20 @@ const readline = require('readline');
 const { randomUUID } = require('crypto');
 const { execSync } = require('child_process');
 
+// Agent-session marker: tag the first task of every hop-launched agent so
+// trajectory-memory tools (mybot) can tell orchestrated worker runs from the
+// user's own sessions — the CLIs otherwise log them identically (entrypoint=cli,
+// promptSource=typed, origin={kind:human}). Prepended INLINE (no newline) so it
+// can't split a multi-line task into two submits.
+// Convention: docs/agent-session-convention.md in the mybot repo.
+const AGENT_SESSION_MARKER = '<!-- agent-session: launcher=hop origin=orchestrated -->';
+
+function withAgentSessionMarker(task) {
+  if (typeof task !== 'string' || task.length === 0) return task;
+  if (task.includes('<!-- agent-session:')) return task; // already tagged
+  return `${AGENT_SESSION_MARKER} ${task}`;
+}
+
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2024-11-05'];
 const DEFAULT_PROTOCOL = '2024-11-05';
 const DEFAULT_ACTOR_HEADER = 'x-hop-actor';
@@ -5648,7 +5662,7 @@ class HopMCPServer {
     if (ready && typeof args.initial_task === 'string' && args.initial_task.length > 0) {
       const dispatch = await this.handleHopxAgentTurn({
         terminal_id: terminalId,
-        data: args.initial_task,
+        data: withAgentSessionMarker(args.initial_task),
         async: true
       });
       if (!dispatch.isError && dispatch.content && dispatch.content[0] && typeof dispatch.content[0].text === 'string') {
@@ -6281,7 +6295,7 @@ class HopMCPServer {
     // keeping the marker text in the byte stream, where the readable parser
     // (which strips SGR) still matches it for exit-code extraction. Octal
     // escapes (\033) because POSIX printf doesn't guarantee \x.
-    const wrappedCommand = `${commandBody}${joiner}printf '\\n\\033[8m${rcPrefix}%d\\033[28m\\n' "$?"`;
+    const wrappedCommand = `${commandBody}${joiner}printf '\\n${rcPrefix}%d\\n' "$?"`;
 
     // Send the command + Enter
     this.streamManager.noteTerminalInput(terminalId, wrappedCommand);

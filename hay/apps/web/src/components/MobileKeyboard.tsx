@@ -459,31 +459,49 @@ export const MobileKeyboard = ({
   // how real keyboards avoid dropping keys at speed: dispatch can't be lost
   // to a button boundary, and each finger of a rolling multi-touch gets its
   // own pointerdown.
-  const onKeysPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const container = e.currentTarget;
-    diag.taps++;
-    const hitKey = (e.target as HTMLElement).closest?.(".kb-key") as HTMLElement | null;
-    // A special key (backspace/shift/return/space/...) owns its touch outright:
-    // snapping those to the nearest character made backspace also type the
-    // adjacent letter. Only character hits and true gap hits dispatch here.
-    if (hitKey && !hitKey.dataset.kbChar) return;
+  // Dispatch on native touchstart, one dispatch PER changedTouch: when two
+  // fingers land in the same frame iOS coalesces them into ONE touchstart
+  // carrying BOTH touch points — a per-event (or pointerdown-based) dispatcher
+  // silently loses the second press ("word" -> "wrd" at speed, with the
+  // taps/disp/sent counters all agreeing because the press never became its
+  // own event). Each touch point is hit-tested by coordinates, snapping to
+  // the nearest character key within 30px; special keys own their touches.
+  const dispatchTouchAt = useCallback((container: HTMLElement, x: number, y: number) => {
+    const under = document.elementFromPoint(x, y) as HTMLElement | null;
+    const hitKey = under?.closest?.(".kb-key") as HTMLElement | null;
+    if (hitKey && !hitKey.dataset.kbChar) return; // special key: its own handler
     let key = hitKey?.dataset.kbChar ?? null;
     if (!key) {
-      // Landed on a gap/edge: snap to the nearest character key within 30px.
       let best: { key: string; d: number } | null = null;
       for (const el of container.querySelectorAll<HTMLElement>("[data-kb-char]")) {
         const r = el.getBoundingClientRect();
-        const dx = Math.max(r.left - e.clientX, 0, e.clientX - r.right);
-        const dy = Math.max(r.top - e.clientY, 0, e.clientY - r.bottom);
+        const dx = Math.max(r.left - x, 0, x - r.right);
+        const dy = Math.max(r.top - y, 0, y - r.bottom);
         const d = Math.hypot(dx, dy);
         if (d <= 30 && (!best || d < best.d)) best = { key: el.dataset.kbChar as string, d };
       }
       key = best?.key ?? null;
     }
-    if (key) {
-      handleCharKeyRef.current(key);
-    }
+    if (key) handleCharKeyRef.current(key);
   }, []);
+
+  const onKeysTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      diag.taps++;
+      dispatchTouchAt(container, t.clientX, t.clientY);
+    }
+  }, [dispatchTouchAt]);
+
+  // Fallback for environments that emulate taps as pointer events without
+  // touch events (desktop pointer, some webviews): only fires when the
+  // event has no touch counterpart.
+  const onKeysPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === "touch") return; // handled by touchstart
+    diag.taps++;
+    dispatchTouchAt(e.currentTarget, e.clientX, e.clientY);
+  }, [dispatchTouchAt]);
 
   const handleCharKey = useCallback(
     (char: string) => {
@@ -796,7 +814,7 @@ export const MobileKeyboard = ({
           </div>
         )}
         {/* Main keyboard rows */}
-        <div className="kb-keys" onPointerDown={onKeysPointerDown}>
+        <div className="kb-keys" onTouchStartCapture={onKeysTouchStart} onPointerDown={onKeysPointerDown}>
           {LAYOUTS[view].map((row, ri) => {
             const isThirdRow = ri === 2;
             return (

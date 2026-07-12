@@ -1357,6 +1357,12 @@ button.primary {
 }
 
 .kb-keys {
+  /* No gesture arbitration over the keyboard: without touch-action:none iOS
+     holds/steals rapid touches while deciding whether they're a pinch or
+     scroll — exactly the window where fast typing loses presses. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
   display: flex;
   flex-direction: column;
   gap: var(--kb-row-gap);

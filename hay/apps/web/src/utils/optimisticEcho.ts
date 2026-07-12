@@ -78,16 +78,53 @@ export const createOptimisticEcho = (options: OptimisticEchoOptions = {}): Optim
       return data;
     }
 
-    let matched = 0;
-    const limit = Math.min(pending.length, data.length);
-    while (matched < limit && data[matched] === pending[matched]) {
-      matched += 1;
+    // Consume echoed copies of pending chars wherever they sit in the
+    // chunk's PRINTABLE stream, preserving control sequences verbatim. The
+    // old head-anchored raw prefix match broke on the first escape byte the
+    // shell interleaves under rapid typing (echoes arrive coalesced), then
+    // two strikes cleared pending — after which every server echo rendered
+    // on top of the optimistic one: typing "alal..." fast displayed
+    // "llllllalalal..." (reproduced deterministically in emulation).
+    let out = "";
+    let i = 0;
+    let consumed = 0;
+    let sawForeign = false;
+    while (i < data.length) {
+      const ch = data[i];
+      if (ch === "\u001b") {
+        let j = i + 1;
+        if (data[j] === "[") {
+          j += 1;
+          while (j < data.length) {
+            const code = data.charCodeAt(j);
+            j += 1;
+            if (code >= 0x40 && code <= 0x7e) break;
+          }
+        } else {
+          j += 1;
+        }
+        out += data.slice(i, j);
+        i = j;
+        continue;
+      }
+      if (!sawForeign && consumed < pending.length && isPrintable(ch) && ch === pending[consumed]) {
+        consumed += 1;
+        i += 1;
+        continue;
+      }
+      if (!sawForeign && consumed < pending.length && isPrintable(ch)) {
+        // A printable that isn't the next expected echo: stop consuming so we
+        // never swallow real program output out of order.
+        sawForeign = true;
+      }
+      out += ch;
+      i += 1;
     }
 
-    if (matched > 0) {
-      pending = pending.slice(matched);
+    if (consumed > 0) {
+      pending = pending.slice(consumed);
       mismatchCount = 0;
-      return data.slice(matched);
+      return out;
     }
 
     mismatchCount += 1;

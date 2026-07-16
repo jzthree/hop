@@ -37,3 +37,20 @@ describe("optimistic echo", () => {
     expect(echo.getPending()).toBe("");
   });
 });
+it("passes TUI redraw chunks through untouched and drops pending", () => {
+  const echo = createOptimisticEcho({ now: () => 1000 });
+  echo.onInput("e", true);
+  // Claude-Code-style composer repaint: erase + cursor moves + existing text
+  const redraw = "\u001b[2K\u001b[1A\u001b[G> some earlier text e more\u001b[B";
+  expect(echo.reconcileOutput(redraw)).toBe(redraw);
+  expect(echo.getPending()).toBe("");
+});
+
+it("still reconciles coalesced plain echoes with SGR styling", () => {
+  const echo = createOptimisticEcho({ now: () => 1000 });
+  echo.onInput("a", true);
+  echo.onInput("l", true);
+  expect(echo.reconcileOutput("\u001b[1mal\u001b[0m")).toBe("\u001b[1m\u001b[0m");
+  expect(echo.getPending()).toBe("");
+});
+

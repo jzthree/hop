@@ -78,6 +78,45 @@ export const createOptimisticEcho = (options: OptimisticEchoOptions = {}): Optim
       return data;
     }
 
+    // TUI guard: a chunk carrying cursor-movement/erase/OSC controls is a
+    // REDRAW (Claude Code's composer, editors), not a keystroke echo.
+    // Consuming pending chars out of a redraw deletes the user's typed text
+    // from the repainted screen — "I can't see what I typed" in multi-line
+    // composers. Redraw chunks pass through untouched; the repaint is the
+    // truth, so pending is dropped rather than matched later out of context.
+    {
+      let scan = 0;
+      let complex = false;
+      while (scan < data.length) {
+        const c = data[scan];
+        if (c === "\u001b") {
+          const next = data[scan + 1];
+          if (next === "[") {
+            let j = scan + 2;
+            while (j < data.length) {
+              const code = data.charCodeAt(j);
+              j += 1;
+              if (code >= 0x40 && code <= 0x7e) {
+                // SGR (m) is styling, safe; anything else moves/erases.
+                if (data[j - 1] !== "m") complex = true;
+                break;
+              }
+            }
+            scan = j;
+            continue;
+          }
+          complex = true; // OSC / other escapes: treat as redraw
+          break;
+        }
+        scan += 1;
+      }
+      if (complex) {
+        pending = "";
+        mismatchCount = 0;
+        return data;
+      }
+    }
+
     // Consume echoed copies of pending chars wherever they sit in the
     // chunk's PRINTABLE stream, preserving control sequences verbatim. The
     // old head-anchored raw prefix match broke on the first escape byte the

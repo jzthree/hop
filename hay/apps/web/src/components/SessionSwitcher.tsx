@@ -437,14 +437,29 @@ export const SessionSwitcher = ({
       />
     );
 
+  // Claude Code titles its process with a bare version number — label it.
+  const appLabel = (s: SwitcherSession) => {
+    const app = runningApp(s);
+    if (!app) return "";
+    return /^\d+\.\d+\.\d+$/.test(app) ? "claude" : app;
+  };
+
+  // Home-shortened path, full tail preserved: the workdir IS the identity of a
+  // session, so it gets its own flexible span (left-ellipsized in CSS — the
+  // END of the path is the part that matters).
+  const dirPath = (s: SwitcherSession) => {
+    const p = s.cwd || "";
+    if (!p) return "";
+    return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~").replace(/^\/root(?=\/|$)/, "~");
+  };
+
+  // Compact right-side meta: time first, app demoted to last (least important).
   const meta = (s: SwitcherSession) => {
     const parts: string[] = [];
-    const app = runningApp(s);
-    if (app) parts.push(app);
     const rel = relativeTime(s.lastActivityAt || 0, now);
     if (rel) parts.push(rel);
-    const dir = shortDir(s.cwd);
-    if (dir) parts.push(dir);
+    const app = appLabel(s);
+    if (app) parts.push(app);
     return parts.join(" · ");
   };
 
@@ -500,7 +515,10 @@ export const SessionSwitcher = ({
           </button>
         </div>
         <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>
-        <div className="switcher-card-meta">{meta(s) || " "}</div>
+        <div className="switcher-card-meta">
+          <span className="switcher-card-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : "\u00a0"}</span>
+          <span className="switcher-card-when">{meta(s)}</span>
+        </div>
       </div>
     );
   };
@@ -524,6 +542,7 @@ export const SessionSwitcher = ({
         {dots(s)}
         <span className="switcher-row-name">{s.displayName}</span>
         {s.type === "port" && <span className="switcher-chip port">PORT {s.port}</span>}
+        <span className="switcher-row-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : ""}</span>
         <span className="switcher-row-meta">{meta(s)}</span>
         <button
           type="button"

@@ -28,6 +28,9 @@ type Props = {
   sessions: SwitcherSession[];
   currentRoom: string | null;
   onClose: () => void;
+  // False when the switcher IS the page (hop's landing/hub mode): hides the ✕
+  // and disables Escape/backdrop dismissal — there is nothing behind to close to.
+  dismissable?: boolean;
   onSwitch: (session: SwitcherSession) => void;
   onRefresh: () => void;
   onNotice: (message: string) => void;
@@ -63,6 +66,7 @@ export const SessionSwitcher = ({
   sessions,
   currentRoom,
   onClose,
+  dismissable = true,
   onSwitch,
   onRefresh,
   onNotice,
@@ -87,6 +91,88 @@ export const SessionSwitcher = ({
     [sessions, currentRoom, filter]
   );
 
+  // ── Keyboard-first palette: ⌘K → type to filter → ↑↓ → Enter, no mouse. ──
+  const filterInputRef = useRef<HTMLInputElement>(null);
+  const [kbdIndex, setKbdIndex] = useState(0);
+  const finePointer = typeof window !== "undefined" && !!window.matchMedia?.("(pointer: fine)").matches;
+
+  // Content-aware matches: debounced grep over each session's recent screen
+  // text (daemon-side, over already-retained output — no index, no polling).
+  const [contentMatches, setContentMatches] = useState<Array<{ session: SwitcherSession; snippet: string }>>([]);
+  useEffect(() => {
+    const q = filter.trim();
+    if (!open || q.length < 3) {
+      setContentMatches([]);
+      return;
+    }
+    let cancelled = false;
+    const t = window.setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/sessions/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        if (cancelled) return;
+        const byKey = new Map(sessions.map((s) => [s.internalName || s.name, s]));
+        setContentMatches(
+          (Array.isArray(data?.matches) ? data.matches : [])
+            .map((m: { internalName?: string; name?: string; snippet?: string }) => {
+              const session = byKey.get(m.internalName || "") || byKey.get(m.name || "");
+              return session ? { session, snippet: m.snippet || "" } : null;
+            })
+            .filter(Boolean) as Array<{ session: SwitcherSession; snippet: string }>
+        );
+      } catch {
+        if (!cancelled) setContentMatches([]);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [open, filter, sessions]);
+
+  // Content matches the name filter didn't already surface.
+  const extraContentMatches = useMemo(() => {
+    if (model.mode !== "filter") return [];
+    const seen = new Set(model.rows.map(sessionKey));
+    return contentMatches.filter((m) => !seen.has(sessionKey(m.session)));
+  }, [model, contentMatches]);
+
+  // Flat navigation order = exactly the visual order: heroes, then group rows
+  // (and under a filter: name matches, then on-screen content matches).
+  const flatNav = useMemo<SwitcherSession[]>(
+    () =>
+      model.mode === "filter"
+        ? [...model.rows, ...extraContentMatches.map((m) => m.session)]
+        : [...model.hero, ...model.groups.flatMap((g) => g.rows)],
+    [model, extraContentMatches]
+  );
+  const navIndexByKey = useMemo(() => {
+    const m = new Map<string, number>();
+    flatNav.forEach((s, i) => m.set(sessionKey(s), i));
+    return m;
+  }, [flatNav]);
+
+  // Default selection: the first session that isn't the current one (Enter on
+  // open = jump to most relevant other session); with a filter, the top match.
+  useEffect(() => {
+    if (!open) return;
+    const firstOther = flatNav.findIndex((s) => !(currentRoom !== null && (s.internalName === currentRoom || s.name === currentRoom)));
+    setKbdIndex(filter ? 0 : Math.max(0, firstOther));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, filter]);
+  // Background refreshes may shrink the list — keep the selection in range.
+  useEffect(() => {
+    setKbdIndex((i) => Math.min(i, Math.max(0, flatNav.length - 1)));
+  }, [flatNav.length]);
+
+  // Focus the filter on open (fine-pointer devices only — autofocus on mobile
+  // would pop the system keyboard over the grid).
+  useEffect(() => {
+    if (!open || !finePointer) return;
+    const t = window.setTimeout(() => filterInputRef.current?.focus(), 40);
+    return () => window.clearTimeout(t);
+  }, [open, finePointer]);
+
   // Reset transient state whenever the switcher opens.
   useEffect(() => {
     if (open) {
@@ -110,7 +196,7 @@ export const SessionSwitcher = ({
       if (event.key === "Escape") {
         event.preventDefault();
         if (sheet) setSheet(null);
-        else onClose();
+        else if (dismissable) onClose();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -191,6 +277,43 @@ export const SessionSwitcher = ({
     }
     onSwitch(session);
   };
+
+  // Arrow/Enter navigation + type-anywhere filtering. The action sheet and
+  // the create form own the keyboard while open.
+  useEffect(() => {
+    if (!open) return;
+    const onNavKey = (event: KeyboardEvent) => {
+      if (sheet || creating) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setKbdIndex((i) => {
+          const n = flatNav.length;
+          if (n === 0) return 0;
+          return event.key === "ArrowDown" ? Math.min(i + 1, n - 1) : Math.max(i - 1, 0);
+        });
+        return;
+      }
+      if (event.key === "Enter") {
+        const target = flatNav[kbdIndex];
+        if (target) {
+          event.preventDefault();
+          handleTap(target);
+        }
+        return;
+      }
+      // Type-to-filter from anywhere: stray printables land in the filter box.
+      const inputFocused = document.activeElement === filterInputRef.current;
+      if (!inputFocused && (event.key.length === 1 || event.key === "Backspace")) {
+        event.preventDefault();
+        filterInputRef.current?.focus();
+        setFilter((f) => (event.key === "Backspace" ? f.slice(0, -1) : f + event.key));
+      }
+    };
+    window.addEventListener("keydown", onNavKey);
+    return () => window.removeEventListener("keydown", onNavKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, sheet, creating, flatNav, kbdIndex]);
 
   const openSheet = (session: SwitcherSession) => {
     cancelLongPress();
@@ -344,12 +467,14 @@ export const SessionSwitcher = ({
     const key = sessionKey(s);
     const preview = previewCacheRef.current.get(key);
     const current = isCurrentSession(s);
+    const kbdSelected = navIndexByKey.get(key) === kbdIndex;
     return (
       <div
         key={key}
         role="button"
         tabIndex={0}
-        className={`switcher-card${current ? " current" : ""}`}
+        ref={(el) => { if (kbdSelected && el) el.scrollIntoView({ block: "nearest" }); }}
+        className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}`}
         onClick={() => handleTap(s)}
         onKeyDown={(e) => {
           if (e.key === "Enter") handleTap(s);
@@ -382,12 +507,14 @@ export const SessionSwitcher = ({
 
   const renderRow = (s: SwitcherSession) => {
     const key = sessionKey(s);
+    const kbdSelected = navIndexByKey.get(key) === kbdIndex;
     return (
       <div
         key={key}
         role="button"
         tabIndex={0}
-        className={`switcher-row${isCurrentSession(s) ? " current" : ""}`}
+        ref={(el) => { if (kbdSelected && el) el.scrollIntoView({ block: "nearest" }); }}
+        className={`switcher-row${isCurrentSession(s) ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}`}
         onClick={() => handleTap(s)}
         onKeyDown={(e) => {
           if (e.key === "Enter") handleTap(s);
@@ -418,7 +545,17 @@ export const SessionSwitcher = ({
   const sheetAgentPermitted = sheetSession?.agentPermitted === true;
 
   return (
-    <div className="switcher-overlay" role="dialog" aria-label="Sessions">
+    <div
+      className={`switcher-overlay${dismissable ? "" : " switcher-hub"}`}
+      role="dialog"
+      aria-label="Sessions"
+      onClick={(e) => {
+        // Desktop shows the switcher as a centered panel over a backdrop;
+        // clicking the backdrop (not the panel) dismisses it. On mobile the
+        // panel is full-bleed, so this never fires.
+        if (dismissable && e.target === e.currentTarget) onClose();
+      }}
+    >
       <div className="switcher-top">
         <header className="switcher-header">
           <h2>Sessions</h2>
@@ -445,13 +582,16 @@ export const SessionSwitcher = ({
               </svg>
             </button>
           )}
-          <button type="button" className="switcher-close" aria-label="Close switcher" onClick={onClose}>
-            ✕
-          </button>
+          {dismissable && (
+            <button type="button" className="switcher-close" aria-label="Close switcher" onClick={onClose}>
+              ✕
+            </button>
+          )}
         </header>
-        {(sessions.length > FILTER_THRESHOLD || filter) && (
+        {(finePointer || sessions.length > FILTER_THRESHOLD || filter) && (
           <div className="switcher-filter-row">
             <input
+              ref={filterInputRef}
               className="switcher-filter"
               placeholder="Filter…"
               value={filter}
@@ -463,13 +603,41 @@ export const SessionSwitcher = ({
       </div>
       <div className="switcher-scroll">
         {model.mode === "filter" ? (
-          <div className="switcher-rows">
-            {model.rows.length === 0 ? (
-              <div className="switcher-empty">No sessions match “{filter.trim()}”</div>
-            ) : (
-              model.rows.map(renderRow)
+          <>
+            <div className="switcher-rows">
+              {model.rows.length === 0 && extraContentMatches.length === 0 ? (
+                <div className="switcher-empty">No sessions match “{filter.trim()}”</div>
+              ) : (
+                model.rows.map(renderRow)
+              )}
+            </div>
+            {extraContentMatches.length > 0 && (
+              <section className="switcher-group">
+                <h3 className="switcher-group-label">on screen</h3>
+                <div className="switcher-rows">
+                  {extraContentMatches.map(({ session: s, snippet }) => {
+                    const key = sessionKey(s);
+                    const kbdSelected = navIndexByKey.get(key) === kbdIndex;
+                    return (
+                      <div
+                        key={key}
+                        role="button"
+                        tabIndex={0}
+                        ref={(el) => { if (kbdSelected && el) el.scrollIntoView({ block: "nearest" }); }}
+                        className={`switcher-row${kbdSelected ? " kbd-selected" : ""}`}
+                        onClick={() => handleTap(s)}
+                        onKeyDown={(e) => { if (e.key === "Enter") handleTap(s); }}
+                      >
+                        {dots(s)}
+                        <span className="switcher-row-name">{s.displayName}</span>
+                        <span className="switcher-snippet">{snippet}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
             )}
-          </div>
+          </>
         ) : (
           <>
             <div className="switcher-grid">

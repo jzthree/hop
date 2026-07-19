@@ -161,23 +161,33 @@ body {
   align-items: center;
 }
 
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 11px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 19px;
-}
-
 .brand-title {
   margin: 0;
   font-family: var(--font-mono);
   font-weight: 700;
   font-size: 15px;
   letter-spacing: -0.01em;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The wordmark's cursor block — a terminal caret, gently blinking. */
+.brand-cursor {
+  display: inline-block;
+  width: 0.52em;
+  height: 1.05em;
+  margin-left: 0.22em;
+  background: var(--accent);
+  animation: brand-cursor-blink 2.4s steps(1) infinite;
+}
+
+@keyframes brand-cursor-blink {
+  0%, 62% { opacity: 1; }
+  63%, 100% { opacity: 0.15; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-cursor { animation: none; }
 }
 
 .brand-subtitle {
@@ -371,7 +381,9 @@ button.primary {
 .session {
   flex: 1;
   display: grid;
-  grid-template-columns: 320px 1fr;
+  /* Single column: the terminal owns the page. Settings live in the drawer
+     (mobile model everywhere); sessions live in the ⌘K switcher. */
+  grid-template-columns: 1fr;
   gap: 28px;
   padding: 30px 32px 50px;
   position: relative;
@@ -382,17 +394,54 @@ button.primary {
 }
 
 .drawer-close {
-  display: none;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .drawer-overlay {
-  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 290;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
 }
 
+/* The settings drawer — off-canvas at every width (the mobile model,
+   promoted to desktop). Opened by the topbar gear, the switcher's gear, or
+   the mobile FAB. */
 .controls {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: min(340px, 85vw);
+  background: var(--bg);
+  z-index: 300;
+  padding: 20px;
+  overflow-y: auto;
+  transform: translateX(-100%);
+  transition: transform 0.3s ease;
+  border-right: 1px solid var(--line);
+}
+
+.controls.open {
+  transform: translateX(0);
 }
 
 /* The drawer is a flex column; on mobile it has a fixed viewport height with
@@ -1015,6 +1064,7 @@ button.primary {
   position: relative;
 }
 
+/* Theme-following: vars only, so it renders correctly in light AND dark. */
 .terminal-find {
   position: absolute;
   top: 8px;
@@ -1025,25 +1075,29 @@ button.primary {
   gap: 4px;
   padding: 4px 6px;
   font-family: var(--font-mono);
-  background: rgba(24, 24, 28, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 9px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow);
 }
 
 .terminal-find-input {
   font: inherit;
   font-size: 13px;
-  color: #fafafa;
+  color: var(--ink);
   background: transparent;
   border: none;
   outline: none;
   width: 180px;
 }
 
+.terminal-find-input::placeholder {
+  color: var(--ink-muted);
+}
+
 .terminal-find-count {
   font-size: 12px;
-  color: #c4b5fd;
+  color: var(--accent-2);
   min-width: 36px;
   text-align: right;
 }
@@ -1051,7 +1105,7 @@ button.primary {
 .terminal-find-btn {
   font: inherit;
   font-size: 13px;
-  color: #d4d4d8;
+  color: var(--ink-muted);
   background: transparent;
   border: none;
   border-radius: 4px;
@@ -1060,7 +1114,8 @@ button.primary {
 }
 
 .terminal-find-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--bg-alt);
+  color: var(--ink);
 }
 
 @media (max-width: 960px) {
@@ -2326,4 +2381,303 @@ button.primary {
   color: var(--ink-muted);
   opacity: 0.7;
   text-align: center;
+}
+
+/* ── Desktop presentation for the session switcher ──
+   The mobile-first overlay goes full-bleed; on wide viewports it becomes a
+   centered command-palette-style panel over a dimmed, blurred backdrop. Same
+   component, same behavior — only the frame changes. */
+@media (min-width: 768px) {
+  .switcher-overlay {
+    background: color-mix(in srgb, var(--bg) 45%, transparent);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    align-items: center;
+    padding: 7vh 24px;
+  }
+  .switcher-overlay > .switcher-top {
+    width: min(760px, 100%);
+    border: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    border-radius: 14px 14px 0 0;
+    background: var(--panel);
+  }
+  .switcher-overlay > .switcher-scroll {
+    width: min(760px, 100%);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-top: none;
+    border-radius: 0 0 14px 14px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+    max-height: calc(86vh - 110px);
+  }
+  .switcher-header {
+    padding: 14px 16px 10px;
+  }
+}
+
+.topbar-sessions-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+.topbar-sessions-btn:hover {
+  border-color: var(--accent);
+}
+.topbar-sessions-btn kbd {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--ink-muted);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 5px;
+  background: var(--bg);
+}
+
+.topbar-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.drawer-sessions-btn kbd {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--ink-muted);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 5px;
+  background: var(--bg);
+}
+
+/* ── Hub mode on desktop: the switcher is the LANDING PAGE, not a palette —
+   let it use the viewport. Wider container, taller scroll area, larger
+   preview cards. The compact 760px treatment stays for the in-session ⌘K
+   overlay. ── */
+@media (min-width: 768px) {
+  .switcher-overlay.switcher-hub {
+    padding: 4vh 32px 3vh;
+  }
+  .switcher-overlay.switcher-hub > .switcher-top,
+  .switcher-overlay.switcher-hub > .switcher-scroll {
+    width: min(1280px, 96vw);
+    /* the base tablet rule caps .switcher-scroll at max-width:760px — lift it */
+    max-width: min(1280px, 96vw);
+  }
+  .switcher-overlay.switcher-hub > .switcher-scroll {
+    max-height: none;
+    flex: 1;
+  }
+  .switcher-overlay.switcher-hub .switcher-grid {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 14px;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   DESKTOP WORKSTATION — instrument-panel pass (≥769px).
+   The desktop app reads as the CLI's bigger sibling: flat surfaces, hairline
+   borders, mono-first labels, terminal edge-to-edge between a slim command
+   bar and an IDE statusline. One accent, used surgically. No floating cards,
+   no soft shadows, no marketing chrome. Mobile (≤768px) is untouched.
+   ════════════════════════════════════════════════════════════════════════ */
+@media (min-width: 769px) {
+  /* ── App frame: fixed-viewport tool, nothing scrolls but the content ── */
+  .app {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  /* ── Command bar: 46px, flat, hairline ── */
+  .topbar {
+    padding: 0 14px 0 12px;
+    height: 46px;
+    gap: 14px;
+    background: var(--panel);
+    backdrop-filter: none;
+    flex-shrink: 0;
+  }
+  .brand { gap: 9px; }
+  .brand-title {
+    font-size: 13px;
+    letter-spacing: 0;
+  }
+  .brand-subtitle { display: none; }
+
+  .presence-strip { gap: 6px; max-width: 50%; }
+  .presence-chip {
+    padding: 3px 8px;
+    gap: 6px;
+    font-size: 11px;
+    background: transparent;
+    border-color: transparent;
+    transition: none;
+  }
+  .presence-chip:hover { transform: none; background: var(--bg-alt); }
+  .presence-chip.self { border-color: var(--line); }
+  .presence-dot { width: 7px; height: 7px; }
+  .presence-name { font-size: 11px; }
+  .presence-status { font-size: 9px; }
+  .presence-empty { font-size: 11px; }
+
+  .topbar-actions { gap: 6px; }
+  .topbar-sessions-btn {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 5px 9px;
+    border-radius: 6px;
+    background: transparent;
+  }
+  .topbar-sessions-btn:hover { background: var(--bg-alt); border-color: var(--line); }
+  .topbar-sessions-btn kbd { border-radius: 4px; padding: 0 4px; font-size: 10.5px; }
+
+  /* ── Session page: terminal owns the viewport ── */
+  .session {
+    padding: 0;
+    gap: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .session .terminal {
+    flex: 1;
+    min-height: 0;
+    gap: 0;
+  }
+  .terminal-frame {
+    height: auto;
+    min-height: 0;
+    flex: 1;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    animation: none;
+  }
+  .terminal-scroll { padding: 12px 14px; }
+
+  /* ── Statusline: full-width, flat — the CLI status bar, verbatim ── */
+  .terminal-footer {
+    border: none;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--panel);
+    min-height: 30px;
+    padding: 3px 12px 3px 6px;
+    font-size: 11.5px;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .footer-chip {
+    border-radius: 4px;
+    padding: 2px 9px;
+    font-size: 11px;
+  }
+  .footer-find-toggle { font-size: 11px; }
+
+  /* ── Controls: quieter, denser ── */
+  button { border-radius: 7px; font-size: 12.5px; }
+  .quick-btn { font-size: 12px; }
+
+  /* ── Settings drawer: flat panel ── */
+  .controls { box-shadow: none; }
+  .controls .room-info,
+  .controls .drawer-group {
+    border-radius: 8px;
+    box-shadow: none;
+  }
+
+  /* ── Hub landing: a workspace page, not a floating dialog ── */
+  .switcher-overlay.switcher-hub {
+    padding: 0;
+    background: var(--bg);
+    backdrop-filter: none;
+    top: 46px; /* command bar stays visible above the hub */
+  }
+  .switcher-overlay.switcher-hub > .switcher-top {
+    width: 100%;
+    max-width: none;
+    border: none;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--bg);
+    backdrop-filter: none;
+  }
+  .switcher-overlay.switcher-hub .switcher-header {
+    padding: 12px 22px 8px;
+  }
+  .switcher-overlay.switcher-hub .switcher-header h2 {
+    font-family: var(--font-mono);
+    font-size: 14px;
+  }
+  .switcher-overlay.switcher-hub .switcher-filter-row {
+    padding: 0 22px 12px;
+  }
+  .switcher-overlay.switcher-hub > .switcher-scroll {
+    width: 100%;
+    max-width: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    background:
+      radial-gradient(var(--line) 1px, transparent 1px) 0 0 / 24px 24px,
+      var(--bg);
+    padding: 18px 22px 48px;
+  }
+  .switcher-overlay.switcher-hub .switcher-grid {
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+  }
+  .switcher-hub .switcher-card {
+    border-radius: 8px;
+    box-shadow: none;
+    transition: border-color 0.12s ease, transform 0.12s ease;
+  }
+  .switcher-hub .switcher-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  .switcher-hub .switcher-group-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .switcher-hub .switcher-rows { border-radius: 8px; }
+
+  /* ── In-session ⌘K palette: crisp, not soft ── */
+  .switcher-overlay:not(.switcher-hub) > .switcher-top {
+    border-radius: 10px 10px 0 0;
+  }
+  .switcher-overlay:not(.switcher-hub) > .switcher-scroll {
+    border-radius: 0 0 10px 10px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* Keyboard-palette selection (⌘K → type → ↑↓ → Enter) */
+.switcher-card.kbd-selected,
+.switcher-row.kbd-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+
+/* Content-match snippet in the switcher's "on screen" section */
+.switcher-snippet {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+  text-align: right;
 }

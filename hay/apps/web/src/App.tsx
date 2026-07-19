@@ -175,6 +175,26 @@ type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "
 // kept as constants so the gated code paths stay obvious.
 const LATENCY_COMP = true;
 const AUTO_FIT_ON_TYPE = true;
+
+// Scan a chunk of remote output for enhanced-keyboard protocol toggles: kitty
+// keyboard push/pop (CSI > flags u / CSI < u) and xterm modifyOtherKeys
+// (CSI > 4 ; level m). Returns the NET state after the chunk, so a re-render
+// that pops and re-pushes inside one chunk stays "on". Mirrors the hop CLI.
+const KBD_PROTO_RE = /\x1b\[([<>=])[0-9;:]*u|\x1b\[>([0-9;]*)m/g;
+const scanKeyboardProtocol = (data: string, current: boolean): boolean => {
+  let next = current;
+  KBD_PROTO_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = KBD_PROTO_RE.exec(data)) !== null) {
+    if (m[1] !== undefined) {
+      next = m[1] !== "<"; // kitty: pop disables, push/set enable
+    } else {
+      const parts = (m[2] ?? "").split(";");
+      if (parts[0] === "4") next = (parts[1] ?? "0") !== "0";
+    }
+  }
+  return next;
+};
 type SessionSwitchMode = "page" | "instant";
 const DEFAULT_SESSION_SWITCH_MODE: SessionSwitchMode = "instant";
 const SESSION_LIST_STALE_MS = 5000;
@@ -204,7 +224,9 @@ type SessionInfo = {
 // Check if embedded in Hop
 const getHopSession = () =>
   (window as unknown as { __HOP_SESSION__?: { room?: string; wsUrl?: string; name?: string } }).__HOP_SESSION__;
-const isEmbeddedInHop = () => !!getHopSession()?.room;
+// Any injected config means hop served this page (session pages carry a room;
+// the landing/hub page carries none). Standalone hay has no injection at all.
+const isEmbeddedInHop = () => !!getHopSession();
 
 // Display name resolution: an explicit ?name= wins, then the name the user set
 // on this device, then the login identity hop injects (never the legacy
@@ -334,13 +356,14 @@ const App = () => {
   // ?home=1 overrides: the daemon redirects mobile roots to the most recent
   // session with that flag, so the grid is still the first paint on "home"
   // while the freshest session connects underneath.
-  const [switcherOpen, setSwitcherOpen] = useState(
-    () =>
-      isMobileDevice() &&
-      isEmbeddedInHop() &&
-      (!window.location.pathname.startsWith("/s/") ||
-        new URLSearchParams(window.location.search).has("home"))
-  );
+  const [switcherOpen, setSwitcherOpen] = useState(() => {
+    if (!isEmbeddedInHop()) return false;
+    // ?home=1 = "this is the landing page": the daemon redirects / and
+    // /sessions here so the switcher grid is the first paint on EVERY device,
+    // with the freshest session already connecting underneath.
+    if (new URLSearchParams(window.location.search).has("home")) return true;
+    return isMobileDevice() && !window.location.pathname.startsWith("/s/");
+  });
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
     const saved = localStorage.getItem("hay_session_switch_mode");
     // Keep "page" as a legacy fallback while we validate instant mode end-to-end.
@@ -453,6 +476,12 @@ const App = () => {
   // local viewport scroll is a no-op there — touch scrolling must instead send the
   // app its own scroll keys (PageUp/PageDown). See the mobile touch handler.
   const remoteAltScreenRef = useRef(false);
+  // Whether the remote app has enhanced keyboard reporting on (kitty keyboard
+  // protocol / xterm modifyOtherKeys). xterm.js can't encode modified keys
+  // itself, so when this is set we synthesize the sequences (e.g. Shift+Enter →
+  // CSI 13;2u) that a protocol-aware terminal would send. Tracked from the
+  // output/snapshot stream; the server's snapshot flag seeds reattach.
+  const remoteKbdEnhancedRef = useRef(false);
   const lastDropToastRef = useRef(0);
   // Keystrokes typed while the socket is down are buffered per room and
   // replayed in order on reconnect — a mobile radio blip must not eat input.
@@ -978,6 +1007,7 @@ const App = () => {
           break;
         case "output":
           {
+            remoteKbdEnhancedRef.current = scanKeyboardProtocol(message.data, remoteKbdEnhancedRef.current);
             const reconciled = optimisticEchoRef.current.reconcileOutput(message.data);
             if (reconciled) {
               writeToTerminal(reconciled);
@@ -985,6 +1015,12 @@ const App = () => {
           }
           break;
         case "snapshot":
+          // Fresh connection: recompute from the snapshot. The server's tracked
+          // flag wins when present (the enable may predate the retained buffer);
+          // otherwise scan the replayed buffer itself from a clean slate.
+          remoteKbdEnhancedRef.current = typeof message.keyboardEnhanced === "boolean"
+            ? message.keyboardEnhanced
+            : scanKeyboardProtocol(message.data, false);
           optimisticEchoRef.current.reset();
           userScrolledUpRef.current = false;
           if (termRef.current) {
@@ -1227,6 +1263,19 @@ const App = () => {
 
     // Prevent browser from intercepting common terminal shortcuts
     terminal.attachCustomKeyEventHandler((event) => {
+      // Shift+Enter: xterm.js would emit a plain \r (indistinguishable from
+      // Enter), which apps like Claude Code treat as "submit". When the remote
+      // app has enhanced keyboard reporting on, synthesize the kitty-protocol
+      // encoding (CSI 13;2u) a protocol-aware terminal would send, so
+      // Shift+Enter inserts a newline instead of submitting.
+      if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+          && remoteKbdEnhancedRef.current) {
+        if (event.type === 'keydown') {
+          event.preventDefault();
+          handleUserInput('\x1b[13;2u');
+        }
+        return false;
+      }
       // Cmd/Ctrl+F opens scrollback search instead of the browser's native find
       if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'f') {
         if (event.type === 'keydown') {
@@ -2293,6 +2342,44 @@ const App = () => {
     []
   );
 
+  // Hub mode (landing page with nothing live): keep the session grid fresh
+  // while the switcher is the whole page.
+  useEffect(() => {
+    if (session || !isEmbeddedInHop()) return;
+    fetchSessions({ showLoading: false });
+    // Poll only while visible — a backgrounded hub tab must not keep hitting
+    // the daemon (and through it the host) forever.
+    const id = window.setInterval(() => {
+      if (!document.hidden) fetchSessions({ showLoading: false });
+    }, 5000);
+    const onVisible = () => { if (!document.hidden) fetchSessions({ showLoading: false }); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
+
+  // ⌘K (mac) / Ctrl+Shift+K opens the session switcher — the same experience
+  // as the mobile hub, now first-class on desktop. Capture phase so it wins
+  // over the focused terminal; plain Ctrl+K is left alone (readline kill-line).
+  useEffect(() => {
+    if (!session || !isEmbeddedInHop()) return;
+    const onKey = (event: KeyboardEvent) => {
+      const combo = isMacPlatform
+        ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
+        : event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey;
+      if (combo && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        event.stopPropagation();
+        setSwitcherOpen((value) => !value);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [session]);
+
   const sessionStyle = isMobile
     ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)
     : undefined;
@@ -2301,9 +2388,13 @@ const App = () => {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">🐰</span>
           <div>
-            <p className="brand-title">{isEmbeddedInHop() ? "hop" : "Hay"}</p>
+            {/* Wordmark only — no mascot tile. The cursor block is the one
+                signature detail: terminal-native, quiet, unmistakable. */}
+            <p className="brand-title">
+              {isEmbeddedInHop() ? "hop" : "hay"}
+              <span className="brand-cursor" aria-hidden="true" />
+            </p>
             <p className="brand-subtitle">
               {isEmbeddedInHop() ? "terminals for humans and agents." : "Collaborative terminal sharing for Hop."}
             </p>
@@ -2326,9 +2417,54 @@ const App = () => {
           ))}
           {sortedPresence.length === 0 && <span className="presence-empty">No viewers yet</span>}
         </div>
+        {!isMobile && session && isEmbeddedInHop() && (
+          <div className="topbar-actions">
+            <button
+              type="button"
+              className="topbar-sessions-btn"
+              title={`Sessions (${isMacPlatform ? "⌘K" : "Ctrl+Shift+K"})`}
+              onClick={() => setSwitcherOpen(true)}
+            >
+              Sessions
+              <kbd>{isMacPlatform ? "⌘K" : "⌃⇧K"}</kbd>
+            </button>
+            <button
+              type="button"
+              className="topbar-sessions-btn"
+              aria-label="Session settings"
+              title="Session settings"
+              onClick={() => setDrawerOpen(true)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+          </div>
+        )}
       </header>
 
-      {!session ? (
+      {!session && isEmbeddedInHop() ? (
+        // Hub mode: hop's landing page with nothing to auto-join. The switcher
+        // IS the page (the old server-rendered /sessions picker is gone) —
+        // picking a session navigates into it, and it can't be dismissed into
+        // nothing. Normally the daemon redirects the landing to the freshest
+        // live session with ?home=1, so this renders only when nothing is live.
+        <main className="hub">
+          <SessionSwitcher
+            open
+            sessions={sessions}
+            currentRoom={null}
+            dismissable={false}
+            onClose={() => {}}
+            onSwitch={(next) => {
+              window.location.href = buildSessionPath(next.displayName || next.name);
+            }}
+            onRefresh={() => fetchSessions({ showLoading: false })}
+            onNotice={showToast}
+          />
+          {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
+        </main>
+      ) : !session ? (
         <main className="join">
           <div className="join-card">
             <h1>Terminal session</h1>
@@ -2664,83 +2800,18 @@ const App = () => {
               </div>
             </details>
             {notice && <p className="notice" role="status" aria-live="polite">{notice}</p>}
-            {/* Desktop keeps the inline switch list (the drawer is a persistent
-                sidebar there); on mobile the full-screen switcher is the hub,
-                so an inline copy here would be redundant. */}
-            {!isMobile && (() => {
-              // Compare against the internal room id — the display label can differ
-              const otherSessions = sessions.filter((s) => s.name !== session.room);
-              return (
-                <div className="session-switcher">
-                  <div className="session-switcher-head">
-                    <p className="session-switcher-label">Switch session</p>
-                    {isEmbeddedInHop() && !creatingSession && (
-                      <button
-                        type="button"
-                        className="quick-btn"
-                        onClick={() => {
-                          setNewSessionName("");
-                          setCreatingSession(true);
-                        }}
-                      >
-                        + New
-                      </button>
-                    )}
-                  </div>
-                  {creatingSession && (
-                    <form className="inline-edit" onSubmit={submitNewSession}>
-                      <input
-                        placeholder="session-name"
-                        value={newSessionName}
-                        onChange={(event) => setNewSessionName(event.target.value)}
-                        maxLength={64}
-                        autoFocus
-                        aria-label="New session name"
-                      />
-                      <button type="submit">Create</button>
-                      <button type="button" onClick={() => setCreatingSession(false)}>✕</button>
-                    </form>
-                  )}
-                  {loadingSessions ? (
-                    <div className="session-list-loading">Loading...</div>
-                  ) : sessionsError ? (
-                    <div className="session-list-error">
-                      <span>Couldn't load sessions</span>
-                      <button type="button" onClick={() => fetchSessions()}>Retry</button>
-                    </div>
-                  ) : otherSessions.length === 0 ? (
-                    <div className="session-list-empty">No other sessions</div>
-                  ) : (
-                    <div className="session-list">
-                      {otherSessions.map((s) => (
-                        <button
-                          key={s.name}
-                          type="button"
-                          className={`session-list-item${s.active ? " active" : ""}${s.starting ? " starting" : ""}`}
-                          onClick={() => switchSession(s)}
-                        >
-                          <span className="session-list-name-group">
-                            <span className="session-list-name">
-                              {(s.bellUnseen || s.unread) && (
-                                <span
-                                  className={`attention-dot ${s.bellUnseen ? "bell" : "output"}`}
-                                  title={s.bellUnseen ? "Bell rung since last viewed" : "New output since last viewed"}
-                                />
-                              )}
-                              {s.displayName}
-                            </span>
-                            {s.cwd && <span className="session-list-cwd">{shortenPath(s.cwd)}</span>}
-                          </span>
-                          {s.active && <span className="session-badge live">LIVE</span>}
-                          {s.starting && !s.active && <span className="session-badge starting">STARTING</span>}
-                          {s.type === "port" && <span className="session-badge port">PORT {s.port}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
+            {/* Session switching lives in the ⌘K switcher on every device now —
+                the drawer is settings-only. */}
+            <button
+              type="button"
+              className="quick-btn drawer-sessions-btn"
+              onClick={() => {
+                setDrawerOpen(false);
+                setSwitcherOpen(true);
+              }}
+            >
+              Sessions{!isMobile && <kbd style={{ marginLeft: 8 }}>{isMacPlatform ? "⌘K" : "⌃⇧K"}</kbd>}
+            </button>
             <p className="build-stamp">build {__BUILD_STAMP__}</p>
           </section>
           <section className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>

@@ -18,7 +18,7 @@ interface MobileKeyboardProps {
   onPasteFailed?: () => void;
 }
 
-type KeyboardView = "abc" | "num";
+type KeyboardView = "abc" | "num" | "sym";
 
 interface KeyDef {
   label: string;
@@ -40,7 +40,15 @@ const LAYOUTS: Record<KeyboardView, string[][]> = {
   num: [
     ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
     ["-", "/", ":", ";", "(", ")", "$", "&", "@", '"'],
-    ["SHIFT", ".", ",", "?", "!", "'", "BKSP"],
+    ["#+=", ".", ",", "?", "!", "'", "BKSP"],
+    ["ABC", "PASTE", "SPACE", "RET"]
+  ],
+  // Terminal-first symbols page (iOS's #+= slot): backslash, pipe, backtick,
+  // tilde, braces — the characters shells live on that iOS buries or omits.
+  sym: [
+    ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="],
+    ["_", "\\", "|", "~", "<", ">", "`"],
+    ["123", ".", ",", "?", "!", "'", "BKSP"],
     ["ABC", "PASTE", "SPACE", "RET"]
   ]
 };
@@ -636,7 +644,7 @@ export const MobileKeyboard = ({
         <button
           key={keyStr}
           type="button"
-          className="kb-key kb-act kb-bottom"
+          className={`kb-key kb-act${isThirdRow ? "" : " kb-bottom"}`}
           style={{ flexGrow: 1.25 }}
           onTouchStart={(e) => {
             e.preventDefault();
@@ -648,6 +656,28 @@ export const MobileKeyboard = ({
           onClick={hapticTap}
         >
           123
+        </button>
+      );
+    }
+
+    // Symbols page toggle — sits in the num view's SHIFT slot, like iOS.
+    if (keyStr === "#+=") {
+      return (
+        <button
+          key={keyStr}
+          type="button"
+          className="kb-key kb-act"
+          style={{ flexGrow: 1.25 }}
+          onTouchStart={(e) => {
+            e.preventDefault();
+            addPressed(e);
+            setView("sym");
+          }}
+          onTouchEnd={removePressed}
+          onTouchCancel={removePressed}
+          onClick={hapticTap}
+        >
+          #+=
         </button>
       );
     }
@@ -825,8 +855,8 @@ export const MobileKeyboard = ({
                 {row.map((keyStr, ki) => {
                   const elements = [];
 
-                  // Add gap after SHIFT in third row
-                  if (keyStr === "SHIFT" && isThirdRow) {
+                  // Add gap after the mode key (SHIFT / #+= / 123) in third row
+                  if ((keyStr === "SHIFT" || keyStr === "#+=" || keyStr === "123") && isThirdRow) {
                     elements.push(renderKey(keyStr, ki, isThirdRow));
                     elements.push(<div key="gap-after-shift" className="kb-gap" />);
                     return elements;

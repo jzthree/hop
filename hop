@@ -5516,6 +5516,82 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+// ---- Passkey (WebAuthn) login — biometric auth via Touch ID / Face ID ----
+// Passkeys AUGMENT TOTP (which stays as the fallback): a verified assertion
+// mints the same tunnel_session cookie the TOTP path mints. Credentials are
+// per-rpID (per hostname), so a passkey enrolled at the tunnel domain works
+// there and one enrolled at localhost works locally.
+const PASSKEYS_FILE = path.join(HOME_DIR, '.passkeys.json');
+let webauthnLibPromise = null;
+function loadWebauthn() {
+    // The library is ESM-only; hop is CJS — load lazily via dynamic import.
+    if (!webauthnLibPromise) webauthnLibPromise = import('@simplewebauthn/server');
+    return webauthnLibPromise;
+}
+
+function loadPasskeys() {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(PASSKEYS_FILE, 'utf8'));
+        return {
+            userId: typeof parsed?.userId === 'string' ? parsed.userId : null,
+            credentials: Array.isArray(parsed?.credentials) ? parsed.credentials : []
+        };
+    } catch (e) {
+        return { userId: null, credentials: [] };
+    }
+}
+
+function savePasskeys(store) {
+    writePrivateFile(PASSKEYS_FILE, JSON.stringify(store, null, 2));
+}
+
+// Outstanding WebAuthn challenges, single-use with a short TTL.
+const passkeyChallenges = new Map();
+function putPasskeyChallenge(type, rpID, challenge) {
+    const now = Date.now();
+    for (const [k, v] of passkeyChallenges) {
+        if (v.expiresAt < now) passkeyChallenges.delete(k);
+    }
+    const token = crypto.randomBytes(16).toString('hex');
+    passkeyChallenges.set(token, { challenge, type, rpID, expiresAt: now + 120000 });
+    return token;
+}
+
+function takePasskeyChallenge(token, type) {
+    const entry = passkeyChallenges.get(String(token || ''));
+    passkeyChallenges.delete(String(token || ''));
+    if (!entry || entry.type !== type || entry.expiresAt < Date.now()) return null;
+    return entry;
+}
+
+// rpID/origin from the request's own Host: the tunnel domain for remote
+// logins, localhost for local ones. (WebAuthn forbids bare IPs as rpIDs —
+// use http://localhost:<port> rather than 127.0.0.1 for local passkeys.)
+function passkeyRpInfo(req) {
+    const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+    const hostname = hostHeader.replace(/:\d+$/, '') || 'localhost';
+    const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (isLocal ? 'http' : 'https');
+    return { rpID: hostname, origin: `${proto}://${hostHeader}` };
+}
+
+function readRequestJson(req, limit = 262144) {
+    return new Promise((resolve) => {
+        let body = '';
+        let dead = false;
+        req.on('data', (chunk) => {
+            if (dead) return;
+            body += chunk;
+            if (body.length > limit) { dead = true; resolve(null); }
+        });
+        req.on('end', () => {
+            if (dead) return;
+            try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve(null); }
+        });
+        req.on('error', () => resolve(null));
+    });
+}
+
 let lastAuthAt = 0;
 function recordAuth(authEmitter) {
     lastAuthAt = Date.now();
@@ -5549,6 +5625,187 @@ function startAuthProxy(authEmitter) {
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ lastAuthAt }));
+            return;
+        }
+
+        // --- PASSKEYS (WebAuthn) ---
+        if (parsedUrl.pathname.startsWith('/api/passkeys/') && req.method === 'POST') {
+            const respond = (status, payload) => {
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(payload));
+            };
+            const rp = passkeyRpInfo(req);
+            try {
+                // Unauthenticated: obtain a login challenge.
+                if (parsedUrl.pathname === '/api/passkeys/login-options') {
+                    const store = loadPasskeys();
+                    const creds = store.credentials.filter((c) => c.rpID === rp.rpID);
+                    if (creds.length === 0) {
+                        respond(200, { ok: false, error: `No passkeys enrolled for ${rp.rpID}` });
+                        return;
+                    }
+                    const { generateAuthenticationOptions } = await loadWebauthn();
+                    const options = await generateAuthenticationOptions({
+                        rpID: rp.rpID,
+                        userVerification: 'preferred',
+                        allowCredentials: creds.map((c) => ({
+                            id: c.id,
+                            transports: Array.isArray(c.transports) && c.transports.length ? c.transports : undefined
+                        }))
+                    });
+                    respond(200, { ok: true, token: putPasskeyChallenge('login', rp.rpID, options.challenge), options });
+                    return;
+                }
+                // Unauthenticated: verify assertion → mint the session cookie.
+                if (parsedUrl.pathname === '/api/passkeys/login') {
+                    const limit = checkRateLimit(ip);
+                    if (!limit.allowed) {
+                        respond(429, { ok: false, error: `Too many attempts. Try again in ${limit.remaining}s.` });
+                        return;
+                    }
+                    const body = await readRequestJson(req);
+                    const challenge = body ? takePasskeyChallenge(body.token, 'login') : null;
+                    const store = loadPasskeys();
+                    const cred = body?.response?.id
+                        ? store.credentials.find((c) => c.id === body.response.id && c.rpID === rp.rpID)
+                        : null;
+                    if (!challenge || !cred) {
+                        recordFailure(ip);
+                        respond(401, { ok: false, error: 'Passkey not recognized' });
+                        return;
+                    }
+                    const { verifyAuthenticationResponse } = await loadWebauthn();
+                    let verification;
+                    try {
+                        verification = await verifyAuthenticationResponse({
+                            response: body.response,
+                            expectedChallenge: challenge.challenge,
+                            expectedOrigin: rp.origin,
+                            expectedRPID: rp.rpID,
+                            credential: {
+                                id: cred.id,
+                                publicKey: Buffer.from(cred.publicKey, 'base64url'),
+                                counter: Number(cred.counter) || 0,
+                                transports: cred.transports
+                            },
+                            requireUserVerification: false
+                        });
+                    } catch (e) {
+                        verification = null;
+                    }
+                    if (!verification?.verified) {
+                        recordFailure(ip);
+                        respond(401, { ok: false, error: 'Passkey verification failed' });
+                        return;
+                    }
+                    cred.counter = verification.authenticationInfo?.newCounter ?? cred.counter;
+                    cred.lastUsedAt = new Date().toISOString();
+                    savePasskeys(store);
+                    resetFailure(ip);
+                    appendSetCookie(res, [
+                        cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
+                            httpOnly: true,
+                            secure: true,
+                            sameSite: 'lax',
+                            path: '/',
+                            maxAge: 60 * 60 * 24 * 7
+                        })
+                    ]);
+                    recordAuth(authEmitter);
+                    respond(200, { ok: true });
+                    return;
+                }
+                // Everything below requires an authenticated session.
+                if (!isAuthenticated) {
+                    respond(401, { ok: false, error: 'Unauthorized' });
+                    return;
+                }
+                if (parsedUrl.pathname === '/api/passkeys/register-options') {
+                    const store = loadPasskeys();
+                    if (!store.userId) store.userId = crypto.randomBytes(16).toString('base64url');
+                    const { generateRegistrationOptions } = await loadWebauthn();
+                    const options = await generateRegistrationOptions({
+                        rpName: 'hop',
+                        rpID: rp.rpID,
+                        userID: Buffer.from(store.userId, 'base64url'),
+                        userName: 'hop',
+                        userDisplayName: `hop @ ${rp.rpID}`,
+                        attestationType: 'none',
+                        excludeCredentials: store.credentials
+                            .filter((c) => c.rpID === rp.rpID)
+                            .map((c) => ({ id: c.id, transports: c.transports })),
+                        authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' }
+                    });
+                    savePasskeys(store); // persist userId
+                    respond(200, { ok: true, token: putPasskeyChallenge('register', rp.rpID, options.challenge), options });
+                    return;
+                }
+                if (parsedUrl.pathname === '/api/passkeys/register') {
+                    const body = await readRequestJson(req);
+                    const challenge = body ? takePasskeyChallenge(body.token, 'register') : null;
+                    if (!challenge) {
+                        respond(400, { ok: false, error: 'Challenge expired — try again' });
+                        return;
+                    }
+                    const { verifyRegistrationResponse } = await loadWebauthn();
+                    let verification;
+                    try {
+                        verification = await verifyRegistrationResponse({
+                            response: body.response,
+                            expectedChallenge: challenge.challenge,
+                            expectedOrigin: rp.origin,
+                            expectedRPID: rp.rpID,
+                            requireUserVerification: false
+                        });
+                    } catch (e) {
+                        verification = null;
+                    }
+                    const registered = verification?.verified ? verification.registrationInfo?.credential : null;
+                    if (!registered) {
+                        respond(400, { ok: false, error: 'Attestation verification failed' });
+                        return;
+                    }
+                    const store = loadPasskeys();
+                    if (!store.credentials.some((c) => c.id === registered.id)) {
+                        store.credentials.push({
+                            id: registered.id,
+                            publicKey: Buffer.from(registered.publicKey).toString('base64url'),
+                            counter: Number(registered.counter) || 0,
+                            transports: registered.transports || body?.response?.response?.transports || [],
+                            rpID: rp.rpID,
+                            label: String(body?.label || '').slice(0, 60) || `passkey · ${rp.rpID}`,
+                            createdAt: new Date().toISOString()
+                        });
+                        savePasskeys(store);
+                    }
+                    log(`[passkey] enrolled for ${rp.rpID} (${store.credentials.length} total)`, GREEN);
+                    respond(200, { ok: true, count: store.credentials.length });
+                    return;
+                }
+                if (parsedUrl.pathname === '/api/passkeys/list') {
+                    const store = loadPasskeys();
+                    respond(200, {
+                        ok: true,
+                        passkeys: store.credentials.map((c) => ({
+                            id: c.id, rpID: c.rpID, label: c.label, createdAt: c.createdAt, lastUsedAt: c.lastUsedAt || null
+                        }))
+                    });
+                    return;
+                }
+                if (parsedUrl.pathname === '/api/passkeys/delete') {
+                    const body = await readRequestJson(req);
+                    const store = loadPasskeys();
+                    const before = store.credentials.length;
+                    store.credentials = store.credentials.filter((c) => c.id !== String(body?.id || ''));
+                    savePasskeys(store);
+                    respond(200, { ok: true, removed: before - store.credentials.length });
+                    return;
+                }
+                respond(404, { ok: false, error: 'Unknown passkey endpoint' });
+            } catch (e) {
+                log(`[passkey] error: ${e.message}`, RED);
+                respond(500, { ok: false, error: 'Passkey internal error' });
+            }
             return;
         }
 
@@ -5743,11 +6000,78 @@ function startAuthProxy(authEmitter) {
                                 <input type="hidden" name="token" id="fullToken">
                                 <button type="submit">Verify</button>
                             </form>
+                            <div id="passkeyRow" style="display:none; margin-top: 1.2rem;">
+                                <div style="display:flex; align-items:center; gap:10px; margin-bottom:1rem; color:#a1a1aa; font-size:0.8rem;">
+                                    <span style="flex:1; height:1px; background:#e4e4e7;"></span>or<span style="flex:1; height:1px; background:#e4e4e7;"></span>
+                                </div>
+                                <button type="button" id="passkeyBtn" style="background:#7c3aed;">Sign in with Touch&nbsp;ID / passkey</button>
+                                <p id="passkeyErr" style="display:none; color:#cf222e; font-size:0.85rem; margin-top:0.6rem;"></p>
+                            </div>
                         </div>
                         <script>
                             const inputs = document.querySelectorAll('.code-inputs input');
                             const form = document.getElementById('authForm');
                             const hidden = document.getElementById('fullToken');
+
+                            // ---- Passkey (WebAuthn) sign-in ----
+                            const pkRow = document.getElementById('passkeyRow');
+                            const pkBtn = document.getElementById('passkeyBtn');
+                            const pkErr = document.getElementById('passkeyErr');
+                            const b64uToBuf = (s) => Uint8Array.from(
+                                atob(s.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(s.length / 4) * 4, '=')),
+                                (c) => c.charCodeAt(0)
+                            );
+                            const bufToB64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b)))
+                                .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+                            async function passkeyLogin() {
+                                pkErr.style.display = 'none';
+                                try {
+                                    const optRes = await fetch('/api/passkeys/login-options', { method: 'POST' });
+                                    const opt = await optRes.json();
+                                    if (!opt.ok) throw new Error(opt.error || 'No passkeys enrolled');
+                                    const pub = opt.options;
+                                    pub.challenge = b64uToBuf(pub.challenge);
+                                    pub.allowCredentials = (pub.allowCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) }));
+                                    const cred = await navigator.credentials.get({ publicKey: pub });
+                                    const r = cred.response;
+                                    const payload = {
+                                        token: opt.token,
+                                        response: {
+                                            id: cred.id,
+                                            rawId: bufToB64u(cred.rawId),
+                                            type: cred.type,
+                                            authenticatorAttachment: cred.authenticatorAttachment || undefined,
+                                            clientExtensionResults: cred.getClientExtensionResults(),
+                                            response: {
+                                                clientDataJSON: bufToB64u(r.clientDataJSON),
+                                                authenticatorData: bufToB64u(r.authenticatorData),
+                                                signature: bufToB64u(r.signature),
+                                                userHandle: r.userHandle ? bufToB64u(r.userHandle) : undefined
+                                            }
+                                        }
+                                    };
+                                    const vr = await fetch('/api/passkeys/login', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify(payload)
+                                    });
+                                    const out = await vr.json();
+                                    if (!out.ok) throw new Error(out.error || 'Verification failed');
+                                    window.location.reload();
+                                } catch (e) {
+                                    if (e && e.name === 'NotAllowedError') return; // user dismissed the prompt
+                                    pkErr.textContent = e.message || String(e);
+                                    pkErr.style.display = 'block';
+                                }
+                            }
+                            if (window.PublicKeyCredential) {
+                                // Show the button only when passkeys exist for this hostname.
+                                fetch('/api/passkeys/login-options', { method: 'POST' })
+                                    .then((r) => r.json())
+                                    .then((opt) => { if (opt.ok) pkRow.style.display = 'block'; })
+                                    .catch(() => {});
+                                pkBtn.addEventListener('click', passkeyLogin);
+                            }
 
                             inputs.forEach((input, i) => {
                                 input.addEventListener('input', e => {

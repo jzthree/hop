@@ -2342,6 +2342,52 @@ const App = () => {
     []
   );
 
+  // Enroll this device's platform authenticator (Touch ID / Face ID) as a
+  // passkey. Requires the authenticated cookie this page already has; the
+  // credential is bound to the current hostname (rpID).
+  const enrollPasskey = useCallback(async () => {
+    const b64uToBuf = (s: string) =>
+      Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+    const bufToB64u = (b: ArrayBuffer) =>
+      btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    try {
+      const optRes = await fetch("/api/passkeys/register-options", { method: "POST" });
+      const opt = await optRes.json();
+      if (!opt.ok) throw new Error(opt.error || "Could not start enrollment");
+      const pub = opt.options;
+      pub.challenge = b64uToBuf(pub.challenge);
+      pub.user.id = b64uToBuf(pub.user.id);
+      pub.excludeCredentials = (pub.excludeCredentials || []).map((c: { id: string }) => ({ ...c, id: b64uToBuf(c.id) }));
+      const cred = (await navigator.credentials.create({ publicKey: pub })) as PublicKeyCredential;
+      const resp = cred.response as AuthenticatorAttestationResponse;
+      const vr = await fetch("/api/passkeys/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: opt.token,
+          response: {
+            id: cred.id,
+            rawId: bufToB64u(cred.rawId),
+            type: cred.type,
+            authenticatorAttachment: (cred as PublicKeyCredential & { authenticatorAttachment?: string }).authenticatorAttachment || undefined,
+            clientExtensionResults: cred.getClientExtensionResults(),
+            response: {
+              clientDataJSON: bufToB64u(resp.clientDataJSON),
+              attestationObject: bufToB64u(resp.attestationObject),
+              transports: (resp as AuthenticatorAttestationResponse & { getTransports?: () => string[] }).getTransports?.() || []
+            }
+          }
+        })
+      });
+      const out = await vr.json();
+      showToast(out.ok ? "Passkey added — biometric sign-in enabled on this domain" : `Passkey failed: ${out.error || "verification failed"}`, 4000);
+    } catch (e) {
+      if ((e as Error).name === "NotAllowedError") return; // user dismissed the OS prompt
+      showToast(`Passkey: ${(e as Error).message}`, 4000);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Hub mode (landing page with nothing live): keep the session grid fresh
   // while the switcher is the whole page.
   useEffect(() => {
@@ -2765,6 +2811,14 @@ const App = () => {
             <details className="drawer-details">
               <summary>More settings</summary>
               <div className="drawer-group">
+                {isEmbeddedInHop() && typeof window !== "undefined" && "PublicKeyCredential" in window && (
+                  <div className="drawer-row">
+                    <label>Passkey</label>
+                    <button type="button" className="quick-btn" onClick={enrollPasskey}>
+                      Add Touch ID / passkey
+                    </button>
+                  </div>
+                )}
                 <div className="drawer-row">
                   <label>View</label>
                   <div className="view-mode-buttons">

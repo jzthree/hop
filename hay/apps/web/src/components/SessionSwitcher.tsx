@@ -632,7 +632,7 @@ export const SessionSwitcher = ({
             </div>
             {extraContentMatches.length > 0 && (
               <section className="switcher-group">
-                <h3 className="switcher-group-label">on screen</h3>
+                <h3 className="switcher-group-label">found in terminal output</h3>
                 <div className="switcher-rows">
                   {extraContentMatches.map(({ session: s, snippet }) => {
                     const key = sessionKey(s);

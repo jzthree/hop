@@ -502,6 +502,13 @@ const App = () => {
   // Set each render once switchSession exists (defined later); the keyboard
   // layer calls through this ref to avoid declaration-order coupling.
   const switchSessionRef = useRef<((s: SessionInfo) => void) | null>(null);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const drawerOpenRef = useRef(drawerOpen);
+  drawerOpenRef.current = drawerOpen;
+  const shortcutHelpRef = useRef(shortcutHelpOpen);
+  shortcutHelpRef.current = shortcutHelpOpen;
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
   // Bell-notification plumbing: the terminal effect that registers onBell runs
@@ -2226,6 +2233,18 @@ const App = () => {
   // Keep the keyboard layer's ref current (it's defined earlier in the file).
   switchSessionRef.current = switchSession;
 
+  // Keyboard-first focus: whenever every overlay is closed (palette, drawer,
+  // help, find) and a session is up, the terminal gets focus back — switching
+  // sessions or dismissing a panel should never require a click before
+  // typing. Desktop only: focusing on mobile pops the system keyboard.
+  useEffect(() => {
+    if (isMobile || !session) return;
+    if (switcherOpen || drawerOpen || shortcutHelpOpen || searchActive || renamingSession || creatingSession) return;
+    // Post-render: let the closing overlay unmount before taking focus.
+    const t = window.setTimeout(() => termRef.current?.focus(), 30);
+    return () => window.clearTimeout(t);
+  }, [switcherOpen, drawerOpen, shortcutHelpOpen, searchActive, renamingSession, creatingSession, session]);
+
   const handleJoin = (event: FormEvent) => {
     event.preventDefault();
     if (!name.trim() || !room.trim()) {
@@ -2522,13 +2541,6 @@ const App = () => {
   // keys, which the terminal must keep receiving untouched.
   //   ⌘K session palette · ⌘J/⌘⇧J cycle sessions · ⌘, settings ·
   //   ⌘+/−/0 font size · ⌘/ shortcut help · Esc closes drawer/help
-  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
-  const sessionsRef = useRef(sessions);
-  sessionsRef.current = sessions;
-  const drawerOpenRef = useRef(drawerOpen);
-  drawerOpenRef.current = drawerOpen;
-  const shortcutHelpRef = useRef(shortcutHelpOpen);
-  shortcutHelpRef.current = shortcutHelpOpen;
   useEffect(() => {
     if (!session || !isEmbeddedInHop()) return;
     const cycleSession = (dir: 1 | -1) => {

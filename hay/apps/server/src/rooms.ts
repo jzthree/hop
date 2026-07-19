@@ -194,6 +194,11 @@ export class Room extends EventEmitter {
   // or xterm modifyOtherKeys). Tracked like alternateScreen so a reattaching client
   // can restore it on its real terminal (see snapshot below).
   private keyboardEnhanced = false;
+  // Mouse tracking requested by the remote app (any of ?1000/1002/1003) and
+  // whether it asked for SGR encoding (?1006). Snapshotted so a reattaching
+  // client can scroll the app with wheel events instead of Page keys.
+  private mouseReporting = false;
+  private mouseSgr = false;
   private cursorHidden = false;
   private controlSequenceTail = "";
   private oscBuffer = "";
@@ -306,7 +311,9 @@ export class Room extends EventEmitter {
         data: boundSnapshotReplay(this.tailOutput(SNAPSHOT_REPLAY_BYTES)),
         alternateScreen: this.alternateScreen,
         cursorHidden: this.cursorHidden,
-        keyboardEnhanced: this.keyboardEnhanced
+        keyboardEnhanced: this.keyboardEnhanced,
+        mouseReporting: this.mouseReporting,
+        mouseSgr: this.mouseSgr
       } satisfies ServerMessage));
     }
 
@@ -415,6 +422,8 @@ export class Room extends EventEmitter {
     let nextAlternate = this.alternateScreen;
     let nextCursorHidden = this.cursorHidden;
 
+    let nextMouseReporting = this.mouseReporting;
+    let nextMouseSgr = this.mouseSgr;
     while ((match = regex.exec(combined)) !== null) {
       const params = match[1].split(";").filter(Boolean);
       const mode = match[2];
@@ -423,6 +432,12 @@ export class Room extends EventEmitter {
           nextCursorHidden = mode === "l";
         } else if (param === "47" || param === "1047" || param === "1049") {
           nextAlternate = mode === "h";
+        } else if (param === "1000" || param === "1002" || param === "1003") {
+          // Mouse tracking (any flavor) — lets a reattaching client know it can
+          // scroll the app with wheel events instead of coarse Page keys.
+          nextMouseReporting = mode === "h";
+        } else if (param === "1006") {
+          nextMouseSgr = mode === "h";
         }
       }
     }
@@ -442,6 +457,11 @@ export class Room extends EventEmitter {
     }
 
     let stateChanged = false;
+    if (nextMouseReporting !== this.mouseReporting || nextMouseSgr !== this.mouseSgr) {
+      this.mouseReporting = nextMouseReporting;
+      this.mouseSgr = nextMouseSgr;
+      stateChanged = true;
+    }
     if (nextAlternate !== this.alternateScreen) {
       if (DEBUG_STATE) {
         console.log(`[hay] room=${this.id} alternateScreen=${nextAlternate}`);

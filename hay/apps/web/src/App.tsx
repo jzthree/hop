@@ -476,6 +476,11 @@ const App = () => {
   // local viewport scroll is a no-op there — touch scrolling must instead send the
   // app its own scroll keys (PageUp/PageDown). See the mobile touch handler.
   const remoteAltScreenRef = useRef(false);
+  // Mouse tracking requested by the remote app (?1000/1002/1003) + SGR
+  // encoding (?1006). When both are on, touch scrolling drives the app with
+  // per-line SGR wheel events (smooth, momentum-capable) instead of Page keys.
+  const remoteMouseReportingRef = useRef(false);
+  const remoteMouseSgrRef = useRef(false);
   // Whether the remote app has enhanced keyboard reporting on (kitty keyboard
   // protocol / xterm modifyOtherKeys). xterm.js can't encode modified keys
   // itself, so when this is set we synthesize the sequences (e.g. Shift+Enter →
@@ -1021,6 +1026,10 @@ const App = () => {
           remoteKbdEnhancedRef.current = typeof message.keyboardEnhanced === "boolean"
             ? message.keyboardEnhanced
             : scanKeyboardProtocol(message.data, false);
+          // Mouse-mode seed: the enables predate the replay tail (emitted once
+          // at app startup), so the server's tracked flags are the only signal.
+          if (typeof message.mouseReporting === "boolean") remoteMouseReportingRef.current = message.mouseReporting;
+          if (typeof message.mouseSgr === "boolean") remoteMouseSgrRef.current = message.mouseSgr;
           optimisticEchoRef.current.reset();
           userScrolledUpRef.current = false;
           if (termRef.current) {
@@ -1233,10 +1242,13 @@ const App = () => {
     // We only observe (update the ref) and return false so xterm still applies the
     // mode itself (switching buffers). Params can carry sub-params (number[]).
     const ALT_SCREEN_PARAMS = new Set([47, 1047, 1049]);
+    const MOUSE_TRACK_PARAMS = new Set([1000, 1002, 1003]);
     const trackAltScreen = (params: (number | number[])[], enabled: boolean) => {
       for (const p of params) {
         const n = Array.isArray(p) ? p[0] : p;
         if (ALT_SCREEN_PARAMS.has(n)) remoteAltScreenRef.current = enabled;
+        if (MOUSE_TRACK_PARAMS.has(n)) remoteMouseReportingRef.current = enabled;
+        if (n === 1006) remoteMouseSgrRef.current = enabled;
       }
       return false; // let xterm's default handler apply the mode
     };
@@ -1535,6 +1547,20 @@ const App = () => {
     const sendScrollKey = (seq: string) => {
       sendMessage({ type: "input", data: seq });
     };
+    // When the app itself requested SGR mouse tracking (Claude Code does),
+    // scroll it with per-LINE wheel events instead of coarse Page keys —
+    // smooth 1:1 tracking, and safe to drive with momentum.
+    const altWheelAvailable = () =>
+      remoteMouseReportingRef.current && remoteMouseSgrRef.current;
+    const sendWheelLines = (lines: number) => {
+      if (lines === 0) return;
+      const term = termRef.current;
+      const col = Math.max(1, Math.floor((term?.cols || 80) / 2));
+      const row = Math.max(1, Math.floor((term?.rows || 24) / 2));
+      const code = lines > 0 ? 65 : 64; // 65 = wheel down, 64 = wheel up
+      const seq = `\x1b[<${code};${col};${row}M`.repeat(Math.min(Math.abs(lines), 40));
+      sendMessage({ type: "input", data: seq });
+    };
 
     const getTwoFingerCenter = (touches: TouchList) => {
       const x = (touches[0].clientX + touches[1].clientX) / 2;
@@ -1564,14 +1590,24 @@ const App = () => {
     const applyScrollDebt = () => {
       scrollApplyId = null;
       if (remoteAltScreenRef.current) {
-        // Alt-screen app: drive its own paging keys instead of the (no-op) local
-        // viewport scroll. pages > 0 → scroll down (PageDown); < 0 → up (PageUp).
-        const pagePx = getCellHeight() * ALT_SCREEN_DRAG_LINES_PER_PAGE;
-        const pages = Math.trunc(scrollDebt / pagePx);
-        if (pages !== 0) {
-          const key = pages > 0 ? PAGE_DOWN_KEY : PAGE_UP_KEY;
-          for (let i = 0; i < Math.abs(pages); i++) sendScrollKey(key);
-          scrollDebt -= pages * pagePx;
+        if (altWheelAvailable()) {
+          // Wheel-capable app: one wheel event per LINE of finger travel —
+          // smooth 1:1 tracking with a fractional carry, like native scroll.
+          const lines = Math.trunc(scrollDebt / getCellHeight());
+          if (lines !== 0) {
+            sendWheelLines(lines);
+            scrollDebt -= lines * getCellHeight();
+          }
+        } else {
+          // Fallback (pagers without mouse support): coarse paging keys.
+          // pages > 0 → scroll down (PageDown); < 0 → up (PageUp).
+          const pagePx = getCellHeight() * ALT_SCREEN_DRAG_LINES_PER_PAGE;
+          const pages = Math.trunc(scrollDebt / pagePx);
+          if (pages !== 0) {
+            const key = pages > 0 ? PAGE_DOWN_KEY : PAGE_UP_KEY;
+            for (let i = 0; i < Math.abs(pages); i++) sendScrollKey(key);
+            scrollDebt -= pages * pagePx;
+          }
         }
       } else {
         // Normal screen: scroll the local xterm viewport (whole lines).
@@ -1594,13 +1630,11 @@ const App = () => {
         return;
       }
 
-      // Apply momentum as fractional scroll
+      // Apply momentum as fractional scroll through the same debt engine the
+      // finger uses, so alt-screen wheel apps coast exactly like the local
+      // viewport does (applyScrollDebt routes to the right sink).
       scrollDebt += momentumVelocity;
-      const lines = Math.trunc(scrollDebt / getCellHeight());
-      if (lines !== 0) {
-        terminal.scrollLines(lines);
-        scrollDebt -= lines * getCellHeight();
-      }
+      applyScrollDebt();
 
       momentumVelocity *= friction;
       momentumId = requestAnimationFrame(applyMomentum);
@@ -1699,10 +1733,11 @@ const App = () => {
         return;
       }
 
-      // Only apply momentum if we were scrolling vertically. Skip it on the
-      // alternate screen: there's no local viewport to coast, and we don't want a
-      // flick to fire a burst of page keys at the remote app.
-      if (isScrolling && velocitySamples.length > 0 && !remoteAltScreenRef.current) {
+      // Only apply momentum if we were scrolling vertically. On the alternate
+      // screen it's allowed when the app takes wheel events (per-line, cheap);
+      // it stays off for Page-key apps, where a flick would fire a burst of
+      // page jumps.
+      if (isScrolling && velocitySamples.length > 0 && (!remoteAltScreenRef.current || altWheelAvailable())) {
         // Use peak velocity (max absolute value) - users often slow down at end of flick
         // but we want to capture their flick intent, not their stopping motion
         let peakVelocity = 0;

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent } from "react";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -1175,6 +1176,12 @@ const App = () => {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    // Desktop: URLs become real links (handles line-wrapped OAuth monsters).
+    // window.open inside the click handler keeps the popup-blocker happy.
+    terminal.loadAddon(new WebLinksAddon((event, uri) => {
+      event.preventDefault();
+      window.open(uri, "_blank", "noopener");
+    }));
     terminal.open(containerRef.current);
 
     // GPU-accelerated rendering (same renderer VS Code uses). Must load after
@@ -1520,6 +1527,12 @@ const App = () => {
     let lastY = 0;
     let scrollDebt = 0; // Accumulated sub-line scroll distance
     let velocitySamples: number[] = []; // Recent velocities for smoothing
+    // Tap detection (open-URL affordance): a touch that barely moves and ends
+    // quickly is a tap, not a scroll.
+    let tapStartX = 0;
+    let tapStartY = 0;
+    let tapStartAt = 0;
+    let tapMoved = true;
     let lastMoveTime = 0;
     let momentumVelocity = 0;
     let momentumId: number | null = null;
@@ -1671,6 +1684,10 @@ const App = () => {
       scrollDebt = 0;
       velocitySamples = [];
       isScrolling = true;
+      tapStartX = e.touches[0].clientX;
+      tapStartY = e.touches[0].clientY;
+      tapStartAt = Date.now();
+      tapMoved = false;
     };
 
     const handleTouchMove = (e: TouchEvent) => {
@@ -1711,6 +1728,10 @@ const App = () => {
       const deltaY = lastY - touchY; // positive = scroll down (finger up)
       const deltaTime = Math.max(1, now - lastMoveTime);
 
+      if (!tapMoved && (Math.abs(e.touches[0].clientX - tapStartX) > 10 || Math.abs(touchY - tapStartY) > 10)) {
+        tapMoved = true;
+      }
+
       // ALWAYS track velocity (even before direction is locked)
       // This ensures quick flicks have velocity data
       if (deltaTime > 0 && deltaTime < 100) { // Ignore stale samples
@@ -1731,6 +1752,22 @@ const App = () => {
       if (isPanning) {
         isPanning = false;
         return;
+      }
+
+      // Tap (not a scroll): if it landed on a URL, offer to open it.
+      if (!tapMoved && Date.now() - tapStartAt < 400) {
+        tapMoved = true;
+        const term = termRef.current;
+        const screenEl = containerRef.current?.querySelector(".xterm-screen");
+        if (term && screenEl) {
+          const rect = (screenEl as HTMLElement).getBoundingClientRect();
+          const col = Math.floor(((tapStartX - rect.left) / rect.width) * term.cols);
+          const row = Math.floor(((tapStartY - rect.top) / rect.height) * term.rows);
+          if (col >= 0 && col < term.cols && row >= 0 && row < term.rows) {
+            const url = extractUrlAtCell(term.buffer.active.viewportY + row, col);
+            if (url) setLinkPrompt(url);
+          }
+        }
       }
 
       // Only apply momentum if we were scrolling vertically. On the alternate
@@ -2376,6 +2413,39 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
+
+  // Mobile link opening: a tap on a URL offers Open/Copy. (The custom touch
+  // layer disables native pointer events on terminal text, and remote apps
+  // can't open the phone's browser — claude login prints a URL that was
+  // otherwise un-tappable.)
+  const [linkPrompt, setLinkPrompt] = useState<string | null>(null);
+
+  // Reconstruct the URL under a tapped cell. Wrapped rows are joined into the
+  // logical line first — OAuth URLs span many screen rows.
+  const extractUrlAtCell = useCallback((bufferRow: number, col: number): string | null => {
+    const term = termRef.current;
+    if (!term) return null;
+    const buf = term.buffer.active;
+    let start = bufferRow;
+    while (start > 0 && buf.getLine(start)?.isWrapped) start--;
+    let text = "";
+    let offset = -1;
+    for (let r = start; r < buf.length; r++) {
+      const line = buf.getLine(r);
+      if (!line || (r > start && !line.isWrapped)) break;
+      if (r === bufferRow) offset = text.length + Math.min(col, term.cols - 1);
+      text += line.translateToString(false);
+    }
+    if (offset < 0) return null;
+    const urlRe = /https?:\/\/[^\s"'`<>]+/g;
+    let m: RegExpExecArray | null;
+    while ((m = urlRe.exec(text)) !== null) {
+      if (offset >= m.index && offset <= m.index + m[0].length) {
+        return m[0].replace(/[.,;:!?)\]}]+$/, "");
+      }
+    }
+    return null;
+  }, []);
 
   // Enroll this device's platform authenticator (Touch ID / Face ID) as a
   // passkey. Requires the authenticated cookie this page already has; the
@@ -3029,6 +3099,36 @@ const App = () => {
                 : undefined
             }
           />
+          {linkPrompt && (
+            <div className="link-prompt" role="dialog" aria-label="Open link">
+              <span className="link-prompt-url">{linkPrompt}</span>
+              <button
+                type="button"
+                className="link-prompt-open"
+                onClick={() => {
+                  window.open(linkPrompt, "_blank", "noopener");
+                  setLinkPrompt(null);
+                }}
+              >
+                Open
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(linkPrompt);
+                    showToast("Link copied");
+                  } catch {
+                    showToast("Clipboard denied — long-press the URL text instead");
+                  }
+                  setLinkPrompt(null);
+                }}
+              >
+                Copy
+              </button>
+              <button type="button" aria-label="Dismiss" onClick={() => setLinkPrompt(null)}>✕</button>
+            </div>
+          )}
           {isMobile && (
             <MobileKeyboard
               onInput={handleKeyboardInput}

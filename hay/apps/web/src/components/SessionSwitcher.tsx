@@ -75,6 +75,15 @@ export const SessionSwitcher = ({
   onFind
 }: Props) => {
   const [filter, setFilter] = useState("");
+  // Hero-tile size: bigger tiles show more of each terminal preview.
+  const [tileSize, setTileSize] = useState<"s" | "m" | "l">(() => {
+    const saved = localStorage.getItem("hay_tile_size");
+    return saved === "s" || saved === "l" ? saved : "m";
+  });
+  const changeTileSize = (size: "s" | "m" | "l") => {
+    setTileSize(size);
+    localStorage.setItem("hay_tile_size", size);
+  };
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
@@ -565,7 +574,7 @@ export const SessionSwitcher = ({
 
   return (
     <div
-      className={`switcher-overlay${dismissable ? "" : " switcher-hub"}`}
+      className={`switcher-overlay tile-${tileSize}${dismissable ? "" : " switcher-hub"}`}
       role="dialog"
       aria-label="Sessions"
       onClick={(e) => {
@@ -579,6 +588,19 @@ export const SessionSwitcher = ({
         <header className="switcher-header">
           <h2>Sessions</h2>
           <span className="switcher-count">{sessions.length}</span>
+          <div className="switcher-tilesize" role="group" aria-label="Tile size">
+            {(["s", "m", "l"] as const).map((size) => (
+              <button
+                key={size}
+                type="button"
+                className={tileSize === size ? "active" : ""}
+                aria-label={`Tile size ${size.toUpperCase()}`}
+                onClick={() => changeTileSize(size)}
+              >
+                {size.toUpperCase()}
+              </button>
+            ))}
+          </div>
           <span className="switcher-header-spacer" />
           {onToggleKeyboard && (
             <button type="button" className="switcher-action" aria-label="Toggle keyboard" title="Toggle keyboard" onClick={onToggleKeyboard}>

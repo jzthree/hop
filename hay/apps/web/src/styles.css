@@ -2774,3 +2774,58 @@ button.primary {
     max-width: 520px;
   }
 }
+
+/* ── Tile-size control (S/M/L) + presets: bigger tiles show more terminal ── */
+.switcher-tilesize {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 2px;
+}
+
+.switcher-tilesize button {
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-muted);
+}
+
+.switcher-tilesize button.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* S: dense overview */
+.switcher-overlay.tile-s .switcher-grid {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+}
+.switcher-overlay.tile-s .switcher-preview {
+  height: 56px;
+  font-size: 5px;
+}
+
+/* L: mini terminals — read real output from the grid */
+.switcher-overlay.tile-l .switcher-grid {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+.switcher-overlay.tile-l .switcher-preview {
+  height: 200px;
+  font-size: 9.5px;
+}
+
+@media (min-width: 769px) {
+  .switcher-overlay.switcher-hub.tile-s .switcher-grid {
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  }
+  .switcher-overlay.switcher-hub.tile-l .switcher-grid {
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  }
+  .switcher-overlay.switcher-hub.tile-l .switcher-preview {
+    height: 260px;
+    font-size: 10.5px;
+  }
+}

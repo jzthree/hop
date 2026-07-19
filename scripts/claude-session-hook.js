@@ -35,6 +35,10 @@ function recordSession(dir, hopSession, payload) {
     sessionId,
     cwd,
     source: payload.source || null,
+    // Which Claude config this conversation lives in (e.g. a `claude-fable`
+    // wrapper with CLAUDE_CONFIG_DIR=~/.claude_fable). `hop restore` must
+    // replay it, or `claude --resume <id>` looks in the wrong config and fails.
+    configDir: process.env.CLAUDE_CONFIG_DIR || null,
     updatedAt: new Date().toISOString()
   });
   // One file per hop session avoids concurrent-write races between sessions.

@@ -238,6 +238,34 @@ const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_
 const HAY_HOST_HOME_HASH = crypto.createHash('sha256').update(path.resolve(HOME_DIR)).digest('hex').slice(0, 24);
 const HAY_HOST_HOME_FLAG = `--hop-home-hash=${HAY_HOST_HOME_HASH}`;
 let hayHostState = null;
+// Session content search: per-room ANSI-stripped tail, cached briefly so a
+// typing burst in the switcher re-greps without re-fetching from the host.
+const sessionSearchTextCache = new Map();
+// Strip control/escape sequences well enough for text grep. Not a renderer —
+// overwritten rows may linger — but "was this string on/near the screen
+// recently" is exactly the question the filter is asking.
+function stripAnsiForSearch(raw) {
+    return String(raw)
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')      // OSC
+        .replace(/\x1b\[[0-9;:?<=>]*[ -\/]*[@-~]/g, '')          // CSI
+        .replace(/\x1b[PX^_][^\x1b]*\x1b\\/g, '')                // DCS/PM/APC
+        .replace(/\x1b[()][A-Za-z0-9]/g, '')                     // charset
+        .replace(/\x1b[@-~]/g, '')                               // other ESC
+        .replace(/\r/g, '\n')
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        .replace(/\n{3,}/g, '\n\n');
+}
+
+// Watchdog grace: restarting the host kills every live PTY, so a probe miss
+// (host mid-GC / briefly saturated) must never be lethal on its own. Restart
+// only after this many consecutive failed probes spanning at least the window.
+const HAY_HOST_UNRESPONSIVE_PROBES = 3;
+const HAY_HOST_UNRESPONSIVE_WINDOW_MS = 60_000;
+let hayHostProbeFailures = { pid: 0, count: 0, firstAt: 0 };
+// Serialize host spawning across concurrent ensure calls / processes: without
+// this, N racing `hop` invocations that each see "no host" spawn N hosts
+// (observed: four in one second), scattering sessions across orphans.
+const HAY_HOST_SPAWN_LOCK = path.join(HOME_DIR, '.hay-host-spawn.lock');
 
 function parsePositiveIntEnv(name, fallback) {
     const raw = process.env[name];
@@ -3610,13 +3638,49 @@ function listClaudeSessionRecords() {
     return out;
 }
 
-// Drop a session's hook record (+ turn counter) so a deleted session is not
-// resurrected by `hop restore`.
+// Drop a session's hook record (+ turn counter + origin marker) so a deleted
+// session is not resurrected by `hop restore`.
 function removeClaudeSessionRecord(internalName) {
     if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
-    for (const ext of ['.json', '.turn']) {
+    for (const ext of ['.json', '.turn', '.meta']) {
         try { fs.unlinkSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}${ext}`)); } catch (e) { /* best effort */ }
     }
+}
+
+// Durable origin marker written by the daemon at creation time. The
+// SessionStart hook runs inside the session and can't know who created it, so
+// restore reads this to keep agent-created workers out of the default set.
+function writeClaudeSessionMeta(internalName, meta) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
+    try { fs.mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true }); } catch (e) { /* best effort */ }
+    try {
+        fs.writeFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.meta`), JSON.stringify(meta), { mode: 0o600 });
+    } catch (e) { /* best effort */ }
+}
+
+function readClaudeSessionMeta(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    try {
+        return JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.meta`), 'utf8'));
+    } catch (e) {
+        return null;
+    }
+}
+
+// Every persisted session meta ({ internalName, cwd, createdBy }). Together
+// with the hook records these form the crash-surviving restore inventory:
+// records resume claude conversations, metas reopen plain shells in place.
+function listClaudeSessionMetas() {
+    let files = [];
+    try { files = fs.readdirSync(CLAUDE_SESSIONS_DIR).filter((f) => f.endsWith('.meta')); }
+    catch (e) { return []; }
+    const out = [];
+    for (const f of files) {
+        const internalName = f.slice(0, -'.meta'.length);
+        const meta = readClaudeSessionMeta(internalName);
+        if (meta) out.push({ internalName, ...meta });
+    }
+    return out;
 }
 
 // Compute how to relaunch a session: the command to run (if any) and the cwd to
@@ -3626,7 +3690,12 @@ function removeClaudeSessionRecord(internalName) {
 function restorePlanForSession(entry) {
     const rec = readClaudeSessionRecord(entry.internalName);
     if (rec && rec.sessionId) {
-        return { command: `claude --resume ${rec.sessionId}`, cwd: rec.cwd || entry.cwd };
+        // Replay the conversation's config dir: a wrapper like `claude-fable`
+        // (CLAUDE_CONFIG_DIR=~/.claude_fable) stores transcripts there, and a
+        // bare `claude --resume` against the default config can't find them.
+        const configDir = typeof rec.configDir === 'string' && rec.configDir.trim() ? rec.configDir.trim() : null;
+        const prefix = configDir ? `CLAUDE_CONFIG_DIR='${configDir.replace(/'/g, `'\\''`)}' ` : '';
+        return { command: `${prefix}claude --resume ${rec.sessionId}`, cwd: rec.cwd || entry.cwd };
     }
     if (entry.startup && entry.autoStart !== false) {
         return { command: String(entry.startup), cwd: entry.cwd };
@@ -3634,7 +3703,7 @@ function restorePlanForSession(entry) {
     return { command: null, cwd: entry.cwd }; // plain shell — just reopen in its cwd
 }
 
-async function restoreSavedSessions({ dryRun = false } = {}) {
+async function restoreSavedSessions({ dryRun = false, includeAgents = false } = {}) {
     const snapshot = await listAllSessionEntriesRuntimeFirst();
     const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
     const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !live.has(e.internalName));
@@ -3653,12 +3722,38 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
             cwd: rec.cwd,
             cols: 140,
             rows: 40,
-            createdBy: 'user',
+            createdBy: readClaudeSessionMeta(rec.internalName)?.createdBy === 'agent' ? 'agent' : 'user',
             agentPermitted: false,
             folderId: null
         });
     }
-    const planned = candidates.map((e) => {
+    // Third source: session metas. A plain-shell session has no SessionStart-hook
+    // record, so after a HARD crash (no graceful-shutdown buffers) the meta's cwd
+    // is its only trace — reopen a fresh shell there.
+    for (const meta of listClaudeSessionMetas()) {
+        if (live.has(meta.internalName) || known.has(meta.internalName)) continue;
+        if (!meta.cwd || typeof meta.cwd !== 'string') continue;
+        known.add(meta.internalName);
+        candidates.push({
+            internalName: meta.internalName,
+            displayName: getSessionDisplayName(meta.internalName) || toDisplaySessionName(meta.internalName),
+            type: 'terminal',
+            cwd: meta.cwd,
+            cols: 140,
+            rows: 40,
+            createdBy: meta.createdBy === 'agent' ? 'agent' : 'user',
+            agentPermitted: false,
+            folderId: null
+        });
+    }
+    // Agent-created workers are disposable tooling, not the user's own sessions:
+    // they come back only with --agents, so a post-reboot restore doesn't flood
+    // the machine with dozens of resumed fleet/verifier terminals.
+    const isAgentCreated = (e) =>
+        e.createdBy === 'agent' || readClaudeSessionMeta(e.internalName)?.createdBy === 'agent';
+    const skippedAgents = includeAgents ? [] : candidates.filter(isAgentCreated).map((e) => e.displayName || e.internalName);
+    const kept = includeAgents ? candidates : candidates.filter((e) => !isAgentCreated(e));
+    const planned = kept.map((e) => {
         const plan = restorePlanForSession(e);
         return {
         internalName: e.internalName,
@@ -3681,6 +3776,7 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
         return {
             restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay })),
             count: planned.length,
+            skippedAgents,
             dryRun: true
         };
     }
@@ -3717,6 +3813,7 @@ async function restoreSavedSessions({ dryRun = false } = {}) {
     return {
         restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay })),
         count: planned.length,
+        skippedAgents,
         dryRun: false
     };
 }
@@ -4709,6 +4806,7 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
                             };
                         })
                         .filter(Boolean);
+                    try { syncSessionMetaFromRooms(rooms); } catch (e) { /* best effort */ }
                     finish(rooms);
                 } catch (e) {
                     finish(null);
@@ -4722,6 +4820,27 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
         });
         req.end();
     });
+}
+
+// Keep a durable {cwd, createdBy} meta per LIVE session, refreshed on every
+// rooms fetch (write only on change). This is what lets `hop restore` reopen
+// plain-shell sessions (which have no SessionStart-hook record) in their last
+// working directory even after a hard crash, where the graceful-shutdown
+// buffer path never ran. Room-end/delete cleanup removes these with the rest.
+function syncSessionMetaFromRooms(rooms) {
+    for (const room of rooms) {
+        if (!room || typeof room.id !== 'string' || !SESSION_NAME_RE.test(room.id)) continue;
+        const cwd = typeof room.cwd === 'string' ? room.cwd : '';
+        if (!cwd) continue;
+        const existing = readClaudeSessionMeta(room.id);
+        if (existing && existing.cwd === cwd) continue;
+        writeClaudeSessionMeta(room.id, {
+            ...(existing || {}),
+            createdBy: existing?.createdBy === 'agent' ? 'agent' : 'user',
+            cwd,
+            updatedAt: new Date().toISOString()
+        });
+    }
 }
 
 async function probeExternalHayHostFromHost(hostState, timeoutMs = 1200) {
@@ -4860,16 +4979,72 @@ async function ensureExternalHayHostReady() {
     }
 
     if (existing && isProcessAlive(existing.pid)) {
-        const healthy = await probeExternalHayHostFromHost(existing, 1200);
+        // Generous timeout: a host mid-GC or briefly saturated is SLOW, not
+        // dead — and "restarting" it kills every live PTY. Only a host that
+        // stays unresponsive across repeated probes over a real time window
+        // gets restarted; a merely-slow host is returned as-is (degraded but
+        // alive beats dead).
+        const healthy = await probeExternalHayHostFromHost(existing, 5000);
         if (healthy) {
+            if (hayHostProbeFailures.pid === existing.pid && hayHostProbeFailures.count > 0) {
+                log(`[Hay] Host ${existing.pid} responsive again after ${hayHostProbeFailures.count} failed probe(s).`, DIM);
+            }
+            hayHostProbeFailures = { pid: 0, count: 0, firstAt: 0 };
             writeHayHostStateFile(existing);
             return existing;
         }
-        log(`[Hay] Existing host on port ${existing.port} is unresponsive. Restarting it.`, YELLOW);
+        if (hayHostProbeFailures.pid !== existing.pid) {
+            hayHostProbeFailures = { pid: existing.pid, count: 0, firstAt: Date.now() };
+        }
+        hayHostProbeFailures.count += 1;
+        const failingForMs = Date.now() - hayHostProbeFailures.firstAt;
+        if (hayHostProbeFailures.count < HAY_HOST_UNRESPONSIVE_PROBES || failingForMs < HAY_HOST_UNRESPONSIVE_WINDOW_MS) {
+            log(`[Hay] Host ${existing.pid} (port ${existing.port}) slow: probe timed out (${hayHostProbeFailures.count}/${HAY_HOST_UNRESPONSIVE_PROBES} over ${Math.round(failingForMs / 1000)}s). Keeping it alive.`, YELLOW);
+            writeHayHostStateFile(existing);
+            return existing;
+        }
+        log(`[Hay] Host ${existing.pid} (port ${existing.port}) unresponsive for ${Math.round(failingForMs / 1000)}s (${hayHostProbeFailures.count} failed probes). Restarting it.`, YELLOW);
+        hayHostProbeFailures = { pid: 0, count: 0, firstAt: 0 };
         await stopExternalHayHostProcess(existing);
     }
 
     clearHayHostStateFile();
+
+    // Spawn lock: concurrent ensure calls (other hop processes, racing web
+    // requests) must not each spawn a host. Loser waits for the winner's
+    // state file and adopts that host.
+    let spawnLockFd = null;
+    try {
+        spawnLockFd = fs.openSync(HAY_HOST_SPAWN_LOCK, 'wx');
+        fs.writeSync(spawnLockFd, String(process.pid));
+    } catch (e) {
+        let stale = true;
+        try {
+            const holder = Number(fs.readFileSync(HAY_HOST_SPAWN_LOCK, 'utf8'));
+            const age = Date.now() - fs.statSync(HAY_HOST_SPAWN_LOCK).mtimeMs;
+            stale = !(Number.isInteger(holder) && holder > 0 && isProcessAlive(holder) && age < 30_000);
+        } catch (e2) { /* unreadable -> treat as stale */ }
+        if (stale) {
+            try { fs.unlinkSync(HAY_HOST_SPAWN_LOCK); } catch (e2) { }
+        } else {
+            // Someone else is spawning: wait for their host to register.
+            const waitDeadline = Date.now() + HAY_HOST_READY_TIMEOUT_MS + 3000;
+            while (Date.now() < waitDeadline) {
+                await new Promise((resolve) => setTimeout(resolve, 200));
+                const spawned = readHayHostStateFile();
+                if (spawned && isProcessAlive(spawned.pid) && await probeExternalHayHostFromHost(spawned, 1500)) {
+                    hayHostState = spawned;
+                    return spawned;
+                }
+            }
+            // Winner never delivered — fall through and spawn ourselves.
+        }
+        try {
+            spawnLockFd = fs.openSync(HAY_HOST_SPAWN_LOCK, 'wx');
+            fs.writeSync(spawnLockFd, String(process.pid));
+        } catch (e2) { spawnLockFd = null; /* proceed unlocked rather than fail */ }
+    }
+    try {
 
     const hostScript = path.join(__dirname, 'scripts', 'hay-host.js');
     if (!fs.existsSync(hostScript)) {
@@ -4923,6 +5098,13 @@ async function ensureExternalHayHostReady() {
     writeHayHostStateFile(started);
     child.unref();
     return started;
+
+    } finally {
+        if (spawnLockFd !== null) {
+            try { fs.closeSync(spawnLockFd); } catch (e) { }
+            try { fs.unlinkSync(HAY_HOST_SPAWN_LOCK); } catch (e) { }
+        }
+    }
 }
 
 async function callExternalHayHostApi(apiPath, method = 'GET', body = null, timeoutMs = 2000) {
@@ -5713,6 +5895,55 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: Content-aware session search — grep the tail of each live room's
+        // ALREADY-RETAINED output (no index, no background work, no new state
+        // beyond a 3s strip cache). Called debounced from the switcher filter.
+        if (parsedUrl.pathname === '/api/sessions/search' && req.method === 'GET') {
+            const q = String(parsedUrl.query?.q || '').trim().toLowerCase();
+            if (q.length < 2 || q.length > 200) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ matches: [] }));
+                return;
+            }
+            let matches = [];
+            try {
+                const listed = await callExternalHayHostApi('/rooms');
+                const rooms = Array.isArray(listed?.data?.rooms) ? listed.data.rooms : [];
+                const now = Date.now();
+                const lookups = rooms.slice(0, 80).map(async (room) => {
+                    const id = String(room?.id || '');
+                    if (!id || !SESSION_NAME_RE.test(id)) return null;
+                    let entry = sessionSearchTextCache.get(id);
+                    if (!entry || now - entry.at > 3000) {
+                        const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview`);
+                        const raw = typeof prev?.data?.output === 'string' ? prev.data.output : '';
+                        entry = { at: now, text: stripAnsiForSearch(raw) };
+                        sessionSearchTextCache.set(id, entry);
+                        if (sessionSearchTextCache.size > 150) {
+                            // Bounded: drop the oldest entries.
+                            for (const key of [...sessionSearchTextCache.keys()].slice(0, 50)) sessionSearchTextCache.delete(key);
+                        }
+                    }
+                    const hay = entry.text.toLowerCase();
+                    const idx = hay.lastIndexOf(q);
+                    if (idx === -1) return null;
+                    // Grep-style snippet: the line around the LAST occurrence.
+                    const lineStart = entry.text.lastIndexOf('\n', idx) + 1;
+                    const lineEnd = entry.text.indexOf('\n', idx + q.length);
+                    const line = entry.text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
+                    return {
+                        internalName: id,
+                        name: getSessionDisplayName(id) || id,
+                        snippet: line.length > 140 ? `…${line.slice(Math.max(0, idx - lineStart - 40), idx - lineStart + 100)}…` : line
+                    };
+                });
+                matches = (await Promise.all(lookups)).filter(Boolean);
+            } catch (e) { /* host unreachable — return what we have */ }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ matches }));
+            return;
+        }
+
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
             const snapshot = await listAllSessionEntriesRuntimeFirst();
@@ -6089,7 +6320,10 @@ function startAuthProxy(authEmitter) {
             req.on('end', async () => {
                 try {
                     const parsed = body ? JSON.parse(body) : {};
-                    const result = await restoreSavedSessions({ dryRun: parsed.dryRun === true });
+                    const result = await restoreSavedSessions({
+                        dryRun: parsed.dryRun === true,
+                        includeAgents: parsed.includeAgents === true
+                    });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(result));
                 } catch (e) {
@@ -6205,8 +6439,11 @@ function startAuthProxy(authEmitter) {
                         deleteSessionConfig(resolved);
                     } else {
                         // Runtime-only sessions skip deleteSessionConfig, so drop
-                        // their rename aliases here to avoid stale resurrection.
+                        // their rename aliases here to avoid stale resurrection...
                         pruneSessionAliasesForSession(resolved, config?.displayName);
+                        // ...and their SessionStart-hook record, or `hop restore`
+                        // resurrects a session the user explicitly deleted.
+                        removeClaudeSessionRecord(resolved);
                     }
 
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -6331,6 +6568,12 @@ function startAuthProxy(authEmitter) {
                         folderId,
                         workspaceName: targetWorkspaceName || null
                     });
+                    // Durable origin marker so `hop restore` (which may run after a
+                    // reboot, long after runtime metadata is gone) can keep
+                    // agent-created workers out of the default restore set.
+                    if (actor === 'agent') {
+                        writeClaudeSessionMeta(internalName, { createdBy: 'agent', createdAt: new Date().toISOString() });
+                    }
 
                     const entry = await attachTerminalApiClient(internalName, displayName, {
                         actor,
@@ -6595,8 +6838,11 @@ function startAuthProxy(authEmitter) {
                     deleteSessionConfig(entry.sessionName);
                 } else {
                     // Runtime-only sessions skip deleteSessionConfig, so drop
-                    // their rename aliases here to avoid stale resurrection.
+                    // their rename aliases here to avoid stale resurrection...
                     pruneSessionAliasesForSession(entry.sessionName, config?.displayName);
+                    // ...and their SessionStart-hook record: an explicitly killed
+                    // session must not come back via `hop restore`.
+                    removeClaudeSessionRecord(entry.sessionName);
                 }
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -6748,47 +6994,61 @@ function startAuthProxy(authEmitter) {
 
         // If no session selected, show session picker
         if (parsedUrl.pathname === '/sessions') {
-            const sessionsFile = path.join(__dirname, 'sessions.html');
-            let sessionsHtml = '<!-- sessions.html not found -->';
-            try {
-                sessionsHtml = fs.readFileSync(sessionsFile, 'utf8');
-            } catch (e) {
-                log(`Warning: sessions.html not found`, YELLOW);
-            }
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(sessionsHtml);
+            // The server-rendered picker is gone; the hay app's switcher IS the
+            // session manager. One canonical landing path.
+            res.writeHead(302, { Location: '/' });
+            res.end();
             return;
         }
         if (!sessionName) {
-            // Mobile home: the hay app's preview grid is the session manager
-            // now. Send phones to the most recently active live session with
-            // ?home=1 — the client opens the switcher over it, so the first
-            // paint is the grid and the freshest session is already connecting
-            // underneath. Desktop keeps sessions.html (folders, workspaces,
-            // bulk management). Falls through when there's nothing live yet.
-            const uaRoot = req.headers['user-agent'] || '';
-            if ((parsedUrl.pathname === '/' || parsedUrl.pathname === '') && /iPad|iPhone|iPod|Android/i.test(uaRoot)) {
-                try {
-                    const snapshotHome = await listAllSessionEntriesRuntimeFirst();
-                    const liveHome = (snapshotHome.entries || [])
-                        .filter((s) => s.live === true && s.type !== 'port' && s.displayName)
-                        .sort((a, b) => (Number(b.lastActivityAt) || 0) - (Number(a.lastActivityAt) || 0));
-                    if (liveHome.length > 0) {
-                        res.writeHead(302, { Location: `/s/${encodeURIComponent(liveHome[0].displayName)}/?home=1` });
-                        res.end();
-                        return;
-                    }
-                } catch (e) { /* fall through to the management page */ }
+            // Landing (every device): the app shell in hub mode — the session
+            // grid as the page, connected to NOTHING. Opening a session is the
+            // user's click, not the server's guess.
+            const isRootAsset = parsedUrl.pathname.startsWith('/assets/');
+            // Serve the app shell + its assets at root scope (hub mode).
+            let hubPath = isRootAsset
+                ? path.join(HAY_WEB_DIR, parsedUrl.pathname)
+                : path.join(HAY_WEB_DIR, 'index.html');
+            const resolvedHub = path.resolve(hubPath);
+            const hubRoot = path.resolve(HAY_WEB_DIR);
+            if (resolvedHub !== hubRoot && !resolvedHub.startsWith(hubRoot + path.sep)) {
+                res.writeHead(403);
+                res.end('Forbidden');
+                return;
             }
-            const sessionsFile = path.join(__dirname, 'sessions.html');
-            let sessionsHtml = '<!-- sessions.html not found -->';
-            try {
-                sessionsHtml = fs.readFileSync(sessionsFile, 'utf8');
-            } catch (e) {
-                log(`Warning: sessions.html not found`, YELLOW);
+            if (!fs.existsSync(resolvedHub)) {
+                res.writeHead(404);
+                res.end('Not Found');
+                return;
             }
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(sessionsHtml);
+            const hubExt = path.extname(resolvedHub).toLowerCase();
+            const hubTypes = {
+                '.html': 'text/html; charset=utf-8',
+                '.js': 'application/javascript',
+                '.css': 'text/css',
+                '.json': 'application/json',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.svg': 'image/svg+xml',
+                '.ico': 'image/x-icon'
+            };
+            let hubContent = fs.readFileSync(resolvedHub);
+            if (hubExt === '.html') {
+                // Room-less config: marks the page as hop-served (hub mode).
+                const hubConfig = { wsUrl: '/ws' };
+                const hubUsername = resolveRequestUsername(req);
+                if (hubUsername) hubConfig.name = hubUsername;
+                hubContent = Buffer.from(
+                    hubContent.toString('utf8').replace(
+                        '<head>',
+                        `<head><script>window.__HOP_SESSION__ = ${JSON.stringify(hubConfig)};</script>`
+                    ),
+                    'utf8'
+                );
+                setNoCache(res);
+            }
+            res.writeHead(200, { 'Content-Type': hubTypes[hubExt] || 'application/octet-stream' });
+            res.end(hubContent);
             return;
         }
         // --- CHECK FOR iOS - Intercept and inject virtual keyboard ---
@@ -8071,9 +8331,16 @@ async function startLocalSession(proxyServer, tunnelProc, publicUrl) {
         shuttingDown = true;  // Prevent tunnel auto-restart
         log(`Cleaning up...`, YELLOW);
 
-        // Remove state file
+        // Remove the state file only if it is OURS: a stale daemon exiting
+        // after a newer one registered must not wipe the live registration
+        // (that orphans the new daemon — "Hop is not running" while it runs).
         if (fs.existsSync(STATE_FILE)) {
-            try { fs.unlinkSync(STATE_FILE); } catch (e) { }
+            try {
+                const st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+                if (!st || !Number.isInteger(st.pid) || st.pid === process.pid) fs.unlinkSync(STATE_FILE);
+            } catch (e) {
+                try { fs.unlinkSync(STATE_FILE); } catch (e2) { }
+            }
         }
 
         // Remove session config for this local session in embedded mode.
@@ -9315,6 +9582,7 @@ async function main() {
     // Handle `hop restore` - recreate saved sessions, resuming claude conversations
     if (process.argv[2] === 'restore') {
         const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
+        const includeAgents = process.argv.includes('--agents');
         let state = isServerRunning();
         if (!state) {
             // Start the daemon on demand so `hop restore` is a one-command recovery
@@ -9329,7 +9597,7 @@ async function main() {
         }
         let res;
         try {
-            res = await callLocalApi(state, '/api/sessions/restore', 'POST', { dryRun });
+            res = await callLocalApi(state, '/api/sessions/restore', 'POST', { dryRun, includeAgents });
         } catch (e) {
             log(`Restore request failed: ${e.message}`, RED);
             process.exit(1);
@@ -9339,8 +9607,12 @@ async function main() {
             process.exit(1);
         }
         const items = Array.isArray(res.data?.restored) ? res.data.restored : [];
+        const skippedAgents = Array.isArray(res.data?.skippedAgents) ? res.data.skippedAgents : [];
         if (items.length === 0) {
             log(`No saved sessions to restore.`, YELLOW);
+            if (skippedAgents.length > 0) {
+                log(`(${skippedAgents.length} agent-created session(s) skipped — ${CYAN}hop restore --agents${RESET} to include)`, DIM);
+            }
             process.exit(0);
         }
         log(`${dryRun ? 'Would restore' : 'Restoring'} ${items.length} session(s):`, BOLD);
@@ -9349,6 +9621,9 @@ async function main() {
                 ? `${DIM}${it.command}${RESET}`
                 : (it.replay ? `${DIM}shell in last dir (replay last screen)${RESET}` : `${DIM}shell in last dir${RESET}`);
             log(`  ${GREEN}•${RESET} ${it.name}  ${how}`, RESET);
+        }
+        if (skippedAgents.length > 0) {
+            log(`  ${DIM}(+${skippedAgents.length} agent-created session(s) skipped — ${CYAN}hop restore --agents${RESET}${DIM} to include)${RESET}`, RESET);
         }
         if (!dryRun) {
             log(`\nDone. Attach with ${CYAN}hop attach <name>${RESET} or open the web session manager.`, RESET);
@@ -10238,6 +10513,25 @@ async function main() {
         if (!subcommand || subcommand === 'list') {
             const includeAll = process.argv.includes('--all') || process.argv.includes('-a');
             const snapshot = await listAllSessionEntriesRuntimeFirst();
+            // Home-shortened working directory (live cwd when known, else the
+            // configured one) so the list shows WHERE each session is working.
+            const sessionCwdLabel = (s) => {
+                const p = (typeof s.liveCwd === 'string' && s.liveCwd) ? s.liveCwd : (typeof s.cwd === 'string' ? s.cwd : '');
+                if (!p) return '';
+                const home = os.homedir();
+                const shown = p === home ? '~' : (p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p);
+                return `  ${DIM}${shown}${RESET}`;
+            };
+            // Foreground program (what the session is running right now), as the
+            // mobile session view shows. Skip a bare shell — it's the idle default.
+            const sessionProcLabel = (s) => {
+                const proc = (typeof s.foregroundProcess === 'string' ? s.foregroundProcess : '').replace(/^-/, '').trim();
+                if (!proc) return '';
+                // Claude Code titles its process with a bare version ("2.1.211");
+                // label it for what it is instead of a cryptic number.
+                if (/^\d+\.\d+\.\d+$/.test(proc)) return `  ${MAGENTA}claude${RESET} ${DIM}${proc}${RESET}`;
+                return `  ${MAGENTA}${proc}${RESET}`;
+            };
             const printSessionRow = (s) => {
                 if (s.type === 'port') {
                     const workspaceSuffix = Array.isArray(s.workspaceNames) && s.workspaceNames.length
@@ -10253,7 +10547,7 @@ async function main() {
                     const stateLabel = s.live
                         ? `${GREEN}[TERMINAL, LIVE${workspaceSuffix}]${RESET}${clientChip}`
                         : `${YELLOW}[TERMINAL${workspaceSuffix}]${RESET}`;
-                    log(`  ${BOLD}${s.displayName}${RESET}  ${stateLabel}`, RESET);
+                    log(`  ${BOLD}${s.displayName}${RESET}${sessionCwdLabel(s)}${sessionProcLabel(s)}  ${stateLabel}`, RESET);
                 }
             };
             if (includeAll) {
@@ -10953,8 +11247,14 @@ async function main() {
 
             stopTunnelHealthMonitor();
 
+            // Only remove our own registration (see the daemon cleanup note).
             if (fs.existsSync(STATE_FILE)) {
-                try { fs.unlinkSync(STATE_FILE); } catch (e) { }
+                try {
+                    const st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+                    if (!st || !Number.isInteger(st.pid) || st.pid === process.pid) fs.unlinkSync(STATE_FILE);
+                } catch (e) {
+                    try { fs.unlinkSync(STATE_FILE); } catch (e2) { }
+                }
             }
 
             if (!isExternalTerminalBackend()) {

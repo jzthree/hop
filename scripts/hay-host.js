@@ -18,6 +18,46 @@ const FALLBACK_CWD = process.env.HAY_HOST_CWD || process.cwd();
 // a plain-shell session's last screen. Mirrors the daemon's HOP_HOME (~/.hop2).
 const HOP_HOME = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
 const BUFFER_DIR = path.join(HOP_HOME, 'session-buffers');
+const CLAUDE_SESSIONS_DIR = path.join(HOP_HOME, 'claude-sessions');
+
+// A recorded cwd can stop existing (deleted temp dir, unmounted volume).
+// Spawning a PTY there dies instantly with exit 1, and recreate loops churn
+// forever. Fall back to $HOME and let the shell say so via the room name.
+function existingCwdOr(cwd, fallback) {
+    if (typeof cwd === 'string' && cwd) {
+        try { if (fs.statSync(cwd).isDirectory()) return cwd; } catch (e) { /* gone */ }
+        console.log(`[hay-host] cwd missing for new room, falling back to home: ${cwd}`);
+    }
+    return fallback;
+}
+
+// True once the host starts shutting down. Rooms killed by shutdown must KEEP
+// their restore records — surviving a host stop is exactly what `hop restore`
+// is for. Only rooms that end while the host stays up (pty exit, explicit
+// kill) are truly over and must not be resurrected.
+let shuttingDown = false;
+
+// When a room ends for good, drop its `hop restore` sources: the SessionStart
+// hook record (+ turn counter + origin marker) and any stale replay buffer.
+const watchedRooms = new WeakSet();
+function watchRoomEnd(room) {
+    if (!room || typeof room.on !== 'function' || watchedRooms.has(room)) return room;
+    watchedRooms.add(room);
+    room.on('session_end', () => {
+        if (shuttingDown) return;
+        const id = String(room.id || '');
+        if (!/^[A-Za-z0-9_.-]+$/.test(id)) return; // never let an id escape the dirs
+        for (const file of [
+            path.join(CLAUDE_SESSIONS_DIR, `${id}.json`),
+            path.join(CLAUDE_SESSIONS_DIR, `${id}.turn`),
+            path.join(CLAUDE_SESSIONS_DIR, `${id}.meta`),
+            path.join(BUFFER_DIR, `${id}.raw`)
+        ]) {
+            try { fs.unlinkSync(file); } catch (e) { /* best effort */ }
+        }
+    });
+    return room;
+}
 
 // Persist live rooms' tail output, called on graceful shutdown (before the PTYs
 // are killed). Best-effort: any failure here must not block the shutdown path.
@@ -125,7 +165,7 @@ async function main() {
                 const seedOutput = typeof body.seedOutput === 'string' && body.seedOutput
                     ? body.seedOutput
                     : undefined;
-                const room = rooms.getRoom(roomId, { cols, rows }, { cwd, shell, env, seedOutput });
+                const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, { cwd: existingCwdOr(cwd, FALLBACK_CWD), shell, env, seedOutput }));
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, room: room.getSummary() }));
             } catch (err) {
@@ -202,7 +242,7 @@ async function main() {
         if (!cwd) {
             console.error(`[hay-host] WARNING: no cwd query param for room "${roomId}", falling back to ${FALLBACK_CWD}`);
         }
-        const room = rooms.getRoom(roomId, { cols, rows }, cwd || FALLBACK_CWD);
+        const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, existingCwdOr(cwd, FALLBACK_CWD)));
 
         room.attachClient(
             {
@@ -218,6 +258,7 @@ async function main() {
     });
 
     const shutdown = () => {
+        shuttingDown = true; // keep restore records for rooms killed by this shutdown
         // Persist tail buffers BEFORE closeAll() kills the PTYs, so a graceful
         // `hop stop --all` leaves something for `hop restore` to replay.
         try {

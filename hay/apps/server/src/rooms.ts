@@ -101,13 +101,6 @@ const DEBUG_STATE = process.env.HAY_DEBUG === "1";
 
 const now = () => Date.now();
 
-const clampBuffer = (value: string) => {
-  if (value.length <= MAX_BUFFER_SIZE) {
-    return value;
-  }
-  return value.slice(value.length - MAX_BUFFER_SIZE);
-};
-
 // Build a useful error for a payload that failed schema validation: name the
 // message type and the offending field instead of a bare "Invalid message".
 const describeInvalidMessage = (payload: string): string => {
@@ -189,7 +182,13 @@ export class Room extends EventEmitter {
   private activeClientId: string | null = null;
   private activeCols: number;
   private activeRows: number;
-  private outputBuffer = "";
+  // Retained raw output as a chunk ring: append is O(1) and trimming drops
+  // whole chunks from the head. NEVER joined in full on the hot path — a flat
+  // string here meant every chunk past the 20MB cap re-copied the entire
+  // buffer (≈3ms of blocked event loop per 2KB chunk, measured), which froze
+  // the host for minutes under a busy fleet and got it killed as unresponsive.
+  private outputChunks: string[] = [];
+  private outputBytes = 0;
   private alternateScreen = false;
   // Enhanced keyboard reporting requested by the remote app (kitty keyboard protocol
   // or xterm modifyOtherKeys). Tracked like alternateScreen so a reattaching client
@@ -228,12 +227,12 @@ export class Room extends EventEmitter {
     // fresh shell repaints. This is raw bytes that already happened, so we only
     // stage it into the buffer — we don't re-broadcast or re-parse it.
     if (options.seedOutput) {
-      this.outputBuffer = clampBuffer(options.seedOutput);
+      this.appendOutput(options.seedOutput);
     }
 
     this.pty.onData((data: string) => {
       this.lastActivityAt = now();
-      this.outputBuffer = clampBuffer(this.outputBuffer + data);
+      this.appendOutput(data);
       this.updateTerminalState(data);
       this.broadcast({ type: "output", data });
       this.emit("pty_output", { roomId: this.id, data, timestamp: now() });
@@ -301,14 +300,38 @@ export class Room extends EventEmitter {
       } satisfies ServerMessage)
     );
 
-    if (this.outputBuffer) {
+    if (this.outputBytes > 0) {
       socket.send(JSON.stringify({
         type: "snapshot",
-        data: boundSnapshotReplay(this.outputBuffer),
+        data: boundSnapshotReplay(this.tailOutput(SNAPSHOT_REPLAY_BYTES)),
         alternateScreen: this.alternateScreen,
         cursorHidden: this.cursorHidden,
         keyboardEnhanced: this.keyboardEnhanced
       } satisfies ServerMessage));
+    }
+
+    // The snapshot is a raw byte TAIL, and incremental TUIs (Claude Code/Ink)
+    // never re-emit rows that don't change — e.g. the input box's horizontal
+    // border lines — so the replay can be missing them. When this client's
+    // size differs from the PTY's, the attach resize triggers a full repaint
+    // anyway; when sizes are EQUAL nothing would repaint, so nudge: a one-
+    // column wiggle (tmux's redraw trick) makes full-screen apps repaint.
+    if (
+      client.cols === this.activeCols &&
+      client.rows === this.activeRows &&
+      this.activeCols > 4 &&
+      !this.ended
+    ) {
+      const cols = this.activeCols;
+      const rows = this.activeRows;
+      try { this.pty.resize(cols - 1, rows); } catch { /* pty may be gone */ }
+      setTimeout(() => {
+        if (this.ended) return;
+        // Only bounce back if nobody claimed a different size meanwhile.
+        if (this.activeCols === cols && this.activeRows === rows) {
+          try { this.pty.resize(cols, rows); } catch { /* pty may be gone */ }
+        }
+      }, 60);
     }
 
     // Send current cwd to the new client
@@ -782,6 +805,42 @@ export class Room extends EventEmitter {
     }, CLEANUP_DELAY_MS);
   }
 
+  /** O(1) append; trims whole chunks from the head past MAX_BUFFER_SIZE. */
+  private appendOutput(data: string) {
+    if (!data) return;
+    this.outputChunks.push(data);
+    this.outputBytes += data.length;
+    while (this.outputChunks.length > 1 && this.outputBytes - this.outputChunks[0].length >= MAX_BUFFER_SIZE) {
+      this.outputBytes -= this.outputChunks[0].length;
+      this.outputChunks.shift();
+    }
+    // A single chunk larger than the whole cap (giant seed/paste): slice once.
+    if (this.outputChunks.length === 1 && this.outputBytes > MAX_BUFFER_SIZE) {
+      const only = this.outputChunks[0].slice(this.outputChunks[0].length - MAX_BUFFER_SIZE);
+      this.outputChunks[0] = only;
+      this.outputBytes = only.length;
+    }
+  }
+
+  /**
+   * Join at most the last maxBytes of retained output. Every consumer
+   * (snapshot replay, preview, persistence) needs only a bounded tail, so the
+   * full ring is never flattened.
+   */
+  private tailOutput(maxBytes: number): string {
+    if (this.outputBytes === 0 || maxBytes <= 0) return "";
+    const cap = Math.min(maxBytes, this.outputBytes);
+    const parts: string[] = [];
+    let collected = 0;
+    for (let i = this.outputChunks.length - 1; i >= 0 && collected < cap; i--) {
+      parts.push(this.outputChunks[i]);
+      collected += this.outputChunks[i].length;
+    }
+    parts.reverse();
+    const joined = parts.join("");
+    return joined.length > cap ? joined.slice(joined.length - cap) : joined;
+  }
+
   private endSession(payload: { exitCode: number | null; signal: string | null; message: string; by?: string }) {
     if (this.ended) return;
     this.ended = true;
@@ -813,9 +872,7 @@ export class Room extends EventEmitter {
    * daemon, on demand, only when someone is looking — so idle rooms cost nothing.
    */
   getPreviewSource(maxBytes = 65536): { cols: number; rows: number; output: string } {
-    const buf = this.outputBuffer;
-    const output = buf.length > maxBytes ? buf.slice(buf.length - maxBytes) : buf;
-    return { cols: this.activeCols, rows: this.activeRows, output };
+    return { cols: this.activeCols, rows: this.activeRows, output: this.tailOutput(maxBytes) };
   }
 
   /**
@@ -824,9 +881,7 @@ export class Room extends EventEmitter {
    * an empty string for an empty buffer so callers can skip writing a file.
    */
   getPersistableBuffer(maxBytes = 65536): string {
-    const buf = this.outputBuffer;
-    if (!buf) return "";
-    return buf.length > maxBytes ? buf.slice(buf.length - maxBytes) : buf;
+    return this.tailOutput(maxBytes);
   }
 
   getSummary(): RoomSummary {

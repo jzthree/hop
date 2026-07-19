@@ -3690,12 +3690,28 @@ function listClaudeSessionMetas() {
 function restorePlanForSession(entry) {
     const rec = readClaudeSessionRecord(entry.internalName);
     if (rec && rec.sessionId) {
-        // Replay the conversation's config dir: a wrapper like `claude-fable`
-        // (CLAUDE_CONFIG_DIR=~/.claude_fable) stores transcripts there, and a
-        // bare `claude --resume` against the default config can't find them.
+        // Preserve the original launch command's FLAGS (--dangerously-skip-
+        // permissions etc.) and wrapper (claude-fable): rebuild from the
+        // recorded startup when it's a claude invocation, swapping in the
+        // current conversation id. A bare `claude --resume` would silently
+        // restore every session with permission prompts re-enabled.
+        const startup = typeof entry.startup === 'string' ? entry.startup.trim() : '';
+        const firstWord = startup.split(/\s+/)[0] || '';
+        const isClaudeLaunch = /(^|\/)claude[\w-]*$/.test(firstWord);
+        let base = 'claude';
+        if (isClaudeLaunch) {
+            base = startup
+                .replace(/\s--resume(=|\s+)[A-Za-z0-9-]+/g, '')
+                .replace(/\s--continue\b/g, '')
+                .trim();
+        }
+        // Config-dir prefix: needed for a bare `claude` against a wrapper
+        // config; a wrapper command (claude-fable) sets it itself.
         const configDir = typeof rec.configDir === 'string' && rec.configDir.trim() ? rec.configDir.trim() : null;
-        const prefix = configDir ? `CLAUDE_CONFIG_DIR='${configDir.replace(/'/g, `'\\''`)}' ` : '';
-        return { command: `${prefix}claude --resume ${rec.sessionId}`, cwd: rec.cwd || entry.cwd };
+        const prefix = configDir && (!isClaudeLaunch || firstWord === 'claude')
+            ? `CLAUDE_CONFIG_DIR='${configDir.replace(/'/g, `'\\''`)}' `
+            : '';
+        return { command: `${prefix}${base} --resume ${rec.sessionId}`, cwd: rec.cwd || entry.cwd };
     }
     if (entry.startup && entry.autoStart !== false) {
         return { command: String(entry.startup), cwd: entry.cwd };

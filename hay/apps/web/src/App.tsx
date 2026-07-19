@@ -499,6 +499,9 @@ const App = () => {
   const presenceThrottleRef = useRef<number | null>(null);
   const presencePendingRef = useRef<PresenceClient[] | null>(null);
   const activeSessionRoomRef = useRef<string | null>(null);
+  // Set each render once switchSession exists (defined later); the keyboard
+  // layer calls through this ref to avoid declaration-order coupling.
+  const switchSessionRef = useRef<((s: SessionInfo) => void) | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
   // Bell-notification plumbing: the terminal effect that registers onBell runs
@@ -2220,6 +2223,8 @@ const App = () => {
     window.history.pushState({}, "", nextPath);
     setDrawerOpen(false);
   };
+  // Keep the keyboard layer's ref current (it's defined earlier in the file).
+  switchSessionRef.current = switchSession;
 
   const handleJoin = (event: FormEvent) => {
     event.preventDefault();
@@ -2512,23 +2517,58 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
-  // ⌘K (mac) / Ctrl+Shift+K opens the session switcher — the same experience
-  // as the mobile hub, now first-class on desktop. Capture phase so it wins
-  // over the focused terminal; plain Ctrl+K is left alone (readline kill-line).
+  // Desktop keyboard layer — capture phase so shortcuts win over the focused
+  // terminal. ⌘-based (Ctrl+Shift elsewhere) to stay clear of readline/TUI
+  // keys, which the terminal must keep receiving untouched.
+  //   ⌘K session palette · ⌘J/⌘⇧J cycle sessions · ⌘, settings ·
+  //   ⌘+/−/0 font size · ⌘/ shortcut help · Esc closes drawer/help
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const drawerOpenRef = useRef(drawerOpen);
+  drawerOpenRef.current = drawerOpen;
+  const shortcutHelpRef = useRef(shortcutHelpOpen);
+  shortcutHelpRef.current = shortcutHelpOpen;
   useEffect(() => {
     if (!session || !isEmbeddedInHop()) return;
+    const cycleSession = (dir: 1 | -1) => {
+      const list = [...sessionsRef.current]
+        .filter((s) => s.type !== "port")
+        .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
+      if (list.length < 2) return;
+      const cur = list.findIndex((s) => s.name === activeSessionRoomRef.current || s.internalName === activeSessionRoomRef.current);
+      const next = list[(cur + dir + list.length) % list.length];
+      if (next) switchSessionRef.current?.(next);
+    };
     const onKey = (event: KeyboardEvent) => {
-      const combo = isMacPlatform
-        ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
+      const mod = isMacPlatform
+        ? event.metaKey && !event.ctrlKey && !event.altKey
         : event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey;
-      if (combo && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        event.stopPropagation();
-        setSwitcherOpen((value) => !value);
+      if (!mod) {
+        if (event.key === "Escape" && (drawerOpenRef.current || shortcutHelpRef.current)) {
+          event.preventDefault();
+          event.stopPropagation();
+          setDrawerOpen(false);
+          setShortcutHelpOpen(false);
+        }
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const shifted = event.shiftKey;
+      const grab = () => { event.preventDefault(); event.stopPropagation(); };
+      if (key === "k" && (isMacPlatform ? !shifted : true)) { grab(); setSwitcherOpen((v) => !v); return; }
+      if (key === "j") { grab(); cycleSession(shifted ? -1 : 1); return; }
+      if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
+      if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
+      if (isMacPlatform && !shifted) {
+        if (key === "=" || key === "+") { grab(); setFontSize((s) => Math.min(24, s + 1)); return; }
+        if (key === "-") { grab(); setFontSize((s) => Math.max(8, s - 1)); return; }
+        if (key === "0") { grab(); setFontSize(14); return; }
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
   const sessionStyle = isMobile
@@ -3031,6 +3071,11 @@ const App = () => {
                   <button type="button" className="footer-find-toggle" aria-label="Find in terminal" onClick={openSearch}>
                     {isMacPlatform ? "⌘F" : "Ctrl+F"} find
                   </button>
+                  {!isMobile && (
+                    <button type="button" className="footer-find-toggle" aria-label="Keyboard shortcuts" onClick={() => setShortcutHelpOpen(true)}>
+                      {isMacPlatform ? "⌘/" : "Ctrl+Shift+/"} keys
+                    </button>
+                  )}
                   <span>
                     {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
                   </span>
@@ -3099,6 +3144,30 @@ const App = () => {
                 : undefined
             }
           />
+          {shortcutHelpOpen && !isMobile && (
+            <>
+              <div className="drawer-overlay" onClick={() => setShortcutHelpOpen(false)} />
+              <div className="shortcut-help" role="dialog" aria-label="Keyboard shortcuts">
+                <h3>Keyboard shortcuts</h3>
+                {[
+                  [isMacPlatform ? "⌘K" : "Ctrl+Shift+K", "session palette (type to filter, ↑↓, ⏎)"],
+                  [isMacPlatform ? "⌘J / ⌘⇧J" : "Ctrl+Shift+J / +⇧", "next / previous session"],
+                  [isMacPlatform ? "⌘," : "Ctrl+Shift+,", "settings drawer"],
+                  [isMacPlatform ? "⌘F" : "Ctrl+Shift+F", "find in terminal"],
+                  ...(isMacPlatform ? [["⌘+ / ⌘− / ⌘0", "terminal font size"]] : []),
+                  ["Ctrl+Shift+C / V", "copy / paste"],
+                  ["Shift+PgUp / PgDn", "scrollback"],
+                  [isMacPlatform ? "⌘/" : "Ctrl+Shift+/", "this help"],
+                  ["Esc", "close panels"]
+                ].map(([keys, what]) => (
+                  <div key={keys as string} className="shortcut-help-row">
+                    <kbd>{keys}</kbd>
+                    <span>{what}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
           {linkPrompt && (
             <div className="link-prompt" role="dialog" aria-label="Open link">
               <span className="link-prompt-url">{linkPrompt}</span>

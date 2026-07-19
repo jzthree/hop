@@ -76,11 +76,11 @@ export const SessionSwitcher = ({
 }: Props) => {
   const [filter, setFilter] = useState("");
   // Hero-tile size: bigger tiles show more of each terminal preview.
-  const [tileSize, setTileSize] = useState<"s" | "m" | "l">(() => {
+  const [tileSize, setTileSize] = useState<"s" | "m" | "l" | "xl">(() => {
     const saved = localStorage.getItem("hay_tile_size");
-    return saved === "s" || saved === "l" ? saved : "m";
+    return saved === "s" || saved === "l" || saved === "xl" ? saved : "m";
   });
-  const changeTileSize = (size: "s" | "m" | "l") => {
+  const changeTileSize = (size: "s" | "m" | "l" | "xl") => {
     setTileSize(size);
     localStorage.setItem("hay_tile_size", size);
   };
@@ -589,7 +589,7 @@ export const SessionSwitcher = ({
           <h2>Sessions</h2>
           <span className="switcher-count">{sessions.length}</span>
           <div className="switcher-tilesize" role="group" aria-label="Tile size">
-            {(["s", "m", "l"] as const).map((size) => (
+            {(["s", "m", "l", "xl"] as const).map((size) => (
               <button
                 key={size}
                 type="button"

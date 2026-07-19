@@ -2829,3 +2829,77 @@ button.primary {
     font-size: 10.5px;
   }
 }
+
+/* XL: dashboard tiles — near-readable full panes */
+.switcher-overlay.tile-xl .switcher-grid {
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+}
+.switcher-overlay.tile-xl .switcher-preview {
+  height: 300px;
+  font-size: 11px;
+}
+
+@media (min-width: 769px) {
+  /* The in-session ⌘K palette earns real width too — 760px wasted big displays. */
+  .switcher-overlay:not(.switcher-hub) > .switcher-top,
+  .switcher-overlay:not(.switcher-hub) > .switcher-scroll {
+    width: min(1200px, 92vw);
+    max-width: min(1200px, 92vw);
+  }
+  .switcher-overlay:not(.switcher-hub) {
+    padding: 5vh 24px;
+  }
+  .switcher-overlay:not(.switcher-hub) > .switcher-scroll {
+    max-height: calc(90vh - 120px);
+  }
+  .switcher-overlay.switcher-hub.tile-xl .switcher-grid {
+    grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
+  }
+  .switcher-overlay.switcher-hub.tile-xl .switcher-preview {
+    height: 380px;
+    font-size: 12px;
+  }
+}
+
+/* ⌘/ shortcut cheatsheet */
+.shortcut-help {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 700;
+  width: min(440px, 90vw);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  padding: 18px 20px;
+}
+
+.shortcut-help h3 {
+  margin: 0 0 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.shortcut-help-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 0;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+
+.shortcut-help-row kbd {
+  flex: 0 0 138px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 2px 7px;
+  text-align: center;
+  white-space: nowrap;
+}

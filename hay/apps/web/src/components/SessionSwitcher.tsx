@@ -167,6 +167,7 @@ export const SessionSwitcher = ({
     if (!open) return;
     const firstOther = flatNav.findIndex((s) => !(currentRoom !== null && (s.internalName === currentRoom || s.name === currentRoom)));
     setKbdIndex(filter ? 0 : Math.max(0, firstOther));
+    document.querySelector(".switcher-scroll")?.scrollTo({ top: 0 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, filter]);
   // Background refreshes may shrink the list — keep the selection in range.
@@ -299,7 +300,11 @@ export const SessionSwitcher = ({
         setKbdIndex((i) => {
           const n = flatNav.length;
           if (n === 0) return 0;
-          return event.key === "ArrowDown" ? Math.min(i + 1, n - 1) : Math.max(i - 1, 0);
+          const next = event.key === "ArrowDown" ? Math.min(i + 1, n - 1) : Math.max(i - 1, 0);
+          requestAnimationFrame(() => {
+            document.querySelector(`[data-nav-index="${next}"]`)?.scrollIntoView({ block: "nearest" });
+          });
+          return next;
         });
         return;
       }
@@ -497,7 +502,7 @@ export const SessionSwitcher = ({
         key={key}
         role="button"
         tabIndex={0}
-        ref={(el) => { if (kbdSelected && el) el.scrollIntoView({ block: "nearest" }); }}
+        data-nav-index={navIndexByKey.get(key)}
         className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}`}
         onClick={() => handleTap(s)}
         onKeyDown={(e) => {
@@ -540,7 +545,7 @@ export const SessionSwitcher = ({
         key={key}
         role="button"
         tabIndex={0}
-        ref={(el) => { if (kbdSelected && el) el.scrollIntoView({ block: "nearest" }); }}
+        data-nav-index={navIndexByKey.get(key)}
         className={`switcher-row${isCurrentSession(s) ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}`}
         onClick={() => handleTap(s)}
         onKeyDown={(e) => {
@@ -664,7 +669,7 @@ export const SessionSwitcher = ({
                         key={key}
                         role="button"
                         tabIndex={0}
-                        ref={(el) => { if (kbdSelected && el) el.scrollIntoView({ block: "nearest" }); }}
+                        data-nav-index={navIndexByKey.get(key)}
                         className={`switcher-row${kbdSelected ? " kbd-selected" : ""}`}
                         onClick={() => handleTap(s)}
                         onKeyDown={(e) => { if (e.key === "Enter") handleTap(s); }}

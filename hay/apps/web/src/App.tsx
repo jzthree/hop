@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent, type ReactElement, type PointerEvent as ReactPointerEvent } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
@@ -13,6 +13,7 @@ import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
+import { SecondaryPane } from "./components/SecondaryPane";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -174,6 +175,30 @@ type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "
 
 // Latency compensation (optimistic echo) and auto-fit-on-type are always on;
 // kept as constants so the gated code paths stay obvious.
+// ── Pane layout tree ─────────────────────────────────────────────────────
+// Splits are a full binary tree (direction + ratio + two children) so future
+// layouts (nested splits, 2x2 grids) need no model changes — today's UI just
+// happens to build one split at a time. The primary leaf (session: null) is
+// the full-featured terminal; other leaves are lightweight SecondaryPanes.
+type PaneNode =
+  | { kind: "leaf"; id: string; session: string | null }
+  | { kind: "split"; id: string; dir: "row" | "col"; ratio: number; a: PaneNode; b: PaneNode };
+
+const PRIMARY_PANE: PaneNode = { kind: "leaf", id: "primary", session: null };
+const newPaneId = () => `p${Math.random().toString(36).slice(2, 8)}`;
+
+const paneTreeValid = (n: unknown): n is PaneNode => {
+  const x = n as PaneNode;
+  if (!x || typeof x !== "object") return false;
+  if (x.kind === "leaf") return typeof x.id === "string" && (x.session === null || typeof x.session === "string");
+  if (x.kind === "split") {
+    return (x.dir === "row" || x.dir === "col") && typeof x.ratio === "number" && paneTreeValid(x.a) && paneTreeValid(x.b);
+  }
+  return false;
+};
+const paneTreeHasPrimary = (n: PaneNode): boolean =>
+  n.kind === "leaf" ? n.session === null : paneTreeHasPrimary(n.a) || paneTreeHasPrimary(n.b);
+
 const LATENCY_COMP = true;
 const AUTO_FIT_ON_TYPE = true;
 
@@ -509,6 +534,81 @@ const App = () => {
   drawerOpenRef.current = drawerOpen;
   const shortcutHelpRef = useRef(shortcutHelpOpen);
   shortcutHelpRef.current = shortcutHelpOpen;
+
+  // ── Panes ──
+  const [paneTree, setPaneTree] = useState<PaneNode>(() => {
+    try {
+      const raw = localStorage.getItem("hay_pane_tree");
+      if (raw) {
+        const t = JSON.parse(raw);
+        if (paneTreeValid(t) && paneTreeHasPrimary(t)) return t;
+      }
+    } catch { /* fall through */ }
+    return PRIMARY_PANE;
+  });
+  const [focusedPaneId, setFocusedPaneId] = useState("primary");
+  const focusedPaneIdRef = useRef(focusedPaneId);
+  focusedPaneIdRef.current = focusedPaneId;
+  // ⌘\ opens the palette in pick-a-session-for-the-new-pane mode.
+  const paneTargetRef = useRef(false);
+  useEffect(() => {
+    try {
+      if (paneTree.kind === "leaf") localStorage.removeItem("hay_pane_tree");
+      else localStorage.setItem("hay_pane_tree", JSON.stringify(paneTree));
+    } catch { /* ignore */ }
+  }, [paneTree]);
+
+  const splitFocusedPane = (session: string) => {
+    setPaneTree((tree) => {
+      const target = focusedPaneIdRef.current;
+      const fresh: PaneNode = { kind: "leaf", id: newPaneId(), session };
+      // Rule: the PRIMARY leaf never re-parents (React would remount the live
+      // xterm/WebGL terminal and kill it). New panes triggered from the
+      // primary append on the right side of the root; secondary leaves split
+      // in place — a SecondaryPane tolerates its remount (quick reconnect).
+      if (target === "primary" || tree.kind === "leaf") {
+        if (tree.kind === "leaf") {
+          return { kind: "split", id: "root", dir: "row", ratio: 0.55, a: tree, b: fresh };
+        }
+        return { ...tree, b: { kind: "split", id: newPaneId(), dir: "col", ratio: 0.5, a: tree.b, b: fresh } };
+      }
+      let done = false;
+      const replace = (n: PaneNode): PaneNode => {
+        if (n.kind === "leaf") {
+          if (n.id !== target || done) return n;
+          done = true;
+          return { kind: "split", id: newPaneId(), dir: "col", ratio: 0.5, a: n, b: fresh };
+        }
+        return { ...n, a: replace(n.a), b: replace(n.b) };
+      };
+      const next = replace(tree);
+      return done ? next : { ...tree, b: { kind: "split", id: newPaneId(), dir: "col", ratio: 0.5, a: (tree as Extract<PaneNode, { kind: "split" }>).b, b: fresh } };
+    });
+  };
+  const closePane = (id: string) => {
+    if (id === "primary") return;
+    setFocusedPaneId("primary");
+    setPaneTree((tree) => {
+      const prune = (n: PaneNode): PaneNode | null => {
+        if (n.kind === "leaf") return n.id === id ? null : n;
+        const a = prune(n.a);
+        const b = prune(n.b);
+        if (a && b) return { ...n, a, b };
+        return a || b;
+      };
+      return prune(tree) || PRIMARY_PANE;
+    });
+  };
+  const setPaneRatio = (id: string, ratio: number) => {
+    setPaneTree((tree) => {
+      const walk = (n: PaneNode): PaneNode =>
+        n.kind === "split" ? (n.id === id ? { ...n, ratio } : { ...n, a: walk(n.a), b: walk(n.b) }) : n;
+      return walk(tree);
+    });
+  };
+  const paneOpsRef = useRef({ splitFocusedPane, closePane });
+  paneOpsRef.current = { splitFocusedPane, closePane };
+  const paneDragRef = useRef<{ id: string; dir: "row" | "col"; rect: DOMRect } | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
   // Bell-notification plumbing: the terminal effect that registers onBell runs
@@ -2240,10 +2340,11 @@ const App = () => {
   useEffect(() => {
     if (isMobile || !session) return;
     if (switcherOpen || drawerOpen || shortcutHelpOpen || searchActive || renamingSession || creatingSession) return;
+    if (focusedPaneId !== "primary") return; // a secondary pane owns the keyboard
     // Post-render: let the closing overlay unmount before taking focus.
     const t = window.setTimeout(() => termRef.current?.focus(), 30);
     return () => window.clearTimeout(t);
-  }, [switcherOpen, drawerOpen, shortcutHelpOpen, searchActive, renamingSession, creatingSession, session]);
+  }, [switcherOpen, drawerOpen, shortcutHelpOpen, searchActive, renamingSession, creatingSession, session, focusedPaneId]);
 
   const handleJoin = (event: FormEvent) => {
     event.preventDefault();
@@ -2572,6 +2673,16 @@ const App = () => {
       if (key === "j") { grab(); cycleSession(shifted ? -1 : 1); return; }
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
       if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
+      if (key === "\\" || key === "|") {
+        grab();
+        if (shifted || key === "|") {
+          if (focusedPaneIdRef.current !== "primary") paneOpsRef.current.closePane(focusedPaneIdRef.current);
+        } else {
+          paneTargetRef.current = true;
+          setSwitcherOpen(true);
+        }
+        return;
+      }
       if (isMacPlatform && !shifted) {
         if (key === "=" || key === "+") { grab(); setFontSize((s) => Math.min(24, s + 1)); return; }
         if (key === "-") { grab(); setFontSize((s) => Math.max(8, s - 1)); return; }
@@ -3025,112 +3136,203 @@ const App = () => {
             </button>
             <p className="build-stamp">build {__BUILD_STAMP__}</p>
           </section>
-          <section className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
-            <div
-              className="terminal-frame"
-              onClick={() => {
-                // On mobile, don't focus terminal to prevent system keyboard
-                if (!isMobile) {
-                  termRef.current?.focus();
-                }
-              }}
-            >
-              <div className="terminal-scroll">
-                <div className="terminal-inner" ref={containerRef} />
-              </div>
-              {isMobile && status === "connecting" && (
-                <div className="terminal-loading" role="status" aria-live="polite">
-                  <IosSpinner />
-                  <span className="terminal-loading-label">Loading session…</span>
-                </div>
-              )}
-              {searchActive && (
-                <div className="terminal-find" onClick={(e) => e.stopPropagation()}>
-                  <input
-                    ref={searchInputRef}
-                    className="terminal-find-input"
-                    placeholder="Find in scrollback…"
-                    value={searchQuery}
-                    onChange={(e) => {
-                      setSearchQuery(e.target.value);
-                      runSearch(e.target.value);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        searchStep(e.shiftKey ? -1 : 1);
-                      } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        closeSearch();
-                      }
-                    }}
-                  />
-                  <span className="terminal-find-count">
-                    {searchInfo.total > 0 ? `${searchInfo.index}/${searchInfo.total}` : searchQuery ? "0/0" : ""}
-                  </span>
-                  <button type="button" className="terminal-find-btn" onClick={() => searchStep(-1)} aria-label="Previous match">↑</button>
-                  <button type="button" className="terminal-find-btn" onClick={() => searchStep(1)} aria-label="Next match">↓</button>
-                  <button type="button" className="terminal-find-btn" onClick={closeSearch} aria-label="Close search">✕</button>
-                </div>
-              )}
-            </div>
-            <div className="terminal-footer">
-              <span className="footer-chip">{sessionLabel || session.room}</span>
-              {liveCwd ? <span className="footer-cwd">{liveCwd}</span> : null}
-              <span className="footer-spacer" />
-              {status === "connected" ? (
-                <>
-                  <button type="button" className="footer-find-toggle" aria-label="Find in terminal" onClick={openSearch}>
-                    {isMacPlatform ? "⌘F" : "Ctrl+F"} find
-                  </button>
-                  {!isMobile && (
-                    <button type="button" className="footer-find-toggle" aria-label="Keyboard shortcuts" onClick={() => setShortcutHelpOpen(true)}>
-                      {isMacPlatform ? "⌘/" : "Ctrl+Shift+/"} keys
-                    </button>
+          {(() => {
+            // Primary terminal as a render-on-demand function: it must not be
+            // evaluated on the hub page (session can be null there), and the
+            // pane renderer places it wherever the tree's primary leaf sits.
+            const renderPrimarySection = (): ReactElement => (
+              <section className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
+                <div
+                  className="terminal-frame"
+                  onClick={() => {
+                    // On mobile, don't focus terminal to prevent system keyboard
+                    if (!isMobile) {
+                      termRef.current?.focus();
+                    }
+                  }}
+                >
+                  <div className="terminal-scroll">
+                    <div className="terminal-inner" ref={containerRef} />
+                  </div>
+                  {isMobile && status === "connecting" && (
+                    <div className="terminal-loading" role="status" aria-live="polite">
+                      <IosSpinner />
+                      <span className="terminal-loading-label">Loading session…</span>
+                    </div>
                   )}
-                  <span>
-                    {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
+                  {searchActive && (
+                    <div className="terminal-find" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        ref={searchInputRef}
+                        className="terminal-find-input"
+                        placeholder="Find in scrollback…"
+                        value={searchQuery}
+                        onChange={(e) => {
+                          setSearchQuery(e.target.value);
+                          runSearch(e.target.value);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            searchStep(e.shiftKey ? -1 : 1);
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            closeSearch();
+                          }
+                        }}
+                      />
+                      <span className="terminal-find-count">
+                        {searchInfo.total > 0 ? `${searchInfo.index}/${searchInfo.total}` : searchQuery ? "0/0" : ""}
+                      </span>
+                      <button type="button" className="terminal-find-btn" onClick={() => searchStep(-1)} aria-label="Previous match">↑</button>
+                      <button type="button" className="terminal-find-btn" onClick={() => searchStep(1)} aria-label="Next match">↓</button>
+                      <button type="button" className="terminal-find-btn" onClick={closeSearch} aria-label="Close search">✕</button>
+                    </div>
+                  )}
+                </div>
+                <div className="terminal-footer">
+                  <span className="footer-chip">{sessionLabel || session.room}</span>
+                  {liveCwd ? <span className="footer-cwd">{liveCwd}</span> : null}
+                  <span className="footer-spacer" />
+                  {status === "connected" ? (
+                    <>
+                      <button type="button" className="footer-find-toggle" aria-label="Find in terminal" onClick={openSearch}>
+                        {isMacPlatform ? "⌘F" : "Ctrl+F"} find
+                      </button>
+                      {!isMobile && (
+                        <button type="button" className="footer-find-toggle" aria-label="Keyboard shortcuts" onClick={() => setShortcutHelpOpen(true)}>
+                          {isMacPlatform ? "⌘/" : "Ctrl+Shift+/"} keys
+                        </button>
+                      )}
+                      <span>
+                        {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
+                      </span>
+                    </>
+                  ) : status === "idle" ? (
+                    <span>awaiting connection</span>
+                  ) : status === "ended" ? (
+                    <>
+                      <span className="ended-label">session ended</span>
+                      <button
+                        type="button"
+                        className="footer-reconnect"
+                        onClick={() => setReconnectToken((value) => value + 1)}
+                      >
+                        Reconnect
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="reconnecting">
+                        ⟳ {status === "connecting" ? "Connecting…" : "Reconnecting…"}
+                      </span>
+                      <button
+                        type="button"
+                        className="footer-reconnect"
+                        onClick={() => setReconnectToken((value) => value + 1)}
+                      >
+                        Reconnect now
+                      </button>
+                    </>
+                  )}
+                  <span className={`footer-dot ${status}`} aria-hidden="true">
+                    ●
                   </span>
-                </>
-              ) : status === "idle" ? (
-                <span>awaiting connection</span>
-              ) : status === "ended" ? (
-                <>
-                  <span className="ended-label">session ended</span>
-                  <button
-                    type="button"
-                    className="footer-reconnect"
-                    onClick={() => setReconnectToken((value) => value + 1)}
-                  >
-                    Reconnect
-                  </button>
-                </>
-              ) : (
-                <>
-                  <span className="reconnecting">
-                    ⟳ {status === "connecting" ? "Connecting…" : "Reconnecting…"}
-                  </span>
-                  <button
-                    type="button"
-                    className="footer-reconnect"
-                    onClick={() => setReconnectToken((value) => value + 1)}
-                  >
-                    Reconnect now
-                  </button>
-                </>
-              )}
-              <span className={`footer-dot ${status}`} aria-hidden="true">
-                ●
-              </span>
-            </div>
-          </section>
+                </div>
+              </section>
+            );
+            const renderDivider = (node: Extract<PaneNode, { kind: "split" }>): ReactElement => (
+              <div
+                key={`div-${node.id}`}
+                className="pane-divider"
+                onPointerDown={(e: ReactPointerEvent<HTMLDivElement>) => {
+                  const parent = (e.currentTarget as HTMLElement).parentElement;
+                  if (!parent) return;
+                  paneDragRef.current = { id: node.id, dir: node.dir, rect: parent.getBoundingClientRect() };
+                  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                }}
+                onPointerMove={(e: ReactPointerEvent<HTMLDivElement>) => {
+                  const d = paneDragRef.current;
+                  if (!d || d.id !== node.id) return;
+                  const r = d.dir === "row"
+                    ? (e.clientX - d.rect.left) / Math.max(1, d.rect.width)
+                    : (e.clientY - d.rect.top) / Math.max(1, d.rect.height);
+                  setPaneRatio(d.id, Math.min(0.85, Math.max(0.15, r)));
+                }}
+                onPointerUp={() => { paneDragRef.current = null; }}
+              />
+            );
+            const renderPaneNode = (node: PaneNode): ReactElement => {
+              if (node.kind === "leaf") {
+                if (node.session === null) {
+                  return (
+                    <div key="primary" className="primary-pane-wrap" onMouseDownCapture={() => setFocusedPaneId("primary")}>
+                      {renderPrimarySection()}
+                    </div>
+                  );
+                }
+                return (
+                  <SecondaryPane
+                    key={node.id}
+                    sessionName={node.session}
+                    wsUrl={resolveWsUrl()}
+                    userName={name}
+                    cols={120}
+                    rows={30}
+                    fontSize={fontSize}
+                    theme={resolveTerminalTheme(themeMode)}
+                    focused={focusedPaneId === node.id}
+                    onFocus={() => setFocusedPaneId(node.id)}
+                    onClose={() => closePane(node.id)}
+                  />
+                );
+              }
+              return (
+                <div key={node.id} className={`pane-split ${node.dir === "row" ? "dir-row" : "dir-col"}`}>
+                  <div className="pane-cell" style={{ flexGrow: node.ratio, flexBasis: 0 }}>{renderPaneNode(node.a)}</div>
+                  {renderDivider(node)}
+                  <div className="pane-cell" style={{ flexGrow: 1 - node.ratio, flexBasis: 0 }}>{renderPaneNode(node.b)}</div>
+                </div>
+              );
+            };
+            const primaryWrap = (
+              <div key="primary" className="primary-pane-wrap" onMouseDownCapture={() => setFocusedPaneId("primary")}>
+                {renderPrimarySection()}
+              </div>
+            );
+            if (isMobile) return renderPrimarySection();
+            // Stable scaffold: the primary's ancestor chain (pane-root → root
+            // split → cell A) and keys are IDENTICAL with and without a split,
+            // so adding/removing panes never re-parents the live terminal.
+            const rootSplit = paneTree.kind === "split" ? paneTree : null;
+            return (
+              <div className="pane-root">
+                <div key="rootsplit" className={`pane-split ${rootSplit?.dir === "col" ? "dir-col" : "dir-row"}`}>
+                  <div key="cell-a" className="pane-cell" style={{ flexGrow: rootSplit ? rootSplit.ratio : 1, flexBasis: 0 }}>
+                    {rootSplit && rootSplit.a.kind !== "leaf" ? renderPaneNode(rootSplit.a) : primaryWrap}
+                  </div>
+                  {rootSplit && renderDivider(rootSplit)}
+                  {rootSplit && (
+                    <div key="cell-b" className="pane-cell" style={{ flexGrow: 1 - rootSplit.ratio, flexBasis: 0 }}>
+                      {renderPaneNode(rootSplit.b)}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
           <SessionSwitcher
             open={switcherOpen}
             sessions={sessions}
             currentRoom={session.room}
-            onClose={() => setSwitcherOpen(false)}
+            onClose={() => { paneTargetRef.current = false; setSwitcherOpen(false); }}
             onSwitch={(next) => {
-              switchSession(next as SessionInfo);
+              if (paneTargetRef.current) {
+                paneTargetRef.current = false;
+                splitFocusedPane(next.name);
+              } else {
+                switchSession(next as SessionInfo);
+              }
               setSwitcherOpen(false);
             }}
             onRefresh={() => fetchSessions({ showLoading: false })}
@@ -3169,6 +3371,7 @@ const App = () => {
                   ...(isMacPlatform ? [["⌘+ / ⌘− / ⌘0", "terminal font size"]] : []),
                   ["Ctrl+Shift+C / V", "copy / paste"],
                   ["Shift+PgUp / PgDn", "scrollback"],
+                  [isMacPlatform ? "⌘\\ / ⌘⇧\\" : "Ctrl+Shift+\\ / +|", "split pane / close pane"],
                   [isMacPlatform ? "⌘/" : "Ctrl+Shift+/", "this help"],
                   ["Esc", "close panels"]
                 ].map(([keys, what]) => (

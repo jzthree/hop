@@ -2903,3 +2903,88 @@ button.primary {
   text-align: center;
   white-space: nowrap;
 }
+
+/* ── Split panes (desktop): tree of flex splits with draggable dividers ── */
+.pane-root {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+.pane-root > * { flex: 1; min-width: 0; min-height: 0; }
+
+.pane-split {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.pane-split.dir-col { flex-direction: column; }
+
+.pane-cell {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.pane-cell > * { flex: 1; min-width: 0; min-height: 0; }
+
+.primary-pane-wrap {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.primary-pane-wrap > .terminal { flex: 1; min-width: 0; }
+
+.pane-divider {
+  flex: 0 0 5px;
+  background: var(--line);
+  cursor: col-resize;
+  touch-action: none;
+  transition: background 0.12s ease;
+}
+.pane-split.dir-col > .pane-divider { cursor: row-resize; }
+.pane-divider:hover, .pane-divider:active { background: var(--accent); }
+
+.secondary-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--terminal-bg);
+}
+.secondary-pane.focused { box-shadow: inset 0 0 0 2px var(--accent); }
+
+.secondary-pane-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.secondary-pane-name { font-weight: 600; color: var(--ink); }
+.secondary-pane-status { color: var(--ink-muted); font-size: 10px; }
+.secondary-pane-status.ended { color: var(--err); }
+.secondary-pane-bar button {
+  margin-left: auto;
+  padding: 1px 7px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--ink-muted);
+}
+.secondary-pane-bar button:hover { color: var(--ink); }
+
+.secondary-pane-box {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  padding: 4px;
+}
+.secondary-pane-scale { transform-origin: top left; }

@@ -38,6 +38,7 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
   const sizeRef = useRef({ cols, rows });
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
+  const fitRef = useRef<() => void>(() => {});
 
   // Terminal + connection lifecycle.
   useEffect(() => {
@@ -90,9 +91,11 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
           shouldReconnect = false;
           setStatus("ended");
         } else if (message.type === "active_size") {
-          // Follow the room's elected size — we render whatever shape the
-          // active typer chose, scaled to fit this pane.
-          if (message.cols >= 2 && message.rows >= 2 && (message.cols !== sizeRef.current.cols || message.rows !== sizeRef.current.rows)) {
+          // Someone else became active — follow the room's elected size. A
+          // focused pane owns the size (it just claimed its box), so it
+          // ignores foreign elections until the next box change.
+          if (message.cols >= 2 && message.rows >= 2 && !focusedRef.current &&
+              (message.cols !== sizeRef.current.cols || message.rows !== sizeRef.current.rows)) {
             sizeRef.current = { cols: message.cols, rows: message.rows };
             term.resize(message.cols, message.rows);
             requestAnimationFrame(fit);
@@ -116,8 +119,32 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
       }
     });
 
-    // Scale the fixed-size terminal to fit the pane box.
-    const fit = () => {
+    // A pane is a viewport. When FOCUSED it auto-fits like the main terminal:
+    // it computes cols/rows for its box and CLAIMS that size (resize → wins the
+    // active-size election), rendering crisp 1:1. When UNFOCUSED it can't claim
+    // without fighting other viewers, so it renders the room's elected size
+    // scaled to fit (letterboxed) — resizing its own term would garble output,
+    // which was wrapped by the PTY at the room's width.
+    const cellSize = () => {
+      const dims = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })
+        ._core?._renderService?.dimensions?.css?.cell;
+      return dims && dims.width > 0 && dims.height > 0 ? dims : null;
+    };
+    const fitFocused = () => {
+      const box = boxRef.current;
+      const cell = cellSize();
+      if (!box || !cell) return;
+      const cols = Math.max(20, Math.floor((box.clientWidth - 10) / cell.width));
+      const rows = Math.max(6, Math.floor((box.clientHeight - 10) / cell.height));
+      if (cols !== sizeRef.current.cols || rows !== sizeRef.current.rows) {
+        sizeRef.current = { cols, rows };
+        term.resize(cols, rows);
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+      setScale(1);
+    };
+    const scaleToFit = () => {
       const box = boxRef.current;
       const inner = hostRef.current;
       if (!box || !inner) return;
@@ -125,10 +152,10 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
       const bh = box.clientHeight - 8;
       const iw = inner.scrollWidth;
       const ih = inner.scrollHeight;
-      if (iw > 0 && ih > 0 && bw > 0 && bh > 0) {
-        setScale(Math.min(bw / iw, bh / ih, 1.4));
-      }
+      if (iw > 0 && ih > 0 && bw > 0 && bh > 0) setScale(Math.min(bw / iw, bh / ih, 1.4));
     };
+    const fit = () => (focusedRef.current ? fitFocused() : scaleToFit());
+    fitRef.current = fit;
     const ro = new ResizeObserver(fit);
     if (boxRef.current) ro.observe(boxRef.current);
     const fitTimer = window.setTimeout(fit, 300);
@@ -152,6 +179,9 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
 
   useEffect(() => {
     if (focused) { termRef.current?.focus(); setActivity(false); }
+    // Focus change flips fit mode: gaining focus claims the box size (crisp),
+    // losing it falls back to letterbox.
+    requestAnimationFrame(() => fitRef.current());
   }, [focused]);
 
   return (

@@ -233,14 +233,24 @@ export const SessionSwitcher = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, sheet]);
 
-  // Hero-card previews: fetch on open and every 5s while open + visible.
-  // Only live terminal sessions are asked; rows never fetch anything.
+  // Tile previews: EVERY session gets a preview tile. Hot tiles (the
+  // attention/recency heroes) refresh each tick; the long tail refreshes at a
+  // quarter of that rate — 30+ tiles stay cheap, and the daemon only renders
+  // previews on demand anyway. Paused while the tab is hidden.
+  const lastColdRefreshRef = useRef(0);
   useEffect(() => {
     if (!open || model.mode !== "tiers") return;
     let cancelled = false;
-    const targets = model.hero.filter((s) => s.type !== "port" && (s.active || s.starting));
+    const hotKeys = new Set(model.hero.map(sessionKey));
+    const all = [...model.hero, ...model.groups.flatMap((g) => g.rows)]
+      .filter((s) => s.type !== "port" && (s.active || s.starting));
     const refresh = async () => {
-      if (cancelled || document.hidden) return;
+      if (cancelled || document.hidden || all.length === 0) return;
+      // Time-based cold tier (not tick-based: the first mount often races the
+      // sessions fetch and would consume the cold slot on an empty list).
+      const coldToo = Date.now() - lastColdRefreshRef.current > 15000;
+      if (coldToo) lastColdRefreshRef.current = Date.now();
+      const targets = all.filter((s) => hotKeys.has(sessionKey(s)) || coldToo);
       await Promise.all(
         targets.map(async (s) => {
           const key = sessionKey(s);
@@ -795,7 +805,7 @@ export const SessionSwitcher = ({
             {model.groups.map((group) => (
               <section key={group.label} className="switcher-group">
                 <h3 className="switcher-group-label">{group.label}</h3>
-                <div className="switcher-rows">{group.rows.map(renderRow)}</div>
+                <div className="switcher-grid">{group.rows.map(renderCard)}</div>
               </section>
             ))}
           </>

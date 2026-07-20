@@ -83,8 +83,11 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
           // Claude pane scrolls Claude.
           let prelude = "";
           if (message.alternateScreen) prelude += "\x1b[?1049h";
-          if (message.mouseReporting) prelude += "\x1b[?1002h";
-          if (message.mouseSgr) prelude += "\x1b[?1006h";
+          // Explicit DISABLES when the server says off: xterm mouse state from
+          // a previous connection must never survive into a session whose app
+          // has no mouse mode (it would turn mouse movement into junk input).
+          prelude += message.mouseReporting ? "\x1b[?1002h" : "\x1b[?1000l\x1b[?1002l\x1b[?1003l";
+          prelude += message.mouseSgr ? "\x1b[?1006h" : "\x1b[?1006l";
           const coda = message.cursorHidden ? "\x1b[?25l" : "";
           term.write(prelude + message.data + coda, () => term.scrollToBottom());
         } else if (message.type === "session_ended") {

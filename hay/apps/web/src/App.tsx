@@ -1184,9 +1184,13 @@ const App = () => {
             ? message.keyboardEnhanced
             : scanKeyboardProtocol(message.data, false);
           // Mouse-mode seed: the enables predate the replay tail (emitted once
-          // at app startup), so the server's tracked flags are the only signal.
-          if (typeof message.mouseReporting === "boolean") remoteMouseReportingRef.current = message.mouseReporting;
-          if (typeof message.mouseSgr === "boolean") remoteMouseSgrRef.current = message.mouseSgr;
+          // at app startup), so the server's tracked flags are the only
+          // signal. Reset UNCONDITIONALLY — stale true values from a previous
+          // session on this connection made clients synthesize SGR mouse
+          // reports at apps that never asked, which land as junk input
+          // ("35;197;31M") at a shell prompt.
+          remoteMouseReportingRef.current = message.mouseReporting === true;
+          remoteMouseSgrRef.current = message.mouseSgr === true;
           optimisticEchoRef.current.reset();
           userScrolledUpRef.current = false;
           if (termRef.current) {

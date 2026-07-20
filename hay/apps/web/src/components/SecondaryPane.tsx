@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { safeParseServerMessage } from "hay-shared";
 
 // A lightweight additional pane: its own WS attach + xterm for one session,
@@ -52,6 +53,8 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
       scrollback: 2000,
       convertEol: false
     });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
     term.open(hostRef.current);
     termRef.current = term;
 
@@ -128,17 +131,16 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
     // without fighting other viewers, so it renders the room's elected size
     // scaled to fit (letterboxed) — resizing its own term would garble output,
     // which was wrapped by the PTY at the room's width.
-    const cellSize = () => {
-      const dims = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })
-        ._core?._renderService?.dimensions?.css?.cell;
-      return dims && dims.width > 0 && dims.height > 0 ? dims : null;
-    };
     const fitFocused = () => {
-      const box = boxRef.current;
-      const cell = cellSize();
-      if (!box || !cell) return;
-      const cols = Math.max(20, Math.floor((box.clientWidth - 10) / cell.width));
-      const rows = Math.max(6, Math.floor((box.clientHeight - 10) / cell.height));
+      // FitAddon computes cols/rows from measured font metrics. Guard hard
+      // against unready metrics: an early read once produced garbage cell
+      // sizes and CLAIMED 432x60 onto real sessions, re-wrapping their
+      // scrollback everywhere. Never claim an implausible size.
+      const dims = fitAddon.proposeDimensions();
+      if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
+      const cols = Math.floor(dims.cols);
+      const rows = Math.floor(dims.rows);
+      if (cols < 20 || cols > 320 || rows < 6 || rows > 120) return;
       if (cols !== sizeRef.current.cols || rows !== sizeRef.current.rows) {
         sizeRef.current = { cols, rows };
         term.resize(cols, rows);

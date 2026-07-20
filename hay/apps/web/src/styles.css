@@ -2971,7 +2971,8 @@ button.primary {
 .secondary-pane-name { font-weight: 600; color: var(--ink); }
 .secondary-pane-status { color: var(--ink-muted); font-size: 10px; }
 .secondary-pane-status.ended { color: var(--err); }
-.secondary-pane-bar button {
+.secondary-pane-bar button { margin-left: 0; }
+.secondary-pane-bar button:first-of-type {
   margin-left: auto;
   padding: 1px 7px;
   font-size: 12px;

@@ -606,11 +606,33 @@ const App = () => {
       return walk(tree);
     });
   };
-  const paneOpsRef = useRef({ splitFocusedPane, closePane });
-  paneOpsRef.current = { splitFocusedPane, closePane };
   const paneTreeRef = useRef(paneTree);
   paneTreeRef.current = paneTree;
+  const findPaneLeafSession = (n: PaneNode, id: string): string | null => {
+    if (n.kind === "leaf") return n.id === id ? n.session : null;
+    return findPaneLeafSession(n.a, id) ?? findPaneLeafSession(n.b, id);
+  };
+  const setPaneLeafSession = (n: PaneNode, id: string, session: string): PaneNode =>
+    n.kind === "leaf"
+      ? (n.id === id ? { ...n, session } : n)
+      : { ...n, a: setPaneLeafSession(n.a, id, session), b: setPaneLeafSession(n.b, id, session) };
+  // Promote: the pane's session becomes the primary and the primary's session
+  // moves into the pane. Pure connection retargeting — the primary terminal's
+  // DOM never moves (a remount would kill the live canvas); the pane
+  // reconnects when its sessionName prop changes.
+  const swapPaneWithPrimary = (paneId: string) => {
+    const paneSession = findPaneLeafSession(paneTreeRef.current, paneId);
+    const primaryRoom = activeSessionRoomRef.current;
+    if (!paneSession || !primaryRoom || paneSession === primaryRoom) return;
+    const target = sessionsRef.current.find((x) => x.name === paneSession || x.internalName === paneSession);
+    if (!target) return;
+    setPaneTree((tree) => setPaneLeafSession(tree, paneId, primaryRoom));
+    switchSessionRef.current?.(target);
+    setFocusedPaneId("primary");
+  };
   // In-order leaves = visual left-to-right/top-to-bottom pane order.
+  const paneOpsRef = useRef({ splitFocusedPane, closePane, swapPaneWithPrimary });
+  paneOpsRef.current = { splitFocusedPane, closePane, swapPaneWithPrimary };
   const paneLeafIds = (n: PaneNode): string[] =>
     n.kind === "leaf" ? [n.id] : [...paneLeafIds(n.a), ...paneLeafIds(n.b)];
   const paneDragRef = useRef<{ id: string; dir: "row" | "col"; rect: DOMRect } | null>(null);
@@ -2678,6 +2700,14 @@ const App = () => {
       if (key === "j") { grab(); cycleSession(shifted ? -1 : 1); return; }
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
       if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
+      if (shifted && key === "e") {
+        const leaves = paneLeafIds(paneTreeRef.current).filter((id) => id !== "primary");
+        const target = focusedPaneIdRef.current !== "primary"
+          ? focusedPaneIdRef.current
+          : (leaves.length === 1 ? leaves[0] : null);
+        if (target) { grab(); paneOpsRef.current.swapPaneWithPrimary(target); }
+        return;
+      }
       if (key === "]" || key === "[") {
         const ids = paneLeafIds(paneTreeRef.current);
         if (ids.length > 1) {
@@ -3302,6 +3332,7 @@ const App = () => {
                     focused={focusedPaneId === node.id}
                     onFocus={() => setFocusedPaneId(node.id)}
                     onClose={() => closePane(node.id)}
+                    onPromote={() => swapPaneWithPrimary(node.id)}
                   />
                 );
               }
@@ -3391,6 +3422,7 @@ const App = () => {
                   ["Shift+PgUp / PgDn", "scrollback"],
                   [isMacPlatform ? "⌘\\ / ⌘⇧\\" : "Ctrl+Shift+\\ / +|", "split pane / close pane"],
                   [isMacPlatform ? "⌘] / ⌘[" : "Ctrl+Shift+] / [", "next / previous pane"],
+                  [isMacPlatform ? "⌘⇧E" : "Ctrl+Shift+E", "swap pane with primary"],
                   [isMacPlatform ? "⌘/" : "Ctrl+Shift+/", "this help"],
                   ["Esc", "close panels"]
                 ].map(([keys, what]) => (

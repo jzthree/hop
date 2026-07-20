@@ -24,9 +24,10 @@ type Props = {
   focused: boolean;
   onFocus: () => void;
   onClose: () => void;
+  onPromote?: () => void;
 };
 
-export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, rows, fontSize, theme, focused, onFocus, onClose }: Props) => {
+export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, rows, fontSize, theme, focused, onFocus, onClose, onPromote }: Props) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -158,6 +159,11 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
         <span className="secondary-pane-name">{sessionName}</span>
         {procLabel ? <span className="secondary-pane-proc">{procLabel}</span> : null}
         <span className={`secondary-pane-status ${status}`}>{status === "connected" ? "" : status}</span>
+        {onPromote && (
+          <button type="button" aria-label={`Swap ${sessionName} with primary`} title="Swap with primary (⌘⇧E)" onClick={(e) => { e.stopPropagation(); onPromote(); }}>
+            ⇄
+          </button>
+        )}
         <button type="button" aria-label={`Close pane ${sessionName}`} onClick={(e) => { e.stopPropagation(); onClose(); }}>
           ✕
         </button>

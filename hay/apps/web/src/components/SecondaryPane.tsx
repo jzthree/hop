@@ -34,7 +34,10 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
   const wsRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "ended" | "closed">("connecting");
   const [scale, setScale] = useState(1);
+  const [activity, setActivity] = useState(false);
   const sizeRef = useRef({ cols, rows });
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
 
   // Terminal + connection lifecycle.
   useEffect(() => {
@@ -69,6 +72,7 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
         if (!message) return;
         if (message.type === "output") {
           term.write(message.data);
+          if (!focusedRef.current && message.data.trim()) setActivity(true);
         } else if (message.type === "snapshot") {
           term.reset();
           // The replay tail can't contain modes the app enabled once at
@@ -147,7 +151,7 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
   }, [fontSize]);
 
   useEffect(() => {
-    if (focused) termRef.current?.focus();
+    if (focused) { termRef.current?.focus(); setActivity(false); }
   }, [focused]);
 
   return (
@@ -156,6 +160,7 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
       onMouseDown={onFocus}
     >
       <div className="secondary-pane-bar">
+        {activity && !focused && <span className="secondary-pane-dot" title="New output" />}
         <span className="secondary-pane-name">{sessionName}</span>
         {procLabel ? <span className="secondary-pane-proc">{procLabel}</span> : null}
         <span className={`secondary-pane-status ${status}`}>{status === "connected" ? "" : status}</span>

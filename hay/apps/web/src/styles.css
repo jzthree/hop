@@ -2994,3 +2994,19 @@ button.primary {
   color: var(--accent);
   font-size: 10px;
 }
+
+.secondary-pane-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  animation: pane-dot-pulse 1.6s ease-in-out infinite;
+}
+@keyframes pane-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .secondary-pane-dot { animation: none; }
+}

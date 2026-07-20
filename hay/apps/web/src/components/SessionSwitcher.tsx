@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,7 +10,9 @@ import {
 } from "react";
 import {
   buildSwitcherModel,
+  filterSessionsByOrigin,
   relativeTime,
+  type SessionOriginScope,
   type SwitcherSession
 } from "../utils/switcherModel";
 
@@ -75,6 +78,7 @@ export const SessionSwitcher = ({
   onFind
 }: Props) => {
   const [filter, setFilter] = useState("");
+  const [originScope, setOriginScope] = useState<SessionOriginScope>("user");
   // Hero-tile size: bigger tiles show more of each terminal preview.
   const [tileSize, setTileSize] = useState<"s" | "m" | "l" | "xl">(() => {
     const saved = localStorage.getItem("hay_tile_size");
@@ -83,6 +87,15 @@ export const SessionSwitcher = ({
   const changeTileSize = (size: "s" | "m" | "l" | "xl") => {
     setTileSize(size);
     localStorage.setItem("hay_tile_size", size);
+  };
+  // Fullscreen: the in-session palette can expand to the whole viewport for a
+  // workspace feel, or stay compact for quick switching. Persisted.
+  const [fullscreen, setFullscreen] = useState(() => localStorage.getItem("hay_switcher_fullscreen") === "1");
+  const toggleFullscreen = () => {
+    setFullscreen((v) => {
+      localStorage.setItem("hay_switcher_fullscreen", v ? "0" : "1");
+      return !v;
+    });
   };
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -95,9 +108,13 @@ export const SessionSwitcher = ({
   // release doesn't also switch sessions.
   const suppressTapRef = useRef(false);
 
+  const visibleSessions = useMemo(
+    () => filterSessionsByOrigin(sessions, originScope),
+    [sessions, originScope]
+  );
   const model = useMemo(
-    () => buildSwitcherModel(sessions, currentRoom, filter),
-    [sessions, currentRoom, filter]
+    () => buildSwitcherModel(visibleSessions, currentRoom, filter),
+    [visibleSessions, currentRoom, filter]
   );
 
   // ── Keyboard-first palette: ⌘K → type to filter → ↑↓ → Enter, no mouse. ──
@@ -120,7 +137,7 @@ export const SessionSwitcher = ({
         const res = await fetch(`/api/sessions/search?q=${encodeURIComponent(q)}`);
         const data = await res.json();
         if (cancelled) return;
-        const byKey = new Map(sessions.map((s) => [s.internalName || s.name, s]));
+        const byKey = new Map(visibleSessions.map((s) => [s.internalName || s.name, s]));
         setContentMatches(
           (Array.isArray(data?.matches) ? data.matches : [])
             .map((m: { internalName?: string; name?: string; snippet?: string }) => {
@@ -137,7 +154,7 @@ export const SessionSwitcher = ({
       cancelled = true;
       window.clearTimeout(t);
     };
-  }, [open, filter, sessions]);
+  }, [open, filter, visibleSessions]);
 
   // Content matches the name filter didn't already surface.
   const extraContentMatches = useMemo(() => {
@@ -169,7 +186,7 @@ export const SessionSwitcher = ({
     setKbdIndex(filter ? 0 : Math.max(0, firstOther));
     document.querySelector(".switcher-scroll")?.scrollTo({ top: 0 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, filter]);
+  }, [open, filter, originScope]);
   // Background refreshes may shrink the list — keep the selection in range.
   useEffect(() => {
     setKbdIndex((i) => Math.min(i, Math.max(0, flatNav.length - 1)));
@@ -183,9 +200,11 @@ export const SessionSwitcher = ({
     return () => window.clearTimeout(t);
   }, [open, finePointer]);
 
-  // Reset transient state whenever the switcher opens.
-  useEffect(() => {
+  // Every visit starts on user-owned sessions. Agent sessions stay one toggle
+  // away without competing for the default view.
+  useLayoutEffect(() => {
     if (open) {
+      setOriginScope("user");
       setFilter("");
       setSheet(null);
       setCreating(false);
@@ -388,9 +407,8 @@ export const SessionSwitcher = ({
     }
   };
 
-  const killSession = async () => {
-    if (!sheet) return;
-    const label = sheet.session.displayName || sheet.session.name;
+  const killSessionByRef = async (s: SwitcherSession) => {
+    const label = s.displayName || s.name;
     if (!window.confirm(`Kill session "${label}" for all participants? Its running process is terminated.`)) {
       return;
     }
@@ -398,7 +416,7 @@ export const SessionSwitcher = ({
       const res = await fetch("/api/sessions/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: sessionKey(sheet.session) })
+        body: JSON.stringify({ internalName: sessionKey(s) })
       });
       if (!res.ok) {
         onNotice("Failed to kill session");
@@ -410,6 +428,14 @@ export const SessionSwitcher = ({
     } catch {
       onNotice("Failed to kill session");
     }
+  };
+  const killSession = async () => {
+    if (!sheet) return;
+    await killSessionByRef(sheet.session);
+  };
+  const startRename = (s: SwitcherSession) => {
+    setRenameDraft(s.displayName || s.name);
+    setSheet({ session: s, mode: "rename" });
   };
 
   const submitCreate = async (event: FormEvent) => {
@@ -514,19 +540,11 @@ export const SessionSwitcher = ({
           {dots(s)}
           <span className="switcher-card-name">{s.displayName}</span>
           {current && <span className="switcher-chip current">CURRENT</span>}
+          {originScope === "all" && s.createdBy === "agent" && (
+            <span className="switcher-chip agent">AGENT</span>
+          )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
-          <button
-            type="button"
-            className="switcher-more"
-            aria-label={`Actions for ${s.displayName}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              openSheet(s);
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            ⋯
-          </button>
+          {inlineActions(s)}
         </div>
         <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>
         <div className="switcher-card-meta">
@@ -555,31 +573,59 @@ export const SessionSwitcher = ({
       >
         {dots(s)}
         <span className="switcher-row-name">{s.displayName}</span>
+        {originScope === "all" && s.createdBy === "agent" && (
+          <span className="switcher-chip agent">AGENT</span>
+        )}
         {s.type === "port" && <span className="switcher-chip port">PORT {s.port}</span>}
         <span className="switcher-row-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : ""}</span>
         <span className="switcher-row-meta">{meta(s)}</span>
-        <button
-          type="button"
-          className="switcher-more"
-          aria-label={`Actions for ${s.displayName}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            openSheet(s);
-          }}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          ⋯
-        </button>
+        {inlineActions(s)}
       </div>
     );
   };
+
+  // Inline quick actions (desktop hover): rename + kill without the sheet.
+  const inlineActions = (s: SwitcherSession) => (
+    <span className="switcher-inline-actions">
+      <button
+        type="button"
+        className="switcher-icon-btn"
+        aria-label={`Rename ${s.displayName}`}
+        title="Rename"
+        onClick={(e) => { e.stopPropagation(); startRename(s); }}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+      </button>
+      <button
+        type="button"
+        className="switcher-icon-btn danger"
+        aria-label={`Kill ${s.displayName}`}
+        title="Kill session"
+        onClick={(e) => { e.stopPropagation(); killSessionByRef(s); }}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg>
+      </button>
+      <button
+        type="button"
+        className="switcher-icon-btn"
+        aria-label={`More actions for ${s.displayName}`}
+        title="More"
+        onClick={(e) => { e.stopPropagation(); openSheet(s); }}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        ⋯
+      </button>
+    </span>
+  );
 
   const sheetSession = sheet?.session;
   const sheetAgentPermitted = sheetSession?.agentPermitted === true;
 
   return (
     <div
-      className={`switcher-overlay tile-${tileSize}${dismissable ? "" : " switcher-hub"}`}
+      className={`switcher-overlay tile-${tileSize}${dismissable ? "" : " switcher-hub"}${dismissable && fullscreen ? " switcher-fullscreen" : ""}`}
       role="dialog"
       aria-label="Sessions"
       onClick={(e) => {
@@ -592,7 +638,7 @@ export const SessionSwitcher = ({
       <div className="switcher-top">
         <header className="switcher-header">
           <h2>Sessions</h2>
-          <span className="switcher-count">{sessions.length}</span>
+          <span className="switcher-count">{visibleSessions.length}</span>
           <div className="switcher-tilesize" role="group" aria-label="Tile size">
             {(["s", "m", "l", "xl"] as const).map((size) => (
               <button
@@ -607,6 +653,19 @@ export const SessionSwitcher = ({
             ))}
           </div>
           <span className="switcher-header-spacer" />
+          {dismissable && (
+            <button type="button" className="switcher-action" aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"} title={fullscreen ? "Exit fullscreen" : "Fullscreen"} onClick={toggleFullscreen}>
+              {fullscreen ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 3v6H3M21 9h-6V3M3 15h6v6M15 21v-6h6"/>
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6"/>
+                </svg>
+              )}
+            </button>
+          )}
           {onToggleKeyboard && (
             <button type="button" className="switcher-action" aria-label="Toggle keyboard" title="Toggle keyboard" onClick={onToggleKeyboard}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -634,8 +693,28 @@ export const SessionSwitcher = ({
             </button>
           )}
         </header>
-        {(finePointer || sessions.length > FILTER_THRESHOLD || filter) && (
-          <div className="switcher-filter-row">
+        <div className="switcher-filter-row">
+          <div className="switcher-origin" role="group" aria-label="Session origin">
+            {([
+              ["user", "User"],
+              ["agent", "Agent"],
+              ["all", "All"]
+            ] as const).map(([scope, label]) => (
+              <button
+                key={scope}
+                type="button"
+                className={originScope === scope ? "active" : ""}
+                aria-pressed={originScope === scope}
+                onClick={() => {
+                  setOriginScope(scope);
+                  setCreating(false);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {(finePointer || visibleSessions.length > FILTER_THRESHOLD || filter) && (
             <input
               ref={filterInputRef}
               className="switcher-filter"
@@ -644,8 +723,8 @@ export const SessionSwitcher = ({
               onChange={(e) => setFilter(e.target.value)}
               aria-label="Filter sessions"
             />
-          </div>
-        )}
+          )}
+        </div>
       </div>
       <div className="switcher-scroll">
         {model.mode === "filter" ? (
@@ -686,9 +765,12 @@ export const SessionSwitcher = ({
           </>
         ) : (
           <>
+            {originScope === "agent" && visibleSessions.length === 0 && (
+              <div className="switcher-empty">No agent sessions</div>
+            )}
             <div className="switcher-grid">
               {model.hero.map(renderCard)}
-              {creating ? (
+              {originScope !== "agent" && (creating ? (
                 <form className="switcher-card new inline-edit" onSubmit={submitCreate}>
                   <input
                     placeholder="session-name"
@@ -708,7 +790,7 @@ export const SessionSwitcher = ({
                   <span className="switcher-new-plus">+</span>
                   <span>New session</span>
                 </button>
-              )}
+              ))}
             </div>
             {model.groups.map((group) => (
               <section key={group.label} className="switcher-group">

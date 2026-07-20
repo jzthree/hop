@@ -1986,7 +1986,36 @@ button.primary {
 }
 
 .switcher-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 0 16px 10px;
+}
+
+.switcher-origin {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-alt);
+}
+
+.switcher-origin button {
+  min-width: 54px;
+  padding: 4px 9px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.switcher-origin button.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
 }
 
 .switcher-header h2 {
@@ -2007,6 +2036,7 @@ button.primary {
 }
 
 .switcher-filter {
+  flex: 1;
   width: 100%;
   min-width: 0;
   font-family: var(--font-mono);
@@ -2153,6 +2183,12 @@ button.primary {
 
 .switcher-chip.port {
   background: var(--bg-alt);
+  color: var(--ink-muted);
+}
+
+.switcher-chip.agent {
+  border: 1px solid var(--line);
+  background: var(--panel);
   color: var(--ink-muted);
 }
 
@@ -3009,4 +3045,78 @@ button.primary {
 }
 @media (prefers-reduced-motion: reduce) {
   .secondary-pane-dot { animation: none; }
+}
+
+/* ── Session-manager fullscreen (in-session palette → whole viewport) ── */
+@media (min-width: 769px) {
+  .switcher-overlay.switcher-fullscreen {
+    padding: 0;
+    background: var(--bg);
+    backdrop-filter: none;
+    align-items: stretch;
+  }
+  .switcher-overlay.switcher-fullscreen > .switcher-top,
+  .switcher-overlay.switcher-fullscreen > .switcher-scroll {
+    width: 100%;
+    max-width: none;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    box-shadow: none;
+  }
+  .switcher-overlay.switcher-fullscreen > .switcher-scroll {
+    max-height: none;
+    flex: 1;
+  }
+  .switcher-overlay.switcher-fullscreen > .switcher-top {
+    border-top: none;
+  }
+}
+
+/* ── Inline row/card actions (rename · kill · more) ── */
+.switcher-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.switcher-card-head .switcher-inline-actions { margin-left: auto; }
+
+.switcher-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 15px;
+  line-height: 1;
+}
+.switcher-icon-btn:hover {
+  background: var(--bg-alt);
+  color: var(--ink);
+}
+.switcher-icon-btn.danger:hover {
+  background: color-mix(in srgb, var(--err) 15%, transparent);
+  color: var(--err);
+}
+
+/* On fine pointers, reveal rename/kill on hover only (keep rows calm); the
+   ⋯ (last child) always shows. Touch devices show all (no hover). */
+@media (hover: hover) and (pointer: fine) {
+  .switcher-inline-actions .switcher-icon-btn:not(:last-child) {
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+  .switcher-row:hover .switcher-inline-actions .switcher-icon-btn,
+  .switcher-card:hover .switcher-inline-actions .switcher-icon-btn,
+  .switcher-row.kbd-selected .switcher-inline-actions .switcher-icon-btn,
+  .switcher-card.kbd-selected .switcher-inline-actions .switcher-icon-btn,
+  .switcher-inline-actions:focus-within .switcher-icon-btn {
+    opacity: 1;
+  }
 }

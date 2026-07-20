@@ -69,7 +69,17 @@ export const SecondaryPane = ({ sessionName, wsUrl, userName, cols, rows, fontSi
           term.write(message.data);
         } else if (message.type === "snapshot") {
           term.reset();
-          term.write(message.data, () => term.scrollToBottom());
+          // The replay tail can't contain modes the app enabled once at
+          // startup — seed them from the server-tracked flags so the pane
+          // renders into the right buffer, and so xterm itself encodes wheel
+          // events (SGR) that our onData then forwards: wheel-scrolling a
+          // Claude pane scrolls Claude.
+          let prelude = "";
+          if (message.alternateScreen) prelude += "\x1b[?1049h";
+          if (message.mouseReporting) prelude += "\x1b[?1002h";
+          if (message.mouseSgr) prelude += "\x1b[?1006h";
+          const coda = message.cursorHidden ? "\x1b[?25l" : "";
+          term.write(prelude + message.data + coda, () => term.scrollToBottom());
         } else if (message.type === "session_ended") {
           shouldReconnect = false;
           setStatus("ended");

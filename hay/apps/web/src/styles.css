@@ -2988,3 +2988,8 @@ button.primary {
   padding: 4px;
 }
 .secondary-pane-scale { transform-origin: top left; }
+
+.secondary-pane-proc {
+  color: var(--accent);
+  font-size: 10px;
+}

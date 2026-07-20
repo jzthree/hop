@@ -14,6 +14,7 @@ import { safeParseServerMessage } from "hay-shared";
 
 type Props = {
   sessionName: string;
+  procLabel?: string;
   wsUrl: string;
   userName: string;
   cols: number;
@@ -25,7 +26,7 @@ type Props = {
   onClose: () => void;
 };
 
-export const SecondaryPane = ({ sessionName, wsUrl, userName, cols, rows, fontSize, theme, focused, onFocus, onClose }: Props) => {
+export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, rows, fontSize, theme, focused, onFocus, onClose }: Props) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -155,6 +156,7 @@ export const SecondaryPane = ({ sessionName, wsUrl, userName, cols, rows, fontSi
     >
       <div className="secondary-pane-bar">
         <span className="secondary-pane-name">{sessionName}</span>
+        {procLabel ? <span className="secondary-pane-proc">{procLabel}</span> : null}
         <span className={`secondary-pane-status ${status}`}>{status === "connected" ? "" : status}</span>
         <button type="button" aria-label={`Close pane ${sessionName}`} onClick={(e) => { e.stopPropagation(); onClose(); }}>
           ✕

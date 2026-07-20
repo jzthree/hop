@@ -608,6 +608,11 @@ const App = () => {
   };
   const paneOpsRef = useRef({ splitFocusedPane, closePane });
   paneOpsRef.current = { splitFocusedPane, closePane };
+  const paneTreeRef = useRef(paneTree);
+  paneTreeRef.current = paneTree;
+  // In-order leaves = visual left-to-right/top-to-bottom pane order.
+  const paneLeafIds = (n: PaneNode): string[] =>
+    n.kind === "leaf" ? [n.id] : [...paneLeafIds(n.a), ...paneLeafIds(n.b)];
   const paneDragRef = useRef<{ id: string; dir: "row" | "col"; rect: DOMRect } | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
@@ -2673,6 +2678,15 @@ const App = () => {
       if (key === "j") { grab(); cycleSession(shifted ? -1 : 1); return; }
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
       if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
+      if (key === "]" || key === "[") {
+        const ids = paneLeafIds(paneTreeRef.current);
+        if (ids.length > 1) {
+          grab();
+          const cur = Math.max(0, ids.indexOf(focusedPaneIdRef.current));
+          setFocusedPaneId(ids[(cur + (key === "]" ? 1 : -1) + ids.length) % ids.length]);
+        }
+        return;
+      }
       if (key === "\\" || key === "|") {
         grab();
         if (shifted || key === "|") {
@@ -3271,10 +3285,14 @@ const App = () => {
                     </div>
                   );
                 }
+                const paneInfo = sessions.find((x) => x.name === node.session || x.internalName === node.session);
+                const paneProcRaw = (paneInfo?.foregroundProcess || "").replace(/^-/, "");
+                const paneProc = /^\d+\.\d+\.\d+$/.test(paneProcRaw) ? "claude" : paneProcRaw;
                 return (
                   <SecondaryPane
                     key={node.id}
                     sessionName={node.session}
+                    procLabel={paneProc === "zsh" || paneProc === "bash" ? "" : paneProc}
                     wsUrl={resolveWsUrl()}
                     userName={name}
                     cols={120}
@@ -3372,6 +3390,7 @@ const App = () => {
                   ["Ctrl+Shift+C / V", "copy / paste"],
                   ["Shift+PgUp / PgDn", "scrollback"],
                   [isMacPlatform ? "⌘\\ / ⌘⇧\\" : "Ctrl+Shift+\\ / +|", "split pane / close pane"],
+                  [isMacPlatform ? "⌘] / ⌘[" : "Ctrl+Shift+] / [", "next / previous pane"],
                   [isMacPlatform ? "⌘/" : "Ctrl+Shift+/", "this help"],
                   ["Esc", "close panels"]
                 ].map(([keys, what]) => (

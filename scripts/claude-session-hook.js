@@ -74,6 +74,19 @@ function main() {
   try { payload = JSON.parse(raw || "{}"); } catch { return; }
   if (!payload || typeof payload !== "object") return;
 
+  // Nested-claude guard: a claude spawned from ANOTHER claude's tool shell
+  // (e.g. a headless test run by an orchestrating Claude Code) inherits this
+  // terminal's HOP_SESSION — but it is not the terminal's primary conversation.
+  // Its env carries the PARENT's CLAUDE_CODE_SESSION_ID; when that is set and
+  // differs from this process's own session id, recording would clobber the
+  // terminal's record (wrong cwd + an unresumable conversation on `hop
+  // restore`) and its Stops would fake turn completions. Skip both. hop scrubs
+  // these markers when spawning session shells, so each session's primary
+  // claude (and every fleet worker in its own session) still records normally.
+  const parentSessionId = process.env.CLAUDE_CODE_SESSION_ID;
+  const ownSessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+  if (parentSessionId && ownSessionId && parentSessionId !== ownSessionId) return;
+
   const event = typeof payload.hook_event_name === "string" ? payload.hook_event_name : "";
   const dir = sessionsDir();
   // Only the main agent's Stop bumps the turn counter. SubagentStop (a Task-tool

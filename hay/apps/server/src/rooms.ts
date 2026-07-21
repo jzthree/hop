@@ -249,24 +249,44 @@ export class Room extends EventEmitter {
       console.log(
         `[hay] PTY exit room=${this.id} code=${normalizedExit ?? "null"} signal=${normalizedSignal ?? "null"}`
       );
-      this.endSession({
+      // Spurious-exit guard: an exit event with the shell still alive must not
+      // end the session — a wrongly `ended` room keeps serving output but its
+      // cwd poll and cleanup are permanently dead (observed live: a restored
+      // session whose cwd froze for hours while the shell ran fine). If the
+      // pid still exists shortly after the event, ignore it.
+      const pid = (this.pty as unknown as { pid?: number }).pid;
+      const finish = () => this.endSession({
         exitCode: normalizedExit,
         signal: normalizedSignal,
         message: "Session ended"
       });
+      if (!pid) {
+        finish();
+        return;
+      }
+      setTimeout(() => {
+        try {
+          process.kill(pid, 0); // throws when the process is gone
+          console.log(`[hay] room=${this.id} ignoring spurious exit event (pid ${pid} still alive)`);
+        } catch {
+          finish();
+        }
+      }, 150);
     };
 
     if (typeof this.pty.onExit === "function") {
       this.pty.onExit((event) => {
         handleExit(event.exitCode, event.signal);
       });
-    }
-
-    const legacyOn = (this.pty as unknown as { on?: (event: string, handler: (...args: any[]) => void) => void }).on;
-    if (typeof legacyOn === "function") {
-      legacyOn.call(this.pty, "exit", (exitCode: number, signal?: number) => {
-        handleExit(exitCode, signal);
-      });
+    } else {
+      // Legacy fallback ONLY when onExit is unavailable — registering both
+      // fired every real exit twice.
+      const legacyOn = (this.pty as unknown as { on?: (event: string, handler: (...args: any[]) => void) => void }).on;
+      if (typeof legacyOn === "function") {
+        legacyOn.call(this.pty, "exit", (exitCode: number, signal?: number) => {
+          handleExit(exitCode, signal);
+        });
+      }
     }
 
     // Start PID-based cwd polling as fallback for shells without OSC 7
@@ -904,6 +924,10 @@ export class Room extends EventEmitter {
     return this.tailOutput(maxBytes);
   }
 
+  hasEnded() {
+    return this.ended;
+  }
+
   getSummary(): RoomSummary {
     const localCliCount = [...this.clients.values()].filter((client) => client.source === "local-cli").length;
     // Read the foreground process name fresh (cheap getter) so the session
@@ -941,7 +965,9 @@ export class RoomManager {
 
   getRoom(roomId: string, initialSize: { cols: number; rows: number }, cwdOrOptions: string | RoomCreateOptions) {
     const existing = this.rooms.get(roomId);
-    if (existing) {
+    // Never hand out a room that already ended — its poll/cleanup are dead and
+    // its pty is (supposed to be) gone. Replace it with a fresh generation.
+    if (existing && !existing.hasEnded()) {
       return existing;
     }
     const options = typeof cwdOrOptions === "string"
@@ -952,7 +978,12 @@ export class RoomManager {
     }
     const room = new Room(roomId, this.ptyFactory, initialSize, options);
     room.on("empty", () => {
-      this.rooms.delete(roomId);
+      // Generation-safe delete: only remove the mapping if it still points at
+      // THIS room. A late 'empty' from a dead generation must not evict a
+      // freshly created successor under the same id.
+      if (this.rooms.get(roomId) === room) {
+        this.rooms.delete(roomId);
+      }
     });
     this.rooms.set(roomId, room);
     return room;

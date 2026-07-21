@@ -3596,6 +3596,22 @@ const SESSION_BUFFERS_DIR = path.join(HOME_DIR, 'session-buffers');
 // boundary is obvious. Dim, centered-ish marker on its own line.
 const SESSION_RESTORED_SEPARATOR = '\r\n\x1b[2m──────── session restored ────────\x1b[0m\r\n';
 
+// Strip terminal QUERY sequences from a seed buffer before replay. The buffer
+// is raw output from the previous life of the session; replaying queries (DA
+// "who are you", DSR cursor probes, kitty keyboard probes, XTVERSION, DECRQM,
+// OSC color queries) makes the user's real terminal ANSWER them — and those
+// answers arrive as junk keystrokes at the fresh prompt (e.g. "1;2c").
+function sanitizeSeedBuffer(buf) {
+    return String(buf)
+        .replace(/\x1b\[[>=]?\d*c/g, '')                          // DA1/DA2/DA3
+        .replace(/\x1b\[\??\d*n/g, '')                             // DSR / cursor position report requests
+        .replace(/\x1b\[\?u/g, '')                                 // kitty keyboard protocol query
+        .replace(/\x1b\[>0?q/g, '')                                // XTVERSION
+        .replace(/\x1b\[\?\d+(?:;\d+)*\$p/g, '')                   // DECRQM mode queries
+        .replace(/\x1bP\$q[^\x1b]*\x1b\\/g, '')                    // DECRQSS
+        .replace(/\x1b\](?:1[0-2]|4;\d+);\?(?:\x07|\x1b\\)/g, ''); // OSC color queries
+}
+
 function shellSessionBufferPath(internalName) {
     if (!internalName || !/^[A-Za-z0-9_.-]+$/.test(internalName)) return null;
     return path.join(SESSION_BUFFERS_DIR, `${internalName}.raw`);
@@ -3697,12 +3713,55 @@ function listClaudeSessionMetas() {
     return out;
 }
 
+// Claude Code slugifies a project cwd by replacing every non-alphanumeric char
+// with '-'; transcripts live at <config-root>/projects/<slug>/<sessionId>.jsonl.
+function encodeClaudeProjectDir(cwd) {
+    return String(cwd || '').replace(/[^A-Za-z0-9]/g, '-');
+}
+
+// Config roots that can hold a conversation's transcript: the recorded
+// configDir first, then ~/.claude, then alternate installs (~/.claude_fable
+// etc. — wrapper launchers point CLAUDE_CONFIG_DIR at these).
+function claudeConfigRootsForRestore(recConfigDir) {
+    const roots = [];
+    const push = (p) => { if (p && typeof p === 'string' && !roots.includes(p)) roots.push(p); };
+    push(recConfigDir);
+    push(path.join(os.homedir(), '.claude'));
+    try {
+        for (const dirEntry of fs.readdirSync(os.homedir())) {
+            if (/^\.claude[_-][A-Za-z0-9_-]+$/.test(dirEntry)) push(path.join(os.homedir(), dirEntry));
+        }
+    } catch (e) { /* home unreadable — stick with the defaults */ }
+    return roots;
+}
+
+// Does the recorded conversation actually have a transcript on this host? A
+// hook record can point at an ephemeral conversation (e.g. a headless
+// `claude -p` that inherited HOP_SESSION) — resuming that would fail with
+// "No conversation found" in the restored terminal. Verify before planning a
+// resume; the caller falls back to a plain shell with a visible warning.
+function claudeTranscriptExists(rec) {
+    if (!rec || !rec.sessionId || !rec.cwd) return false;
+    for (const root of claudeConfigRootsForRestore(rec.configDir)) {
+        const file = path.join(root, 'projects', encodeClaudeProjectDir(rec.cwd), `${rec.sessionId}.jsonl`);
+        try { fs.accessSync(file); return true; } catch (e) { /* try next root */ }
+    }
+    return false;
+}
+
 // Compute how to relaunch a session: the command to run (if any) and the cwd to
 // start the shell in. For a claude session we use the cwd recorded by the hook
 // (where claude started), since `claude --resume` resolves the conversation from
 // that project directory.
 function restorePlanForSession(entry) {
     const rec = readClaudeSessionRecord(entry.internalName);
+    if (rec && rec.sessionId && !claudeTranscriptExists(rec)) {
+        return {
+            command: null,
+            cwd: rec.cwd || entry.cwd,
+            warning: `recorded claude conversation ${String(rec.sessionId).slice(0, 8)}… has no transcript on this host — opening a plain shell instead`
+        };
+    }
     if (rec && rec.sessionId) {
         // Preserve the original launch command's FLAGS (--dangerously-skip-
         // permissions etc.) and wrapper (claude-fable): rebuild from the
@@ -3790,6 +3849,7 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
         displayName: e.displayName || e.internalName,
         cwd: plan.cwd || e.cwd || process.cwd(),
         command: plan.command,
+        warning: plan.warning || null,
         // Plain-shell sessions (no claude/startup command) replay their last
         // screen if we persisted a buffer for them at the previous shutdown.
         replay: !plan.command && shellSessionBufferExists(e.internalName),
@@ -3804,7 +3864,7 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
     });
     if (dryRun) {
         return {
-            restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay })),
+            restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay, warning: p.warning })),
             count: planned.length,
             skippedAgents,
             dryRun: true
@@ -3816,7 +3876,7 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
         let seedOutput;
         if (p.replay) {
             const buf = readShellSessionBuffer(p.internalName);
-            if (buf) seedOutput = buf + SESSION_RESTORED_SEPARATOR;
+            if (buf) seedOutput = sanitizeSeedBuffer(buf) + SESSION_RESTORED_SEPARATOR;
         }
         let entry;
         try {
@@ -3841,7 +3901,7 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
         }
     }
     return {
-        restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay })),
+        restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay, warning: p.warning })),
         count: planned.length,
         skippedAgents,
         dryRun: false
@@ -10061,6 +10121,9 @@ async function main() {
                 ? `${DIM}${it.command}${RESET}`
                 : (it.replay ? `${DIM}shell in last dir (replay last screen)${RESET}` : `${DIM}shell in last dir${RESET}`);
             log(`  ${GREEN}•${RESET} ${it.name}  ${how}`, RESET);
+            if (it.warning) {
+                log(`      ${YELLOW}⚠ ${it.warning}${RESET}`, RESET);
+            }
         }
         if (skippedAgents.length > 0) {
             log(`  ${DIM}(+${skippedAgents.length} agent-created session(s) skipped — ${CYAN}hop restore --agents${RESET}${DIM} to include)${RESET}`, RESET);

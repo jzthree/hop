@@ -20,6 +20,19 @@ const HOP_HOME = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
 const BUFFER_DIR = path.join(HOP_HOME, 'session-buffers');
 const CLAUDE_SESSIONS_DIR = path.join(HOP_HOME, 'claude-sessions');
 
+// Scrub Claude Code SESSION markers from our environment before any PTY is
+// spawned. If hop was ever (re)started from inside a Claude Code session,
+// these inherited markers make every claude launched in a hop session think
+// it is a child session — and SILENTLY DISABLE TRANSCRIPT SAVING (breaking
+// hop restore's --resume and losing history). Auth/config vars
+// (CLAUDE_CODE_OAUTH_TOKEN*, CLAUDE_CONFIG_DIR) are intentionally kept.
+for (const key of Object.keys(process.env)) {
+    if (key === 'CLAUDECODE' || key === 'CLAUDE_EFFORT' ||
+        (key.startsWith('CLAUDE_CODE_') && !key.startsWith('CLAUDE_CODE_OAUTH_TOKEN'))) {
+        delete process.env[key];
+    }
+}
+
 // A recorded cwd can stop existing (deleted temp dir, unmounted volume).
 // Spawning a PTY there dies instantly with exit 1, and recreate loops churn
 // forever. Fall back to $HOME and let the shell say so via the room name.

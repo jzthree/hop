@@ -130,6 +130,20 @@ authenticator.options = { window: 1 };
 
 // --- Configuration ---
 // Use HOP_HOME env var or default to .hop2 (separate from original hop)
+// Scrub Claude Code SESSION markers before anything is spawned (hay-host,
+// embedded PTYs, cloudflared). A daemon started from inside a Claude Code
+// session would otherwise pass CLAUDE_CODE_CHILD_SESSION etc. down to every
+// hop session's shell — making claude there silently disable transcript
+// saving (breaking hop restore and losing history). Auth/config vars
+// (CLAUDE_CODE_OAUTH_TOKEN*, CLAUDE_CONFIG_DIR) are intentionally kept.
+// The hay-host applies the same scrub itself, as defense in depth.
+for (const envKey of Object.keys(process.env)) {
+    if (envKey === 'CLAUDECODE' || envKey === 'CLAUDE_EFFORT' ||
+        (envKey.startsWith('CLAUDE_CODE_') && !envKey.startsWith('CLAUDE_CODE_OAUTH_TOKEN'))) {
+        delete process.env[envKey];
+    }
+}
+
 const HOME_DIR = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
 // Testing-only (undocumented): HOP_NO_TUNNEL=1 runs a fully local stack — no
 // cloudflared, API/web on 127.0.0.1 only. Combined with HOP_HOME=<dir> this
@@ -4068,6 +4082,30 @@ function getSessionSwitcherOverlay() {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+#hop-session-fab-menu .hop-origin {
+  display: flex;
+  gap: 2px;
+  margin: 0 6px 6px;
+  padding: 2px;
+  border: 1px solid #e4e4e7;
+  border-radius: 7px;
+  background: #f4f4f5;
+}
+#hop-session-fab-menu .hop-origin button {
+  flex: 1;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #71717a;
+  font-size: 11px;
+  padding: 5px 6px;
+  cursor: pointer;
+}
+#hop-session-fab-menu .hop-origin button.active {
+  background: #fff;
+  color: #18181b;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+}
 #hop-session-fab-menu .hop-item,
 #hop-session-fab-menu .hop-link {
   display: flex;
@@ -4122,6 +4160,11 @@ function getSessionSwitcherOverlay() {
   </button>
   <div id="hop-session-fab-menu" aria-hidden="true">
     <div class="hop-title">Sessions</div>
+    <div class="hop-origin" id="hop-session-fab-origin" role="group" aria-label="Session origin">
+      <button type="button" data-scope="user" class="active">User</button>
+      <button type="button" data-scope="agent">Agent</button>
+      <button type="button" data-scope="all">All</button>
+    </div>
     <div id="hop-session-fab-list"></div>
     <a class="hop-link" href="/sessions">Session Picker</a>
   </div>
@@ -4132,7 +4175,10 @@ function getSessionSwitcherOverlay() {
   var btn = document.getElementById('hop-session-fab-btn');
   var menu = document.getElementById('hop-session-fab-menu');
   var list = document.getElementById('hop-session-fab-list');
-  if (!fab || !btn || !menu || !list) return;
+  var origin = document.getElementById('hop-session-fab-origin');
+  if (!fab || !btn || !menu || !list || !origin) return;
+  var originScope = 'user';
+  var latestSessionData = null;
 
   function clamp(v, min, max) { return Math.min(Math.max(v, min), max); }
   function getCurrentSession() {
@@ -4209,6 +4255,10 @@ function getSessionSwitcherOverlay() {
       closeMenu();
       return;
     }
+    originScope = 'user';
+    Array.prototype.forEach.call(origin.querySelectorAll('button'), function(scopeBtn) {
+      scopeBtn.classList.toggle('active', scopeBtn.getAttribute('data-scope') === originScope);
+    });
     fab.classList.add('open');
     menu.setAttribute('aria-hidden', 'false');
     fetchSessions();
@@ -4224,65 +4274,86 @@ function getSessionSwitcherOverlay() {
     if (!fab.contains(e.target)) closeMenu();
   });
 
+  origin.addEventListener('click', function(e) {
+    var scopeBtn = e.target.closest('button[data-scope]');
+    if (!scopeBtn) return;
+    e.stopPropagation();
+    originScope = scopeBtn.getAttribute('data-scope') || 'user';
+    Array.prototype.forEach.call(origin.querySelectorAll('button'), function(btn) {
+      btn.classList.toggle('active', btn === scopeBtn);
+    });
+    if (latestSessionData) renderSessions(latestSessionData);
+  });
+
+  function renderSessions(data) {
+    list.innerHTML = '';
+    var sessions = (data.sessions || []).filter(function(s) {
+      if (originScope === 'all') return true;
+      if (originScope === 'agent') return s.createdBy === 'agent';
+      return s.createdBy !== 'agent';
+    });
+    var active = data.active || [];
+    if (!sessions.length) {
+      var empty = document.createElement('div');
+      empty.className = 'hop-item';
+      empty.textContent = originScope === 'agent' ? 'No agent sessions' : 'No sessions';
+      list.appendChild(empty);
+      return;
+    }
+    var current = getCurrentSession();
+    sessions.forEach(function(s) {
+      var displayName = s.displayName || s.name;
+      var row = document.createElement('div');
+      row.className = 'hop-item-row';
+
+      var item = document.createElement('button');
+      item.className = 'hop-item';
+      if (s.name === current) item.classList.add('current');
+      if (active.indexOf(s.name) !== -1) {
+        var dot = document.createElement('span');
+        dot.className = 'hop-dot';
+        item.appendChild(dot);
+      }
+      var label = document.createElement('span');
+      var suffix = s.type === 'port' ? (s.port ? ' (PORT ' + s.port + ')' : ' (PORT)') : '';
+      if (originScope === 'all' && s.createdBy === 'agent') suffix += ' (AGENT)';
+      label.textContent = displayName + suffix;
+      item.appendChild(label);
+      item.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        window.location.href = '/s/' + encodeURIComponent(s.name) + '/';
+      });
+
+      var renameBtn = document.createElement('button');
+      renameBtn.className = 'hop-action';
+      renameBtn.textContent = 'Rename';
+      renameBtn.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        var nextName = prompt('Rename session:', displayName);
+        if (!nextName || nextName === displayName) return;
+        if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
+          alert('Only letters, numbers, - and _ allowed');
+          return;
+        }
+        fetch('/api/sessions/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ oldName: displayName, newName: nextName })
+        }).then(function() { fetchSessions(); });
+      });
+
+      row.appendChild(item);
+      row.appendChild(renameBtn);
+      list.appendChild(row);
+    });
+  }
+
   function fetchSessions() {
     fetch('/api/sessions')
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        list.innerHTML = '';
-        var sessions = data.sessions || [];
-        var active = data.active || [];
-        if (!sessions.length) {
-          var empty = document.createElement('div');
-          empty.className = 'hop-item';
-          empty.textContent = 'No sessions';
-          list.appendChild(empty);
-          return;
-        }
-        var current = getCurrentSession();
-        sessions.forEach(function(s) {
-          var displayName = s.displayName || s.name;
-          var row = document.createElement('div');
-          row.className = 'hop-item-row';
-
-          var item = document.createElement('button');
-          item.className = 'hop-item';
-          if (s.name === current) item.classList.add('current');
-          if (active.indexOf(s.name) !== -1) {
-            var dot = document.createElement('span');
-            dot.className = 'hop-dot';
-            item.appendChild(dot);
-          }
-          var label = document.createElement('span');
-          var suffix = s.type === 'port' ? (s.port ? ' (PORT ' + s.port + ')' : ' (PORT)') : '';
-          label.textContent = displayName + suffix;
-          item.appendChild(label);
-          item.addEventListener('click', function(ev) {
-            ev.stopPropagation();
-            window.location.href = '/s/' + encodeURIComponent(s.name) + '/';
-          });
-
-          var renameBtn = document.createElement('button');
-          renameBtn.className = 'hop-action';
-          renameBtn.textContent = 'Rename';
-          renameBtn.addEventListener('click', function(ev) {
-            ev.stopPropagation();
-            var nextName = prompt('Rename session:', displayName);
-            if (!nextName || nextName === displayName) return;
-            if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
-              alert('Only letters, numbers, - and _ allowed');
-              return;
-            }
-            fetch('/api/sessions/rename', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ oldName: displayName, newName: nextName })
-            }).then(function() { fetchSessions(); });
-          });
-
-          row.appendChild(item);
-          row.appendChild(renameBtn);
-          list.appendChild(row);
-        });
+        latestSessionData = data;
+        renderSessions(data);
       })
       .catch(function() {
         list.innerHTML = '<div class="hop-item hop-subtle">Failed to load</div>';
@@ -4474,7 +4545,14 @@ function readHayHostStateFile() {
         const port = Number(parsed?.port);
         if (!Number.isInteger(pid) || pid <= 0) return null;
         if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-        return { pid, port, startedAt: Number(parsed?.startedAt) || Date.now() };
+        return {
+            pid,
+            port,
+            startedAt: Number(parsed?.startedAt) || Date.now(),
+            // The state file itself lives under this HOP_HOME, so legacy files
+            // without the hash are still unambiguously owned by this instance.
+            homeHash: typeof parsed?.homeHash === 'string' ? parsed.homeHash : HAY_HOST_HOME_HASH
+        };
     } catch (e) {
         return null;
     }
@@ -4491,7 +4569,12 @@ function writeHayHostStateFile(state) {
         || hayHostState.pid !== state.pid
         || hayHostState.port !== state.port;
     if (!changed) return;
-    hayHostState = { pid: state.pid, port: state.port, startedAt: state.startedAt || Date.now() };
+    hayHostState = {
+        pid: state.pid,
+        port: state.port,
+        startedAt: state.startedAt || Date.now(),
+        homeHash: HAY_HOST_HOME_HASH
+    };
     hayHostDiscoveryCache = { expiresAt: 0, hosts: [] };
     writePrivateFile(HAY_HOST_STATE_FILE, JSON.stringify(hayHostState));
 }
@@ -4534,6 +4617,11 @@ function parseListeningPortForPid(pid) {
     return null;
 }
 
+function parseHayHostHomeHash(command) {
+    const match = String(command || '').match(/(?:^|\s)--hop-home-hash=([a-f0-9]{24})(?=\s|$)/i);
+    return match ? match[1].toLowerCase() : null;
+}
+
 // Background refresh for host discovery. The sync builder below runs ps plus
 // one lsof per candidate pid (~1.8s wall, and it BLOCKS the event loop — the
 // daemon can't proxy websockets or serve requests while it runs). With the
@@ -4556,8 +4644,11 @@ function refreshHayHostDiscoveryAsync() {
             const pid = Number.parseInt(match[1], 10);
             const command = match[2] || '';
             if (!Number.isInteger(pid) || pid <= 0 || !command.includes(hostScript)) continue;
+            const homeHash = parseHayHostHomeHash(command);
+            const recordedMatch = recorded && recorded.pid === pid;
+            if (homeHash !== HAY_HOST_HOME_HASH && !recordedMatch) continue;
             pids.push(pid);
-            scopedByPid.set(pid, command.includes(HAY_HOST_HOME_FLAG));
+            scopedByPid.set(pid, homeHash);
         }
         if (pids.length === 0) {
             hayHostDiscoveryCache = { expiresAt: Date.now() + HAY_HOST_DISCOVERY_CACHE_MS, hosts: [] };
@@ -4584,7 +4675,8 @@ function refreshHayHostDiscoveryAsync() {
                         pid,
                         port,
                         startedAt: recorded && recorded.pid === pid && recorded.port === port ? recorded.startedAt : 0,
-                        scoped: scopedByPid.get(pid) === true
+                        scoped: typeof scopedByPid.get(pid) === 'string',
+                        homeHash: scopedByPid.get(pid) || null
                     });
                 }
             }
@@ -4627,12 +4719,13 @@ function listDiscoveredHayHostCandidates(force = false) {
             pid,
             port,
             startedAt: Number(candidate.startedAt) || 0,
-            scoped: candidate.scoped === true
+            scoped: candidate.scoped === true,
+            homeHash: typeof candidate.homeHash === 'string' ? candidate.homeHash.toLowerCase() : null
         });
     };
 
     if (recorded && isProcessAlive(recorded.pid)) {
-        remember(recorded);
+        remember({ ...recorded, scoped: true, homeHash: HAY_HOST_HOME_HASH });
     }
 
     try {
@@ -4651,12 +4744,15 @@ function listDiscoveredHayHostCandidates(force = false) {
             if (!Number.isInteger(pid) || pid <= 0) continue;
             if (!command.includes(hostScript)) continue;
             if (!isProcessAlive(pid)) continue;
+            const homeHash = parseHayHostHomeHash(command);
+            const recordedMatch = recorded && recorded.pid === pid;
+            if (homeHash !== HAY_HOST_HOME_HASH && !recordedMatch) continue;
             const port = parseListeningPortForPid(pid);
             if (!port) continue;
             const startedAt = recorded && recorded.pid === pid && recorded.port === port
                 ? recorded.startedAt
                 : 0;
-            remember({ pid, port, startedAt, scoped: command.includes(HAY_HOST_HOME_FLAG) });
+            remember({ pid, port, startedAt, scoped: !!homeHash, homeHash });
         }
     } catch (e) { }
 
@@ -4935,7 +5031,9 @@ async function inspectExternalHayHosts(force = false) {
 
 function hostBelongsToCurrentHome(entry, preferredHost = null) {
     if (!entry || !entry.host) return false;
-    if (entry.host.scoped === true) return true;
+    if (typeof entry.host.homeHash === 'string') {
+        return entry.host.homeHash.toLowerCase() === HAY_HOST_HOME_HASH;
+    }
     const preferredPid = Number(preferredHost?.pid);
     const preferredPort = Number(preferredHost?.port);
     if (entry.host.pid === preferredPid && entry.host.port === preferredPort) {
@@ -5094,7 +5192,8 @@ async function ensureExternalHayHostReady() {
     const started = {
         pid: Number(child?.pid) || 0,
         port: hostPort,
-        startedAt: Date.now()
+        startedAt: Date.now(),
+        homeHash: HAY_HOST_HOME_HASH
     };
     if (!Number.isInteger(started.pid) || started.pid <= 0) {
         throw new Error(`Hay host failed to start; see ${hayHostLogFile}`);
@@ -5299,7 +5398,8 @@ async function reconcileExternalRuntimeSessions() {
         runtimeIds.add(room.id);
         const savedConfig = getSessionConfig(room.id);
         const runtimeConfig = getRuntimeSessionMetadata(room.id);
-        const createdBy = savedConfig?.createdBy || runtimeConfig?.createdBy || 'user';
+        const durableMeta = readClaudeSessionMeta(room.id);
+        const createdBy = savedConfig?.createdBy || runtimeConfig?.createdBy || durableMeta?.createdBy || 'user';
         rememberRuntimeSessionMetadata(room.id, {
             type: 'terminal',
             cwd: room.cwd || savedConfig?.cwd || runtimeConfig?.cwd,

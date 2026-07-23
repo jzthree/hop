@@ -21,7 +21,10 @@ export type SwitcherSession = {
   bellUnseen?: boolean;
   foregroundProcess?: string;
   agentPermitted?: boolean;
+  createdBy?: "user" | "agent";
 };
+
+export type SessionOriginScope = "user" | "agent" | "all";
 
 export type SwitcherGroup = {
   label: string;
@@ -83,6 +86,15 @@ const matchesFilter = (s: SwitcherSession, query: string) => {
     (s.cwd || "").toLowerCase().includes(q) ||
     (s.foregroundProcess || "").toLowerCase().includes(q)
   );
+};
+
+export const filterSessionsByOrigin = (
+  sessions: SwitcherSession[],
+  scope: SessionOriginScope
+) => {
+  if (scope === "all") return sessions;
+  if (scope === "agent") return sessions.filter((session) => session.createdBy === "agent");
+  return sessions.filter((session) => session.createdBy !== "agent");
 };
 
 export const buildSwitcherModel = (

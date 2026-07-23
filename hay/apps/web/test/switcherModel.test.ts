@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildSwitcherModel, projectKey, relativeTime, type SwitcherSession } from "../src/utils/switcherModel";
+import {
+  buildSwitcherModel,
+  filterSessionsByOrigin,
+  projectKey,
+  relativeTime,
+  type SwitcherSession
+} from "../src/utils/switcherModel";
 
 const mk = (over: Partial<SwitcherSession> & { name: string }): SwitcherSession => ({
   displayName: over.name,
@@ -99,6 +105,30 @@ describe("buildSwitcherModel", () => {
     if (byCwd.mode !== "filter" || byProc.mode !== "filter") throw new Error("expected filter");
     expect(byCwd.rows.map((s) => s.name)).toEqual(["s1"]);
     expect(byProc.rows.map((s) => s.name)).toEqual(["s2"]);
+  });
+});
+
+describe("filterSessionsByOrigin", () => {
+  const sessions = [
+    mk({ name: "legacy-user" }),
+    mk({ name: "explicit-user", createdBy: "user" }),
+    mk({ name: "worker", createdBy: "agent" })
+  ];
+
+  it("defaults legacy sessions to the user side", () => {
+    expect(filterSessionsByOrigin(sessions, "user").map((s) => s.name)).toEqual([
+      "legacy-user",
+      "explicit-user"
+    ]);
+  });
+
+  it("can isolate agent sessions or show all sessions", () => {
+    expect(filterSessionsByOrigin(sessions, "agent").map((s) => s.name)).toEqual(["worker"]);
+    expect(filterSessionsByOrigin(sessions, "all").map((s) => s.name)).toEqual([
+      "legacy-user",
+      "explicit-user",
+      "worker"
+    ]);
   });
 });
 

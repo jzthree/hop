@@ -439,6 +439,30 @@ export const SessionSwitcher = ({
       onNotice("Failed to kill session");
     }
   };
+  // Reclassify origin (user <-> agent): adopting an agent-spawned session you
+  // now drive yourself (a forked conversation, a worker you took over) moves
+  // it to the user side of the origin filter — and into default restore.
+  const toggleOrigin = async () => {
+    if (!sheet) return;
+    const next = sheet.session.createdBy === "agent" ? "user" : "agent";
+    try {
+      const res = await fetch("/api/sessions/origin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internalName: sessionKey(sheet.session), createdBy: next })
+      });
+      if (!res.ok) {
+        onNotice("Failed to change session origin");
+        return;
+      }
+      onNotice(next === "user" ? "Moved to user sessions" : "Moved to agent sessions");
+      setSheet(null);
+      onRefresh();
+    } catch {
+      onNotice("Failed to change session origin");
+    }
+  };
+
   const killSession = async () => {
     if (!sheet) return;
     await killSessionByRef(sheet.session);
@@ -845,6 +869,11 @@ export const SessionSwitcher = ({
                 {sheetSession.type !== "port" && (
                   <button type="button" onClick={toggleAgentAccess}>
                     {sheetAgentPermitted ? "Disable agent access" : "Enable agent access"}
+                  </button>
+                )}
+                {sheetSession.type !== "port" && (
+                  <button type="button" onClick={toggleOrigin}>
+                    {sheetSession.createdBy === "agent" ? "Move to user sessions" : "Move to agent sessions"}
                   </button>
                 )}
                 <button type="button" className="danger" onClick={killSession}>

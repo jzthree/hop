@@ -6954,6 +6954,54 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: Reclassify a session's origin (user <-> agent). An agent-spawned
+        // session the human adopts (e.g. a forked conversation) belongs on the
+        // user side of the origin filter; the flag is presentation + restore
+        // policy (agent sessions skip default restore), not a permission.
+        if (parsedUrl.pathname === '/api/sessions/origin' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { name, internalName, createdBy } = JSON.parse(body);
+                    if (createdBy !== 'user' && createdBy !== 'agent') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'createdBy must be "user" or "agent"' }));
+                        return;
+                    }
+                    const resolved = resolveSessionInternalName(name, internalName);
+                    if (!resolved) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const savedConfig = getSessionConfig(resolved);
+                    const config = getEffectiveSessionConfig(resolved);
+                    if (!config || config.type === 'port') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not a terminal' }));
+                        return;
+                    }
+                    const next = { ...config, createdBy, updatedAt: new Date().toISOString() };
+                    if (savedConfig) {
+                        setSessionConfig(resolved, next);
+                    } else {
+                        rememberRuntimeSessionMetadata(resolved, next);
+                    }
+                    // The durable meta is what restore + reconcile consult; keep
+                    // it in lockstep so the reclassification survives restarts.
+                    const durable = readClaudeSessionMeta(resolved) || {};
+                    writeClaudeSessionMeta(resolved, { ...durable, createdBy });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, createdBy }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
         // API: Delete session
         if (parsedUrl.pathname === '/api/sessions/delete' && req.method === 'POST') {
             let body = '';
@@ -10469,6 +10517,7 @@ async function main() {
         log(`  hop session rename <old> <new>   Rename a session`, RESET);
         log(`  hop session remove <name>        Remove a session`, RESET);
         log(`  hop session permit <name>        Allow agent access`, RESET);
+        log(`  hop session origin <name> <user|agent>  Move a session between user/agent sides (switcher filter + restore policy)`, RESET);
         log(`  hop session block <name>         Block agent access`, RESET);
         log('');
         log(`${BOLD}Workspaces:${RESET}`, RESET);
@@ -11342,6 +11391,31 @@ async function main() {
             process.exit(0);
         }
 
+        if (subcommand === 'origin') {
+            const target = process.argv[5];
+            if (!nameArg || (target !== 'user' && target !== 'agent')) {
+                log(`Usage: hop session origin <name> <user|agent>`, RED);
+                process.exit(1);
+            }
+            const resolvedDisplay = resolveDisplayNameAlias(nameArg);
+            const internalName = findInternalSessionName(resolvedDisplay) || toInternalSessionName(resolvedDisplay);
+            const existingTunnel = isServerRunning();
+            if (!existingTunnel) {
+                printNotRunningError();
+                process.exit(1);
+            }
+            let res = null;
+            try {
+                res = await callLocalApi(existingTunnel, '/api/sessions/origin', 'POST', { internalName, createdBy: target });
+            } catch (e) { res = null; }
+            if (res && res.status >= 200 && res.status < 300) {
+                log(`"${nameArg}" is now a ${target} session.`, GREEN);
+                process.exit(0);
+            }
+            log(res?.data?.error || 'Request failed.', RED);
+            process.exit(1);
+        }
+
         if (subcommand === 'permit' || subcommand === 'block') {
             if (!nameArg) {
                 log(`Usage: hop session ${subcommand} <name>`, RED);
@@ -11504,6 +11578,7 @@ async function main() {
         log(`  hop session rename <old> <new>   Rename a session`, RESET);
         log(`  hop session remove <name>        Remove a session`, RESET);
         log(`  hop session permit <name>        Allow agent access`, RESET);
+        log(`  hop session origin <name> <user|agent>  Move a session between user/agent sides (switcher filter + restore policy)`, RESET);
         log(`  hop session block <name>         Block agent access`, RESET);
         process.exit(unknownSessionSub ? 1 : 0);
     }

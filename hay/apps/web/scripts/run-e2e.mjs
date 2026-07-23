@@ -93,6 +93,26 @@ const runE2E = async () => {
       return window.__hay?.getBufferText().includes("shared");
     });
 
+    // Switching to an untouched room produces no snapshot. The connection
+    // handoff itself must still clear the previous room's screen before the
+    // fresh room receives its first output.
+    const freshRoom = `${room}-fresh`;
+    await page1.evaluate((nextRoom) => {
+      window.history.pushState({}, "", `/s/${encodeURIComponent(nextRoom)}/`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }, freshRoom);
+    await page1.waitForFunction((nextRoom) => {
+      const url = new URL(window.location.href);
+      const expectedPath = `/s/${encodeURIComponent(String(nextRoom))}/`;
+      return url.pathname === expectedPath && document.querySelector(".footer-dot.connected");
+    }, freshRoom);
+    await page1.locator(".terminal-frame").click();
+    await page1.keyboard.type("echo fresh");
+    await page1.keyboard.press("Enter");
+    await page1.waitForFunction(() => window.__hay?.getBufferText().includes("fresh"));
+    const switchedBuffer = await page1.evaluate(() => window.__hay?.getBufferText() || "");
+    assert.ok(!switchedBuffer.includes("shared"), `old room output survived session switch: ${JSON.stringify(switchedBuffer)}`);
+
     const roomLock = `e2e-${Date.now()}-lock`;
     const context2 = await browser.newContext({ viewport: { width: 1280, height: 720 } });
     const page3 = await context2.newPage();
@@ -102,7 +122,7 @@ const runE2E = async () => {
     await joinRoom(page4, "Drew", roomLock);
 
     // Lock typing to page3: the Typing segmented control's "One user" option.
-    await page3.getByRole("button", { name: "One user" }).click();
+    await page3.getByRole("button", { name: "One user" }).evaluate((button) => button.click());
     await page3.waitForFunction(() => {
       return document.querySelector(".control-state")?.textContent?.includes("You have control");
     });

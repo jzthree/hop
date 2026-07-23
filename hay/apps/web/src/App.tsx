@@ -1097,6 +1097,20 @@ const App = () => {
 
     const connectionNonce = ++connectNonceRef.current;
 
+    // A brand-new room may have no retained output, so the server sends no
+    // snapshot. Reset at the connection boundary instead of relying on the
+    // snapshot handler, or the previous room's screen and terminal modes can
+    // survive and make the new prompt appear below old output (with mouse
+    // reports rendered as junk text).
+    remoteKbdEnhancedRef.current = false;
+    remoteAltScreenRef.current = false;
+    remoteMouseReportingRef.current = false;
+    remoteMouseSgrRef.current = false;
+    activeSizeRef.current = null;
+    optimisticEchoRef.current.reset();
+    userScrolledUpRef.current = false;
+    termRef.current?.reset();
+
     const wsUrl = resolveWsUrl();
     const cols = termRef.current?.cols ?? 80;
     const rows = termRef.current?.rows ?? 24;
@@ -1139,6 +1153,11 @@ const App = () => {
     });
 
     ws.addEventListener("message", (event) => {
+      // close() does not guarantee that already-queued message events from the
+      // old socket won't run. Never let one repopulate the freshly reset term.
+      if (connectionNonce !== connectNonceRef.current || activeSessionRoomRef.current !== targetRoom) {
+        return;
+      }
       const message = safeParseServerMessage(event.data);
       if (!message) {
         return;

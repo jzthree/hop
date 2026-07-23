@@ -531,6 +531,16 @@ const App = () => {
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  // Claude Code titles its process with a bare version number; hop's session
+  // poll surfaces it as foregroundProcess. Used to unlock claude-specific key
+  // encodings (Shift+Enter) without protocol negotiation.
+  const foregroundIsClaude = () => {
+    const room = activeSessionRoomRef.current;
+    if (!room) return false;
+    const s = sessionsRef.current.find((x) => (x.internalName || x.name) === room);
+    const proc = (s?.foregroundProcess || "").trim();
+    return proc === "claude" || /^\d+\.\d+\.\d+$/.test(proc);
+  };
   const drawerOpenRef = useRef(drawerOpen);
   drawerOpenRef.current = drawerOpen;
   const shortcutHelpRef = useRef(shortcutHelpOpen);
@@ -1471,12 +1481,15 @@ const App = () => {
     // Prevent browser from intercepting common terminal shortcuts
     terminal.attachCustomKeyEventHandler((event) => {
       // Shift+Enter: xterm.js would emit a plain \r (indistinguishable from
-      // Enter), which apps like Claude Code treat as "submit". When the remote
-      // app has enhanced keyboard reporting on, synthesize the kitty-protocol
-      // encoding (CSI 13;2u) a protocol-aware terminal would send, so
-      // Shift+Enter inserts a newline instead of submitting.
+      // Enter), which apps like Claude Code treat as "submit". Synthesize the
+      // kitty-protocol encoding (CSI 13;2u) when the remote app negotiated
+      // enhanced keyboard reporting — OR when the foreground process is
+      // Claude Code, which parses CSI-u unconditionally but (since ~July
+      // 2026 builds) no longer advertises the protocol at boot, so waiting
+      // for the enable never fires. A plain shell renders raw CSI-u as junk
+      // text, hence the gate stays.
       if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
-          && remoteKbdEnhancedRef.current) {
+          && (remoteKbdEnhancedRef.current || foregroundIsClaude())) {
         if (event.type === 'keydown') {
           event.preventDefault();
           handleUserInput('\x1b[13;2u');

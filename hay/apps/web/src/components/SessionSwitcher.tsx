@@ -128,8 +128,11 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
     let claimed = { cols: term.cols, rows: term.rows };
     const sep = wsBase.includes("?") ? "&" : "?";
+    // 64KB replay: enough tail for a wall tile, and the snapshot parses ~4x
+    // faster than the full-scrollback replay — focus latency is dominated by
+    // connect + snapshot + repaint.
     const ws = new WebSocket(
-      `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=262144&cols=${term.cols}&rows=${term.rows}`
+      `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=65536&cols=${term.cols}&rows=${term.rows}`
     );
     const sendClaim = (claim?: "attach") => {
       if (ws.readyState !== WebSocket.OPEN) return;
@@ -140,20 +143,26 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     };
     const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
     setVeiled(true);
-    // Unveil once the post-claim repaint has had a beat to land; hard cap so
-    // a silent room can't hold the veil forever.
+    // Unveil as soon as the post-claim repaint actually ARRIVES (first output
+    // after the snapshot, +120ms for the burst to paint). The timers are only
+    // fallbacks: 500ms for an idle room that will never repaint, 2.5s hard cap.
     let unveilTimer = 0;
     const unveilSoon = (ms: number) => {
       window.clearTimeout(unveilTimer);
       unveilTimer = window.setTimeout(() => setVeiled(false), ms);
     };
     unveilSoon(2500);
+    let sawSnapshot = false;
+    let sawRepaint = false;
     ws.onopen = () => sendClaim("attach");
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(String(ev.data));
-        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); unveilSoon(450); }
-        else if (m.type === "output") term.write(m.data);
+        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); sawSnapshot = true; unveilSoon(500); }
+        else if (m.type === "output") {
+          term.write(m.data);
+          if (sawSnapshot && !sawRepaint) { sawRepaint = true; unveilSoon(120); }
+        }
         else if (m.type === "active_size" && (m.cols !== term.cols || m.rows !== term.rows)) {
           // Another client won the election — observe at its size, scaled.
           term.resize(m.cols, m.rows);

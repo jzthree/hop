@@ -4926,10 +4926,27 @@ function fetchHayRoomPreviewSource(internalName) {
     });
 }
 
+// The preview source is a raw tail cut at an arbitrary byte: it can begin
+// mid-escape-sequence (renders as garbage text) or mid-redraw (renders a
+// half-painted frame until the next poll's cut happens to land clean). Start
+// at the most recent full-repaint marker (clear-screen / cursor-home, which
+// alt-screen TUIs emit every frame) when one exists; otherwise skip to the
+// first line boundary so we never start inside a sequence.
+function trimPreviewSource(output) {
+    const CLEAR_RE = /\x1b\[[0-3]?J|\x1b\[H(?!\d)/g;
+    let lastMarker = -1;
+    let m;
+    while ((m = CLEAR_RE.exec(output)) !== null) lastMarker = m.index;
+    if (lastMarker > 0) return output.slice(lastMarker);
+    const nl = output.indexOf('\n');
+    return nl > 0 && nl < 8192 ? output.slice(nl + 1) : output;
+}
+
 async function renderSessionPreviewText(source) {
     if (!source || typeof source.output !== 'string') return null;
     const Term = loadHeadlessTerminal();
     if (!Term) return null;
+    source = { ...source, output: trimPreviewSource(source.output) };
     const cols = Math.max(2, Math.min(220, Math.floor(Number(source.cols) || 80)));
     const rows = Math.max(2, Math.min(80, Math.floor(Number(source.rows) || 24)));
     let term;

@@ -503,12 +503,44 @@ export const SessionSwitcher = ({
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        // ←→ must keep editing the filter text when there is any.
+        if (
+          (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+          document.activeElement === filterInputRef.current &&
+          (filterInputRef.current?.value || "").length > 0
+        ) {
+          return;
+        }
         event.preventDefault();
         setKbdIndex((i) => {
-          const n = flatNav.length;
-          if (n === 0) return 0;
-          const next = event.key === "ArrowDown" ? Math.min(i + 1, n - 1) : Math.max(i - 1, 0);
+          // Geometric navigation: the wall is a grid, the tail is rows — pick
+          // the nearest tile in the pressed direction from real layout, so
+          // all four arrows work in every mode without column bookkeeping.
+          const els = Array.from(document.querySelectorAll<HTMLElement>("[data-nav-index]"));
+          if (els.length === 0) return 0;
+          const cur = els.find((el) => Number(el.dataset.navIndex) === i) ?? els[0];
+          const cr = cur.getBoundingClientRect();
+          const cx = cr.left + cr.width / 2;
+          const cy = cr.top + cr.height / 2;
+          let best: { idx: number; score: number } | null = null;
+          for (const el of els) {
+            const idx = Number(el.dataset.navIndex);
+            if (idx === i || Number.isNaN(idx)) continue;
+            const r = el.getBoundingClientRect();
+            const dx = r.left + r.width / 2 - cx;
+            const dy = r.top + r.height / 2 - cy;
+            let primary: number;
+            let cross: number;
+            if (event.key === "ArrowDown") { primary = dy; cross = Math.abs(dx); }
+            else if (event.key === "ArrowUp") { primary = -dy; cross = Math.abs(dx); }
+            else if (event.key === "ArrowRight") { primary = dx; cross = Math.abs(dy); }
+            else { primary = -dx; cross = Math.abs(dy); }
+            if (primary < 4) continue; // wrong direction (or same row/col slot)
+            const score = primary + cross * 3;
+            if (!best || score < best.score) best = { idx, score };
+          }
+          const next = best ? best.idx : i;
           requestAnimationFrame(() => {
             document.querySelector(`[data-nav-index="${next}"]`)?.scrollIntoView({ block: "nearest" });
           });

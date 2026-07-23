@@ -993,6 +993,8 @@ const App = () => {
   const attachClaimPendingRef = useRef(false);
   // Throttle gate for fit-on-type (one fit per typing burst, not per key).
   const lastTypeFitAtRef = useRef(0);
+  // Ctrl+Q double-press arm deadline (CLI-parity kill binding).
+  const killArmedAtRef = useRef(0);
   // Last size actually sent, to skip redundant resize messages. Reset when a
   // new connection opens so the server always learns the size once.
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
@@ -1294,6 +1296,10 @@ const App = () => {
           pushNotice(message.by ? `${message.message} (by ${message.by})` : message.message);
           ws.close();
           setStatus("ended");
+          // A dead screen is a dead end — bring up the switcher so the next
+          // session is one keystroke away. Delayed a beat so the ended notice
+          // registers before the overlay covers it.
+          window.setTimeout(() => setSwitcherOpen(true), 400);
           break;
         case "session_renamed":
           setSessionLabel(message.displayName);
@@ -1493,6 +1499,21 @@ const App = () => {
         if (event.type === 'keydown') {
           event.preventDefault();
           handleUserInput('\x1b[13;2u');
+        }
+        return false;
+      }
+      // Ctrl+Q ×2 kills the session — parity with the hop CLI binding. Two
+      // presses within 2s, same confirm rhythm as the CLI (no modal).
+      if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'q') {
+        if (event.type === 'keydown') {
+          const nowKill = Date.now();
+          if (nowKill > killArmedAtRef.current) {
+            killArmedAtRef.current = nowKill + 2000;
+            pushNotice("Press Ctrl+Q again to kill this session for ALL participants");
+          } else {
+            killArmedAtRef.current = 0;
+            sendMessage({ type: "kill_session" });
+          }
         }
         return false;
       }

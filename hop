@@ -4981,7 +4981,13 @@ async function renderSessionPreviewText(source) {
     const lines = [];
     for (let i = 0; i < rows; i++) {
         const line = buffer.getLine(buffer.baseY + i);
-        lines.push(line ? line.translateToString(true) : '');
+        if (!line) { lines.push(''); continue; }
+        // Crop, never wrap: a row marked isWrapped continues the previous
+        // row's logical line — output written when the terminal was wider
+        // than we render at. Re-wrapped fragments read as garbage in a
+        // preview tile; dropping them crops each line at the right edge.
+        if (line.isWrapped) continue;
+        lines.push(line.translateToString(true));
     }
     try { term.dispose(); } catch (e) { /* ignore */ }
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();

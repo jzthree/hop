@@ -106,6 +106,19 @@ describe("buildSwitcherModel", () => {
     expect(byCwd.rows.map((s) => s.name)).toEqual(["s1"]);
     expect(byProc.rows.map((s) => s.name)).toEqual(["s2"]);
   });
+
+  it("filter matches the home-shortened cwd the UI displays (~/...)", () => {
+    const sessions = [
+      mk({ name: "home", cwd: "/Users/x/Code/hop2" }),
+      mk({ name: "root", cwd: "/root/ops" }),
+      mk({ name: "sys", cwd: "/etc" })
+    ];
+    const byTilde = buildSwitcherModel(sessions, null, "~");
+    const byTildePath = buildSwitcherModel(sessions, null, "~/code");
+    if (byTilde.mode !== "filter" || byTildePath.mode !== "filter") throw new Error("expected filter");
+    expect(byTilde.rows.map((s) => s.name).sort()).toEqual(["home", "root"]);
+    expect(byTildePath.rows.map((s) => s.name)).toEqual(["home"]);
+  });
 });
 
 describe("filterSessionsByOrigin", () => {

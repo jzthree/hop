@@ -83,9 +83,13 @@ export const projectKey = (cwd?: string) => {
 
 const matchesFilter = (s: SwitcherSession, query: string) => {
   const q = query.toLowerCase();
+  const cwd = s.cwd || "";
   return (
     (s.displayName || s.name).toLowerCase().includes(q) ||
-    (s.cwd || "").toLowerCase().includes(q) ||
+    cwd.toLowerCase().includes(q) ||
+    // The UI shows home-shortened paths (~/Code/hop2), so the filter must
+    // match what the user sees, not just the raw /Users/... path.
+    (cwd.length > 0 && shortenForGroup(cwd).toLowerCase().includes(q)) ||
     (s.foregroundProcess || "").toLowerCase().includes(q)
   );
 };

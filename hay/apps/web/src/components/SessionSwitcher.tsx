@@ -48,6 +48,10 @@ type Props = {
 type Sheet = {
   session: SwitcherSession;
   mode: "menu" | "rename";
+  // Viewport point the menu anchors to — the ... button or the long-press
+  // finger position. A bottom sheet made the thumb travel the whole screen
+  // for actions about the element it was already touching.
+  anchor: { x: number; y: number };
 };
 
 const sessionKey = (s: SwitcherSession) => s.internalName || s.name;
@@ -280,12 +284,14 @@ export const SessionSwitcher = ({
   const startLongPress = (event: ReactPointerEvent, session: SwitcherSession) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     cancelLongPress();
+    const pressX = event.clientX;
+    const pressY = event.clientY;
     const timer = window.setTimeout(() => {
       longPressRef.current = null;
       suppressTapRef.current = true;
-      setSheet({ session, mode: "menu" });
+      setSheet({ session, mode: "menu", anchor: { x: pressX, y: pressY } });
     }, LONG_PRESS_MS);
-    longPressRef.current = { timer, startX: event.clientX, startY: event.clientY };
+    longPressRef.current = { timer, startX: pressX, startY: pressY };
   };
 
   const cancelLongPress = () => {
@@ -358,9 +364,9 @@ export const SessionSwitcher = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, sheet, creating, flatNav, kbdIndex]);
 
-  const openSheet = (session: SwitcherSession) => {
+  const openSheet = (session: SwitcherSession, anchor: { x: number; y: number }) => {
     cancelLongPress();
-    setSheet({ session, mode: "menu" });
+    setSheet({ session, mode: "menu", anchor });
   };
 
   const submitRename = async (event: FormEvent) => {
@@ -548,7 +554,7 @@ export const SessionSwitcher = ({
     onContextMenu: (e: ReactMouseEvent) => {
       e.preventDefault();
       suppressTapRef.current = false;
-      openSheet(s);
+      openSheet(s, { x: e.clientX, y: e.clientY });
     }
   });
 
@@ -838,7 +844,19 @@ export const SessionSwitcher = ({
       {sheet && sheetSession && (
         <>
           <div className="switcher-sheet-backdrop" onClick={() => setSheet(null)} />
-          <div className="switcher-sheet" role="menu" aria-label={`Actions for ${sheetSession.displayName}`}>
+          <div
+            className="switcher-sheet"
+            role="menu"
+            aria-label={`Actions for ${sheetSession.displayName}`}
+            style={(() => {
+              const width = 264;
+              const estH = sheet.mode === "rename" ? 140 : 340;
+              const left = Math.min(Math.max(8, sheet.anchor.x - width), window.innerWidth - width - 8);
+              let top = sheet.anchor.y + 8;
+              if (top + estH > window.innerHeight - 8) top = Math.max(8, sheet.anchor.y - estH - 8);
+              return { left, top };
+            })()}
+          >
             <p className="switcher-sheet-title">{sheetSession.displayName}</p>
             {sheet.mode === "rename" ? (
               <form className="inline-edit" onSubmit={submitRename}>
@@ -850,7 +868,7 @@ export const SessionSwitcher = ({
                   aria-label="New session name"
                 />
                 <button type="submit">Save</button>
-                <button type="button" onClick={() => setSheet({ session: sheetSession, mode: "menu" })}>✕</button>
+                <button type="button" onClick={() => setSheet({ session: sheetSession, mode: "menu", anchor: sheet.anchor })}>✕</button>
               </form>
             ) : (
               <>
@@ -861,7 +879,7 @@ export const SessionSwitcher = ({
                   type="button"
                   onClick={() => {
                     setRenameDraft(sheetSession.displayName || sheetSession.name);
-                    setSheet({ session: sheetSession, mode: "rename" });
+                    setSheet({ session: sheetSession, mode: "rename", anchor: sheet.anchor });
                   }}
                 >
                   Rename

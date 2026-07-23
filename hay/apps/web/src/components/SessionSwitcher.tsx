@@ -266,8 +266,11 @@ export const SessionSwitcher = ({
   // open = jump to most relevant other session); with a filter, the top match.
   useEffect(() => {
     if (!open) return;
-    const firstOther = flatNav.findIndex((s) => !(currentRoom !== null && (s.internalName === currentRoom || s.name === currentRoom)));
-    setKbdIndex(filter ? 0 : Math.max(0, firstOther));
+    // Anchor the selection on the CURRENT session: a stable, predictable start
+    // (arrow keys move from there). Auto-selecting the first OTHER session
+    // saved one keypress but made every open feel like the cursor teleported.
+    const currentIdx = flatNav.findIndex((s) => currentRoom !== null && (s.internalName === currentRoom || s.name === currentRoom));
+    setKbdIndex(filter ? 0 : Math.max(0, currentIdx));
     document.querySelector(".switcher-scroll")?.scrollTo({ top: 0 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, filter, originScope]);

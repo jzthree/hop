@@ -4934,10 +4934,17 @@ function fetchHayRoomPreviewSource(internalName) {
 // first line boundary so we never start inside a sequence.
 function trimPreviewSource(output) {
     const CLEAR_RE = /\x1b\[[0-3]?J|\x1b\[H(?!\d)/g;
-    let lastMarker = -1;
+    // A marker with almost nothing after it is a mid-repaint cursor-home, not
+    // a frame start — inline TUIs (claude) emit these constantly, and cutting
+    // there rendered EMPTY previews. Use the latest marker that still has a
+    // frame's worth of content following it.
+    const MIN_FRAME_TAIL = 1500;
+    let frameStart = -1;
     let m;
-    while ((m = CLEAR_RE.exec(output)) !== null) lastMarker = m.index;
-    if (lastMarker > 0) return output.slice(lastMarker);
+    while ((m = CLEAR_RE.exec(output)) !== null) {
+        if (output.length - m.index >= MIN_FRAME_TAIL) frameStart = m.index;
+    }
+    if (frameStart > 0) return output.slice(frameStart);
     const nl = output.indexOf('\n');
     return nl > 0 && nl < 8192 ? output.slice(nl + 1) : output;
 }

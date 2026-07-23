@@ -61,10 +61,15 @@ const CLAUDE_SESSIONS_DIR = path.join(HOP_HOME, 'claude-sessions');
 // spawned. If hop was ever (re)started from inside a Claude Code session,
 // these inherited markers make every claude launched in a hop session think
 // it is a child session — and SILENTLY DISABLE TRANSCRIPT SAVING (breaking
-// hop restore's --resume and losing history). Auth/config vars
-// (CLAUDE_CODE_OAUTH_TOKEN*, CLAUDE_CONFIG_DIR) are intentionally kept.
+// hop restore's --resume and losing history). CLAUDE_CONFIG_DIR is scrubbed
+// too: it is the PARENT session's config root (e.g. ~/.claude_fable when hop
+// was restarted from a fable session), and inheriting it sent every restored
+// `claude --resume` to the wrong root ("No conversation found", 2026-07-23).
+// A hop PTY runs a login shell, so a config dir the user actually wants comes
+// back via their shell rc. Auth vars (CLAUDE_CODE_OAUTH_TOKEN*) are kept.
 for (const key of Object.keys(process.env)) {
     if (key === 'CLAUDECODE' || key === 'CLAUDE_EFFORT' ||
+        key === 'CLAUDE_CONFIG_DIR' || key === 'CLAUDE_PID' ||
         (key.startsWith('CLAUDE_CODE_') && !key.startsWith('CLAUDE_CODE_OAUTH_TOKEN'))) {
         delete process.env[key];
     }

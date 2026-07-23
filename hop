@@ -3796,11 +3796,16 @@ function restorePlanForSession(entry) {
                 .trim();
         }
         // Config-dir prefix: needed for a bare `claude` against a wrapper
-        // config; a wrapper command (claude-fable) sets it itself.
+        // config; a wrapper command (claude-fable) sets it itself. A null
+        // configDir means the DEFAULT root — pin that explicitly too
+        // (env -u), because the room shell may have inherited a different
+        // CLAUDE_CONFIG_DIR from whatever session (re)started hop, which
+        // sent resumes to the wrong root ("No conversation found").
         const configDir = typeof rec.configDir === 'string' && rec.configDir.trim() ? rec.configDir.trim() : null;
-        const prefix = configDir && (!isClaudeLaunch || firstWord === 'claude')
-            ? `CLAUDE_CONFIG_DIR='${configDir.replace(/'/g, `'\\''`)}' `
-            : '';
+        const bareClaude = !isClaudeLaunch || firstWord === 'claude';
+        const prefix = !bareClaude ? ''
+            : configDir ? `CLAUDE_CONFIG_DIR='${configDir.replace(/'/g, `'\\''`)}' `
+            : 'env -u CLAUDE_CONFIG_DIR ';
         return { command: `${prefix}${base} --resume ${rec.sessionId}`, cwd: rec.cwd || entry.cwd };
     }
     if (entry.startup && entry.autoStart !== false) {
@@ -5309,17 +5314,25 @@ async function ensureExternalHayHostReady() {
     const hayHostLogFd = rotateAndOpenLogFd(hayHostLogFile);
     let child;
     try {
+        // The host must not inherit the parent claude session's identity: the
+        // daemon is routinely (re)started from inside a claude session, and a
+        // leaked CLAUDE_CONFIG_DIR reaches every PTY the host spawns (sent
+        // restored resumes to the wrong config root, 2026-07-23). The host
+        // scrubs its own env too; this covers hosts spawned before that ships.
+        const hostEnv = {
+            ...process.env,
+            HAY_HOST_PORT: String(hostPort),
+            HAY_HOST_CWD: process.cwd(),
+            // Pin the host's HOP_HOME to the daemon's so it persists session
+            // buffers (for `hop restore`) under the same dir we read from.
+            HOP_HOME: HOME_DIR
+        };
+        delete hostEnv.CLAUDE_CONFIG_DIR;
+        delete hostEnv.CLAUDE_PID;
         child = spawn(process.execPath, [hostScript, HAY_HOST_HOME_FLAG], {
             detached: true,
             stdio: ['ignore', hayHostLogFd, hayHostLogFd],
-            env: {
-                ...process.env,
-                HAY_HOST_PORT: String(hostPort),
-                HAY_HOST_CWD: process.cwd(),
-                // Pin the host's HOP_HOME to the daemon's so it persists session
-                // buffers (for `hop restore`) under the same dir we read from.
-                HOP_HOME: HOME_DIR
-            }
+            env: hostEnv
         });
     } finally {
         try { fs.closeSync(hayHostLogFd); } catch (e) { }

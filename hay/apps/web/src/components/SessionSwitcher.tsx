@@ -364,9 +364,14 @@ export const SessionSwitcher = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, sheet, creating, flatNav, kbdIndex]);
 
-  const openSheet = (session: SwitcherSession, anchor: { x: number; y: number }) => {
+  const openSheet = (session: SwitcherSession, anchor?: { x: number; y: number }) => {
     cancelLongPress();
-    setSheet({ session, mode: "menu", anchor });
+    // A missing anchor must degrade to a centered menu, never crash the render.
+    setSheet({
+      session,
+      mode: "menu",
+      anchor: anchor ?? { x: window.innerWidth / 2 + 132, y: window.innerHeight / 3 }
+    });
   };
 
   const submitRename = async (event: FormEvent) => {
@@ -652,7 +657,7 @@ export const SessionSwitcher = ({
         className="switcher-icon-btn"
         aria-label={`More actions for ${s.displayName}`}
         title="More"
-        onClick={(e) => { e.stopPropagation(); openSheet(s); }}
+        onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); openSheet(s, { x: r.right, y: r.bottom }); }}
         onPointerDown={(e) => e.stopPropagation()}
       >
         ⋯

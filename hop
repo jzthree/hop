@@ -6605,6 +6605,20 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ ...cached, stale: true }));
                         return;
                     }
+                    // No live room (dead / not-yet-restored session): serve its
+                    // retained shutdown buffer so every tile shows a last
+                    // screen, not a blank box.
+                    const bufPath = shellSessionBufferPath(internalName);
+                    let buf = null;
+                    if (bufPath) { try { buf = fs.readFileSync(bufPath, 'utf8'); } catch (e) { /* none */ } }
+                    if (buf && buf.trim()) {
+                        const text = await renderSessionPreviewText({ output: buf, cols: 100, rows: 30 });
+                        if (typeof text === 'string' && text.trim()) {
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ text, cols: 100, rows: 30, stale: true }));
+                            return;
+                        }
+                    }
                     res.writeHead(404, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'No live preview available' }));
                     return;

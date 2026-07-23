@@ -3713,10 +3713,17 @@ function listClaudeSessionMetas() {
     return out;
 }
 
-// Claude Code slugifies a project cwd by replacing every non-alphanumeric char
-// with '-'; transcripts live at <config-root>/projects/<slug>/<sessionId>.jsonl.
-function encodeClaudeProjectDir(cwd) {
-    return String(cwd || '').replace(/[^A-Za-z0-9]/g, '-');
+// Claude Code slugifies a project cwd for <config-root>/projects/<slug>/.
+// The rule has changed across versions (older: every non-alphanumeric -> '-';
+// newer builds preserve spaces: "nebula-notebook 2" keeps its space), so
+// resolution must try every plausible slug.
+function claudeProjectDirCandidates(cwd) {
+    const raw = String(cwd || '');
+    const slugs = [
+        raw.replace(/[^A-Za-z0-9]/g, '-'),
+        raw.replace(/[^A-Za-z0-9 ]/g, '-')
+    ];
+    return [...new Set(slugs)];
 }
 
 // Config roots that can hold a conversation's transcript: the recorded
@@ -3743,8 +3750,18 @@ function claudeConfigRootsForRestore(recConfigDir) {
 function claudeTranscriptExists(rec) {
     if (!rec || !rec.sessionId || !rec.cwd) return false;
     for (const root of claudeConfigRootsForRestore(rec.configDir)) {
-        const file = path.join(root, 'projects', encodeClaudeProjectDir(rec.cwd), `${rec.sessionId}.jsonl`);
-        try { fs.accessSync(file); return true; } catch (e) { /* try next root */ }
+        for (const slug of claudeProjectDirCandidates(rec.cwd)) {
+            const base = path.join(root, 'projects', slug);
+            try { fs.accessSync(path.join(base, `${rec.sessionId}.jsonl`)); return true; } catch (e) { /* next */ }
+            // Newer layout: a per-session DIRECTORY. Only counts when it holds a
+            // real transcript jsonl — a dir with only subagents/ metadata is a
+            // conversation that never persisted (resume would fail on it).
+            try {
+                const dir = path.join(base, rec.sessionId);
+                if (fs.statSync(dir).isDirectory()
+                    && fs.readdirSync(dir).some((f) => f.endsWith('.jsonl'))) return true;
+            } catch (e) { /* next */ }
+        }
     }
     return false;
 }
@@ -3935,13 +3952,26 @@ function getClaudeConfigRoots() {
     return roots.filter((p) => { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } });
 }
 
+function getCodexConfigRoots() {
+    const root = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    try {
+        return fs.statSync(root).isDirectory() ? [root] : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function getAgentSkillRoots() {
+    return Array.from(new Set([...getClaudeConfigRoots(), ...getCodexConfigRoots()]));
+}
+
 // ---- hop-session skill install/remove (<config-root>/skills/hop-session/) --
 // Teaches agents running INSIDE hop terminals the house conventions (render
 // math via `hop math`, ring the bell when blocked, phone-friendly output).
 // Source of truth: skills/hop-session/SKILL.md in the hop install.
 const HOP_SKILLS_DIR = path.join(__dirname, 'skills');
 
-function installClaudeSkill() {
+function installAgentSkills(roots) {
     let names = [];
     try {
         names = fs.readdirSync(HOP_SKILLS_DIR).filter((n) => fs.existsSync(path.join(HOP_SKILLS_DIR, n, 'SKILL.md')));
@@ -3953,7 +3983,7 @@ function installClaudeSkill() {
     const already = [];
     for (const name of names) {
         const content = fs.readFileSync(path.join(HOP_SKILLS_DIR, name, 'SKILL.md'), 'utf8');
-        for (const root of getClaudeConfigRoots()) {
+        for (const root of roots) {
             const dest = path.join(root, 'skills', name, 'SKILL.md');
             try {
                 if (fs.existsSync(dest) && fs.readFileSync(dest, 'utf8') === content) {
@@ -3971,11 +4001,11 @@ function installClaudeSkill() {
     return { ok: true, installed, already };
 }
 
-function removeClaudeSkill() {
+function removeAgentSkills(roots) {
     const removed = [];
     let names = [];
     try { names = fs.readdirSync(HOP_SKILLS_DIR); } catch (e) { names = ['hop-session', 'hop-manager']; }
-    for (const root of getClaudeConfigRoots()) for (const name of names) {
+    for (const root of roots) for (const name of names) {
         const dir = path.join(root, 'skills', name);
         try {
             if (fs.existsSync(dir)) {
@@ -4635,7 +4665,14 @@ function writeHayHostStateFile(state) {
         startedAt: state.startedAt || Date.now(),
         homeHash: HAY_HOST_HOME_HASH
     };
-    hayHostDiscoveryCache = { expiresAt: 0, hosts: [] };
+    // The state was just authenticated by a health check, so it is already a
+    // valid discovery result. Keeping it in the cache avoids an immediate
+    // synchronous ps/lsof rediscovery on the next ensure call; lsof can block
+    // indefinitely on unhealthy filesystem mounts and stall daemon startup.
+    hayHostDiscoveryCache = {
+        expiresAt: Date.now() + HAY_HOST_DISCOVERY_CACHE_MS,
+        hosts: [{ ...hayHostState, scoped: true }]
+    };
     writePrivateFile(HAY_HOST_STATE_FILE, JSON.stringify(hayHostState));
 }
 
@@ -4786,6 +4823,15 @@ function listDiscoveredHayHostCandidates(force = false) {
 
     if (recorded && isProcessAlive(recorded.pid)) {
         remember({ ...recorded, scoped: true, homeHash: HAY_HOST_HOME_HASH });
+        // A live state-file record is already scoped to this HOP_HOME and its
+        // health is checked by inspectExternalHayHosts. Adopt it directly;
+        // rediscovering its listening port with lsof is redundant and can
+        // block daemon restart on machines with stalled filesystem mounts.
+        hayHostDiscoveryCache = {
+            expiresAt: now + HAY_HOST_DISCOVERY_CACHE_MS,
+            hosts: candidates
+        };
+        return candidates.map((host) => ({ ...host }));
     }
 
     try {
@@ -9710,7 +9756,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'claude-skill', 'math', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -10161,33 +10207,36 @@ async function main() {
         process.exit(0);
     }
 
-    // Handle `hop claude-skill [install|remove|status]` — the hop-session skill
-    // that teaches in-terminal agents to use `hop math`, ring bells, etc.
-    if (process.argv[2] === 'claude-skill') {
+    // `agent-skill` installs Hop's bundled instructions for Claude and Codex.
+    // Keep `claude-skill` as the narrower backward-compatible command.
+    if (process.argv[2] === 'agent-skill' || process.argv[2] === 'claude-skill') {
+        const agentWide = process.argv[2] === 'agent-skill';
+        const roots = agentWide ? getAgentSkillRoots() : getClaudeConfigRoots();
+        const commandName = agentWide ? 'agent-skill' : 'claude-skill';
         const sub = process.argv[3] || 'status';
         if (sub === 'install') {
-            const r = installClaudeSkill();
+            const r = installAgentSkills(roots);
             if (!r.ok) { log(`Failed to install skill: ${r.error}`, RED); process.exit(1); }
-            for (const p of r.installed) log(`${GREEN}Installed${RESET} hop-session skill → ${p}`, RESET);
-            for (const p of r.already) log(`hop-session skill already current (${p}).`, DIM);
+            for (const p of r.installed) log(`${GREEN}Installed${RESET} Hop skill → ${p}`, RESET);
+            for (const p of r.already) log(`Hop skill already current (${p}).`, DIM);
             if (r.installed.length) log(`New agent sessions in hop terminals will pick it up automatically.`, DIM);
             process.exit(0);
         }
         if (sub === 'remove') {
-            const r = removeClaudeSkill();
+            const r = removeAgentSkills(roots);
             for (const p of r.removed) log(`${GREEN}Removed${RESET} ${p}`, RESET);
-            if (!r.removed.length) log(`hop-session skill was not installed.`, RESET);
+            if (!r.removed.length) log(`Hop skills were not installed.`, RESET);
             process.exit(0);
         }
         // status
         let any = false;
         let skillNames = [];
         try { skillNames = fs.readdirSync(HOP_SKILLS_DIR); } catch (e) { skillNames = []; }
-        for (const root of getClaudeConfigRoots()) for (const name of skillNames) {
+        for (const root of roots) for (const name of skillNames) {
             const dest = path.join(root, 'skills', name, 'SKILL.md');
             if (fs.existsSync(dest)) { any = true; log(`${GREEN}✓${RESET} ${dest}`, RESET); }
         }
-        if (!any) log(`${YELLOW}!${RESET} hop-session skill not installed. Run ${CYAN}hop claude-skill install${RESET} so agents render math, ring bells, and format for phones.`, RESET);
+        if (!any) log(`${YELLOW}!${RESET} Hop skills are not installed. Run ${CYAN}hop ${commandName} install${RESET}.`, RESET);
         process.exit(0);
     }
 
@@ -10417,8 +10466,9 @@ async function main() {
         log(`  hop restore [--dry-run]   Recreate your saved sessions, resuming claude conversations`, RESET);
         log(`  hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`, RESET);
         log(`  hop claude-hook status|remove   Check or remove the hook`, RESET);
-        log(`  hop claude-skill install  Teach agents hop conventions (hop math, bells, phone output)`, RESET);
-        log(`  hop claude-skill status|remove   Check or remove the skill`, RESET);
+        log(`  hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`, RESET);
+        log(`  hop agent-skill status|remove   Check or remove the skills`, RESET);
+        log(`  hop claude-skill ...      Backward-compatible Claude-only alias`, RESET);
         log('');
         log(`${BOLD}Client mode (for users):${RESET}`, RESET);
         log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);

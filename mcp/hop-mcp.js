@@ -17,11 +17,140 @@ const { execSync } = require('child_process');
 // can't split a multi-line task into two submits.
 // Convention: docs/agent-session-convention.md in the mybot repo.
 const AGENT_SESSION_MARKER = '<!-- agent-session: launcher=hop origin=orchestrated -->';
+const AGENT_COMPLETION_TOKEN_PREFIX = 'HOP_TASK_COMPLETE_';
+// Hop is commonly launched from inside another Claude Code process. Its child
+// terminal inherits process-scoped credentials/context that are not valid for a
+// fresh CLI session and can override the user's durable `claude auth login`
+// credentials. Strip only Claude Code's nesting/auth variables for the preset;
+// an explicit command remains an escape hatch for intentional env-based auth.
+const CLAUDE_PRESET_UNSET_ENV = [
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION'
+];
+const CLAUDE_PERMISSION_MODES = new Set([
+  'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'manual', 'plan'
+]);
+
+function claudePresetCommand() {
+  return `env ${CLAUDE_PRESET_UNSET_ENV.map((name) => `-u ${name}`).join(' ')} claude`;
+}
+
+function codexPresetCommand() {
+  // Managed workers cannot answer an interactive workspace-trust or approval
+  // prompt. `command` bypasses a same-named interactive-shell function so the
+  // autonomous flag is applied exactly once; the config override also keeps a
+  // self-update chooser from intercepting the first delegated task.
+  return 'command codex --dangerously-bypass-approvals-and-sandbox -c check_for_update_on_startup=false';
+}
 
 function withAgentSessionMarker(task) {
   if (typeof task !== 'string' || task.length === 0) return task;
   if (task.includes('<!-- agent-session:')) return task; // already tagged
   return `${AGENT_SESSION_MARKER} ${task}`;
+}
+
+function createAutomaticCompletionContract(task) {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase();
+  const token = `${AGENT_COMPLETION_TOKEN_PREFIX}${suffix}`;
+  const instruction = [
+    'Hop completion contract:',
+    'Begin immediately and work autonomously through execution and verification before deciding whether the task succeeded.',
+    'Only after the requested task has succeeded, end your final response with a token formed by concatenating these two parts on its own line:',
+    `Prefix: ${AGENT_COMPLETION_TOKEN_PREFIX}`,
+    `Suffix: ${suffix}`,
+    'Do not output the token if the task failed, is blocked, or remains incomplete; explain the failure or blocker instead.'
+  ].join('\n');
+  return {
+    task: `${task}\n\n${instruction}`,
+    token,
+    regex: `(?:^|\\r?\\n)[\\t ]*${escapeRegExp(token)}[\\t ]*(?:\\r?\\n|$)`
+  };
+}
+
+function isAutomaticCompletionContract(pattern) {
+  return typeof pattern === 'string' && pattern.includes(AGENT_COMPLETION_TOKEN_PREFIX);
+}
+
+function uiSnapshotText(payload) {
+  const lines = payload && payload.ui && Array.isArray(payload.ui.lines)
+    ? payload.ui.lines
+    : [];
+  return lines
+    .map((line) => (line && typeof line.text === 'string' ? line.text : ''))
+    .join('\n');
+}
+
+function detectAgentStartupBlocker(text) {
+  const value = stripAnsi(String(text || ''));
+  if (/please run \/login|invalid authentication credentials|authentication failed|not logged in/i.test(value)) {
+    return {
+      kind: 'authentication_required',
+      message: 'The agent CLI is not authenticated.'
+    };
+  }
+  if (/update available![\s\S]*(?:update now|skip until next version)/i.test(value)) {
+    return {
+      kind: 'update_prompt',
+      message: 'The agent CLI is waiting at a self-update prompt.'
+    };
+  }
+  if (/do you trust the contents of this directory|workspace trust/i.test(value)) {
+    return {
+      kind: 'workspace_trust_required',
+      message: 'The agent CLI is waiting for workspace trust confirmation.'
+    };
+  }
+  if (/error:.*(?:argument|option)|command not found|usage:\s+(?:codex|claude|gemini)\b/i.test(value)) {
+    return {
+      kind: 'agent_launch_failed',
+      message: 'The agent CLI exited during launch.'
+    };
+  }
+  return null;
+}
+
+function codexMessageText(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  if (typeof payload.message === 'string') return payload.message;
+  const content = Array.isArray(payload.content) ? payload.content : [];
+  return content
+    .map((block) => {
+      if (!block || typeof block !== 'object') return '';
+      if (typeof block.text === 'string') return block.text;
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function updateCodexReplyState(state, obj, sentData) {
+  const payload = obj && typeof obj === 'object' && obj.payload && typeof obj.payload === 'object'
+    ? obj.payload
+    : null;
+  if (!payload) return;
+  const text = codexMessageText(payload).trim();
+  const task = String(sentData || '').trim();
+  const isUserMessage = payload.type === 'user_message'
+    || (payload.type === 'message' && payload.role === 'user');
+  if (isUserMessage && task && text === task) {
+    state.sawTask = true;
+    state.finalReply = null;
+    return;
+  }
+  const isFinalAnswer = payload.phase === 'final_answer'
+    && (payload.type === 'agent_message' || (payload.type === 'message' && payload.role === 'assistant'));
+  if (state.sawTask && isFinalAnswer && text) state.finalReply = text;
+}
+
+function extractCodexFinalReply(events, sentData) {
+  const state = { sawTask: false, finalReply: null };
+  for (const event of Array.isArray(events) ? events : []) {
+    updateCodexReplyState(state, event, sentData);
+  }
+  return state.finalReply;
 }
 
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2024-11-05'];
@@ -53,8 +182,10 @@ const DEFAULT_HOPX_UI_SETTLE_CHECKS = 2;
 // Verified submit: after pressing Enter in a TUI composer, re-check that the box
 // actually cleared. A composer still holding our text means Enter was swallowed
 // (a known TUI race), so re-send it up to this many times before giving up.
-const DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES = 3;
-const DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS = 300;
+const DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES = 6;
+const DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS = 350;
+const DEFAULT_HOPX_COMPOSER_LOAD_TIMEOUT_MS = 5000;
+const DEFAULT_HOPX_COMPOSER_LOAD_POLL_MS = 100;
 // Box-drawing characters that frame a TUI input box (rounded, square, and heavy
 // variants), plus the column separators. Used to locate the composer and to skip
 // border cells when scraping its contents.
@@ -479,7 +610,7 @@ function slimWaitPayload(waitPayload, sentData) {
   if (typeof out.text === 'string' && typeof sentData === 'string' && sentData.length > 0) {
     const text = out.text;
     // Strip ANSI from search window for more reliable matching
-    const rawWindow = text.slice(0, 1024);
+    const rawWindow = text.slice(0, Math.max(1024, sentData.length + 512));
     const cleanWindow = stripAnsi(rawWindow);
     const cmdToFind = sentData.replace(/\r$/, ''); // strip trailing \r if present
     const idx = cleanWindow.indexOf(cmdToFind);
@@ -533,7 +664,7 @@ function extractWaitReplyText(waitPayload) {
 // the final reply line, and the rendered screen would false-positive on the
 // echoed instruction. Falls back to the wait-captured text. Case-insensitive
 // by contract; ANSI is stripped so patterns match the visible text.
-function evaluateReplyRegex(pattern, waitPayload, preferredText) {
+function evaluateReplyRegex(pattern, waitPayload, preferredText, sentData) {
   let regex = null;
   try {
     regex = new RegExp(pattern, 'i');
@@ -545,7 +676,23 @@ function evaluateReplyRegex(pattern, waitPayload, preferredText) {
     match = stripAnsi(preferredText).match(regex);
   }
   if (!match) {
-    match = stripAnsi(extractWaitReplyText(waitPayload)).match(regex);
+    const cleanSentData = typeof sentData === 'string' ? stripAnsi(sentData) : '';
+    // If the contract itself appears in the submitted instruction, a terminal
+    // capture without a transcript cannot distinguish the worker's reply from
+    // an echoed or partially-redrawn prompt. Fail closed in that case. Hop's
+    // automatic contract avoids this ambiguity by splitting its token in the
+    // instruction, so transcript-less workers can still be verified.
+    if (cleanSentData && regex.test(cleanSentData)) {
+      return { reply_matched: false, reply_match: null };
+    }
+    let fallbackText = stripAnsi(extractWaitReplyText(waitPayload));
+    if (cleanSentData) {
+      const echoIndex = fallbackText.indexOf(cleanSentData);
+      if (echoIndex !== -1) {
+        fallbackText = fallbackText.slice(echoIndex + cleanSentData.length);
+      }
+    }
+    match = fallbackText.match(regex);
   }
   return {
     reply_matched: match !== null,
@@ -587,7 +734,17 @@ function composerSharesContent(sent, composerText) {
   const longer = a.length <= b.length ? b : a;
   if (longer.includes(shorter)) return true;
   const head = shorter.slice(0, Math.min(20, shorter.length));
-  return head.length >= 4 && longer.includes(head);
+  if (head.length >= 4 && longer.includes(head)) return true;
+  // xterm represents blank cells with getChars()==="". Older composer
+  // snapshots therefore collapsed the spaces in a visible line; compare a
+  // compact form as a defensive fallback for those snapshots.
+  const compactA = a.replace(/\s/g, '');
+  const compactB = b.replace(/\s/g, '');
+  const compactShorter = compactA.length <= compactB.length ? compactA : compactB;
+  const compactLonger = compactA.length <= compactB.length ? compactB : compactA;
+  if (compactLonger.includes(compactShorter)) return true;
+  const compactHead = compactShorter.slice(0, Math.min(24, compactShorter.length));
+  return compactHead.length >= 8 && compactLonger.includes(compactHead);
 }
 
 // Claude Code stores a session transcript at
@@ -2222,7 +2379,10 @@ class TerminalStreamManager {
           if (!c) continue;
           if (c.getWidth() === 0) continue; // trailing half of a wide glyph
           const ch = c.getChars();
-          if (!ch) continue;
+          if (!ch) {
+            if (!c.isDim()) rowReal += ' ';
+            continue;
+          }
           if (COMPOSER_BORDER_CHARS.has(ch)) continue; // box frame
           // Strip a single leading prompt glyph at the very start of the body.
           if (!strippedPrompt && COMPOSER_PROMPT_CHARS.has(ch) && rowReal.trim() === '' && real.trim() === '') {
@@ -3268,7 +3428,7 @@ class HopMCPServer {
       },
       {
         name: 'hopx_agent_turn',
-        description: 'Convenience helper: send one turn to a terminal agent, wait, and return mode-appropriate output. Built on top of core hop_* tools. Provide terminal_id to start a turn, or wait_id to continue/poll/control an async turn. Optional until_reply_regex is evaluated (case-insensitive) against the captured reply text after the turn completes and reported as reply_matched/reply_match — "task finished", not just "turn finished".',
+        description: 'Convenience helper: send one turn to a terminal agent, wait, and return mode-appropriate output. Built on top of core hop_* tools. Provide terminal_id to start a turn, or wait_id to continue/poll/control an async turn. Optional until_reply_regex is evaluated (case-insensitive) against the captured reply text after the turn completes; a mismatch returns contract_failed instead of success.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -3304,7 +3464,7 @@ class HopMCPServer {
             match_target: { type: 'string', enum: WAIT_MATCH_TARGETS, description: 'Where until_regex/until_prompt look: stream (output byte stream, good for shells), screen (rendered virtual screen, needed for redraw-heavy TUIs but also sees echoed input), or auto (default: stream, plus screen in alternate-screen mode).' },
             until_prompt: { type: 'boolean', description: 'Wait for prompt regex match.' },
             until_agent_done: { type: 'boolean', description: 'Wait for agent-style completion.' },
-            until_reply_regex: { type: 'string', description: 'Optional case-insensitive regex evaluated against the captured reply text AFTER the turn completes (it does not change when the wait ends); adds reply_matched: true|false and reply_match (first match or null) to the result. For async turns it is evaluated when the background job completes, so hopx_wait_any completed[] summaries carry it too.' },
+            until_reply_regex: { type: 'string', description: 'Optional case-insensitive completion contract evaluated against the captured reply text AFTER the turn completes. A mismatch returns status=contract_failed, ok=false, and an MCP tool error. Async hopx_wait_any summaries carry the same verdict.' },
             prompt_regex: { type: 'string', description: 'Prompt matcher regex.' },
             idle_ms: { type: 'number', description: 'Match when output-like events are quiet for this duration.' },
             max_wait_ms: { type: 'number', description: 'Overall wait timeout (default: 30000 synchronous; 15 minutes when async=true — the job is a background watch nobody blocks on).' },
@@ -3318,9 +3478,9 @@ class HopMCPServer {
             uiMaxLines: { type: 'number', description: 'For mode=ui, max visible lines to include.' },
             includeRawTail: { type: 'boolean', description: 'For mode=ui, include raw output tail (default: false in hopx helper).' },
             rawTailMaxEvents: { type: 'number', description: 'For mode=ui, max raw tail events.' },
-            verify_submit: { type: 'boolean', description: 'For mode=ui: after data+Enter, confirm the composer cleared and re-send Enter if it was swallowed (default: true). Set false to disable.' },
-            verify_submit_retries: { type: 'number', description: 'Max Enter re-sends when verified submit detects a swallowed Enter (default: 2).' },
-            verify_submit_delay_ms: { type: 'number', description: 'Delay before each verified-submit composer re-check (default: 250).' },
+            verify_submit: { type: 'boolean', description: 'For agent composers in every mode: confirm the task rendered before Enter, then confirm the composer cleared and re-send Enter if it was swallowed (default: true). Set false to disable.' },
+            verify_submit_retries: { type: 'number', description: `Max Enter re-sends when verified submit detects a swallowed Enter (default: ${DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES}).` },
+            verify_submit_delay_ms: { type: 'number', description: `Delay before each verified-submit composer re-check (default: ${DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS}).` },
             settle_checks: { type: 'number', description: 'For the busy-line completion heuristic (no Stop-hook marker): consecutive idle reads required before declaring the turn done (default: 2). Ignored when the turn counter marker is authoritative.' }
           }
         }
@@ -3393,16 +3553,20 @@ class HopMCPServer {
       },
       {
         name: 'hopx_spawn_agent',
-        description: 'One-call subagent bring-up: create a terminal, launch an agent CLI (claude/codex/gemini or a custom command), wait until it is ready for input, and optionally dispatch a first task as an async turn. Returns { terminal_id, sessionName, wait_id? } — collect results with hopx_wait_any / hopx_agent_turn(wait_id=...). Composes hop_create_terminal + hop_write_terminal + hop_wait_terminal + hopx_agent_turn.',
+        description: 'One-call subagent bring-up: create a terminal, launch an agent CLI (claude/codex/gemini or a custom command), wait until it is ready for input, and optionally dispatch a first task. initial_task gets a unique completion contract automatically unless until_reply_regex is supplied. By default the call waits and succeeds only when that contract is satisfied. Set async=true for fleet dispatch, then wait for reply_matched=true; dispatch alone is never task completion.',
         inputSchema: {
           type: 'object',
           properties: {
             name: { type: 'string', description: 'Session name for the subagent terminal (default: auto-named).' },
             cwd: { type: 'string', description: 'Working directory for the terminal.' },
-            agent: { type: 'string', enum: ['claude', 'codex', 'gemini', 'custom'], description: 'Agent CLI preset (default: claude). Use custom with command=... for anything else.' },
+            agent: { type: 'string', enum: ['claude', 'codex', 'gemini', 'custom'], description: 'Agent CLI preset (default: claude, launched with the Sonnet model alias in autonomous permission mode). Use custom with command=... for anything else.' },
             command: { type: 'string', description: 'Override the launch command (required when agent=custom).' },
             args: { type: 'string', description: 'Extra CLI arguments appended to the launch command (e.g. "--model opus").' },
-            initial_task: { type: 'string', description: 'First task to dispatch once ready, as an async agent turn (returns its wait_id).' },
+            permission_mode: { type: 'string', enum: ['acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'manual', 'plan'], description: 'Claude worker permission mode (default: bypassPermissions so delegated tasks cannot park on an approval prompt). Set manual or another Claude mode for restricted workers. Ignored by other presets and explicit command overrides.' },
+            initial_task: { type: 'string', description: 'First task to dispatch once ready. Hop appends a unique success-token instruction unless until_reply_regex is supplied.' },
+            until_reply_regex: { type: 'string', description: 'Optional caller-defined completion contract for initial_task. When omitted, Hop creates and instructs the worker to emit a unique success token. The turn is contract_failed if its final reply does not match.' },
+            async: { type: 'boolean', description: 'Initial-task behavior: false/default waits for the contracted result and returns initial_task_result; true returns a pending wait_id for explicit fleet orchestration.' },
+            max_wait_ms: { type: 'number', description: 'Maximum initial-task wait window (default: 15 minutes).' },
             ready_timeout_ms: { type: 'number', description: 'Max ms to wait for the agent CLI to become ready (default: 60000).' },
             cols: { type: 'number', description: 'Terminal columns.' },
             rows: { type: 'number', description: 'Terminal rows.' },
@@ -3412,7 +3576,7 @@ class HopMCPServer {
       },
       {
         name: 'hopx_task_ledger',
-        description: 'The durable orchestration ledger: every async agent turn dispatched with hopx_agent_turn is recorded on disk (~/.hop2/orchestration) and survives manager/MCP restarts. Lists tasks with status pending/completed/failed, contract verdicts (replyMatched), and per-session grouping; pending entries are lazily reconciled from turn counters + transcripts on every call, so a freshly restarted manager sees which turns finished while nobody was watching. Use acknowledge to delete consumed entries.',
+        description: 'The durable orchestration ledger: every async agent turn dispatched with hopx_agent_turn is recorded on disk (~/.hop2/orchestration) and survives manager/MCP restarts. Lists tasks with status pending/completed/failed and contract verdicts; a finished turn with an unsatisfied contract is failed. Pending entries are lazily reconciled from turn counters + transcripts on every call. Use acknowledge to delete consumed entries.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -3512,7 +3676,7 @@ class HopMCPServer {
           autoStart: args.autoStart,
           folderId: args.folderId
         });
-        if (created && created.ok && created.id) {
+        if (!this.isApiFailurePayload(created) && created && created.id) {
           await this.prewarmTerminalStream(created.id, {
             cols: args.cols,
             rows: args.rows,
@@ -3533,7 +3697,7 @@ class HopMCPServer {
           cols: args.cols,
           rows: args.rows
         });
-        if (attached && attached.ok && attached.id) {
+        if (!this.isApiFailurePayload(attached) && attached && attached.id) {
           await this.prewarmTerminalStream(attached.id, {
             cols: args.cols,
             rows: args.rows,
@@ -4036,6 +4200,7 @@ class HopMCPServer {
       // the metadata carries the regex).
       replyMatched: null,
       replyMatch: null,
+      assistantReply: null,
       // Stable link back to the terminal for fleet views (metadata is
       // caller-shaped and not guaranteed to carry it).
       terminalId: typeof args.terminal_id === 'string' ? args.terminal_id : null,
@@ -4066,28 +4231,72 @@ class HopMCPServer {
         // task-level completion, not just turn completion. The transcript's
         // last assistant message is the authoritative reply source; the
         // wait-captured text is the fallback.
-        if (job.metadata && typeof job.metadata.until_reply_regex === 'string') {
+        if (
+          job.status !== 'error'
+          && job.status !== 'timed_out'
+          && job.metadata
+          && typeof job.metadata.until_reply_regex === 'string'
+        ) {
           let transcriptReply = null;
           try {
             const handle = this.getTerminalHandle(job.terminalId);
             const internalName = handle ? (handle.internalName || handle.sessionName || null) : null;
-            transcriptReply = await this.readLastAssistantReplyText(internalName);
+            transcriptReply = await this.readLastAssistantReplyText(
+              internalName,
+              job.metadata._sent_data,
+              job.createdAt
+            );
           } catch {
             /* fall back to wait text */
           }
-          const reply = evaluateReplyRegex(job.metadata.until_reply_regex, job.result, transcriptReply);
+          if (typeof transcriptReply === 'string' && transcriptReply.trim()) {
+            job.assistantReply = transcriptReply;
+          }
+          let reply = evaluateReplyRegex(
+            job.metadata.until_reply_regex,
+            job.result,
+            transcriptReply,
+            job.metadata._sent_data
+          );
+          // Automatic contracts are deliberately absent from the submitted
+          // prompt as a contiguous token, so the rendered screen is a safe
+          // fallback when transcript resolution is unavailable/ambiguous and
+          // the bounded wait capture omitted the final reply.
+          if (!reply.reply_matched && isAutomaticCompletionContract(job.metadata.until_reply_regex)) {
+            try {
+              const screen = await this.readHopxUiSnapshot(job.terminalId, undefined, undefined, false);
+              if (!screen.errorResponse) {
+                const screenText = uiSnapshotText(screen.payload);
+                if (screenText) {
+                  reply = evaluateReplyRegex(
+                    job.metadata.until_reply_regex,
+                    job.result,
+                    screenText,
+                    job.metadata._sent_data
+                  );
+                }
+              }
+            } catch {
+              /* keep the transcript/wait verdict */
+            }
+          }
           job.replyMatched = reply.reply_matched;
           job.replyMatch = reply.reply_match;
+          if (!job.replyMatched) {
+            job.status = 'contract_failed';
+            job.error = 'Agent turn finished without satisfying its completion contract.';
+          }
         }
         job.done = true;
         job.updatedAt = Date.now();
         if (job.metadata && job.metadata.ledger) {
+          const failed = job.status === 'error' || job.status === 'contract_failed';
           this.updateLedgerTask(job.waitId, {
-            status: job.status === 'error' ? 'failed' : (job.status === 'timed_out' ? 'pending' : 'completed'),
-            completedAt: job.status === 'error' || job.status === 'timed_out' ? undefined : job.updatedAt,
+            status: failed ? 'failed' : (job.status === 'timed_out' ? 'pending' : 'completed'),
+            completedAt: job.status === 'timed_out' ? undefined : job.updatedAt,
             replyMatched: job.replyMatched,
             replyMatch: job.replyMatch,
-            error: job.status === 'error' ? (job.error || 'unknown') : undefined
+            error: failed ? (job.error || 'unknown') : undefined
           });
         }
         this.pruneWaitJobs(job.updatedAt);
@@ -4113,18 +4322,28 @@ class HopMCPServer {
   }
 
   summarizeWaitJob(job) {
+    const failed = job.status === 'error' || job.status === 'contract_failed';
+    const incomplete = job.status === 'timed_out';
     const payload = {
-      ok: job.done ? job.status !== 'error' : true,
+      ok: job.done ? !failed && !incomplete : true,
       wait_id: job.waitId,
       done: !!job.done,
       status: job.done ? job.status : 'pending'
     };
     if (job.done && job.metadata && typeof job.metadata === 'object') {
-      payload.metadata = job.metadata;
+      payload.metadata = Object.fromEntries(
+        Object.entries(job.metadata).filter(([key]) => !key.startsWith('_'))
+      );
     }
     if (job.done && typeof job.replyMatched === 'boolean') {
       payload.reply_matched = job.replyMatched;
       payload.reply_match = job.replyMatch;
+    }
+    if (job.done && typeof job.assistantReply === 'string' && job.assistantReply.length > 0) {
+      payload.assistant_reply = job.assistantReply;
+    }
+    if (job.done && failed) {
+      payload.error = job.error || 'Unknown wait failure';
     }
     return payload;
   }
@@ -4179,7 +4398,7 @@ class HopMCPServer {
     if (job.done && job.result) {
       payload.result = slimWaitPayload(job.result, null);
     }
-    if (job.done && job.status === 'error') {
+    if (job.done && (job.status === 'error' || job.status === 'contract_failed')) {
       payload.error = job.error || 'Unknown wait failure';
     }
 
@@ -4187,7 +4406,7 @@ class HopMCPServer {
       this.waitJobs.delete(waitId);
     }
 
-    if (job.done && job.status === 'error') {
+    if (job.done && (job.status === 'error' || job.status === 'contract_failed')) {
       return {
         content: [{ type: 'text', text: JSON.stringify(payload) }],
         isError: true
@@ -4278,7 +4497,7 @@ class HopMCPServer {
       )
         ? condenseReadableWaitPayload(job.result)
         : job.result;
-      payload.wait = slimWaitPayload(rawWait, null);
+      payload.wait = slimWaitPayload(rawWait, metadata._sent_data || null);
       if (selectedMode === 'ui' && payload.terminal_id) {
         const uiOutcome = await this.readHopxUiSnapshot(
           payload.terminal_id,
@@ -4290,7 +4509,7 @@ class HopMCPServer {
         payload.output = uiOutcome.payload;
       }
     }
-    if (job.done && job.status === 'error') {
+    if (job.done && (job.status === 'error' || job.status === 'contract_failed')) {
       payload.error = job.error || 'Unknown wait failure';
       return {
         content: [{ type: 'text', text: JSON.stringify(payload) }],
@@ -4350,27 +4569,80 @@ class HopMCPServer {
     }
   }
 
-  // Authoritative reply text for until_reply_regex: the last assistant message
-  // in the session's Claude transcript. Returns null when no transcript is
-  // resolvable (non-Claude agent, no hook record, remote host) — callers then
-  // fall back to wait-captured text.
-  async readLastAssistantReplyText(internalName) {
-    if (!internalName) return null;
+  codexSessionDateDirs(sinceMs) {
+    const root = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
+    const keys = new Set();
+    const add = (date, utc) => {
+      const year = utc ? date.getUTCFullYear() : date.getFullYear();
+      const month = (utc ? date.getUTCMonth() : date.getMonth()) + 1;
+      const day = utc ? date.getUTCDate() : date.getDate();
+      keys.add(path.join(root, String(year), String(month).padStart(2, '0'), String(day).padStart(2, '0')));
+    };
+    const base = Number.isFinite(sinceMs) ? sinceMs : Date.now();
+    for (const delta of [-86400000, 0, 86400000]) {
+      const date = new Date(base + delta);
+      add(date, false);
+      add(date, true);
+    }
+    return [...keys];
+  }
+
+  async readLastCodexAssistantReplyText(sentData, sinceMs) {
+    if (typeof sentData !== 'string' || !sentData.trim()) return null;
+    const threshold = (Number.isFinite(sinceMs) ? sinceMs : Date.now() - 86400000) - 60000;
+    const candidates = [];
+    for (const dir of this.codexSessionDateDirs(sinceMs)) {
+      let files = [];
+      try { files = fs.readdirSync(dir).filter((name) => name.endsWith('.jsonl')); } catch { continue; }
+      for (const name of files) {
+        const file = path.join(dir, name);
+        try {
+          const stat = fs.statSync(file);
+          if (stat.mtimeMs >= threshold) candidates.push({ file, mtimeMs: stat.mtimeMs });
+        } catch { /* file disappeared */ }
+      }
+    }
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const candidate of candidates.slice(0, 64)) {
+      const state = { sawTask: false, finalReply: null };
+      try {
+        const rl = readline.createInterface({
+          input: fs.createReadStream(candidate.file, { encoding: 'utf8' }),
+          crlfDelay: Infinity
+        });
+        for await (const line of rl) {
+          if (!line) continue;
+          let obj = null;
+          try { obj = JSON.parse(line); } catch { continue; }
+          updateCodexReplyState(state, obj, sentData);
+        }
+      } catch { continue; }
+      if (state.finalReply) return state.finalReply;
+    }
+    return null;
+  }
+
+  // Authoritative reply text for completion contracts: prefer the exact
+  // session's Claude transcript, then the Codex rollout containing this
+  // dispatched task. Returns null when neither transcript is resolvable.
+  async readLastAssistantReplyText(internalName, sentData = null, sinceMs = null) {
+    let claudeReply = null;
+    if (!internalName) return this.readLastCodexAssistantReplyText(sentData, sinceMs);
     try {
       const source = await this.resolveTrajectorySource(internalName);
-      if (!source || source.error || source.kind !== 'local') return null;
-      const data = await this.loadTrajectory(source, { mode: 'tail', limit: 8, textOnly: true });
-      const tail = Array.isArray(data && data.tail) ? data.tail : [];
-      for (let i = tail.length - 1; i >= 0; i--) {
-        const t = tail[i];
-        if (t && t.kind === 'assistant' && typeof t.text === 'string' && t.text.trim()) {
-          return t.text;
+      if (source && !source.error && source.kind === 'local' && source.ambiguous !== true) {
+        const data = await this.loadTrajectory(source, { mode: 'tail', limit: 8, textOnly: true });
+        const tail = Array.isArray(data && data.tail) ? data.tail : [];
+        for (let i = tail.length - 1; i >= 0; i--) {
+          const t = tail[i];
+          if (t && t.kind === 'assistant' && typeof t.text === 'string' && t.text.trim()) {
+            claudeReply = t.text;
+            break;
+          }
         }
       }
-      return null;
-    } catch {
-      return null;
-    }
+    } catch { /* try Codex */ }
+    return claudeReply || this.readLastCodexAssistantReplyText(sentData, sinceMs);
   }
 
   // ── Durable task ledger (~/.hop2/orchestration/tasks/<id>.json) ─────────
@@ -4427,14 +4699,22 @@ class HopMCPServer {
       let replyMatched = null;
       let replyMatch = null;
       if (typeof entry.contract === 'string' && entry.contract) {
-        const replyText = await this.readLastAssistantReplyText(entry.internalName);
+        const replyText = await this.readLastAssistantReplyText(entry.internalName, entry.task, entry.dispatchedAt);
         const verdict = evaluateReplyRegex(entry.contract, null, replyText);
         replyMatched = verdict.reply_matched;
         replyMatch = verdict.reply_match;
       }
+      const contractFailed = typeof entry.contract === 'string'
+        && entry.contract.length > 0
+        && replyMatched === false;
       this.updateLedgerTask(entry.taskId, {
-        status: 'completed', completedAt: Date.now(), turnCount: current,
-        replyMatched, replyMatch, reconciled: true
+        status: contractFailed ? 'failed' : 'completed',
+        completedAt: Date.now(),
+        turnCount: current,
+        replyMatched,
+        replyMatch,
+        error: contractFailed ? 'Agent turn finished without satisfying its completion contract.' : undefined,
+        reconciled: true
       });
       changed += 1;
     }
@@ -4559,7 +4839,12 @@ class HopMCPServer {
     // NOT always ~/.claude: alternate installs point CLAUDE_CONFIG_DIR at e.g.
     // ~/.claude_fable, so search every plausible root (exact sessionId match
     // first across all roots, then newest-fallback across all roots).
-    const projectDirs = claudeConfigRoots().map((root) => path.join(root, 'projects', encodeClaudeProjectDir(cwd)));
+    const slugCandidates = [...new Set([
+      encodeClaudeProjectDir(cwd),
+      // Newer Claude Code builds preserve spaces in the slug ("…notebook 2").
+      String(cwd || '').replace(/[^A-Za-z0-9 ]/g, '-')
+    ])];
+    const projectDirs = claudeConfigRoots().flatMap((root) => slugCandidates.map((slug) => path.join(root, 'projects', slug)));
     if (sessionId) {
       for (const projectDir of projectDirs) {
         const preferred = path.join(projectDir, `${sessionId}.jsonl`);
@@ -4994,6 +5279,45 @@ class HopMCPServer {
   // bounded number of times. Only acts in TUI/alt-screen mode where a composer
   // exists; degrades to a no-op (verified:false, reason:composer_not_found) when
   // it can't see a box, so it never double-submits a plain shell.
+  async waitForHopxComposerLoaded(streamTerminalId, sentData, opts = {}) {
+    const timeoutMs = Number.isFinite(opts.timeoutMs)
+      ? Math.max(0, Math.floor(opts.timeoutMs))
+      : DEFAULT_HOPX_COMPOSER_LOAD_TIMEOUT_MS;
+    const pollMs = Number.isFinite(opts.pollMs)
+      ? Math.max(0, Math.floor(opts.pollMs))
+      : DEFAULT_HOPX_COMPOSER_LOAD_POLL_MS;
+    const deadline = Date.now() + timeoutMs;
+    let composer = null;
+    let checks = 0;
+
+    while (true) {
+      if (pollMs > 0) await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await this.streamManager.flushVirtualScreen(streamTerminalId);
+      composer = this.streamManager.getComposerState(streamTerminalId);
+      checks += 1;
+      if (composer && composer.found && !composer.isEmpty) {
+        return {
+          applied: true,
+          verified: true,
+          reason: composerSharesContent(sentData, composer.text)
+            ? 'task_rendered'
+            : 'composer_populated',
+          checks,
+          composer
+        };
+      }
+      if (Date.now() >= deadline) break;
+    }
+
+    return {
+      applied: true,
+      verified: false,
+      reason: composer && composer.found ? 'task_not_rendered' : 'composer_not_found',
+      checks,
+      composer: composer || null
+    };
+  }
+
   async verifyHopxSubmitCleared(requestedTerminalId, streamTerminalId, sentData, opts = {}) {
     const retries = Number.isInteger(opts.retries)
       ? Math.max(0, opts.retries)
@@ -5003,13 +5327,20 @@ class HopMCPServer {
       : DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS;
     let resends = 0;
     let composer = null;
-    let emptyStreak = 0;
+    const preSubmitVerified = opts.preSubmitVerified === true;
     for (let attempt = 0; attempt <= retries; attempt++) {
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       await this.streamManager.flushVirtualScreen(streamTerminalId);
       composer = this.streamManager.getComposerState(streamTerminalId);
       if (!composer || !composer.found) {
-        return { applied: true, verified: false, reason: 'composer_not_found', resends, composer: composer || null };
+        // A TUI can briefly remove the composer while repainting after the
+        // first Enter. Keep sampling: a swallowed submit often reappears as a
+        // parked prompt on the next frame. A composer that stays absent means
+        // the turn is running (or this is a plain shell), so no resend is safe.
+        if (preSubmitVerified || attempt === retries) {
+          return { applied: true, verified: true, reason: 'composer_stayed_absent', resends, composer: composer || null };
+        }
+        continue;
       }
       if (composer.isEmpty) {
         // An empty composer right after a send is AMBIGUOUS: either the prompt
@@ -5017,11 +5348,10 @@ class HopMCPServer {
         // screen yet — a swallowed Enter with a slow first-render, which is
         // exactly what parks a fresh worker's first task. If we have already
         // re-sent we know our text WAS there, so empty = cleared. Otherwise
-        // require empty to hold across two consecutive reads before trusting it;
-        // a provisional single empty just loops to re-check (so a not-yet-
-        // rendered parked prompt is caught on the next pass and re-submitted).
-        emptyStreak += 1;
-        if (resends > 0 || emptyStreak >= 2 || attempt === retries) {
+        // wait out the full verification window before trusting an initially
+        // empty composer. Long multi-line prompts can take more than two screen
+        // samples to render after a swallowed Enter.
+        if (preSubmitVerified || resends > 0 || attempt === retries) {
           return {
             applied: true, verified: true,
             reason: resends ? 'cleared_after_resend' : 'cleared',
@@ -5030,11 +5360,13 @@ class HopMCPServer {
         }
         continue;
       }
-      emptyStreak = 0;
       if (!composerSharesContent(sentData, composer.text)) {
         // The box holds something other than our un-submitted prompt; don't poke it.
         return { applied: true, verified: false, reason: 'composer_has_other_text', resends, composer };
       }
+      // Once the task was visibly present before submission, give the TUI one
+      // extra paint cycle to clear it before treating the Enter as swallowed.
+      if (preSubmitVerified && resends === 0 && attempt === 0) continue;
       if (attempt === retries) break;
       // Our prompt is still sitting in the composer → Enter was swallowed. Re-send.
       const re = await this.handleSendAndWait({
@@ -5080,7 +5412,8 @@ class HopMCPServer {
       applied: v.applied === true,
       verified: v.verified === true,
       reason: v.reason || null,
-      resends: Number.isInteger(v.resends) ? v.resends : 0
+      resends: Number.isInteger(v.resends) ? v.resends : 0,
+      ...(Number.isInteger(v.checks) ? { checks: v.checks } : {})
     };
   }
 
@@ -5488,8 +5821,12 @@ class HopMCPServer {
       const summary = this.summarizeWaitJob(job);
       summary.terminal_id = job.terminalId || null;
       if (job.done) {
-        if (job.status === 'error') summary.error = job.error || 'Unknown wait failure';
-        if (includeResults && job.result) summary.result = slimWaitPayload(job.result, null);
+        if (job.status === 'error' || job.status === 'contract_failed') {
+          summary.error = job.error || 'Unknown wait failure';
+        }
+        if (includeResults && job.result) {
+          summary.result = slimWaitPayload(job.result, job.metadata?._sent_data || null);
+        }
         completed.push(summary);
         if (args.consume === true) this.waitJobs.delete(job.waitId);
       } else {
@@ -5498,7 +5835,7 @@ class HopMCPServer {
       }
     }
     return this.wrapJson({
-      ok: true,
+      ok: completed.every((job) => job.ok !== false),
       helper: 'hopx_wait_any',
       completed,
       pending,
@@ -5511,12 +5848,19 @@ class HopMCPServer {
     });
   }
 
-  // One-call subagent bring-up: terminal + agent CLI + readiness (+ optional
-  // first task dispatched as an async turn).
+  // One-call subagent bring-up: terminal + agent CLI + readiness, with an
+  // optional contracted first task that blocks unless async is explicit.
   async handleSpawnAgent(args = {}) {
     const preset = typeof args.agent === 'string' && args.agent ? args.agent : 'claude';
-    const presetCommands = { claude: 'claude', codex: 'codex', gemini: 'gemini' };
+    const presetCommands = { claude: claudePresetCommand(), codex: codexPresetCommand(), gemini: 'gemini' };
     let command = typeof args.command === 'string' && args.command.trim() ? args.command.trim() : '';
+    const usesPresetCommand = command.length === 0;
+    if (args.permission_mode !== undefined && !CLAUDE_PERMISSION_MODES.has(args.permission_mode)) {
+      return {
+        content: [{ type: 'text', text: `Error: invalid Claude permission_mode "${String(args.permission_mode)}".` }],
+        isError: true
+      };
+    }
     if (!command) {
       if (preset === 'custom') {
         return { content: [{ type: 'text', text: 'Error: agent="custom" requires command=...' }], isError: true };
@@ -5525,9 +5869,42 @@ class HopMCPServer {
       if (!command) {
         return { content: [{ type: 'text', text: `Error: unknown agent preset "${preset}". Use claude, codex, gemini, or custom with command=...` }], isError: true };
       }
+      // Claude's account-dependent default can open a post-submit usage-credit
+      // chooser instead of running the task. The stable Sonnet alias avoids
+      // that blocking interstitial; callers can explicitly select another
+      // model through args="--model ...".
+      const extraArgs = typeof args.args === 'string' ? args.args.trim() : '';
+      if (preset === 'claude' && !/(?:^|\s)--model(?:\s|=|$)/.test(extraArgs)) {
+        command += ' --model sonnet';
+      }
+      if (preset === 'claude' && !/(?:^|\s)(?:--permission-mode(?:\s|=|$)|--dangerously-skip-permissions(?:\s|$))/.test(extraArgs)) {
+        const permissionMode = typeof args.permission_mode === 'string' && args.permission_mode
+          ? args.permission_mode
+          : 'bypassPermissions';
+        command += ` --permission-mode ${permissionMode}`;
+      }
+    }
+    if (!usesPresetCommand && args.permission_mode !== undefined) {
+      return {
+        content: [{ type: 'text', text: 'Error: permission_mode applies only to the built-in Claude preset; include the desired flags in command for an explicit command override.' }],
+        isError: true
+      };
     }
     if (typeof args.args === 'string' && args.args.trim()) {
       command += ` ${args.args.trim()}`;
+    }
+    if (args.until_reply_regex !== undefined && args.until_reply_regex !== null) {
+      if (typeof args.until_reply_regex !== 'string' || args.until_reply_regex.length === 0) {
+        return { content: [{ type: 'text', text: 'Error: until_reply_regex must be a non-empty string.' }], isError: true };
+      }
+      try {
+        new RegExp(args.until_reply_regex, 'i');
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Error: invalid until_reply_regex: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true
+        };
+      }
     }
 
     // isolation:"worktree" — each worker gets its own git worktree + branch so
@@ -5609,6 +5986,7 @@ class HopMCPServer {
     let ready = !readiness.errorResponse
       && readiness.payload
       && readiness.payload.status !== 'timed_out';
+    const launchSettled = ready;
 
     // Idle alone is a false-positive for TUI agents: a freshly launched Claude
     // Code (or codex/gemini) paints its welcome banner — and lately a dated
@@ -5637,8 +6015,21 @@ class HopMCPServer {
       }
     }
 
+    let startupBlocker = null;
+    if (launchSettled) {
+      try {
+        const snapshot = await this.readHopxUiSnapshot(terminalId, undefined, undefined, false);
+        if (!snapshot.errorResponse) {
+          startupBlocker = detectAgentStartupBlocker(uiSnapshotText(snapshot.payload));
+          if (startupBlocker) ready = false;
+        }
+      } catch {
+        /* readiness still has the composer check and completion contract */
+      }
+    }
+
     const result = {
-      ok: true,
+      ok: ready,
       helper: 'hopx_spawn_agent',
       worktree,
       terminal_id: terminalId,
@@ -5653,17 +6044,33 @@ class HopMCPServer {
     if (composerReady !== null) {
       result.composer_ready = composerReady;
     }
+    if (startupBlocker) {
+      result.startup_blocker = startupBlocker;
+      result.readiness_status = startupBlocker.kind;
+    }
     if (!ready) {
-      result.hint = composerReady === false
-        ? 'Agent CLI painted but its input composer never became available within ready_timeout_ms — inspect with hop_read_terminal(mode="ui") before dispatching; the first keystroke may be swallowed.'
-        : 'Agent CLI not confirmed ready within ready_timeout_ms — inspect with hop_read_terminal before dispatching work.';
+      result.hint = startupBlocker
+        ? `${startupBlocker.message} Resolve that startup gate before dispatching work.`
+        : (composerReady === false
+            ? 'Agent CLI painted but its input composer never became available within ready_timeout_ms — inspect with hop_read_terminal(mode="ui") before dispatching; the first keystroke may be swallowed.'
+            : 'Agent CLI not confirmed ready within ready_timeout_ms — inspect with hop_read_terminal before dispatching work.');
     }
 
     if (ready && typeof args.initial_task === 'string' && args.initial_task.length > 0) {
+      const automaticContract = typeof args.until_reply_regex !== 'string'
+        ? createAutomaticCompletionContract(args.initial_task)
+        : null;
+      const initialTask = automaticContract ? automaticContract.task : args.initial_task;
+      const completionRegex = automaticContract ? automaticContract.regex : args.until_reply_regex;
+      result.completion_contract = automaticContract
+        ? { kind: 'automatic_token', token: automaticContract.token, regex: automaticContract.regex }
+        : { kind: 'caller_regex', regex: completionRegex };
       const dispatch = await this.handleHopxAgentTurn({
         terminal_id: terminalId,
-        data: withAgentSessionMarker(args.initial_task),
-        async: true
+        data: withAgentSessionMarker(initialTask),
+        async: true,
+        until_reply_regex: completionRegex,
+        max_wait_ms: args.max_wait_ms
       });
       if (!dispatch.isError && dispatch.content && dispatch.content[0] && typeof dispatch.content[0].text === 'string') {
         try {
@@ -5671,17 +6078,59 @@ class HopMCPServer {
           if (parsed && typeof parsed.wait_id === 'string') {
             result.wait_id = parsed.wait_id;
             result.dispatched = true;
+            if (parsed.pre_submit) result.pre_submit = parsed.pre_submit;
+            if (parsed.submit) result.submit = parsed.submit;
           }
         } catch {
           /* leave dispatch details out; the task may still be running */
         }
       }
       if (!result.wait_id) {
+        result.ok = false;
         result.dispatched = false;
         result.hint = 'initial_task dispatch did not return a wait_id — check the terminal with hopx_agent_turn(control="wait").';
+      } else if (args.async === true) {
+        result.task_completed = false;
+        result.task_status = 'pending';
+      } else {
+        const job = this.waitJobs.get(result.wait_id);
+        if (!job) {
+          result.ok = false;
+          result.task_completed = false;
+          result.task_status = 'error';
+          result.error = `Initial-task wait job disappeared (${result.wait_id}).`;
+        } else {
+          await job.promise;
+          const completionResponse = await this.formatHopxAsyncWaitResponse(job, { terminal_id: terminalId });
+          let completionPayload = null;
+          try {
+            completionPayload = JSON.parse(completionResponse.content?.[0]?.text || '{}');
+          } catch {
+            completionPayload = { ok: false, status: 'error', error: 'Could not parse initial-task result.' };
+          }
+          result.initial_task_result = completionPayload;
+          result.ok = completionPayload.ok === true;
+          result.task_completed = result.ok;
+          result.task_status = completionPayload.status || (result.ok ? 'matched' : 'error');
+          if (!result.ok) {
+            result.error = completionPayload.error || `Initial task ended with status ${completionPayload.status || 'unknown'}.`;
+          }
+          this.waitJobs.delete(result.wait_id);
+        }
       }
     }
 
+    const failed = result.ok === false || !ready || (
+      typeof args.initial_task === 'string'
+      && args.initial_task.length > 0
+      && result.dispatched !== true
+    );
+    if (failed) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result) }],
+        isError: true
+      };
+    }
     return this.wrapJson(result);
   }
 
@@ -5794,10 +6243,44 @@ class HopMCPServer {
     }
     const readableTextOnly = resolveHopxTextOnly(args.text_only, selectedMode);
     const includeUiRawTail = args.includeRawTail === true ? true : DEFAULT_HOPX_UI_INCLUDE_RAW_TAIL;
+    const verifySubmit = (
+      data.length > 0
+      && pressEnter
+      && controlMode === 'send'
+      && this.shouldVerifyHopxSubmit(args)
+    );
+    let composerBeforeSubmit = null;
+    if (verifySubmit) {
+      await this.streamManager.flushVirtualScreen(terminalId);
+      composerBeforeSubmit = this.streamManager.getComposerState(terminalId);
+      if (composerBeforeSubmit && composerBeforeSubmit.found && !composerBeforeSubmit.isEmpty) {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: false,
+              helper: 'hopx_agent_turn',
+              status: 'composer_not_empty',
+              terminal_id: requestedTerminalId,
+              error: 'The agent composer already contains text; refusing to append and submit a second task.'
+            })
+          }],
+          isError: true
+        };
+      }
+    }
+    const shouldStageComposerSubmit = Boolean(
+      verifySubmit
+      && composerBeforeSubmit
+      && composerBeforeSubmit.found
+      && composerBeforeSubmit.isEmpty
+    );
 
     let sendOnlyPayload = {
       cursorStart: this.streamManager.getLatestCursor(terminalId)
     };
+    let inputSentBeforeWait = false;
+    let preSubmitVerification = null;
     if (controlMode === 'interrupt' || controlMode === 'terminate') {
       const interruptOutcome = await this.sendHopxControlInput(
         requestedTerminalId,
@@ -5818,6 +6301,52 @@ class HopMCPServer {
           return { content: [{ type: 'text', text: `Error: ${parsedTerminateSend.error}` }], isError: true };
         }
       }
+    } else if (shouldStageComposerSubmit) {
+      // A task and its Enter must not be fired back-to-back at a TUI. First
+      // write the task, wait until the empty composer visibly contains it, and
+      // only then submit. This makes the first turn deterministic even when a
+      // newly launched worker is still finishing a repaint.
+      const dataOnly = await this.handleSendAndWait({
+        terminal_id: requestedTerminalId,
+        data,
+        wait: false
+      });
+      if (dataOnly.isError) return dataOnly;
+      const parsedDataOnly = this.parseToolJsonResponse(dataOnly, 'hopx_send_and_wait');
+      if (!parsedDataOnly.ok) {
+        return { content: [{ type: 'text', text: `Error: ${parsedDataOnly.error}` }], isError: true };
+      }
+      sendOnlyPayload = parsedDataOnly.payload;
+      preSubmitVerification = await this.waitForHopxComposerLoaded(terminalId, data);
+      if (!preSubmitVerification.verified) {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: false,
+              helper: 'hopx_agent_turn',
+              status: 'submit_not_ready',
+              terminal_id: requestedTerminalId,
+              pre_submit: this.summarizeSubmitVerification(preSubmitVerification),
+              error: 'The task was written, but Hop could not confirm that the agent composer loaded it; Enter was not sent.'
+            })
+          }],
+          isError: true
+        };
+      }
+      const submitOnly = await this.handleSendAndWait({
+        terminal_id: requestedTerminalId,
+        press_enter: true,
+        key,
+        repeat: args.repeat,
+        wait: false
+      });
+      if (submitOnly.isError) return submitOnly;
+      const parsedSubmitOnly = this.parseToolJsonResponse(submitOnly, 'hopx_send_and_wait');
+      if (!parsedSubmitOnly.ok) {
+        return { content: [{ type: 'text', text: `Error: ${parsedSubmitOnly.error}` }], isError: true };
+      }
+      inputSentBeforeWait = true;
     } else if (hasInputAction && (selectedMode === 'ui' || shouldAsync)) {
       // Pre-send (then wait separately) only for paths that DON'T fall through to
       // the combined send+wait below: the ui branch and any async branch both
@@ -5839,6 +6368,7 @@ class HopMCPServer {
         return { content: [{ type: 'text', text: `Error: ${parsedSend.error}` }], isError: true };
       }
       sendOnlyPayload = parsedSend.payload;
+      inputSentBeforeWait = true;
     }
 
     // Verified submit: we just pressed Enter — confirm the composer actually
@@ -5852,13 +6382,37 @@ class HopMCPServer {
       && pressEnter
       && controlMode === 'send'
       && this.shouldVerifyHopxSubmit(args)
+      && inputSentBeforeWait
     ) {
       submitVerification = await this.verifyHopxSubmitCleared(
         requestedTerminalId,
         terminalId,
         data,
-        { retries: args.verify_submit_retries, delayMs: args.verify_submit_delay_ms }
+        {
+          retries: args.verify_submit_retries,
+          delayMs: args.verify_submit_delay_ms,
+          preSubmitVerified: preSubmitVerification?.verified === true
+        }
       );
+      if (!submitVerification.verified) {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: false,
+              helper: 'hopx_agent_turn',
+              status: 'submit_failed',
+              terminal_id: requestedTerminalId,
+              ...(preSubmitVerification
+                ? { pre_submit: this.summarizeSubmitVerification(preSubmitVerification) }
+                : {}),
+              submit: this.summarizeSubmitVerification(submitVerification),
+              error: 'Hop could not verify that the task left the agent composer.'
+            })
+          }],
+          isError: true
+        };
+      }
     }
 
     if (selectedMode === 'ui') {
@@ -5909,17 +6463,22 @@ class HopMCPServer {
             uiMaxLines: args.uiMaxLines,
             rawTailMaxEvents: args.rawTailMaxEvents,
             includeUiRawTail,
+            _sent_data: data || null,
             ...(typeof args.until_reply_regex === 'string' ? { until_reply_regex: args.until_reply_regex } : {})
           });
           return this.wrapJson({
             ...this.summarizeWaitJob(job),
             helper: 'hopx_agent_turn',
-            terminal_id: requestedTerminalId
+            terminal_id: requestedTerminalId,
+            ...(preSubmitVerification
+              ? { pre_submit: this.summarizeSubmitVerification(preSubmitVerification) }
+              : {}),
+            ...(submitVerification ? { submit: this.summarizeSubmitVerification(submitVerification) } : {})
           });
         }
         const waited = await this.runWaitTerminal(waitArgs);
         if (waited.errorResponse) return waited.errorResponse;
-        waitPayload = slimWaitPayload(waited.payload, null);
+        waitPayload = slimWaitPayload(waited.payload, data || null);
       }
 
       let outputPayload = null;
@@ -5961,14 +6520,32 @@ class HopMCPServer {
         }
       }
 
-      return this.wrapJson({
+      const uiPayload = {
         ok: true,
         helper: 'hopx_agent_turn',
         terminal_id: requestedTerminalId,
         wait: waitPayload,
         output: outputPayload,
+        ...(preSubmitVerification
+          ? { pre_submit: this.summarizeSubmitVerification(preSubmitVerification) }
+          : {}),
         ...(submitVerification ? { submit: this.summarizeSubmitVerification(submitVerification) } : {})
-      });
+      };
+      if (shouldWait && typeof args.until_reply_regex === 'string') {
+        const transcriptReply = await this.readLastAssistantReplyText(turnInternalName, data);
+        if (typeof transcriptReply === 'string' && transcriptReply.trim()) uiPayload.assistant_reply = transcriptReply;
+        Object.assign(uiPayload, evaluateReplyRegex(args.until_reply_regex, waitPayload, transcriptReply, data));
+      }
+      if (uiPayload.reply_matched === false) {
+        uiPayload.ok = false;
+        uiPayload.status = 'contract_failed';
+        uiPayload.error = 'Agent turn finished without satisfying its completion contract.';
+        return {
+          content: [{ type: 'text', text: JSON.stringify(uiPayload) }],
+          isError: true
+        };
+      }
+      return this.wrapJson(uiPayload);
     }
 
     if (shouldAsync && shouldWait) {
@@ -6011,12 +6588,17 @@ class HopMCPServer {
         task_summary: data ? data.slice(0, 200) : null,
         selected_mode: selectedMode,
         text_only: readableTextOnly,
+        _sent_data: data || null,
         ...(typeof args.until_reply_regex === 'string' ? { until_reply_regex: args.until_reply_regex } : {})
       });
       return this.wrapJson({
         ...this.summarizeWaitJob(job),
         helper: 'hopx_agent_turn',
-        terminal_id: requestedTerminalId
+        terminal_id: requestedTerminalId,
+        ...(preSubmitVerification
+          ? { pre_submit: this.summarizeSubmitVerification(preSubmitVerification) }
+          : {}),
+        ...(submitVerification ? { submit: this.summarizeSubmitVerification(submitVerification) } : {})
       });
     }
 
@@ -6029,16 +6611,32 @@ class HopMCPServer {
       });
     }
 
+    if (inputSentBeforeWait && !shouldWait) {
+      return this.wrapJson({
+        ok: true,
+        helper: 'hopx_agent_turn',
+        terminal_id: requestedTerminalId,
+        next_cursor: this.streamManager.getLatestCursor(terminalId),
+        ...(preSubmitVerification
+          ? { pre_submit: this.summarizeSubmitVerification(preSubmitVerification) }
+          : {}),
+        ...(submitVerification ? { submit: this.summarizeSubmitVerification(submitVerification) } : {})
+      });
+    }
+
+    const stagedCursor = inputSentBeforeWait && Number.isFinite(sendOnlyPayload?.cursorStart)
+      ? Math.floor(sendOnlyPayload.cursorStart)
+      : undefined;
     const sendAndWait = await this.handleSendAndWait({
       terminal_id: requestedTerminalId,
-      data,
-      press_enter: pressEnter,
-      key,
+      data: inputSentBeforeWait ? '' : data,
+      press_enter: inputSentBeforeWait ? false : pressEnter,
+      key: inputSentBeforeWait ? '' : key,
       repeat: args.repeat,
       wait: shouldWait,
       capture: selectedMode,
-      cursor: args.cursor,
-      start_from: args.start_from,
+      cursor: args.cursor ?? stagedCursor,
+      start_from: args.start_from ?? (stagedCursor === undefined ? undefined : 'cursor'),
       until_regex: args.until_regex,
       regex_flags: args.regex_flags,
       match_target: args.match_target,
@@ -6088,7 +6686,11 @@ class HopMCPServer {
           ...parsedSendAndWait.payload,
           helper: 'hopx_agent_turn',
           auto_switched_to_ui: true,
-          output: outputPayload
+          output: outputPayload,
+          ...(preSubmitVerification
+            ? { pre_submit: this.summarizeSubmitVerification(preSubmitVerification) }
+            : {}),
+          ...(submitVerification ? { submit: this.summarizeSubmitVerification(submitVerification) } : {})
         };
         if (this.shouldApplyHopxUiBusyGuard(args, promotedPayload.wait)) {
           const guardOutcome = await this.waitForHopxUiNotBusy({
@@ -6130,8 +6732,21 @@ class HopMCPServer {
           };
         }
         if (typeof args.until_reply_regex === 'string') {
-          const transcriptReply = await this.readLastAssistantReplyText(turnInternalName);
-          Object.assign(promotedPayload, evaluateReplyRegex(args.until_reply_regex, promotedPayload.wait, transcriptReply));
+          const transcriptReply = await this.readLastAssistantReplyText(turnInternalName, data);
+          if (typeof transcriptReply === 'string' && transcriptReply.trim()) promotedPayload.assistant_reply = transcriptReply;
+          Object.assign(
+            promotedPayload,
+            evaluateReplyRegex(args.until_reply_regex, promotedPayload.wait, transcriptReply, data)
+          );
+        }
+        if (promotedPayload.reply_matched === false) {
+          promotedPayload.ok = false;
+          promotedPayload.status = 'contract_failed';
+          promotedPayload.error = 'Agent turn finished without satisfying its completion contract.';
+          return {
+            content: [{ type: 'text', text: JSON.stringify(promotedPayload) }],
+            isError: true
+          };
         }
         return this.wrapJson({
           ...promotedPayload
@@ -6141,11 +6756,25 @@ class HopMCPServer {
 
     const finalPayload = {
       ...parsedSendAndWait.payload,
-      helper: 'hopx_agent_turn'
+      helper: 'hopx_agent_turn',
+      ...(preSubmitVerification
+        ? { pre_submit: this.summarizeSubmitVerification(preSubmitVerification) }
+        : {}),
+      ...(submitVerification ? { submit: this.summarizeSubmitVerification(submitVerification) } : {})
     };
     if (typeof args.until_reply_regex === 'string') {
-      const transcriptReply = await this.readLastAssistantReplyText(turnInternalName);
-      Object.assign(finalPayload, evaluateReplyRegex(args.until_reply_regex, finalPayload.wait, transcriptReply));
+      const transcriptReply = await this.readLastAssistantReplyText(turnInternalName, data);
+      if (typeof transcriptReply === 'string' && transcriptReply.trim()) finalPayload.assistant_reply = transcriptReply;
+      Object.assign(finalPayload, evaluateReplyRegex(args.until_reply_regex, finalPayload.wait, transcriptReply, data));
+    }
+    if (finalPayload.reply_matched === false) {
+      finalPayload.ok = false;
+      finalPayload.status = 'contract_failed';
+      finalPayload.error = 'Agent turn finished without satisfying its completion contract.';
+      return {
+        content: [{ type: 'text', text: JSON.stringify(finalPayload) }],
+        isError: true
+      };
     }
 
     return this.wrapJson(finalPayload);
@@ -7005,6 +7634,8 @@ if (require.main === module) {
     COMPOSER_BORDER_CHARS,
     COMPOSER_PROMPT_CHARS,
     encodeClaudeProjectDir,
+    detectAgentStartupBlocker,
+    extractCodexFinalReply,
     summarizeMessageContent
   };
 }

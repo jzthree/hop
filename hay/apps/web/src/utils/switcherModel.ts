@@ -21,6 +21,8 @@ export type SwitcherSession = {
   bellUnseen?: boolean;
   foregroundProcess?: string;
   agentPermitted?: boolean;
+  cols?: number;
+  rows?: number;
   createdBy?: "user" | "agent";
 };
 

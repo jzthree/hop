@@ -2879,6 +2879,26 @@ button.primary {
   font-size: 11px;
 }
 
+/* Live XL tile: a real (read-only) terminal scaled into the preview box. */
+.switcher-overlay.tile-xl .switcher-live-tile {
+  position: relative;
+  height: 300px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--terminal-bg);
+}
+
+.switcher-live-tile .switcher-live-fallback {
+  height: 100%;
+  border: none;
+  border-radius: 0;
+}
+
+.switcher-live-tile .xterm {
+  pointer-events: none; /* tiles are read-only; the card handles taps */
+}
+
 @media (min-width: 769px) {
   /* The in-session ⌘K palette earns real width too — 760px wasted big displays. */
   .switcher-overlay:not(.switcher-hub) > .switcher-top,

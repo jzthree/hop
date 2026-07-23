@@ -2170,7 +2170,9 @@ const App = () => {
           bellSeq: Number(s.bellSeq) || 0,
           foregroundProcess: s.foregroundProcess,
           agentPermitted: s.agentPermitted === true,
-          createdBy: s.createdBy === "agent" ? "agent" : "user"
+          createdBy: s.createdBy === "agent" ? "agent" : "user",
+          cols: Number.isInteger(s.cols) ? s.cols : undefined,
+          rows: Number.isInteger(s.rows) ? s.rows : undefined
         });
       }
 
@@ -2865,6 +2867,7 @@ const App = () => {
             }}
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
+            tileWsBase={resolveWsUrl()}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -3453,6 +3456,7 @@ const App = () => {
             }}
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
+            tileWsBase={resolveWsUrl()}
             onOpenSettings={() => {
               setSwitcherOpen(false);
               setDrawerOpen(true);

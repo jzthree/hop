@@ -287,6 +287,7 @@ async function main() {
         const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, existingCwdOr(cwd, FALLBACK_CWD)));
         if (Date.now() - __t0 > 100) console.log(`[hay-host] slow room create (ws) room=${roomId} ${Date.now() - __t0}ms`);
 
+        const replayRaw = Number(wsUrl.searchParams.get('replay'));
         room.attachClient(
             {
                 id: randomUUID(),
@@ -294,7 +295,9 @@ async function main() {
                 source,
                 colorIndex: Math.floor(Math.random() * 1000),
                 cols,
-                rows
+                rows,
+                // Per-connection snapshot cap (monitor tiles ask small).
+                replayBytes: Number.isFinite(replayRaw) && replayRaw > 0 ? replayRaw : undefined
             },
             hay.createSocketAdapter(ws)
         );

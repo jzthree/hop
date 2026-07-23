@@ -18,10 +18,16 @@ export type SocketAdapter = {
 export type ClientInfo = {
   id: string;
   name: string;
+  // "local-cli" = hop CLI attach; "monitor" = read-only live tile (session
+  // switcher wall): excluded from presence and client counts, and given a
+  // small snapshot so a wall of tiles doesn't pull megabytes per open.
   source?: string;
   colorIndex: number;
   cols: number;
   rows: number;
+  // Optional per-connection cap for the join snapshot (clamped to the
+  // room-level bound). Monitors request ~64KB.
+  replayBytes?: number;
 };
 
 export type RoomCreateOptions = {
@@ -328,7 +334,11 @@ export class Room extends EventEmitter {
     if (this.outputBytes > 0) {
       socket.send(JSON.stringify({
         type: "snapshot",
-        data: boundSnapshotReplay(this.tailOutput(SNAPSHOT_REPLAY_BYTES)),
+        data: boundSnapshotReplay(this.tailOutput(
+          Number.isFinite(info.replayBytes) && (info.replayBytes as number) > 0
+            ? Math.min(SNAPSHOT_REPLAY_BYTES, Math.floor(info.replayBytes as number))
+            : SNAPSHOT_REPLAY_BYTES
+        )),
         alternateScreen: this.alternateScreen,
         cursorHidden: this.cursorHidden,
         keyboardEnhanced: this.keyboardEnhanced,
@@ -810,7 +820,9 @@ export class Room extends EventEmitter {
   }
 
   private broadcastPresence() {
-    const clients = [...this.clients.values()].map(toPresence);
+    // Monitor tiles are spectators of the UI, not participants — eight live
+    // tiles must not read as eight viewers in every session.
+    const clients = [...this.clients.values()].filter((c) => c.source !== "monitor").map(toPresence);
     this.broadcast({ type: "presence", clients });
   }
 
@@ -949,7 +961,7 @@ export class Room extends EventEmitter {
       lastActivityAt: this.lastActivityAt,
       bellSeq: this.bellSeq,
       lastBellAt: this.lastBellAt,
-      clientCount: this.clients.size,
+      clientCount: [...this.clients.values()].filter((c) => c.source !== "monitor").length,
       localCliCount
     };
   }

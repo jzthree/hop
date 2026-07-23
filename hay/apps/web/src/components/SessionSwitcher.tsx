@@ -8,6 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
+import { Terminal } from "@xterm/xterm";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -40,6 +41,9 @@ type Props = {
   // Mobile-hub quick actions: the switcher is the front page there, so the
   // few one-tap-hot actions (keyboard, find) and the settings drawer hang off
   // its header. Omitted callbacks render no button.
+  // WebSocket base for live XL tiles (read-only monitor attachments). When
+  // absent, XL falls back to polled text previews.
+  tileWsBase?: string;
   onOpenSettings?: () => void;
   onToggleKeyboard?: () => void;
   onFind?: () => void;
@@ -68,6 +72,81 @@ const runningApp = (s: SwitcherSession) => {
   return proc && !SHELL_PROCS.has(proc.toLowerCase()) ? proc : "";
 };
 
+// Live-tile budget: each live tile is a real xterm + WebSocket. Nine is a
+// full XL screen; anything beyond falls back to polled text previews until a
+// slot frees (scroll-out / unmount releases).
+const MAX_LIVE_TILES = 9;
+let liveTileSlots = 0;
+
+// A read-only live terminal tile: attaches to the room as source=monitor
+// (excluded from presence/counts server-side) with a small snapshot, renders
+// at the session's true grid scaled to fit the tile box. IntersectionObserver
+// gates the attachment so off-screen tiles cost nothing.
+const LiveTile = ({ wsBase, room, cols, rows, fallback }: {
+  wsBase: string; room: string; cols: number; rows: number; fallback: string;
+}) => {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    let term: Terminal | null = null;
+    let ws: WebSocket | null = null;
+    let acquired = false;
+    const teardown = () => {
+      try { ws?.close(); } catch { /* closing */ }
+      try { term?.dispose(); } catch { /* disposed */ }
+      ws = null;
+      term = null;
+      if (acquired) { liveTileSlots -= 1; acquired = false; }
+      setLive(false);
+    };
+    const goLive = () => {
+      if (term || liveTileSlots >= MAX_LIVE_TILES) return;
+      liveTileSlots += 1;
+      acquired = true;
+      term = new Terminal({ cols, rows, scrollback: 0, disableStdin: true, cursorBlink: false, fontSize: 8 });
+      term.open(box);
+      // Scale the full terminal grid to the tile box (top-left anchored).
+      const inner = box.querySelector(".xterm") as HTMLElement | null;
+      if (inner) {
+        const fit = () => {
+          const w = inner.offsetWidth;
+          if (w > 0 && box.clientWidth > 0) {
+            const scale = Math.min(1, box.clientWidth / w);
+            inner.style.transform = `scale(${scale})`;
+            inner.style.transformOrigin = "top left";
+          }
+        };
+        setTimeout(fit, 50);
+      }
+      const sep = wsBase.includes("?") ? "&" : "?";
+      ws = new WebSocket(`${wsBase}${sep}room=${encodeURIComponent(room)}&name=tile&source=monitor&replay=65536&cols=${cols}&rows=${rows}`);
+      ws.onmessage = (ev) => {
+        try {
+          const m = JSON.parse(String(ev.data));
+          if (!term) return;
+          if (m.type === "snapshot") { term.reset(); term.write(m.data); }
+          else if (m.type === "output") term.write(m.data);
+        } catch { /* non-JSON frame */ }
+      };
+      ws.onclose = () => { /* tile goes stale silently; fallback on next mount */ };
+      setLive(true);
+    };
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) goLive();
+      else teardown();
+    }, { threshold: 0.05 });
+    io.observe(box);
+    return () => { io.disconnect(); teardown(); };
+  }, [wsBase, room, cols, rows]);
+  return (
+    <div className="switcher-live-tile" ref={boxRef}>
+      {!live && <pre className="switcher-preview switcher-live-fallback">{fallback}</pre>}
+    </div>
+  );
+};
+
 export const SessionSwitcher = ({
   open,
   sessions,
@@ -77,6 +156,7 @@ export const SessionSwitcher = ({
   onSwitch,
   onRefresh,
   onNotice,
+  tileWsBase,
   onOpenSettings,
   onToggleKeyboard,
   onFind
@@ -591,7 +671,17 @@ export const SessionSwitcher = ({
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
           {inlineActions(s)}
         </div>
-        <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>
+        {tileSize === "xl" && tileWsBase && s.active && s.type !== "port" ? (
+          <LiveTile
+            wsBase={tileWsBase}
+            room={sessionKey(s)}
+            cols={s.cols || 140}
+            rows={s.rows || 40}
+            fallback={preview || " "}
+          />
+        ) : (
+          <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>
+        )}
         <div className="switcher-card-meta">
           <span className="switcher-card-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : "\u00a0"}</span>
           <span className="switcher-card-when">{meta(s)}</span>

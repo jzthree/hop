@@ -4903,6 +4903,12 @@ function loadHeadlessTerminal() {
     return null;
 }
 
+// Last non-empty rendered preview per room. A live TUI mid-repaint (or a
+// briefly unreachable host) can render an empty frame; a blank tile that was
+// showing content a second ago reads as a dead session, so serve the previous
+// good frame instead and let the next poll catch up.
+const lastGoodPreviewByRoom = new Map();
+
 function fetchHayRoomPreviewSource(internalName) {
     const host = hayHostState || readHayHostStateFile();
     if (!host || !Number.isInteger(host.port) || host.port <= 0) return Promise.resolve(null);
@@ -6573,14 +6579,29 @@ function startAuthProxy(authEmitter) {
             }
             try {
                 const source = await fetchHayRoomPreviewSource(internalName);
+                const cached = lastGoodPreviewByRoom.get(internalName);
                 if (!source) {
+                    if (cached) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ...cached, stale: true }));
+                        return;
+                    }
                     res.writeHead(404, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'No live preview available' }));
                     return;
                 }
-                const text = await renderSessionPreviewText(source);
+                const rendered = await renderSessionPreviewText(source);
+                let payload = { text: typeof rendered === 'string' ? rendered : '', cols: source.cols, rows: source.rows };
+                if (payload.text.trim()) {
+                    lastGoodPreviewByRoom.set(internalName, payload);
+                    if (lastGoodPreviewByRoom.size > 500) {
+                        lastGoodPreviewByRoom.delete(lastGoodPreviewByRoom.keys().next().value);
+                    }
+                } else if (cached) {
+                    payload = { ...cached, stale: true };
+                }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ text: typeof text === 'string' ? text : '', cols: source.cols, rows: source.rows }));
+                res.end(JSON.stringify(payload));
             } catch (e) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Preview failed' }));

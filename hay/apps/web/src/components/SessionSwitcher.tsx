@@ -137,6 +137,20 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
         }
       } catch { /* non-JSON frame */ }
     };
+    // Two reserved chords — everything else (Enter, Escape, arrows…) belongs
+    // to the remote app: ⌘⏎/Ctrl⏎ opens the session full screen, ⌘./Ctrl+.
+    // releases focus back to the wall.
+    term.attachCustomKeyEventHandler((ev) => {
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === "Enter") {
+        if (ev.type === "keydown") onFullscreen();
+        return false;
+      }
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === ".") {
+        if (ev.type === "keydown") onUnfocus();
+        return false;
+      }
+      return true;
+    });
     let lastTypeClaimAt = 0;
     const sub = term.onData((data) => {
       if (ws.readyState !== WebSocket.OPEN) return;
@@ -168,7 +182,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
   return (
     <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
       <div className="switcher-focus-bar">
-        <span className="switcher-focus-label">interactive — fits to tile; last typer wins the size</span>
+        <span className="switcher-focus-label">interactive — ⌘⏎ full screen · ⌘. release</span>
         <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
         <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
       </div>
@@ -222,7 +236,25 @@ export const SessionSwitcher = ({
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState("");
   const [, setTick] = useState(0);
-  const previewCacheRef = useRef(new Map<string, string>());
+  // Preview cache survives page reloads via sessionStorage: a freshly loaded
+  // page paints last-known screens instantly instead of a wall of blanks.
+  const previewCacheRef = useRef<Map<string, string> | null>(null);
+  if (!previewCacheRef.current) {
+    const seeded = new Map<string, string>();
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("hop_preview_cache_v1") || "[]") as Array<[string, string]>;
+      for (const [k, v] of saved) seeded.set(k, v);
+    } catch { /* corrupt or absent — start empty */ }
+    previewCacheRef.current = seeded;
+  }
+  const persistPreviewCache = () => {
+    try {
+      const entries = Array.from(previewCacheRef.current!.entries()).map(
+        ([k, v]) => [k, v.length > 4000 ? v.slice(-4000) : v] as [string, string]
+      );
+      sessionStorage.setItem("hop_preview_cache_v1", JSON.stringify(entries));
+    } catch { /* quota — previews are best-effort */ }
+  };
   const longPressRef = useRef<{ timer: number; startX: number; startY: number } | null>(null);
   // Set when a long-press opened the sheet, so the click that fires on finger
   // release doesn't also switch sessions.
@@ -369,14 +401,15 @@ export const SessionSwitcher = ({
     if (!open || model.mode !== "tiers") return;
     let cancelled = false;
     const hotKeys = new Set(model.hero.map(sessionKey));
+    // EVERY session previews — dead ones serve their retained last screen
+    // from the daemon, so a tile is never a blank box.
     const all = [...model.hero, ...model.groups.flatMap((g) => g.rows)]
-      .filter((s) => s.type !== "port" && (s.active || s.starting));
+      .filter((s) => s.type !== "port");
     const refresh = async () => {
       if (cancelled || document.hidden || all.length === 0) return;
       // Time-based cold tier (not tick-based: the first mount often races the
       // sessions fetch and would consume the cold slot on an empty list).
       const coldToo = Date.now() - lastColdRefreshRef.current > 15000;
-      if (coldToo) lastColdRefreshRef.current = Date.now();
       const targets = all.filter((s) => hotKeys.has(sessionKey(s)) || coldToo);
       await Promise.all(
         targets.map(async (s) => {
@@ -387,14 +420,20 @@ export const SessionSwitcher = ({
             const data = await res.json();
             const text = typeof data.text === "string" ? data.text.replace(/\s+$/, "") : "";
             if (!cancelled && text) {
-              previewCacheRef.current.set(key, text);
+              previewCacheRef.current!.set(key, text);
             }
           } catch {
             /* keep the cached preview */
           }
         })
       );
-      if (!cancelled) setTick((t) => t + 1);
+      if (cancelled) return;
+      // Consume the cold slot only after an uncancelled sweep: a model change
+      // mid-sweep otherwise burned the slot and left cold tiles blank for
+      // another 15s, repeatedly.
+      if (coldToo) lastColdRefreshRef.current = Date.now();
+      persistPreviewCache();
+      setTick((t) => t + 1);
     };
     refresh();
     const id = window.setInterval(refresh, PREVIEW_REFRESH_MS);
@@ -453,6 +492,16 @@ export const SessionSwitcher = ({
     const onNavKey = (event: KeyboardEvent) => {
       if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
       if (sheet || creating) return;
+      // ⌘⏎ (Ctrl⏎): focus the selected XL tile for in-place interaction.
+      // Plain Enter stays "switch to session" — the muscle-memory action.
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
+        const target = flatNav[kbdIndex];
+        if (target && tileSize === "xl" && tileWsBase && target.active && target.type !== "port") {
+          event.preventDefault();
+          setFocusedKey(sessionKey(target));
+        }
+        return;
+      }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
@@ -471,11 +520,7 @@ export const SessionSwitcher = ({
         const target = flatNav[kbdIndex];
         if (target) {
           event.preventDefault();
-          if (tileSize === "xl" && tileWsBase && target.active && target.type !== "port") {
-            setFocusedKey(sessionKey(target));
-          } else {
-            handleTap(target);
-          }
+          handleTap(target);
         }
         return;
       }
@@ -693,7 +738,7 @@ export const SessionSwitcher = ({
 
   const renderCard = (s: SwitcherSession) => {
     const key = sessionKey(s);
-    const preview = previewCacheRef.current.get(key);
+    const preview = previewCacheRef.current!.get(key);
     const current = isCurrentSession(s);
     const kbdSelected = navIndexByKey.get(key) === kbdIndex;
     return (
@@ -709,7 +754,8 @@ export const SessionSwitcher = ({
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
-            if (tileSize === "xl" && tileWsBase && s.active && s.type !== "port") setFocusedKey(key);
+            // ⌘⏎ focuses the tile; plain Enter switches (mirrors onNavKey).
+            if ((e.metaKey || e.ctrlKey) && tileSize === "xl" && tileWsBase && s.active && s.type !== "port") setFocusedKey(key);
             else handleTap(s);
           }
         }}

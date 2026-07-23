@@ -24,15 +24,26 @@ for (const level of ['log', 'error', 'warn']) {
 {
     const HEARTBEAT_MS = 50;
     const REPORT_STALL_MS = 250;
+    const memLine = () => {
+        const m = process.memoryUsage();
+        const mb = (n) => Math.round(n / 1048576);
+        return `rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB ext=${mb(m.external)}MB`;
+    };
     let last = Date.now();
     setInterval(() => {
         const nowTs = Date.now();
         const lag = nowTs - last - HEARTBEAT_MS;
         if (lag > REPORT_STALL_MS) {
-            console.error(`[hay-host] event-loop stalled ~${lag}ms`);
+            // Memory on every stall line: the 2026-07-23 death spiral (stalls
+            // growing 500ms -> 18s over two minutes until the daemon shot the
+            // host) left no way to tell a heap/GC spiral from CPU-bound work.
+            console.error(`[hay-host] event-loop stalled ~${lag}ms ${memLine()}`);
         }
         last = nowTs;
     }, HEARTBEAT_MS).unref();
+    // Hourly baseline so a slow leak is visible before it becomes a stall.
+    setInterval(() => console.error(`[hay-host] mem ${memLine()}`), 3600_000).unref();
+    setTimeout(() => console.error(`[hay-host] mem ${memLine()}`), 30_000).unref();
 }
 
 const HOST = '127.0.0.1';

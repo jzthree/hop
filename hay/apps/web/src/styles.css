@@ -2879,6 +2879,32 @@ button.primary {
 .switcher-overlay.tile-xl .switcher-preview {
   height: 300px;
   font-size: 11px;
+  /* Match the focused tile's xterm metrics (11px / 1.2) so focusing a tile
+     swaps content in place instead of reading as a mode change. */
+  line-height: 1.2;
+}
+
+/* Last preview frame held over a freshly focused tile until the claimed
+   resize round-trips and the app repaints (the first snapshot replays
+   old-size bytes). Same metrics as the preview it replaces. */
+.switcher-focus-term {
+  position: relative;
+}
+
+.switcher-focus-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: pre;
+  color: var(--ink-muted);
+  background: var(--terminal-bg);
+  padding: 4px 5px;
+  pointer-events: none;
 }
 
 .switcher-overlay.switcher-fullscreen.tile-xl .switcher-grid,

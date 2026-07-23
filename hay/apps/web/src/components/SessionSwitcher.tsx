@@ -84,6 +84,11 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
   fallback: string; onFullscreen: () => void; onUnfocus: () => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
+  // The last preview frame stays painted OVER the terminal until the claimed
+  // resize has round-tripped and the app repainted — the first snapshot
+  // contains old-size bytes and looks mangled for a beat. Matching font
+  // metrics (below) make the veil-to-terminal swap nearly invisible.
+  const [veiled, setVeiled] = useState(true);
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
@@ -93,7 +98,17 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     // last owns the size — so typing in the big background terminal snaps the
     // session back, and the tile falls back to observing at active_size,
     // scaled down to fit.
-    const term = new Terminal({ scrollback: 2000, fontSize: 13, cursorBlink: true, theme: theme as never });
+    // Same font metrics as .switcher-preview (11px, app mono stack, 1.2 line
+    // height) so preview → terminal is a swap, not a mode change.
+    const monoStack = getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim() || "monospace";
+    const term = new Terminal({
+      scrollback: 2000,
+      fontSize: 11,
+      lineHeight: 1.2,
+      fontFamily: monoStack,
+      cursorBlink: true,
+      theme: theme as never
+    });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(box);
@@ -124,11 +139,20 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
       rescale();
     };
     const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
+    setVeiled(true);
+    // Unveil once the post-claim repaint has had a beat to land; hard cap so
+    // a silent room can't hold the veil forever.
+    let unveilTimer = 0;
+    const unveilSoon = (ms: number) => {
+      window.clearTimeout(unveilTimer);
+      unveilTimer = window.setTimeout(() => setVeiled(false), ms);
+    };
+    unveilSoon(2500);
     ws.onopen = () => sendClaim("attach");
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(String(ev.data));
-        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); }
+        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); unveilSoon(450); }
         else if (m.type === "output") term.write(m.data);
         else if (m.type === "active_size" && (m.cols !== term.cols || m.rows !== term.rows)) {
           // Another client won the election — observe at its size, scaled.
@@ -173,6 +197,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     const focusTimer = window.setTimeout(() => { term.focus(); rescale(); }, 50);
     return () => {
       window.clearTimeout(focusTimer);
+      window.clearTimeout(unveilTimer);
       ro.disconnect();
       sub.dispose();
       try { ws.close(); } catch { /* closing */ }
@@ -186,7 +211,9 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
         <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
         <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
       </div>
-      <div className="switcher-focus-term" ref={boxRef} data-fallback={fallback ? "" : "empty"} />
+      <div className="switcher-focus-term" ref={boxRef} data-fallback={fallback ? "" : "empty"}>
+        {veiled && <pre className="switcher-focus-veil" aria-hidden="true">{fallback || " "}</pre>}
+      </div>
     </div>
   );
 };

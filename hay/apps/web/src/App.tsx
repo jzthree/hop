@@ -953,6 +953,15 @@ const App = () => {
       if (nowFit - lastTypeFitAtRef.current > 500) {
         lastTypeFitAtRef.current = nowFit;
         fitToViewport();
+        // If another client holds the session at a different size, our fit can
+        // equal the last size we sent (a rejected claim) — the dedupe guard
+        // would swallow the reclaim. Typing is the election winner, so force
+        // the resize through whenever the active size isn't ours.
+        const active = activeSizeRef.current;
+        const t = termRef.current;
+        if (active && t && (active.cols !== t.cols || active.rows !== t.rows)) {
+          lastSentSizeRef.current = null;
+        }
         handleResize();
       }
     }

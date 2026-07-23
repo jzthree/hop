@@ -9,6 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -86,10 +87,15 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
-    // The tile OBSERVES the session at its real size — it never resizes the
-    // shared PTY (a wall tile reshaping everyone's terminal was maximally
-    // surprising). The grid renders at active_size and is scaled to fit.
+    // Clicking a tile is an act of attention: the tile claims the shared PTY
+    // and autofits it to the tile box, exactly like attaching a window. Size
+    // conflicts resolve through the normal server election — whoever typed
+    // last owns the size — so typing in the big background terminal snaps the
+    // session back, and the tile falls back to observing at active_size,
+    // scaled down to fit.
     const term = new Terminal({ scrollback: 2000, fontSize: 13, cursorBlink: true, theme: theme as never });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
     term.open(box);
     const inner = box.querySelector(".xterm") as HTMLElement | null;
     const rescale = () => {
@@ -102,25 +108,53 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
         inner.style.transformOrigin = "top left";
       }
     };
+    // Size the local grid to the box before connecting so the attach itself
+    // carries the tile's dimensions.
+    if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
+    let claimed = { cols: term.cols, rows: term.rows };
     const sep = wsBase.includes("?") ? "&" : "?";
     const ws = new WebSocket(
       `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=262144&cols=${term.cols}&rows=${term.rows}`
     );
+    const sendClaim = (claim?: "attach") => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
+      claimed = { cols: term.cols, rows: term.rows };
+      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows, ...(claim ? { claim } : {}) }));
+      rescale();
+    };
+    const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
+    ws.onopen = () => sendClaim("attach");
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(String(ev.data));
         if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); }
         else if (m.type === "output") term.write(m.data);
         else if (m.type === "active_size" && (m.cols !== term.cols || m.rows !== term.rows)) {
+          // Another client won the election — observe at its size, scaled.
           term.resize(m.cols, m.rows);
           setTimeout(rescale, 30);
         }
       } catch { /* non-JSON frame */ }
     };
+    let lastTypeClaimAt = 0;
     const sub = term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: "input", data }));
+      // Typing in the tile reasserts its size (typing recency wins the
+      // election). One claim per burst, not per keystroke.
+      const now = Date.now();
+      if (!ownsSize() && now - lastTypeClaimAt > 500) {
+        lastTypeClaimAt = now;
+        sendClaim();
+      }
     });
-    const ro = new ResizeObserver(rescale);
+    const ro = new ResizeObserver(() => {
+      // Box changed (viewport/tile-size): refit our claim if we hold the
+      // size; otherwise just rescale the observed grid.
+      if (ownsSize()) sendClaim();
+      else rescale();
+    });
     ro.observe(box);
     const focusTimer = window.setTimeout(() => { term.focus(); rescale(); }, 50);
     return () => {
@@ -134,7 +168,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
   return (
     <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
       <div className="switcher-focus-bar">
-        <span className="switcher-focus-label">interactive — session keeps its own size</span>
+        <span className="switcher-focus-label">interactive — fits to tile; last typer wins the size</span>
         <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
         <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
       </div>

@@ -3145,6 +3145,17 @@ button.primary {
   }
 }
 
+/* S/M cards are too narrow for inline rename/kill (they reserve layout space
+   even while hover-hidden, squeezing the name to a couple of characters) —
+   those actions live in the ⋯ menu there. The CURRENT chip is likewise
+   redundant with the accent border at these sizes. The name owns the row. */
+.switcher-overlay.tile-s .switcher-card-head .switcher-icon-btn:not(:last-child),
+.switcher-overlay.tile-m .switcher-card-head .switcher-icon-btn:not(:last-child),
+.switcher-overlay.tile-s .switcher-card-head .switcher-chip.current,
+.switcher-overlay.tile-m .switcher-card-head .switcher-chip.current {
+  display: none;
+}
+
 /* ── Inline row/card actions (rename · kill · more) ── */
 .switcher-inline-actions {
   display: inline-flex;

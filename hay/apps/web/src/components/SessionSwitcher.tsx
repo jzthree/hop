@@ -9,6 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -41,9 +42,11 @@ type Props = {
   // Mobile-hub quick actions: the switcher is the front page there, so the
   // few one-tap-hot actions (keyboard, find) and the settings drawer hang off
   // its header. Omitted callbacks render no button.
-  // WebSocket base for live XL tiles (read-only monitor attachments). When
-  // absent, XL falls back to polled text previews.
+  // WebSocket base + identity/theme for the XL focused tile (the one
+  // interactive terminal in the wall). Absent => XL stays previews-only.
   tileWsBase?: string;
+  userName?: string;
+  terminalTheme?: object;
   onOpenSettings?: () => void;
   onToggleKeyboard?: () => void;
   onFind?: () => void;
@@ -72,77 +75,69 @@ const runningApp = (s: SwitcherSession) => {
   return proc && !SHELL_PROCS.has(proc.toLowerCase()) ? proc : "";
 };
 
-// Live-tile budget: each live tile is a real xterm + WebSocket. Nine is a
-// full XL screen; anything beyond falls back to polled text previews until a
-// slot frees (scroll-out / unmount releases).
-const MAX_LIVE_TILES = 9;
-let liveTileSlots = 0;
-
-// A read-only live terminal tile: attaches to the room as source=monitor
-// (excluded from presence/counts server-side) with a small snapshot, renders
-// at the session's true grid scaled to fit the tile box. IntersectionObserver
-// gates the attachment so off-screen tiles cost nothing.
-const LiveTile = ({ wsBase, room, cols, rows, fallback }: {
-  wsBase: string; room: string; cols: number; rows: number; fallback: string;
+// Focused tile: exactly ONE tile at a time is a real interactive terminal —
+// full input, auto-fit to its box, instant rendering, connected as the user
+// (it participates in presence like any client). Every other tile stays a
+// cheap polled text preview, so the XL wall costs one websocket, not nine.
+const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, onUnfocus }: {
+  wsBase: string; room: string; userName: string; theme: object | undefined;
+  fallback: string; onFullscreen: () => void; onUnfocus: () => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
-  const [live, setLive] = useState(false);
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
-    let term: Terminal | null = null;
-    let ws: WebSocket | null = null;
-    let acquired = false;
-    const teardown = () => {
-      try { ws?.close(); } catch { /* closing */ }
-      try { term?.dispose(); } catch { /* disposed */ }
-      ws = null;
-      term = null;
-      if (acquired) { liveTileSlots -= 1; acquired = false; }
-      setLive(false);
-    };
-    const goLive = () => {
-      if (term || liveTileSlots >= MAX_LIVE_TILES) return;
-      liveTileSlots += 1;
-      acquired = true;
-      term = new Terminal({ cols, rows, scrollback: 0, disableStdin: true, cursorBlink: false, fontSize: 8 });
-      term.open(box);
-      // Scale the full terminal grid to the tile box (top-left anchored).
-      const inner = box.querySelector(".xterm") as HTMLElement | null;
-      if (inner) {
-        const fit = () => {
-          const w = inner.offsetWidth;
-          if (w > 0 && box.clientWidth > 0) {
-            const scale = Math.min(1, box.clientWidth / w);
-            inner.style.transform = `scale(${scale})`;
-            inner.style.transformOrigin = "top left";
-          }
-        };
-        setTimeout(fit, 50);
+    const term = new Terminal({ scrollback: 2000, fontSize: 12, cursorBlink: true, theme: theme as never });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(box);
+    try { fit.fit(); } catch { /* zero-size race */ }
+    const sep = wsBase.includes("?") ? "&" : "?";
+    const ws = new WebSocket(
+      `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=262144&cols=${term.cols}&rows=${term.rows}`
+    );
+    const sendResize = () => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       }
-      const sep = wsBase.includes("?") ? "&" : "?";
-      ws = new WebSocket(`${wsBase}${sep}room=${encodeURIComponent(room)}&name=tile&source=monitor&replay=65536&cols=${cols}&rows=${rows}`);
-      ws.onmessage = (ev) => {
-        try {
-          const m = JSON.parse(String(ev.data));
-          if (!term) return;
-          if (m.type === "snapshot") { term.reset(); term.write(m.data); }
-          else if (m.type === "output") term.write(m.data);
-        } catch { /* non-JSON frame */ }
-      };
-      ws.onclose = () => { /* tile goes stale silently; fallback on next mount */ };
-      setLive(true);
     };
-    const io = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) goLive();
-      else teardown();
-    }, { threshold: 0.05 });
-    io.observe(box);
-    return () => { io.disconnect(); teardown(); };
-  }, [wsBase, room, cols, rows]);
+    ws.onopen = sendResize;
+    ws.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(String(ev.data));
+        if (m.type === "snapshot") { term.reset(); term.write(m.data); }
+        else if (m.type === "output") term.write(m.data);
+        else if (m.type === "active_size" && (m.cols !== term.cols || m.rows !== term.rows)) {
+          // A peer holds the shared size — follow it; the box scrolls.
+          term.resize(m.cols, m.rows);
+        }
+      } catch { /* non-JSON frame */ }
+    };
+    const sub = term.onData((data) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+    });
+    const ro = new ResizeObserver(() => {
+      try { fit.fit(); } catch { /* mid-teardown */ }
+      sendResize();
+    });
+    ro.observe(box);
+    const focusTimer = window.setTimeout(() => term.focus(), 30);
+    return () => {
+      window.clearTimeout(focusTimer);
+      ro.disconnect();
+      sub.dispose();
+      try { ws.close(); } catch { /* closing */ }
+      term.dispose();
+    };
+  }, [wsBase, room, userName, theme]);
   return (
-    <div className="switcher-live-tile" ref={boxRef}>
-      {!live && <pre className="switcher-preview switcher-live-fallback">{fallback}</pre>}
+    <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+      <div className="switcher-focus-bar">
+        <span className="switcher-focus-label">interactive — click outside or ✕ to unfocus</span>
+        <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
+        <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
+      </div>
+      <div className="switcher-focus-term" ref={boxRef} data-fallback={fallback ? "" : "empty"} />
     </div>
   );
 };
@@ -157,6 +152,8 @@ export const SessionSwitcher = ({
   onRefresh,
   onNotice,
   tileWsBase,
+  userName,
+  terminalTheme,
   onOpenSettings,
   onToggleKeyboard,
   onFind
@@ -182,6 +179,10 @@ export const SessionSwitcher = ({
     });
   };
   const [sheet, setSheet] = useState<Sheet | null>(null);
+  // XL wall: the single interactive tile. Cleared on close / leaving XL.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
+  useEffect(() => { if (!open) setFocusedKey(null); }, [open]);
+  useEffect(() => { if (tileSize !== "xl") setFocusedKey(null); }, [tileSize]);
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState("");
@@ -309,16 +310,20 @@ export const SessionSwitcher = ({
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
+      // While the focused tile owns the keyboard, Escape belongs to the
+      // remote app (vim, claude) — unfocus is the ✕ or a click outside.
+      if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
       if (event.key === "Escape") {
         event.preventDefault();
         if (sheet) setSheet(null);
+        else if (focusedKey) setFocusedKey(null);
         else if (dismissable) onClose();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sheet]);
+  }, [open, sheet, focusedKey]);
 
   // Tile previews: EVERY session gets a preview tile. Hot tiles (the
   // attention/recency heroes) refresh each tick; the long tail refreshes at a
@@ -411,6 +416,7 @@ export const SessionSwitcher = ({
   useEffect(() => {
     if (!open) return;
     const onNavKey = (event: KeyboardEvent) => {
+      if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
       if (sheet || creating) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -430,7 +436,11 @@ export const SessionSwitcher = ({
         const target = flatNav[kbdIndex];
         if (target) {
           event.preventDefault();
-          handleTap(target);
+          if (tileSize === "xl" && tileWsBase && target.active && target.type !== "port") {
+            setFocusedKey(sessionKey(target));
+          } else {
+            handleTap(target);
+          }
         }
         return;
       }
@@ -657,10 +667,16 @@ export const SessionSwitcher = ({
         role="button"
         tabIndex={0}
         data-nav-index={navIndexByKey.get(key)}
-        className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}`}
-        onClick={() => handleTap(s)}
+        className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}`}
+        onClick={() => {
+          if (tileSize === "xl" && tileWsBase && s.active && s.type !== "port") setFocusedKey(key);
+          else handleTap(s);
+        }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") handleTap(s);
+          if (e.key === "Enter") {
+            if (tileSize === "xl" && tileWsBase && s.active && s.type !== "port") setFocusedKey(key);
+            else handleTap(s);
+          }
         }}
         {...pressHandlers(s)}
       >
@@ -674,13 +690,15 @@ export const SessionSwitcher = ({
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
           {inlineActions(s)}
         </div>
-        {tileSize === "xl" && tileWsBase && s.active && s.type !== "port" ? (
-          <LiveTile
+        {tileSize === "xl" && tileWsBase && s.active && s.type !== "port" && focusedKey === key ? (
+          <FocusedTile
             wsBase={tileWsBase}
-            room={sessionKey(s)}
-            cols={s.cols || 140}
-            rows={s.rows || 40}
+            room={key}
+            userName={userName || "user"}
+            theme={terminalTheme}
             fallback={preview || " "}
+            onFullscreen={() => onSwitch(s)}
+            onUnfocus={() => setFocusedKey(null)}
           />
         ) : (
           <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>

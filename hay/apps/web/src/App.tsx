@@ -2868,6 +2868,8 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
+            userName={name}
+            terminalTheme={resolveTerminalTheme(themeMode)}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -3457,6 +3459,8 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
+            userName={name}
+            terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {
               setSwitcherOpen(false);
               setDrawerOpen(true);

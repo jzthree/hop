@@ -9,7 +9,6 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -87,41 +86,43 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
-    const term = new Terminal({ scrollback: 2000, fontSize: 12, cursorBlink: true, theme: theme as never });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
+    // The tile OBSERVES the session at its real size — it never resizes the
+    // shared PTY (a wall tile reshaping everyone's terminal was maximally
+    // surprising). The grid renders at active_size and is scaled to fit.
+    const term = new Terminal({ scrollback: 2000, fontSize: 13, cursorBlink: true, theme: theme as never });
     term.open(box);
-    try { fit.fit(); } catch { /* zero-size race */ }
+    const inner = box.querySelector(".xterm") as HTMLElement | null;
+    const rescale = () => {
+      if (!inner) return;
+      const w = inner.offsetWidth;
+      const h = inner.offsetHeight;
+      if (w > 0 && h > 0 && box.clientWidth > 0 && box.clientHeight > 0) {
+        const scale = Math.min(1, box.clientWidth / w, box.clientHeight / h);
+        inner.style.transform = `scale(${scale})`;
+        inner.style.transformOrigin = "top left";
+      }
+    };
     const sep = wsBase.includes("?") ? "&" : "?";
     const ws = new WebSocket(
       `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=262144&cols=${term.cols}&rows=${term.rows}`
     );
-    const sendResize = () => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-      }
-    };
-    ws.onopen = sendResize;
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(String(ev.data));
-        if (m.type === "snapshot") { term.reset(); term.write(m.data); }
+        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); }
         else if (m.type === "output") term.write(m.data);
         else if (m.type === "active_size" && (m.cols !== term.cols || m.rows !== term.rows)) {
-          // A peer holds the shared size — follow it; the box scrolls.
           term.resize(m.cols, m.rows);
+          setTimeout(rescale, 30);
         }
       } catch { /* non-JSON frame */ }
     };
     const sub = term.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
     });
-    const ro = new ResizeObserver(() => {
-      try { fit.fit(); } catch { /* mid-teardown */ }
-      sendResize();
-    });
+    const ro = new ResizeObserver(rescale);
     ro.observe(box);
-    const focusTimer = window.setTimeout(() => term.focus(), 30);
+    const focusTimer = window.setTimeout(() => { term.focus(); rescale(); }, 50);
     return () => {
       window.clearTimeout(focusTimer);
       ro.disconnect();
@@ -133,7 +134,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
   return (
     <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
       <div className="switcher-focus-bar">
-        <span className="switcher-focus-label">interactive — click outside or ✕ to unfocus</span>
+        <span className="switcher-focus-label">interactive — session keeps its own size</span>
         <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
         <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
       </div>

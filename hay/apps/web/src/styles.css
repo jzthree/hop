@@ -2870,13 +2870,27 @@ button.primary {
   }
 }
 
-/* XL: dashboard tiles — near-readable full panes */
+/* XL: dashboard tiles — near-readable full panes. In fullscreen/hub the
+   viewport is the workspace, so tiles grow with it instead of staying at the
+   compact-panel size that made XL feel small on a big monitor. */
 .switcher-overlay.tile-xl .switcher-grid {
   grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
 }
 .switcher-overlay.tile-xl .switcher-preview {
   height: 300px;
   font-size: 11px;
+}
+
+.switcher-overlay.switcher-fullscreen.tile-xl .switcher-grid,
+.switcher-overlay.switcher-hub.tile-xl .switcher-grid {
+  grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
+}
+
+.switcher-overlay.switcher-fullscreen.tile-xl .switcher-preview,
+.switcher-overlay.switcher-hub.tile-xl .switcher-preview,
+.switcher-overlay.switcher-fullscreen.tile-xl .switcher-focus-tile,
+.switcher-overlay.switcher-hub.tile-xl .switcher-focus-tile {
+  height: min(52vh, 640px);
 }
 
 /* Focused XL tile: THE interactive terminal of the wall. */

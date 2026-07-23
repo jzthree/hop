@@ -7604,6 +7604,15 @@ function startAuthProxy(authEmitter) {
         }
 
         // If no session selected, show session picker
+        // Unknown /api/* must 404 as JSON — falling through to the page handler
+        // returned 200 HTML, which callers (CLI, agents) misread as success
+        // when talking to a daemon older than the endpoint they called.
+        if (parsedUrl.pathname.startsWith('/api/')) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Unknown API endpoint: ${parsedUrl.pathname} (daemon may need a restart to pick up new endpoints)` }));
+            return;
+        }
+
         if (parsedUrl.pathname === '/sessions') {
             // The server-rendered picker is gone; the hay app's switcher IS the
             // session manager. One canonical landing path.
@@ -11408,9 +11417,13 @@ async function main() {
             try {
                 res = await callLocalApi(existingTunnel, '/api/sessions/origin', 'POST', { internalName, createdBy: target });
             } catch (e) { res = null; }
-            if (res && res.status >= 200 && res.status < 300) {
+            if (res && res.status >= 200 && res.status < 300 && res.data && res.data.ok === true) {
                 log(`"${nameArg}" is now a ${target} session.`, GREEN);
                 process.exit(0);
+            }
+            if (res && !(res.data && typeof res.data === 'object')) {
+                log(`Daemon did not recognize this endpoint — restart it with hop stop && hop start (sessions keep running).`, YELLOW);
+                process.exit(1);
             }
             log(res?.data?.error || 'Request failed.', RED);
             process.exit(1);

@@ -9,6 +9,32 @@ const { pathToFileURL } = require('url');
 const { randomUUID } = require('crypto');
 const { WebSocketServer } = require('ws');
 
+// Timestamp every log line: freeze forensics are impossible without knowing
+// WHEN "[hay] PTY exit ..." happened relative to a reported hang.
+for (const level of ['log', 'error', 'warn']) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => orig(`[${new Date().toISOString()}]`, ...args);
+}
+
+// Event-loop lag watchdog: the host is single-threaded — any synchronous work
+// (pty spawns, giant string ops) freezes EVERY session at once. A 50ms
+// heartbeat that arrives late tells us the loop was blocked and for how long;
+// with timestamps we can correlate against room lifecycle lines. (A live
+// incident froze the loop for 10-18s with nothing in the log to show for it.)
+{
+    const HEARTBEAT_MS = 50;
+    const REPORT_STALL_MS = 250;
+    let last = Date.now();
+    setInterval(() => {
+        const nowTs = Date.now();
+        const lag = nowTs - last - HEARTBEAT_MS;
+        if (lag > REPORT_STALL_MS) {
+            console.error(`[hay-host] event-loop stalled ~${lag}ms`);
+        }
+        last = nowTs;
+    }, HEARTBEAT_MS).unref();
+}
+
 const HOST = '127.0.0.1';
 const portFromEnv = Number.parseInt(process.env.HAY_HOST_PORT || '', 10);
 const PORT = Number.isInteger(portFromEnv) && portFromEnv > 0 ? portFromEnv : 0;
@@ -178,7 +204,9 @@ async function main() {
                 const seedOutput = typeof body.seedOutput === 'string' && body.seedOutput
                     ? body.seedOutput
                     : undefined;
+                const __t0 = Date.now();
                 const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, { cwd: existingCwdOr(cwd, FALLBACK_CWD), shell, env, seedOutput }));
+                if (Date.now() - __t0 > 100) console.log(`[hay-host] slow room create (POST) room=${roomId} ${Date.now() - __t0}ms`);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, room: room.getSummary() }));
             } catch (err) {
@@ -255,7 +283,9 @@ async function main() {
         if (!cwd) {
             console.error(`[hay-host] WARNING: no cwd query param for room "${roomId}", falling back to ${FALLBACK_CWD}`);
         }
+        const __t0 = Date.now();
         const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, existingCwdOr(cwd, FALLBACK_CWD)));
+        if (Date.now() - __t0 > 100) console.log(`[hay-host] slow room create (ws) room=${roomId} ${Date.now() - __t0}ms`);
 
         room.attachClient(
             {

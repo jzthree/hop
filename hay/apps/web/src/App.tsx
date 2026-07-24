@@ -1144,9 +1144,14 @@ const App = () => {
     const wsUrl = resolveWsUrl();
     const cols = termRef.current?.cols ?? 80;
     const rows = termRef.current?.rows ?? 24;
+    // Bound the attach snapshot: long-lived sessions sit at the server's
+    // 1.5MB retention cap, and downloading + parsing that on every switch
+    // cost ~1s through the tunnel — switching stopped feeling instant once
+    // buffers filled. 384KB keeps thousands of scrollback lines and lands in
+    // ~0.3s worst-case; the CLI still replays full depth.
     const url = `${wsUrl}?room=${encodeURIComponent(nextSession.room)}&name=${encodeURIComponent(
       nextSession.name
-    )}&cols=${cols}&rows=${rows}`;
+    )}&cols=${cols}&rows=${rows}&replay=393216`;
 
     wsRef.current?.close();
     setStatus("connecting");

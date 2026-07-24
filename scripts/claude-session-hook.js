@@ -19,6 +19,32 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
+
+// The full command line claude was ACTUALLY started with (alias expansion has
+// already happened in argv), so `hop restore` can relaunch with the same
+// flags (--dangerously-skip-permissions etc.) instead of a bare `claude`.
+// The hook may run under a shell claude spawned, so walk up a few parents.
+function claudeLaunchCmd() {
+  try {
+    let pid = process.ppid;
+    for (let hop = 0; hop < 4 && pid > 1; hop++) {
+      const out = execFileSync("ps", ["-o", "ppid=,command=", "-p", String(pid)], {
+        encoding: "utf8", timeout: 1500
+      }).trim();
+      const m = out.match(/^\s*(\d+)\s+(.*)$/s);
+      if (!m) return null;
+      const cmd = m[2].trim();
+      const word = (cmd.split(/\s+/)[0] || "").replace(/^-/, "");
+      const base = word.split("/").pop() || "";
+      if (/^claude[\w.-]*$/.test(base)) return cmd;
+      if (base === "node" && /claude/i.test(cmd)) return cmd;
+      if (!/^(sh|bash|zsh|dash|fish|ksh|env)$/.test(base)) return null; // unknown ancestor — stop
+      pid = Number(m[1]);
+    }
+  } catch { /* never break claude */ }
+  return null;
+}
 
 function sessionsDir() {
   const home = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
@@ -39,6 +65,9 @@ function recordSession(dir, hopSession, payload) {
     // wrapper with CLAUDE_CONFIG_DIR=~/.claude_fable). `hop restore` must
     // replay it, or `claude --resume <id>` looks in the wrong config and fails.
     configDir: process.env.CLAUDE_CONFIG_DIR || null,
+    // Resolved argv of the running claude (flags survive even when they came
+    // from a shell alias, which a rebuilt/prefixed command would not expand).
+    launchCmd: claudeLaunchCmd(),
     updatedAt: new Date().toISOString()
   });
   // One file per hop session avoids concurrent-write races between sessions.

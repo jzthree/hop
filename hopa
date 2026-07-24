@@ -17,9 +17,8 @@
 //   - exit codes: 0 ok, 1 tool/connection error, 2 usage error, 124 cli timeout
 //
 // Known per-process limits vs a long-lived MCP session (document, don't hide):
-//   - async wait jobs (`term wait --async` → `term poll`) live inside one
-//     process; across hopa invocations use blocking waits or `wait-any`
-//     with terminal_ids instead of wait_ids.
+//   - async wait jobs and wait_id continuations are rejected because hopa exits
+//     after each command. Use blocking commands or a long-lived Hop MCP client.
 //   - read cursors are best-effort across invocations; prefer --start-from.
 
 const path = require('path');
@@ -59,7 +58,7 @@ const VERBS = {
   'exec':            { tool: 'hopx_exec', pos: ['terminal_id', 'command...'] },
   'send':            { tool: 'hopx_send_and_wait', pos: ['terminal_id', 'data...'] },
   'turn':            { tool: 'hopx_agent_turn', pos: ['terminal_id?', 'message...'] },
-  'spawn':           { tool: 'hopx_spawn_agent', pos: ['name?'], alias: { task: 'initial_task', cmd: 'command' } },
+  'spawn':           { tool: 'hopx_spawn_agent', pos: ['name?'], preset: { async: false }, alias: { task: 'initial_task', cmd: 'command' } },
   'scrollback':      { tool: 'hopx_capture_scrollback', pos: ['terminal_id'] },
   'ledger':          { tool: 'hopx_task_ledger', pos: [] },
   'wait-any':        { tool: 'hopx_wait_any', pos: ['terminal_ids*'] },
@@ -108,6 +107,7 @@ const USAGE = `hopa — agent-facing hop CLI (terminal orchestration; no admin v
 
 Flags map to tool arguments: --until-regex X == until_regex, --uiMaxLines 40, etc.
 Global: --json (machine output), --cli-timeout <ms>, HOP_DEBUG=1 for stderr logs.
+Async wait jobs are MCP-only; hopa spawn/turn block through the contracted result.
 Exit codes: 0 ok, 1 error, 2 usage, 124 timeout.`;
 
 function fail(msg, code) {
@@ -191,8 +191,12 @@ function buildArgs(spec, tokens, schema) {
       }
       if (raw === 'help') return { help: true };
       const key = normalizeFlagKey(raw, props, spec.alias);
-      if (value === true && queue.length && !(props[key] && props[key].type === 'boolean') && !queue[0].startsWith('--')) {
+      const expectsValue = props[key] && props[key].type && props[key].type !== 'boolean';
+      if (value === true && queue.length && (expectsValue || !queue[0].startsWith('--'))) {
         value = queue.shift();
+      }
+      if (value === true && expectsValue) {
+        fail(`--${raw}: expected a value`, 2);
       }
       try {
         args[key] = coerceValue(value, props[key]);
@@ -225,6 +229,35 @@ function buildArgs(spec, tokens, schema) {
     args[restName] = restIsArray ? rest : rest.join(' ');
   }
   return { args, global };
+}
+
+// Global flags may precede the verb (`hopa --json agents`) as users expect.
+// Stop at the first non-global token so command payloads remain untouched.
+function extractLeadingGlobalFlags(argv) {
+  const global = { json: false, cliTimeout: 0 };
+  const tokens = argv.slice();
+  while (tokens.length) {
+    const token = tokens[0];
+    if (token === '--json') {
+      global.json = true;
+      tokens.shift();
+      continue;
+    }
+    if (token === '--cli-timeout' || token.startsWith('--cli-timeout=')) {
+      tokens.shift();
+      const raw = token === '--cli-timeout'
+        ? tokens.shift()
+        : token.slice('--cli-timeout='.length);
+      const timeout = Number(raw);
+      if (!Number.isFinite(timeout) || timeout < 0) {
+        fail('--cli-timeout: expected a non-negative number', 2);
+      }
+      global.cliTimeout = timeout;
+      continue;
+    }
+    break;
+  }
+  return { tokens, global };
 }
 
 function resolveVerb(argv) {
@@ -270,7 +303,46 @@ function payloadIndicatesError(text) {
   return false;
 }
 
+function cliProcessLimitError(toolName, toolArgs = {}) {
+  if (
+    toolName === 'hop_wait_poll'
+    && typeof toolArgs.wait_id === 'string'
+    && toolArgs.wait_id.length > 0
+  ) {
+    return 'wait_id polling requires the same long-lived MCP connection that created the wait. In hopa, use blocking commands or start a fresh wait from the terminal name.';
+  }
+  if (
+    toolName === 'hopx_wait_any'
+    && Array.isArray(toolArgs.wait_ids)
+    && toolArgs.wait_ids.length > 0
+  ) {
+    return 'wait_id continuations require the same long-lived MCP connection that created them. In hopa, pass terminal names to wait-any so the wait starts and completes in this process.';
+  }
+  const startsAsyncWait = toolArgs.async === true && (
+    toolName === 'hop_wait_terminal'
+    || (toolName === 'hopx_agent_turn' && toolArgs.wait !== false)
+    || (
+      toolName === 'hopx_spawn_agent'
+      && typeof toolArgs.initial_task === 'string'
+      && toolArgs.initial_task.length > 0
+    )
+  );
+  if (startsAsyncWait) {
+    return 'async wait jobs require a long-lived MCP connection; hopa exits after each command. Use hopa\'s blocking spawn/turn default, or use async through the Hop MCP.';
+  }
+  if (
+    toolName === 'hopx_agent_turn'
+    && typeof toolArgs.wait_id === 'string'
+    && toolArgs.wait_id.length > 0
+  ) {
+    return 'wait_id continuation requires the same long-lived MCP connection that created it. In hopa, use blocking spawn/turn; inspect an already-dispatched task with hopa ledger and hopa trajectory.';
+  }
+  return null;
+}
+
 async function runTool(toolName, toolArgs, global) {
+  const processLimitError = cliProcessLimitError(toolName, toolArgs);
+  if (processLimitError) fail(processLimitError, 2);
   const server = new HopMCPServer();
   if (global.cliTimeout > 0) {
     setTimeout(() => {
@@ -312,7 +384,8 @@ async function runTool(toolName, toolArgs, global) {
 }
 
 async function main() {
-  const argv = process.argv.slice(2);
+  const leading = extractLeadingGlobalFlags(process.argv.slice(2));
+  const argv = leading.tokens;
 
   if (argv[0] === 'help' || argv[0] === '--help' || argv[0] === '-h') {
     process.stdout.write(USAGE + '\n');
@@ -339,7 +412,10 @@ async function main() {
         fail(`invalid JSON args: ${err.message}`, 2);
       }
     }
-    const global = { json: argv.includes('--json'), cliTimeout: 0 };
+    const global = {
+      json: leading.global.json || argv.includes('--json'),
+      cliTimeout: leading.global.cliTimeout
+    };
     return runTool(toolName, toolArgs, global);
   }
 
@@ -358,7 +434,11 @@ async function main() {
     }
     process.exit(0);
   }
-  return runTool(resolved.spec.tool, built.args, built.global);
+  const global = {
+    json: leading.global.json || built.global.json,
+    cliTimeout: built.global.cliTimeout || leading.global.cliTimeout
+  };
+  return runTool(resolved.spec.tool, built.args, global);
 }
 
 if (require.main === module) {
@@ -367,5 +447,14 @@ if (require.main === module) {
     process.exit(1);
   });
 } else {
-  module.exports = { VERBS, GROUP_ALIASES, resolveVerb, normalizeFlagKey, coerceValue, buildArgs };
+  module.exports = {
+    VERBS,
+    GROUP_ALIASES,
+    resolveVerb,
+    normalizeFlagKey,
+    coerceValue,
+    buildArgs,
+    extractLeadingGlobalFlags,
+    cliProcessLimitError
+  };
 }

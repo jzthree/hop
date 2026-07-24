@@ -103,6 +103,30 @@ test('buildArgs: positionals, rest join, -- verbatim, arrays, presets', () => {
   const block = hopa.buildArgs(hopa.VERBS.block, ['Venus'], schema('hop_set_agent_permission'));
   assert.strictEqual(block.args.allowed, false);
 
+  // CLI spawn waits for the contracted result by default. Parsing still sees
+  // --async; the process-limit validator rejects it before dispatch.
+  const spawn = hopa.buildArgs(
+    hopa.VERBS.spawn,
+    ['worker', '--task', 'do work'],
+    schema('hopx_spawn_agent')
+  );
+  assert.strictEqual(spawn.args.async, false);
+  const detachedSpawn = hopa.buildArgs(
+    hopa.VERBS.spawn,
+    ['worker', '--task', 'do work', '--async'],
+    schema('hopx_spawn_agent')
+  );
+  assert.strictEqual(detachedSpawn.args.async, true);
+
+  // String-valued flags may legitimately begin with dashes. Quoting keeps the
+  // value in one argv element and the parser must not mistake it for a new flag.
+  const spawnArgs = hopa.buildArgs(
+    hopa.VERBS.spawn,
+    ['worker', '--args', '--permission-mode manual'],
+    schema('hopx_spawn_agent')
+  );
+  assert.strictEqual(spawnArgs.args.args, '--permission-mode manual');
+
   // global flags stay out of tool args
   const read = hopa.buildArgs(
     hopa.VERBS['term read'],
@@ -112,6 +136,51 @@ test('buildArgs: positionals, rest join, -- verbatim, arrays, presets', () => {
   assert.strictEqual(read.args.mode, 'ui');
   assert.strictEqual(read.global.json, true);
   assert.strictEqual(read.args.json, undefined);
+});
+
+test('global flags may precede the verb without entering tool arguments', () => {
+  assert.deepStrictEqual(
+    hopa.extractLeadingGlobalFlags(['--json', '--cli-timeout', '180000', 'spawn', 'worker']),
+    {
+      tokens: ['spawn', 'worker'],
+      global: { json: true, cliTimeout: 180000 }
+    }
+  );
+  assert.deepStrictEqual(
+    hopa.extractLeadingGlobalFlags(['--cli-timeout=2500', 'agents']),
+    {
+      tokens: ['agents'],
+      global: { json: false, cliTimeout: 2500 }
+    }
+  );
+  assert.deepStrictEqual(
+    hopa.extractLeadingGlobalFlags(['exec', 'worker', '--', '--json']),
+    {
+      tokens: ['exec', 'worker', '--', '--json'],
+      global: { json: false, cliTimeout: 0 }
+    }
+  );
+});
+
+test('CLI rejects process-local async waits with an actionable explanation', () => {
+  assert.match(
+    hopa.cliProcessLimitError('hopx_spawn_agent', { async: true, initial_task: 'do work' }),
+    /long-lived MCP connection/
+  );
+  assert.match(
+    hopa.cliProcessLimitError('hopx_agent_turn', { wait_id: 'wait_stale' }),
+    /same long-lived MCP connection/
+  );
+  assert.match(
+    hopa.cliProcessLimitError('hop_wait_poll', { wait_id: 'wait_stale' }),
+    /same long-lived MCP connection/
+  );
+  assert.match(
+    hopa.cliProcessLimitError('hopx_wait_any', { wait_ids: ['wait_stale'] }),
+    /pass terminal names/
+  );
+  assert.equal(hopa.cliProcessLimitError('hopx_wait_any', { terminal_ids: ['worker'] }), null);
+  assert.equal(hopa.cliProcessLimitError('hopx_spawn_agent', { async: false, initial_task: 'do work' }), null);
 });
 
 test('requiring hopa as a module does not clobber console.error', () => {

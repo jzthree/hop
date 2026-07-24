@@ -43,7 +43,16 @@ Supported auto-detected clients:
 
 4. Restart your MCP client.
 
+Install the bundled Hop workflow instructions for Claude Code and Codex:
+
+```bash
+hop agent-skill install
+```
+
 The server auto-connects to the local Hop daemon via `~/.hop2/.tunnel-state`.
+Long-lived MCP clients refresh that file automatically when the local daemon
+restarts on a new port. Explicit `connect_server` and `HOP_API_URL` connections
+remain pinned to the configured endpoint.
 
 ## Recommended Flow: One Agent Terminal
 
@@ -91,21 +100,22 @@ A manager agent (any MCP client — Claude Code, Codex, ...) can run a whole
 fleet of subagent terminals through hop. The loop:
 
 1. **Spawn** — one call per subagent:
-   `hopx_spawn_agent(name="worker-1", cwd="/repo", agent="claude", initial_task="<task>")`
-   → `{ terminal_id, sessionName, wait_id }`. Repeat for each worker.
+   `hopx_spawn_agent(name="worker-1", cwd="/repo", agent="claude", initial_task="<task>", async=true)`
+   → `{ terminal_id, sessionName, wait_id, completion_contract }`. Hop gives
+   each initial task a unique completion contract automatically.
 2. **Wait for anyone** — block on the whole fleet with one call:
    `hopx_wait_any(wait_ids=[...], max_wait_ms=60000)` returns the first
    completed turn(s) and the still-pending set. No round-robin polling.
-   `completed` means the turn actually finished — a watch whose window merely
-   expired is re-armed under a new wait_id and stays in `pending` (carry those
-   forward to the next call). Two distinct timers: each background job's own
+   A settled result is successful only when `ok=true` and its completion
+   contract matched; a mismatch is `contract_failed`. A watch whose window
+   merely expired is re-armed under a new wait_id and stays in `pending` (carry
+   those forward to the next call). Two distinct timers: each background job's own
    wait window defaults to 15 minutes; `max_wait_ms` on the call is only how
    long that one `hopx_wait_any` invocation blocks (default 30s).
 3. **Read the result** — `hop_read_trajectory(name=<sessionName>)` for the
    full turn (digest mode is context-safe), or use the slimmed wait result
-   returned by `hopx_wait_any` directly. Give each task a completion phrase
-   and pass `until_reply_regex` at dispatch: completed summaries then carry
-   `reply_matched`, distinguishing "did the assignment" from "stopped talking".
+   returned by `hopx_wait_any` directly. Follow-up turns should pass
+   `until_reply_regex`; only `reply_matched=true` counts as completion.
 4. **Redispatch** — next task via
    `hopx_agent_turn(terminal_id=..., data="<task>", async=true)`; collect the
    new `wait_id` and go back to step 2.
@@ -206,11 +216,14 @@ Core tools (`hop_`): stable atomic operations.
 Helper tools (`hopx_`): convenience wrappers built on top of core tools.
 - `hopx_send_and_wait` — single-call send + wait wrapper
 - `hopx_exec` — Bash-tool-style shell execution: command in, clean stdout + `exit_code` out (see section above)
-- `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`; optional `until_reply_regex` reports `reply_matched`/`reply_match` against the agent's actual reply (transcript-sourced when available) — "task finished", not just "turn finished"
+- `hopx_agent_turn` — single-turn send + wait + mode-aware output, default `mode="auto"`; optional `until_reply_regex` is a completion contract, and a mismatch returns `contract_failed`
 - `hopx_capture_scrollback` — capture an alternate-screen TUI's scrollback the way a user would: scroll up page-by-page, snapshot each frame, and stitch newly-revealed rows together (live view restored afterward by default); best-effort and lossy for wrapped/redrawn content; requires agent permission on the session
 - `hopx_agents_overview` — fleet status in one call: every agent-created/agent-permitted session with state (running/busy/idle), cwd, foreground program, Claude turn count, bell counters, last activity, and pending wait jobs; `include_user_sessions=false` narrows to agent-created only, `include_ports=true` adds proxy sessions
 - `hopx_wait_any` — race several background waits (wait_ids and/or terminal_ids, auto-starting `until_agent_done` waits); returns the first real completion(s) plus the still-pending set; expired watches are re-armed automatically (new wait_id in `pending`) rather than reported as completions
-- `hopx_spawn_agent` — one-call subagent bring-up: create terminal + launch agent CLI (claude/codex/gemini/custom) + wait until ready + optionally dispatch a first task as an async turn; `isolation="worktree"` gives the worker its own git worktree + fleet/ branch for overlapping-file fleets
+- `hopx_spawn_agent` — one-call subagent bring-up: create terminal + launch agent CLI (claude/codex/gemini/custom) + wait until ready + optionally run a first task with an automatic completion contract; `isolation="worktree"` gives the worker its own git worktree + fleet/ branch for overlapping-file fleets
+  - the Claude preset uses the `sonnet` model alias and `bypassPermissions` mode by default, and removes inherited Claude Code process credentials before launch, so a delegated worker uses the host's durable `claude auth login` without parking on approval prompts; pass `permission_mode="manual"` for a restricted worker, `args="--model ..."` to choose another model, or an explicit `command` when inherited credentials are intentional
+  - the Codex preset runs autonomously and bypasses workspace-trust, approval, and self-update startup gates; Hop rejects detected login, trust, or update screens instead of dispatching a task into them
+  - MCP and `hopa spawn --task` wait by default and return the transcript-backed `assistant_reply`; `async=true` is for fleet dispatch through a long-lived MCP connection, while the short-lived `hopa` CLI rejects async waits
 - `hopx_task_ledger` — the durable orchestration ledger (~/.hop2/orchestration): async dispatches with contracts survive manager/MCP restarts; pending entries reconcile lazily from turn counters + transcripts; acknowledge to consume
 
 ### Reading terminal history
@@ -310,6 +323,7 @@ Helper tools (`hopx_`): convenience wrappers built on top of core tools.
   - in `mode="auto"`, if alternate-screen starts during the same turn, it auto-promotes to `ui` for that response
   - wait-only continuation is supported: omit `data`/`message` and use `control="wait"` to keep waiting on a terminal without sending new input
   - `async=true` starts the turn wait in the background and returns `wait_id` immediately; continue polling or controlling that turn with `hopx_agent_turn(wait_id=..., wait=true|false, control=...)`
+  - `until_reply_regex` is a completion contract; a finished turn that does not match returns `status="contract_failed"`, `ok=false`, and a tool error
   - `control="interrupt"` / `control="terminate"` send an explicit interrupt key (default `esc`); `terminate_message` can send a final follow-up after the interrupt
   - `mode="ui"` returns a UI snapshot payload after wait
   - for readable modes, `text_only` defaults to `true` and condenses waits the same way as `hopx_send_and_wait` (set `text_only=false` to keep full wait events)

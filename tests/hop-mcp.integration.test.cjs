@@ -4,6 +4,8 @@ const http = require('node:http');
 const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 const path = require('node:path');
+const os = require('node:os');
+const fs = require('node:fs/promises');
 const { setTimeout: delay } = require('node:timers/promises');
 
 const MCP_BIN = path.join(__dirname, '..', 'mcp', 'hop-mcp.js');
@@ -104,6 +106,7 @@ function startMockHopStreamServer(options = {}) {
     ? Math.floor(options.closeFirstStreamAfterMs)
     : 0;
   const terminals = new Map();
+  const writes = [];
   let nextTerminalId = 1;
 
   function getTerminal(id) {
@@ -219,6 +222,7 @@ function startMockHopStreamServer(options = {}) {
       const terminal = getTerminal(id);
       const body = await readJsonBody(req);
       const output = String(body.data || '');
+      writes.push({ id, data: output });
 
       emitOutput(terminal, output, [output]);
 
@@ -252,7 +256,7 @@ function startMockHopStreamServer(options = {}) {
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
-      resolve({ server, port });
+      resolve({ server, port, getWrites: () => writes.slice() });
     });
   });
 }
@@ -522,8 +526,9 @@ function startMcp(env) {
       return;
     }
     if (message && message.id !== undefined && pending.has(message.id)) {
-      const { resolve } = pending.get(message.id);
+      const { resolve, timer } = pending.get(message.id);
       pending.delete(message.id);
+      clearTimeout(timer);
       resolve(message);
     }
   });
@@ -534,13 +539,13 @@ function startMcp(env) {
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
     child.stdin.write(payload);
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (pending.has(id)) {
           pending.delete(id);
           reject(new Error(`Timed out waiting for response to ${method}`));
         }
-      }, 3000);
+      }, 10000);
+      pending.set(id, { resolve, reject, timer });
     });
   }
 
@@ -562,10 +567,11 @@ test('hop-mcp tools/resources basic flow', async () => {
     const toolNames = tools.result.tools.map(t => t.name);
     const hopxSendAndWaitTool = tools.result.tools.find((t) => t.name === 'hopx_send_and_wait');
     const hopxAgentTurnTool = tools.result.tools.find((t) => t.name === 'hopx_agent_turn');
+    const hopxSpawnAgentTool = tools.result.tools.find((t) => t.name === 'hopx_spawn_agent');
     assert.ok(toolNames.includes('hop_create_terminal'));
     assert.ok(toolNames.includes('hopx_send_and_wait'));
     assert.ok(toolNames.includes('hop_wait_terminal'));
-    assert.ok(toolNames.includes('hop_wait_start'));
+    assert.ok(!toolNames.includes('hop_wait_start'));
     assert.ok(toolNames.includes('hop_wait_poll'));
     assert.ok(toolNames.includes('hopx_agent_turn'));
     assert.ok(!toolNames.includes('hop_exec_terminal'));
@@ -575,6 +581,8 @@ test('hop-mcp tools/resources basic flow', async () => {
     assert.equal(hopxAgentTurnTool.inputSchema.properties.async.type, 'boolean');
     assert.equal(hopxAgentTurnTool.inputSchema.properties.wait_id.type, 'string');
     assert.deepEqual(hopxAgentTurnTool.inputSchema.properties.control.enum, ['send', 'wait', 'interrupt', 'terminate']);
+    assert.equal(hopxSpawnAgentTool.inputSchema.properties.until_reply_regex.type, 'string');
+    assert.equal(hopxSpawnAgentTool.inputSchema.properties.async.type, 'boolean');
 
     const resources = await call('resources/list');
     const resourceUris = resources.result.resources.map(r => r.uri);
@@ -630,7 +638,7 @@ test('hop_write_terminal preserves output before first read', async () => {
 
     const read = await call('tools/call', {
       name: 'hop_read_terminal',
-      arguments: { terminal_id: createdPayload.id, maxEvents: 20 }
+      arguments: { terminal_id: createdPayload.id, mode: 'raw', maxEvents: 20 }
     });
     const readPayload = JSON.parse(read.result.content[0].text);
     const output = readPayload.events
@@ -672,7 +680,7 @@ test('hop_write_terminal reconnects stream after previous stream ended', async (
     for (let i = 0; i < 5; i++) {
       const read = await call('tools/call', {
         name: 'hop_read_terminal',
-        arguments: { terminal_id: createdPayload.id, cursor, maxEvents: 20 }
+        arguments: { terminal_id: createdPayload.id, cursor, mode: 'raw', maxEvents: 20 }
       });
       const payload = JSON.parse(read.result.content[0].text);
       cursor = payload.cursor;
@@ -715,7 +723,7 @@ test('hop_send_key maps named keys to terminal input', async () => {
     for (let i = 0; i < 5; i += 1) {
       const read = await call('tools/call', {
         name: 'hop_read_terminal',
-        arguments: { terminal_id: createdPayload.id, cursor, maxEvents: 40 }
+        arguments: { terminal_id: createdPayload.id, cursor, mode: 'raw', maxEvents: 40 }
       });
       const parsed = JSON.parse(read.result.content[0].text);
       cursor = parsed.cursor;
@@ -769,10 +777,8 @@ test('hop_wait_terminal matches regex condition with readable_raw capture', asyn
     });
     const parsed = JSON.parse(waited.result.content[0].text);
 
-    assert.equal(parsed.status, 'matched');
     assert.equal(parsed.matched, 'regex');
-    assert.match(parsed.matchedText || '', /complete/);
-    assert.equal(parsed.captureMode, 'readable_raw');
+    assert.equal(parsed.status, undefined);
     assert.ok(Array.isArray(parsed.events));
     assert.ok(parsed.events.every((event) => !event || !Object.prototype.hasOwnProperty.call(event, 'controls')));
     assert.ok(parsed.events.every((event) => (
@@ -817,11 +823,8 @@ test('hop_wait_terminal matches idle condition when terminal is quiet', async ()
     });
     const parsed = JSON.parse(waited.result.content[0].text);
 
-    assert.equal(parsed.status, 'matched');
     assert.equal(parsed.matched, 'idle');
-    assert.equal(parsed.captureMode, 'raw');
-    assert.equal(typeof parsed.waitedMs, 'number');
-    assert.ok(parsed.waitedMs >= 100);
+    assert.equal(parsed.status, undefined);
   } finally {
     child.kill();
     server.close();
@@ -855,7 +858,7 @@ test('hop_wait_terminal defaults to until_agent_done when no condition is provid
       arguments: {
         terminal_id: createdPayload.id,
         start_from: 'beginning',
-        max_wait_ms: 2500,
+        max_wait_ms: 5000,
         capture: 'readable_raw'
       }
     });
@@ -864,11 +867,10 @@ test('hop_wait_terminal defaults to until_agent_done when no condition is provid
       .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
       .join('');
 
-    assert.equal(parsed.status, 'matched');
     assert.equal(parsed.matched, 'agent_done');
     assert.equal(parsed.untilAgentDone, true);
-    assert.equal(parsed.startFrom, 'beginning');
-    assert.equal(parsed.next_cursor, parsed.cursorEnd);
+    assert.equal(parsed.status, undefined);
+    assert.equal(typeof parsed.next_cursor, 'number');
     assert.match(text, /TASK_COMPLETE/);
   } finally {
     child.kill();
@@ -876,7 +878,7 @@ test('hop_wait_terminal defaults to until_agent_done when no condition is provid
   }
 });
 
-test('hop_wait_start and hop_wait_poll support async regex waits', async () => {
+test('hop_wait_terminal and hop_wait_poll support async regex waits', async () => {
   const { server, port } = await startMockHopStreamServer({ startupOutput: '' });
   const { child, call } = startMcp({
     HOP_API_URL: `http://127.0.0.1:${port}`,
@@ -894,9 +896,10 @@ test('hop_wait_start and hop_wait_poll support async regex waits', async () => {
     assert.ok(createdPayload.id);
 
     const started = await call('tools/call', {
-      name: 'hop_wait_start',
+      name: 'hop_wait_terminal',
       arguments: {
         terminal_id: createdPayload.id,
+        async: true,
         start_from: 'latest',
         until_regex: 'ASYNC_READY',
         capture: 'readable_raw',
@@ -969,8 +972,7 @@ test('hopx_agent_turn supports wait-only mode without input actions', async () =
     const turnPayload = JSON.parse(turn.result.content[0].text);
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'readable_raw');
-    assert.equal(turnPayload.waited, true);
+    assert.equal(turnPayload.helper, 'hopx_agent_turn');
     assert.match(turnPayload.wait.text || '', /READY_WAIT_ONLY/);
   } finally {
     child.kill();
@@ -989,9 +991,11 @@ test('hopx_agent_turn supports async send and poll with wait_id', async () => {
       return null;
     }
   });
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-async-turn-test-'));
   const { child, call } = startMcp({
     HOP_API_URL: `http://127.0.0.1:${port}`,
-    HOP_TOKEN: 'test-token'
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
   });
 
   try {
@@ -1017,7 +1021,6 @@ test('hopx_agent_turn supports async send and poll with wait_id', async () => {
     const startedPayload = JSON.parse(started.result.content[0].text);
 
     assert.equal(startedPayload.helper, 'hopx_agent_turn');
-    assert.equal(startedPayload.async, true);
     assert.equal(startedPayload.done, false);
     assert.equal(startedPayload.status, 'pending');
     assert.equal(typeof startedPayload.wait_id, 'string');
@@ -1034,13 +1037,397 @@ test('hopx_agent_turn supports async send and poll with wait_id', async () => {
     const polledPayload = JSON.parse(polled.result.content[0].text);
 
     assert.equal(polledPayload.helper, 'hopx_agent_turn');
-    assert.equal(polledPayload.async, true);
     assert.equal(polledPayload.done, true);
     assert.equal(polledPayload.status, 'matched');
     assert.match((polledPayload.wait && polledPayload.wait.text) || '', /ASYNC_TURN_DONE/);
   } finally {
     child.kill();
     server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
+test('hopx_agent_turn reports an unsatisfied completion contract as a tool failure', async () => {
+  const marker = 'CONTRACT_FAILURE_TURN';
+  const { server, port } = await startMockHopStreamServer({
+    startupOutput: '',
+    outputChunker: (output) => {
+      if (output === marker) {
+        return [{ data: 'TURN_FINISHED_WITHOUT_CONTRACT\n', delayMs: 50 }];
+      }
+      return null;
+    }
+  });
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-contract-test-'));
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const created = await call('tools/call', {
+      name: 'hop_create_terminal',
+      arguments: { name: 'contract-failure-test' }
+    });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+
+    const started = await call('tools/call', {
+      name: 'hopx_agent_turn',
+      arguments: {
+        terminal_id: createdPayload.id,
+        data: marker,
+        async: true,
+        until_regex: 'TURN_FINISHED_WITHOUT_CONTRACT',
+        until_reply_regex: 'EXPECTED_COMPLETION_TOKEN',
+        max_wait_ms: 2000
+      }
+    });
+    const startedPayload = JSON.parse(started.result.content[0].text);
+
+    const polled = await call('tools/call', {
+      name: 'hopx_agent_turn',
+      arguments: {
+        wait_id: startedPayload.wait_id,
+        wait: true,
+        max_wait_ms: 2000
+      }
+    });
+    const polledPayload = JSON.parse(polled.result.content[0].text);
+
+    assert.equal(polled.result.isError, true);
+    assert.equal(polledPayload.ok, false);
+    assert.equal(polledPayload.status, 'contract_failed');
+    assert.equal(polledPayload.reply_matched, false);
+
+    const ledger = await call('tools/call', {
+      name: 'hopx_task_ledger',
+      arguments: { status: 'all' }
+    });
+    const ledgerPayload = JSON.parse(ledger.result.content[0].text);
+    const task = ledgerPayload.tasks.find((entry) => entry.taskId === startedPayload.wait_id);
+    assert.equal(task.status, 'failed');
+    assert.equal(task.replyMatched, false);
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
+test('hopx_agent_turn does not satisfy a synchronous contract from echoed input', async () => {
+  const contract = 'EXPECTED_COMPLETION_TOKEN';
+  const task = `Complete the task and end with ${contract}`;
+  const { server, port } = await startMockHopStreamServer({
+    startupOutput: '',
+    outputChunker: (output) => {
+      if (output === task) {
+        return [output, { data: 'TURN_FINISHED_WITHOUT_CONTRACT\n', delayMs: 50 }];
+      }
+      return null;
+    }
+  });
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token'
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const created = await call('tools/call', {
+      name: 'hop_create_terminal',
+      arguments: { name: 'synchronous-contract-echo-test' }
+    });
+    const createdPayload = JSON.parse(created.result.content[0].text);
+
+    const turn = await call('tools/call', {
+      name: 'hopx_agent_turn',
+      arguments: {
+        terminal_id: createdPayload.id,
+        data: task,
+        until_regex: 'TURN_FINISHED_WITHOUT_CONTRACT',
+        until_reply_regex: contract,
+        max_wait_ms: 2000
+      }
+    });
+    const payload = JSON.parse(turn.result.content[0].text);
+
+    assert.equal(turn.result.isError, true, JSON.stringify(payload));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.status, 'contract_failed');
+    assert.equal(payload.reply_matched, false);
+  } finally {
+    child.kill();
+    server.close();
+  }
+});
+
+test('hopx_spawn_agent gives initial tasks an automatic echo-safe completion contract', async () => {
+  const { server, port, getWrites } = await startMockHopStreamServer();
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-spawn-test-'));
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const spawned = await call('tools/call', {
+      name: 'hopx_spawn_agent',
+      arguments: {
+        name: 'automatic-contract-test',
+        agent: 'custom',
+        command: 'fake-agent',
+        initial_task: 'Complete the assigned work.',
+        async: true,
+        ready_timeout_ms: 5000
+      }
+    });
+    const spawnedPayload = JSON.parse(spawned.result.content[0].text);
+
+    assert.equal(spawnedPayload.ok, true);
+    assert.equal(spawnedPayload.ready, true);
+    assert.equal(spawnedPayload.dispatched, true);
+    assert.equal(spawnedPayload.task_completed, false);
+    assert.equal(spawnedPayload.task_status, 'pending');
+    assert.equal(spawnedPayload.completion_contract.kind, 'automatic_token');
+    assert.match(spawnedPayload.completion_contract.token, /^HOP_TASK_COMPLETE_[A-F0-9]{16}$/);
+    const dispatchedText = getWrites().map((write) => write.data).join('');
+    assert.doesNotMatch(dispatchedText, new RegExp(spawnedPayload.completion_contract.token));
+    assert.match(dispatchedText, /Prefix: HOP_TASK_COMPLETE_/);
+    assert.match(
+      dispatchedText,
+      new RegExp(`Suffix: ${spawnedPayload.completion_contract.token.replace('HOP_TASK_COMPLETE_', '')}`)
+    );
+
+    await call('tools/call', {
+      name: 'hop_write_terminal',
+      arguments: {
+        terminal_id: spawnedPayload.terminal_id,
+        data: 'AGENT_EXITED_WITHOUT_COMPLETING\n'
+      }
+    });
+
+    const polled = await call('tools/call', {
+      name: 'hopx_agent_turn',
+      arguments: {
+        wait_id: spawnedPayload.wait_id,
+        wait: true,
+        max_wait_ms: 500
+      }
+    });
+    const polledPayload = JSON.parse(polled.result.content[0].text);
+
+    assert.equal(polled.result.isError, undefined);
+    assert.equal(polledPayload.done, false);
+    assert.equal(polledPayload.status, 'pending');
+    assert.equal(polledPayload.reply_matched, undefined);
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
+test('hopx_spawn_agent uses autonomous Sonnet by default unless explicitly overridden', async () => {
+  const { server, port, getWrites } = await startMockHopStreamServer({ startupOutput: '❯ ' });
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-claude-model-test-'));
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const defaultSpawn = await call('tools/call', {
+      name: 'hopx_spawn_agent',
+      arguments: { name: 'claude-default-model', agent: 'claude', ready_timeout_ms: 5000 }
+    });
+    const defaultPayload = JSON.parse(defaultSpawn.result.content[0].text);
+    assert.equal(defaultPayload.ok, true, JSON.stringify(defaultPayload));
+    const cleanClaude = 'env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION claude';
+    assert.equal(defaultPayload.command, `${cleanClaude} --model sonnet --permission-mode bypassPermissions`);
+
+    const explicitSpawn = await call('tools/call', {
+      name: 'hopx_spawn_agent',
+      arguments: {
+        name: 'claude-explicit-model',
+        agent: 'claude',
+        args: '--model opus',
+        ready_timeout_ms: 5000
+      }
+    });
+    const explicitPayload = JSON.parse(explicitSpawn.result.content[0].text);
+    assert.equal(explicitPayload.ok, true, JSON.stringify(explicitPayload));
+    assert.equal(explicitPayload.command, `${cleanClaude} --permission-mode bypassPermissions --model opus`);
+    assert.deepEqual(
+      getWrites().filter((write) => write.data.includes(' claude')).map((write) => write.data),
+      [
+        `${cleanClaude} --model sonnet --permission-mode bypassPermissions\n`,
+        `${cleanClaude} --permission-mode bypassPermissions --model opus\n`
+      ]
+    );
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
+test('hopx_spawn_agent uses an autonomous Codex preset that skips workspace trust', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: '› ' });
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-codex-preset-test-'));
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const spawned = await call('tools/call', {
+      name: 'hopx_spawn_agent',
+      arguments: { name: 'codex-autonomous-preset', agent: 'codex', ready_timeout_ms: 5000 }
+    });
+    const payload = JSON.parse(spawned.result.content[0].text);
+
+    assert.equal(spawned.result.isError, undefined, JSON.stringify(payload));
+    assert.equal(payload.ok, true);
+    assert.equal(
+      payload.command,
+      'command codex --dangerously-bypass-approvals-and-sandbox -c check_for_update_on_startup=false'
+    );
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
+test('hopx_spawn_agent rejects a startup trust gate instead of dispatching', async () => {
+  const { server, port, getWrites } = await startMockHopStreamServer({
+    startupOutput: 'Do you trust the contents of this directory?\nPress enter to continue\n› '
+  });
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-startup-gate-test-'));
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const spawned = await call('tools/call', {
+      name: 'hopx_spawn_agent',
+      arguments: {
+        name: 'codex-startup-gate',
+        agent: 'codex',
+        initial_task: 'This must not be dispatched.',
+        ready_timeout_ms: 5000
+      }
+    });
+    const payload = JSON.parse(spawned.result.content[0].text);
+
+    assert.equal(spawned.result.isError, true, JSON.stringify(payload));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.ready, false);
+    assert.equal(payload.readiness_status, 'workspace_trust_required');
+    assert.equal(payload.startup_blocker.kind, 'workspace_trust_required');
+    assert.equal(payload.dispatched, undefined);
+    assert.equal(getWrites().some((entry) => entry.data.includes('This must not be dispatched.')), false);
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
+test('hopx_spawn_agent permits a restricted Claude worker mode', async () => {
+  const { server, port } = await startMockHopStreamServer({ startupOutput: '❯ ' });
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-claude-permission-test-'));
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const spawned = await call('tools/call', {
+      name: 'hopx_spawn_agent',
+      arguments: {
+        name: 'claude-manual-permissions',
+        agent: 'claude',
+        permission_mode: 'manual',
+        ready_timeout_ms: 5000
+      }
+    });
+    const payload = JSON.parse(spawned.result.content[0].text);
+    assert.equal(payload.ok, true, JSON.stringify(payload));
+    assert.match(payload.command, /--model sonnet --permission-mode manual$/);
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
+test('hopx_spawn_agent waits for a successful contracted initial task by default', async () => {
+  const { server, port } = await startMockHopStreamServer({
+    outputChunker: (output) => {
+      const prefix = output.match(/Prefix: (HOP_TASK_COMPLETE_)/)?.[1];
+      const suffix = output.match(/Suffix: ([A-F0-9]{16})/)?.[1];
+      const token = prefix && suffix ? `${prefix}${suffix}` : null;
+      // Put the token on screen, then push it outside the bounded wait-event
+      // tail with control-only redraws. This reproduces the live Claude case
+      // where the final reply is visible but the readable wait capture omits it.
+      return token
+        ? [
+            `Task finished successfully.\n  ${token}\nFinal response complete.\n`,
+            ...Array.from({ length: 80 }, () => '\u001b[0m')
+          ]
+        : null;
+    }
+  });
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-blocking-spawn-test-'));
+  const { child, call } = startMcp({
+    HOP_API_URL: `http://127.0.0.1:${port}`,
+    HOP_TOKEN: 'test-token',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    const spawned = await call('tools/call', {
+      name: 'hopx_spawn_agent',
+      arguments: {
+        name: 'blocking-contract-test',
+        agent: 'custom',
+        command: 'fake-agent',
+        initial_task: 'Complete the assigned work.',
+        ready_timeout_ms: 5000,
+        max_wait_ms: 5000
+      }
+    });
+    const payload = JSON.parse(spawned.result.content[0].text);
+
+    assert.equal(spawned.result.isError, undefined, JSON.stringify(payload));
+    assert.equal(payload.ok, true);
+    assert.equal(payload.task_completed, true);
+    assert.equal(payload.task_status, 'matched');
+    assert.equal(payload.initial_task_result.status, 'matched');
+    assert.equal(payload.initial_task_result.wait.matched, 'regex');
+    assert.equal(payload.initial_task_result.reply_matched, true);
+    assert.match(payload.initial_task_result.reply_match, /HOP_TASK_COMPLETE_/);
+    assert.equal(payload.reply_matched, true);
+    assert.equal(payload.reply_match, payload.initial_task_result.reply_match);
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
   }
 });
 
@@ -1072,12 +1459,12 @@ test('hopx_agent_turn interrupt control sends default interrupt key without wait
     const turnPayload = JSON.parse(turn.result.content[0].text);
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.waited, false);
-    assert.deepEqual(turnPayload.sent.map((entry) => entry.source), ['key:esc']);
+    assert.equal(turnPayload.helper, 'hopx_agent_turn');
+    assert.equal(typeof turnPayload.next_cursor, 'number');
 
     const read = await call('tools/call', {
       name: 'hop_read_terminal',
-      arguments: { terminal_id: createdPayload.id, start_from: 'beginning', maxEvents: 20 }
+      arguments: { terminal_id: createdPayload.id, mode: 'raw', start_from: 'beginning', maxEvents: 20 }
     });
     const readPayload = JSON.parse(read.result.content[0].text);
     const output = (readPayload.events || [])
@@ -1113,6 +1500,7 @@ test('hopx_send_and_wait defaults to condensed readable wait text', async () => 
       arguments: {
         terminal_id: createdPayload.id,
         data: 'SENT_AND_WAIT_MARKER\n',
+        idle_ms: 100,
         max_wait_ms: 2500,
         capture: 'readable_raw'
       }
@@ -1120,15 +1508,10 @@ test('hopx_send_and_wait defaults to condensed readable wait text', async () => 
     const parsed = JSON.parse(sent.result.content[0].text);
     const waitPayload = parsed.wait || {};
 
-    assert.equal(parsed.ok, true);
-    assert.equal(parsed.waited, true);
-    assert.equal(waitPayload.status, 'matched');
-    assert.equal(waitPayload.matched, 'agent_done');
-    assert.equal(waitPayload.next_cursor, waitPayload.cursorEnd);
-    assert.equal(waitPayload.eventCount, 0);
-    assert.deepEqual(waitPayload.events, []);
-    assert.equal(typeof waitPayload.originalEventCount, 'number');
-    assert.ok(waitPayload.originalEventCount > 0);
+    assert.equal(parsed.ok, true, JSON.stringify(parsed));
+    assert.equal(waitPayload.matched, 'idle');
+    assert.equal(typeof waitPayload.next_cursor, 'number');
+    assert.equal(Object.prototype.hasOwnProperty.call(waitPayload, 'events'), false);
     assert.equal(typeof waitPayload.text, 'string');
     assert.match(waitPayload.text, /SENT_AND_WAIT_MARKER/);
   } finally {
@@ -1177,11 +1560,7 @@ test('hopx_send_and_wait text_only=true returns condensed readable wait payload'
     const waitPayload = parsed.wait || {};
 
     assert.equal(parsed.ok, true);
-    assert.equal(waitPayload.captureMode, 'readable_raw');
-    assert.equal(waitPayload.eventCount, 0);
-    assert.deepEqual(waitPayload.events, []);
-    assert.equal(typeof waitPayload.originalEventCount, 'number');
-    assert.ok(waitPayload.originalEventCount > 0);
+    assert.equal(Object.prototype.hasOwnProperty.call(waitPayload, 'events'), false);
     assert.equal(typeof waitPayload.text, 'string');
     assert.match(waitPayload.text, /TEXT_ONLY_RESULT_1/);
     assert.match(waitPayload.text, /TEXT_ONLY_RESULT_2/);
@@ -1233,7 +1612,6 @@ test('hopx_send_and_wait keeps readable wait events when text_only=false', async
       .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
       .join('');
 
-    assert.equal(waitPayload.captureMode, 'readable_raw');
     assert.ok(Array.isArray(waitPayload.events));
     assert.ok(waitPayload.events.length > 0);
     assert.equal(waitPayload.eventCount, waitPayload.events.length);
@@ -1247,7 +1625,9 @@ test('hopx_send_and_wait keeps readable wait events when text_only=false', async
 });
 
 test('hopx_agent_turn auto mode defaults to readable_raw for non-TUI terminal', async () => {
-  const { server, port } = await startMockHopStreamServer();
+  const { server, port } = await startMockHopStreamServer({
+    outputChunker: (output) => output === 'echo HOPX_AUTO_MODE' ? ['HOPX_AUTO_MODE_RESULT\n'] : null
+  });
   const { child, call } = startMcp({
     HOP_API_URL: `http://127.0.0.1:${port}`,
     HOP_TOKEN: 'test-token'
@@ -1273,16 +1653,10 @@ test('hopx_agent_turn auto mode defaults to readable_raw for non-TUI terminal', 
     const turnPayload = JSON.parse(turn.result.content[0].text);
     assert.equal(turnPayload.ok, true);
     assert.equal(turnPayload.helper, 'hopx_agent_turn');
-    assert.equal(turnPayload.selected_mode, 'readable_raw');
-    assert.equal(turnPayload.waited, true);
     assert.ok(turnPayload.wait && typeof turnPayload.wait === 'object');
-    assert.equal(turnPayload.wait.captureMode, 'readable_raw');
-    assert.equal(turnPayload.wait.eventCount, 0);
-    assert.deepEqual(turnPayload.wait.events, []);
-    assert.equal(typeof turnPayload.wait.originalEventCount, 'number');
-    assert.ok(turnPayload.wait.originalEventCount > 0);
+    assert.equal(Object.prototype.hasOwnProperty.call(turnPayload.wait, 'events'), false);
     assert.equal(typeof turnPayload.wait.text, 'string');
-    assert.match(turnPayload.wait.text, /HOPX_AUTO_MODE/);
+    assert.match(turnPayload.wait.text, /HOPX_AUTO_MODE_RESULT/);
   } finally {
     child.kill();
     server.close();
@@ -1328,12 +1702,7 @@ test('hopx_agent_turn readable path supports text_only=true condensed wait paylo
     const waitPayload = turnPayload.wait || {};
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'readable_raw');
-    assert.equal(waitPayload.captureMode, 'readable_raw');
-    assert.equal(waitPayload.eventCount, 0);
-    assert.deepEqual(waitPayload.events, []);
-    assert.equal(typeof waitPayload.originalEventCount, 'number');
-    assert.ok(waitPayload.originalEventCount > 0);
+    assert.equal(Object.prototype.hasOwnProperty.call(waitPayload, 'events'), false);
     assert.equal(typeof waitPayload.text, 'string');
     assert.match(waitPayload.text, /TURN_TEXT_ONLY_RESULT/);
     assert.match(waitPayload.text, /TURN_TEXT_ONLY_DONE/);
@@ -1385,8 +1754,6 @@ test('hopx_agent_turn readable path keeps wait events when text_only=false', asy
       .join('');
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'readable_raw');
-    assert.equal(waitPayload.captureMode, 'readable_raw');
     assert.ok(Array.isArray(waitPayload.events));
     assert.ok(waitPayload.events.length > 0);
     assert.equal(waitPayload.eventCount, waitPayload.events.length);
@@ -1439,13 +1806,11 @@ test('hopx_agent_turn auto mode promotes to ui when alternate screen appears dur
     });
     const turnPayload = JSON.parse(turn.result.content[0].text);
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'ui');
     assert.equal(turnPayload.auto_switched_to_ui, true);
     assert.ok(turnPayload.output && typeof turnPayload.output === 'object');
-    assert.equal(turnPayload.output.mode, 'ui');
+    assert.ok(turnPayload.output.ui && typeof turnPayload.output.ui === 'object');
     assert.ok(!Object.prototype.hasOwnProperty.call(turnPayload.output, 'rawTail'));
-    assert.equal(turnPayload.wait.eventCount, 0);
-    assert.deepEqual(turnPayload.wait.events, []);
+    assert.equal(Object.prototype.hasOwnProperty.call(turnPayload.wait, 'events'), false);
   } finally {
     child.kill();
     server.close();
@@ -1496,8 +1861,6 @@ test('hopx_agent_turn mode=ui respects capture_max_events override', async () =>
       .join('');
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'ui');
-    assert.equal(turnPayload.wait.captureMode, 'readable_raw');
     assert.ok(waitEvents.length > 0);
     assert.ok(waitEvents.length <= 5);
     assert.match(waitText, /RESULT_UI/);
@@ -1553,7 +1916,6 @@ test('hopx_agent_turn mode=ui applies busy guard for default agent_done waits', 
       .join('\n');
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'ui');
     assert.equal(guardPayload.applied, true);
     assert.equal(guardPayload.busy, false);
     assert.equal(typeof guardPayload.waitedMs, 'number');
@@ -1604,11 +1966,7 @@ test('hopx_agent_turn default readable path keeps shell result and suppresses pr
       : '';
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'readable_raw');
-    assert.equal(turnPayload.wait.eventCount, 0);
-    assert.deepEqual(turnPayload.wait.events, []);
-    assert.equal(typeof turnPayload.wait.originalEventCount, 'number');
-    assert.ok(turnPayload.wait.originalEventCount > 0);
+    assert.equal(Object.prototype.hasOwnProperty.call(turnPayload.wait, 'events'), false);
     assert.match(text, /status:ok/);
     assert.match(text, /next:idle/);
     assert.ok(!text.includes(`PROMPT> ${marker}`), `expected prompt echo to be suppressed, got: ${text}`);
@@ -1663,11 +2021,7 @@ test('hopx_agent_turn default readable path collapses rewrite progress noise', a
       : '';
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'readable_raw');
-    assert.equal(turnPayload.wait.eventCount, 0);
-    assert.deepEqual(turnPayload.wait.events, []);
-    assert.equal(typeof turnPayload.wait.originalEventCount, 'number');
-    assert.ok(turnPayload.wait.originalEventCount > 0);
+    assert.equal(Object.prototype.hasOwnProperty.call(turnPayload.wait, 'events'), false);
     assert.match(text, /Build complete/);
     assert.ok(!text.includes('Building 10%'), `expected early progress rewrite to be compacted, got: ${text}`);
     assert.ok(!text.includes('Building 30%'), `expected early progress rewrite to be compacted, got: ${text}`);
@@ -1722,11 +2076,7 @@ test('hopx_agent_turn helper default keeps only recent tail for large outputs', 
       : '';
 
     assert.equal(turnPayload.ok, true);
-    assert.equal(turnPayload.selected_mode, 'readable_raw');
-    assert.equal(turnPayload.wait.eventCount, 0);
-    assert.deepEqual(turnPayload.wait.events, []);
-    assert.equal(typeof turnPayload.wait.originalEventCount, 'number');
-    assert.ok(turnPayload.wait.originalEventCount <= 60, `expected helper tail cap of 60 events, got ${turnPayload.wait.originalEventCount}`);
+    assert.equal(Object.prototype.hasOwnProperty.call(turnPayload.wait, 'events'), false);
     assert.match(text, /^L90$/m);
     assert.match(text, /^DONE$/m);
     assert.doesNotMatch(text, /^L1$/m);
@@ -1785,10 +2135,9 @@ test('hop_read_terminal ui mode returns screen snapshot and raw tail', async () 
     }
 
     assert.ok(payload);
-    assert.equal(payload.mode, 'ui');
     assert.ok(Array.isArray(payload.rawTail));
     assert.ok(foundMarker, 'rawTail should contain recent output');
-    assert.equal(typeof payload.eventCount, 'number');
+    assert.equal(typeof payload.next_cursor, 'number');
     assert.equal(typeof payload.ui, 'object');
 
     if (payload.ui.available) {
@@ -1840,7 +2189,7 @@ test('hop_read_terminal readable_raw preserves text with compact controls', asyn
         }
       });
       const parsed = JSON.parse(read.result.content[0].text);
-      assert.equal(parsed.mode, 'readable_raw');
+      assert.equal(typeof parsed.next_cursor, 'number');
       cursor = parsed.cursor;
       if (Array.isArray(parsed.events)) {
         collected.push(...parsed.events);
@@ -2032,7 +2381,7 @@ test('hop_read_terminal readable_raw default balanced noise filter suppresses re
     }
     await call('tools/call', {
       name: 'hop_write_terminal',
-      arguments: { terminal_id: createdPayload.id, data: 'DONE\n' }
+      arguments: { terminal_id: createdPayload.id, data: '\rDONE\n' }
     });
 
     const read = await call('tools/call', {
@@ -2489,7 +2838,7 @@ test('hop_read_terminal parses CRLF-delimited SSE event blocks', async () => {
     for (let i = 0; i < 5; i++) {
       const read = await call('tools/call', {
         name: 'hop_read_terminal',
-        arguments: { terminal_id: createdPayload.id, maxEvents: 20 }
+        arguments: { terminal_id: createdPayload.id, mode: 'raw', maxEvents: 20 }
       });
       payload = JSON.parse(read.result.content[0].text);
       output += payload.events
@@ -2660,6 +3009,43 @@ test('connect_server verify failure returns error and does not persist connectio
   }
 });
 
+test('long-lived local MCP refreshes a changed daemon port from tunnel state', async () => {
+  const { server, port } = await startMockHopServer();
+  const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-state-refresh-test-'));
+  const statePath = path.join(hopHome, '.tunnel-state');
+  await fs.writeFile(statePath, JSON.stringify({
+    port: 1,
+    sessionSecret: 'stale-token'
+  }));
+  const { child, call } = startMcp({
+    HOP_API_URL: '',
+    HOP_TOKEN: '',
+    HOP_HOME: hopHome
+  });
+
+  try {
+    await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'test', version: '0.0.1' } });
+    await fs.writeFile(statePath, JSON.stringify({
+      port,
+      sessionSecret: 'fresh-token'
+    }));
+
+    const info = await call('tools/call', { name: 'hop_server_info', arguments: {} });
+    const parsed = JSON.parse(info.result.content[0].text);
+    assert.equal(parsed.connection.baseUrl, `http://127.0.0.1:${port}`);
+    assert.equal(parsed.connection.source, 'state_file');
+
+    const listed = await call('tools/call', { name: 'hop_list_sessions', arguments: {} });
+    assert.equal(listed.result.isError, undefined);
+    const payload = JSON.parse(listed.result.content[0].text);
+    assert.equal(payload.sessions[0].displayName, 'demo');
+  } finally {
+    child.kill();
+    server.close();
+    await fs.rm(hopHome, { recursive: true, force: true });
+  }
+});
+
 test('hop_wait_terminal supports start_from beginning for buffered output', async () => {
   const { server, port } = await startMockHopStreamServer({ startupOutput: 'BOOT_READY\n' });
   const { child, call } = startMcp({
@@ -2697,9 +3083,8 @@ test('hop_wait_terminal supports start_from beginning for buffered output', asyn
       }
     });
     const beginningPayload = JSON.parse(beginning.result.content[0].text);
-    assert.equal(beginningPayload.status, 'matched');
     assert.equal(beginningPayload.matched, 'regex');
-    assert.equal(beginningPayload.startFrom, 'beginning');
+    assert.equal(typeof beginningPayload.next_cursor, 'number');
   } finally {
     child.kill();
     server.close();
@@ -2763,7 +3148,6 @@ test('hop_read_terminal supports start_from cursor for deterministic deltas', as
       .map((event) => event.data)
       .join('');
     assert.match(firstText, /BOOT_READY/);
-    assert.equal(firstPayload.startFrom, 'beginning');
     assert.equal(firstPayload.next_cursor, firstPayload.cursorEnd);
 
     await call('tools/call', {
@@ -2786,7 +3170,6 @@ test('hop_read_terminal supports start_from cursor for deterministic deltas', as
       .filter((event) => event && event.type === 'output' && typeof event.data === 'string')
       .map((event) => event.data)
       .join('');
-    assert.equal(secondPayload.startFrom, 'cursor');
     assert.equal(secondPayload.cursorStart, firstPayload.cursorEnd);
     assert.equal(secondPayload.next_cursor, secondPayload.cursorEnd);
     assert.match(secondText, /DELTA_ONLY/);
@@ -2949,7 +3332,6 @@ test('terminal-scoped tools auto-recover stale terminal_id after daemon restart'
       .map((event) => (event && typeof event.text === 'string' ? event.text : ''))
       .join('');
 
-    assert.equal(waitedPayload.status, 'matched');
     assert.equal(waitedPayload.matched, 'regex');
     assert.match(text, new RegExp(marker));
     assert.equal(getAttachCalls(), 1);

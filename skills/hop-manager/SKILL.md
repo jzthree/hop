@@ -12,9 +12,12 @@ ledger, worktrees, and transcripts on disk are the source of truth.
 
 ## The loop
 
-1. **Spawn** workers with `hopx_spawn_agent(name, cwd, agent, isolation:"worktree")`
-   — one worker per task, always worktree isolation for code changes.
-2. **Dispatch** with `hopx_agent_turn(terminal_id, data, async:true,
+1. **Spawn and dispatch** workers with `hopx_spawn_agent`. Keep the blocking
+   default for one-off work; use `async:true` only while actively managing a
+   fleet and collecting every contracted result. Hop gives the initial task a
+   unique completion contract automatically. Use Hop's built-in agent presets
+   for standard agents; custom launch commands are an explicit exception.
+2. **Dispatch follow-up work** with `hopx_agent_turn(terminal_id, data, async:true,
    until_reply_regex:"DONE-<KEY>")`. Every task gets a unique completion
    phrase; instruct the worker to commit to its own fleet/ branch (never push,
    never merge) and to end its reply with the phrase.
@@ -26,9 +29,10 @@ ledger, worktrees, and transcripts on disk are the source of truth.
    dispatch async and end your turn — nothing wakes you, and the fleet finishes
    into the void with no one to notice. (Being woken on completion is a
    deliberately undesigned capability; until it exists, hold the turn.)
-4. **Verify before believing**: `reply_matched=true` plus a real branch diff
-   plus the task's own verification (run its tests). A worker saying done is
-   a claim, not a fact.
+4. **Verify before believing**: only `reply_matched=true` can represent worker
+   completion. Treat `contract_failed`, a missing verdict, or a ledger entry
+   without a satisfied contract as failure. Read the returned assistant reply
+   before reporting or using it, then verify the actual artifacts.
 5. **Escalate** with a bell when a decision belongs to the human: run
    `printf '\a'` in YOUR terminal and say plainly what you need. Do not sit
    on a blocked state silently; do not decide destructive/ambiguous things.

@@ -79,13 +79,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await sleep(10000);
     }
 
-    // 1. Salvage every room.
-    const rooms = (await hostGet('/rooms')).rooms.map((r) => r.id);
+    // 1. Salvage every room. This is also the PRE-RESTART census — reconciled
+    // against the restored set in step 4 so the run reports exactly which
+    // sessions survived (the core guarantee a graceful restart must make).
+    const preRooms = (await hostGet('/rooms')).rooms;
+    const rooms = preRooms.map((r) => r.id);
+    fs.writeFileSync(path.join(OUT, 'pre-rooms.json'), JSON.stringify(preRooms, null, 1), { mode: 0o600 });
     log(`salvaging ${rooms.length} rooms -> ${OUT}`);
+    const salvageStats = {};
     for (const id of rooms) {
       const res = await salvageRoom(oldHost.port, id);
+      salvageStats[id] = res;
       log(`  ${id}: ${res}`);
     }
+    const salvageMisses = rooms.filter((id) => !String(salvageStats[id] || '').startsWith('ok'));
+    if (salvageMisses.length) log(`salvage MISSES (no snapshot captured): ${salvageMisses.join(', ')}`);
 
     // 2. Graceful host stop (persists replay buffers), then wait for exit.
     log(`SIGTERM host ${oldHost.pid}`);
@@ -104,10 +112,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     log('running hop restore…');
     try { log(execSync('hop restore 2>&1 | tail -20', { encoding: 'utf8', env, timeout: 120000 })); } catch (e) { log('restore err: ' + e.message); }
 
-    // 4. Verify: new host pid + a probe session's env must be marker-free.
+    // 4. Verify: new host pid + reconcile the restored set + probe env.
     await sleep(3000);
     const newHost = hostState();
     log(`new host pid=${newHost.pid} port=${newHost.port} (old was ${oldHost.pid})`);
+
+    // Reconciliation: which pre-restart rooms came back? A room missing here
+    // is exactly the failure a graceful-restart feature must surface.
+    try {
+      const postRooms = (await hostGet('/rooms')).rooms.map((r) => r.id);
+      const restored = rooms.filter((id) => postRooms.includes(id));
+      const missing = rooms.filter((id) => !postRooms.includes(id));
+      const extra = postRooms.filter((id) => !rooms.includes(id) && id !== 'EnvProbe');
+      log(`RECONCILE: ${restored.length}/${rooms.length} restored`);
+      if (missing.length) log(`RECONCILE MISSING (${missing.length}): ${missing.join(', ')}`);
+      if (extra.length) log(`RECONCILE UNEXPECTED-NEW (${extra.length}): ${extra.join(', ')}`);
+      fs.writeFileSync(path.join(OUT, 'reconcile.json'),
+        JSON.stringify({ preCount: rooms.length, restored, missing, extra, salvageMisses }, null, 1), { mode: 0o600 });
+    } catch (e) { log('reconcile err: ' + e.message); }
     const ds = daemonState();
     const api = (method, p, body) => new Promise((resolve) => {
       const data = body ? JSON.stringify(body) : null;

@@ -14,6 +14,7 @@ let hopHome;
 let binDir;
 let cloudflaredLog;
 let daemonPid;
+let daemonEnv;
 let state;
 
 async function writeFakeCloudflared(binPath, logPath) {
@@ -155,6 +156,40 @@ async function waitForSseEvent(port, secret, terminalId, predicate, timeoutMs = 
   });
 }
 
+async function launchDaemon(previousState = null) {
+  const output = [];
+  let exitCode = null;
+  const child = spawn(process.execPath, [HOP_BIN, '--daemon'], {
+    env: daemonEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true
+  });
+  child.stdout.on('data', (chunk) => output.push(chunk.toString('utf8')));
+  child.stderr.on('data', (chunk) => output.push(chunk.toString('utf8')));
+  child.once('exit', (code) => { exitCode = code; });
+  child.unref();
+  daemonPid = child.pid;
+
+  const start = Date.now();
+  while (Date.now() - start < 20000) {
+    try {
+      const next = await readState(hopHome);
+      if (next && next.url && (!previousState || next.startTime !== previousState.startTime)) {
+        state = next;
+        daemonPid = next.pid;
+        return;
+      }
+    } catch (e) {
+      // daemon has not written fresh state yet
+    }
+    if (exitCode !== null) {
+      throw new Error(`Hop daemon exited with code ${exitCode}:\n${output.join('')}`);
+    }
+    await delay(200);
+  }
+  throw new Error(`Timed out waiting for restarted hop state:\n${output.join('')}`);
+}
+
 async function startDaemon() {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-api-test-'));
   hopHome = path.join(tempDir, 'hop_home');
@@ -164,27 +199,56 @@ async function startDaemon() {
   await fs.mkdir(binDir, { recursive: true });
   await writeFakeCloudflared(path.join(binDir, 'cloudflared'), cloudflaredLog);
 
-  const env = {
+  daemonEnv = {
     ...process.env,
     HOP_HOME: hopHome,
+    HOP_NO_TUNNEL: '1',
     PATH: `${binDir}:${process.env.PATH || ''}`,
     CLOUDFLARED_LOG: cloudflaredLog
   };
 
-  const child = spawn(process.execPath, [HOP_BIN, '--daemon'], {
-    env,
-    stdio: 'ignore',
-    detached: true
-  });
-  child.unref();
-
-  state = await waitForState(hopHome);
-  daemonPid = state.pid;
+  await launchDaemon();
 }
 
-async function stopDaemon() {
+async function stopDaemon(waitForExit = false) {
   if (!daemonPid) return;
-  try { process.kill(daemonPid, 'SIGTERM'); } catch (e) {}
+  const stoppedPid = daemonPid;
+  try { process.kill(stoppedPid, 'SIGTERM'); } catch (e) {}
+  if (waitForExit) {
+    const start = Date.now();
+    while (Date.now() - start < 5000) {
+      try {
+        process.kill(stoppedPid, 0);
+      } catch (e) {
+        daemonPid = null;
+        return;
+      }
+      await delay(100);
+    }
+    throw new Error(`Timed out waiting for hop daemon ${stoppedPid} to stop`);
+  }
+}
+
+async function stopHayHost() {
+  let pid = null;
+  try {
+    const raw = await fs.readFile(path.join(hopHome, '.hay-host-state'), 'utf8');
+    pid = Number(JSON.parse(raw)?.pid);
+  } catch (e) {
+    return;
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try { process.kill(pid, 'SIGTERM'); } catch (e) { return; }
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      return;
+    }
+    await delay(100);
+  }
+  try { process.kill(pid, 'SIGKILL'); } catch (e) {}
 }
 
 const agentHeaders = { 'X-Hop-Actor': 'agent' };
@@ -198,7 +262,9 @@ before(async () => {
 });
 
 after(async () => {
-  await stopDaemon();
+  await stopDaemon(true);
+  await stopHayHost();
+  if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
 });
 
 test('agent terminal create + stream', async () => {
@@ -294,5 +360,42 @@ test('agent cannot list or stream user terminal when not permitted', async () =>
   assert.equal(streamAsAgent.status, 403);
 
   const cleanup = await requestJson(state.port, state.sessionSecret, 'DELETE', `/api/terminals/${terminalId}?killSession=true`, null, userHeaders);
+  assert.equal(cleanup.status, 200);
+});
+
+test('agent session origin survives a daemon restart', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'agent-restart-origin',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+
+  const previousState = state;
+  await stopDaemon(true);
+  await launchDaemon(previousState);
+
+  const sessions = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const restored = sessions.data.sessions.find(s => s.displayName === 'agent-restart-origin');
+  assert.ok(restored);
+  assert.equal(restored.createdBy, 'agent');
+  assert.equal(restored.agentPermitted, true);
+
+  const attached = await requestJson(
+    state.port,
+    state.sessionSecret,
+    'POST',
+    '/api/terminals/attach',
+    { name: 'agent-restart-origin' },
+    agentHeaders
+  );
+  assert.equal(attached.status, 200);
+  const cleanup = await requestJson(
+    state.port,
+    state.sessionSecret,
+    'DELETE',
+    `/api/terminals/${attached.data.id}?killSession=true`,
+    null,
+    agentHeaders
+  );
   assert.equal(cleanup.status, 200);
 });

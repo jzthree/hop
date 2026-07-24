@@ -42,6 +42,20 @@ hopa ledger                               # cross-agent task ledger
 (Stop-hook signal when installed, quiet-screen heuristic otherwise) — prefer
 them over polling `term read` in a loop.
 
+`hopa spawn --task` waits for its automatic completion contract. Do not use
+async waits or `wait_id` continuations through `hopa`: each CLI invocation is a
+new process. Use a long-lived Hop MCP connection for async fleets. A worker task
+succeeds only when its completion contract is satisfied and its result has been
+collected.
+
+The built-in Claude worker is autonomous by default so delegated work cannot
+park on an approval prompt. Use `--permission-mode manual` (or another Claude
+permission mode) when a restricted worker is intentional.
+
+Use the built-in agent presets for standard workers. Treat a custom launch
+command as an explicit exception that must handle its own authentication and
+startup gates.
+
 ## Permissions
 
 User-owned sessions are blocked by default (`agentPermitted: false`). Do not
@@ -55,7 +69,7 @@ Terminals you create with `hopa term new` / `hopa spawn` are yours.
 - Output is JSON on stdout; debug goes to stderr only with `HOP_DEBUG=1`.
 - Flags map to tool args in any spelling: `--until-regex`, `--uiMaxLines`.
 - Long waits: pass `--max-wait-ms`, and `--cli-timeout <ms>` as a hard stop.
-- Each `hopa` call is its own process: async wait jobs (`term wait --async` →
-  `term poll`) do not survive across calls — use blocking waits or
-  `hopa wait-any` with terminal names instead. Read cursors are best-effort
-  across calls; prefer `--start-from latest|beginning`.
+- Each `hopa` call is its own process, so async wait jobs and `wait_id`
+  continuations are rejected. Use blocking waits or a long-lived Hop MCP
+  connection. Read cursors are best-effort across calls; prefer
+  `--start-from latest|beginning`.

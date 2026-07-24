@@ -71,6 +71,23 @@ test('cursor-anchored composer reports typed text, not the status line below', a
   assert.equal(composer.text, 'hello world');
 });
 
+test('cursor-anchored composer treats unstyled text starting at the cursor as a ghost suggestion', async (t) => {
+  const screen = CLAUDE_SCREEN.slice();
+  screen[2] = '❯ git status';
+  // Claude leaves the cursor immediately after `❯ ` while painting the
+  // suggestion to its right. Snapshot replay can lose the suggestion's dim
+  // style, so cursor position is the durable discriminator.
+  const { manager, reason } = await makeManager(screen, 3, 3);
+  if (!manager) return t.skip(reason);
+
+  const composer = manager.getComposerState('t1');
+  assert.equal(composer.found, true);
+  assert.equal(composer.strategy, 'cursor-prompt');
+  assert.equal(composer.isEmpty, true);
+  assert.equal(composer.text, '');
+  assert.equal(composer.ghost, 'git status');
+});
+
 test('bottom-up fallback skips the bypass-permissions line when the cursor is elsewhere', async (t) => {
   // Cursor parked on the transcript row (no prompt glyph there), so the
   // cursor-prompt strategy cannot fire and the last-resort bottom-up scan runs.

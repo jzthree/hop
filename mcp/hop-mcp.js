@@ -186,6 +186,8 @@ const DEFAULT_HOPX_VERIFY_SUBMIT_RETRIES = 6;
 const DEFAULT_HOPX_VERIFY_SUBMIT_DELAY_MS = 350;
 const DEFAULT_HOPX_COMPOSER_LOAD_TIMEOUT_MS = 5000;
 const DEFAULT_HOPX_COMPOSER_LOAD_POLL_MS = 100;
+const DEFAULT_AGENT_TRANSCRIPT_SETTLE_MS = 5000;
+const DEFAULT_AGENT_TRANSCRIPT_SETTLE_POLL_MS = 100;
 // Box-drawing characters that frame a TUI input box (rounded, square, and heavy
 // variants), plus the column separators. Used to locate the composer and to skip
 // border cells when scraping its contents.
@@ -923,10 +925,12 @@ function resolveDefaultConnection() {
   if (process.env.HOP_API_URL) {
     return {
       baseUrl: process.env.HOP_API_URL,
-      token: process.env.HOP_TOKEN || null
+      token: process.env.HOP_TOKEN || null,
+      source: 'environment'
     };
   }
-  return loadStateFromFile();
+  const state = loadStateFromFile();
+  return state ? { ...state, source: 'state_file' } : null;
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -2365,7 +2369,7 @@ class TerminalStreamManager {
       }
     }
 
-    const readBody = (rowStart, rowEnd) => {
+    const readBody = (rowStart, rowEnd, cursorGhost = null) => {
       let real = '';
       let ghost = '';
       let strippedPrompt = false;
@@ -2379,6 +2383,19 @@ class TerminalStreamManager {
           if (!c) continue;
           if (c.getWidth() === 0) continue; // trailing half of a wide glyph
           const ch = c.getChars();
+          // Claude suggestions are not always emitted with SGR dim styling,
+          // especially after a terminal snapshot is replayed. Text beginning
+          // at the cursor is still a ghost suggestion: typed input lies before
+          // the cursor (or on both sides when editing in the middle).
+          if (
+            ch
+            && cursorGhost
+            && row === cursorGhost.row
+            && x >= cursorGhost.column
+          ) {
+            ghost += ch;
+            continue;
+          }
           if (!ch) {
             if (!c.isDim()) rowReal += ' ';
             continue;
@@ -2398,7 +2415,11 @@ class TerminalStreamManager {
     };
 
     if (boxTop >= 0 && boxBottom > boxTop) {
-      const body = readBody(boxTop + 1, boxBottom - 1);
+      const cursorRow = viewportStart + (typeof buffer.cursorY === 'number' ? buffer.cursorY : 0);
+      const body = readBody(boxTop + 1, boxBottom - 1, {
+        row: cursorRow,
+        column: typeof buffer.cursorX === 'number' ? buffer.cursorX : cols
+      });
       return {
         available: true,
         found: true,
@@ -2421,7 +2442,10 @@ class TerminalStreamManager {
     const cursorRow = viewportStart + (typeof buffer.cursorY === 'number' ? buffer.cursorY : 0);
     if (cursorRow >= viewportTop && cursorRow <= viewportBottom
         && COMPOSER_PROMPT_CHARS.has(firstChar(cursorRow))) {
-      const body = readBody(cursorRow, cursorRow);
+      const body = readBody(cursorRow, cursorRow, {
+        row: cursorRow,
+        column: typeof buffer.cursorX === 'number' ? buffer.cursorX : cols
+      });
       return {
         available: true,
         found: true,
@@ -2896,6 +2920,7 @@ class HopMCPServer {
     this.startedAt = new Date().toISOString();
     this.baseUrl = null;
     this.token = null;
+    this.connectionSource = null;
     this.actor = process.env.HOP_ACTOR || DEFAULT_ACTOR;
     this.streamManager = new TerminalStreamManager();
     this.waitJobs = new Map();
@@ -2906,6 +2931,7 @@ class HopMCPServer {
     if (resolved) {
       this.baseUrl = normalizeBaseUrl(resolved.baseUrl);
       this.token = resolved.token || process.env.HOP_TOKEN || null;
+      this.connectionSource = resolved.source || null;
     }
 
     log(`[Hop MCP] Agent ID: ${this.agentId.slice(0, 8)}`);
@@ -2929,7 +2955,8 @@ class HopMCPServer {
       connection: {
         configured: !!this.baseUrl,
         baseUrl: this.baseUrl || null,
-        hasToken: !!this.token
+        hasToken: !!this.token,
+        source: this.connectionSource
       },
       readTerminal: {
         modes: READ_TERMINAL_MODES,
@@ -3009,11 +3036,13 @@ class HopMCPServer {
   }
 
   ensureConnection() {
+    this.refreshStateFileConnection();
     if (!this.baseUrl) {
       const resolved = resolveDefaultConnection();
       if (resolved) {
         this.baseUrl = normalizeBaseUrl(resolved.baseUrl);
         this.token = resolved.token || process.env.HOP_TOKEN || null;
+        this.connectionSource = resolved.source || null;
       }
     }
     if (!this.baseUrl) {
@@ -3637,11 +3666,13 @@ class HopMCPServer {
       }
       this.baseUrl = baseUrl;
       this.token = token;
+      this.connectionSource = 'explicit';
       this.clearTransientTerminalState();
       return { content: [{ type: 'text', text: `Connected to ${this.baseUrl}` }] };
     }
 
     if (name === 'hop_server_info') {
+      this.refreshStateFileConnection();
       return this.wrapJson(this.getServerInfoPayload());
     }
 
@@ -3885,6 +3916,26 @@ class HopMCPServer {
     this.terminalAliases.clear();
   }
 
+  refreshStateFileConnection() {
+    if (this.connectionSource !== 'state_file') return false;
+    const resolved = loadStateFromFile();
+    if (!resolved) return false;
+    const nextBaseUrl = normalizeBaseUrl(resolved.baseUrl);
+    if (!nextBaseUrl) return false;
+    const nextToken = resolved.token || process.env.HOP_TOKEN || null;
+    if (nextBaseUrl === this.baseUrl && nextToken === this.token) return false;
+
+    const previousBaseUrl = this.baseUrl;
+    this.baseUrl = nextBaseUrl;
+    this.token = nextToken;
+    for (const terminalId of Array.from(this.streamManager.streams.keys())) {
+      this.streamManager.remove(terminalId);
+    }
+    this.terminalAliases.clear();
+    log(`[Hop MCP] Refreshed local Hop API: ${previousBaseUrl || '<unconfigured>'} -> ${this.baseUrl}`);
+    return true;
+  }
+
   resolveTerminalAlias(terminalId) {
     if (typeof terminalId !== 'string' || terminalId.length === 0) return terminalId;
     let current = terminalId;
@@ -4007,6 +4058,26 @@ class HopMCPServer {
     return recoveredId;
   }
 
+  async hydrateTerminalHandle(terminalId) {
+    if (typeof terminalId !== 'string' || terminalId.length === 0) return null;
+    const resolvedId = this.resolveTerminalAlias(terminalId);
+    const existing = this.getTerminalHandle(resolvedId);
+    if (existing) return existing;
+
+    const listed = await this.callApi('GET', '/api/terminals');
+    if (this.isApiFailurePayload(listed) || !Array.isArray(listed?.terminals)) {
+      return null;
+    }
+    const terminal = listed.terminals.find((entry) => (
+      entry
+      && typeof entry.id === 'string'
+      && (entry.id === resolvedId || entry.id === terminalId)
+    ));
+    if (!terminal) return null;
+    this.rememberTerminalHandleFromPayload(terminal);
+    return this.getTerminalHandle(resolvedId);
+  }
+
   async callTerminalEndpointWithRecovery(requestedTerminalId, method, endpointBuilder, body, options = {}) {
     let terminalId = this.resolveTerminalAlias(requestedTerminalId);
     let endpoint = endpointBuilder(terminalId);
@@ -4031,6 +4102,7 @@ class HopMCPServer {
     const cursor = this.streamManager.getLatestCursor(terminalId);
     const probe = this.streamManager.readEvents(terminalId, cursor, 0, 1);
     if (!this.isTerminalNotFoundStreamError(probe.error)) {
+      await this.hydrateTerminalHandle(terminalId);
       return terminalId;
     }
 
@@ -4070,7 +4142,16 @@ class HopMCPServer {
   }
 
   async callApi(method, endpoint, body) {
-    return this.callApiWithConnection(method, this.baseUrl, this.token, endpoint, body);
+    this.refreshStateFileConnection();
+    let payload = await this.callApiWithConnection(method, this.baseUrl, this.token, endpoint, body);
+    const connectionFailed = payload
+      && payload.ok === false
+      && payload.status === null
+      && /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|timed out/i.test(String(payload.error || ''));
+    if (connectionFailed && this.refreshStateFileConnection()) {
+      payload = await this.callApiWithConnection(method, this.baseUrl, this.token, endpoint, body);
+    }
+    return payload;
   }
 
   isApiFailurePayload(payload) {
@@ -4238,17 +4319,40 @@ class HopMCPServer {
           && typeof job.metadata.until_reply_regex === 'string'
         ) {
           let transcriptReply = null;
-          try {
-            const handle = this.getTerminalHandle(job.terminalId);
-            const internalName = handle ? (handle.internalName || handle.sessionName || null) : null;
-            transcriptReply = await this.readLastAssistantReplyText(
-              internalName,
-              job.metadata._sent_data,
-              job.createdAt
-            );
-          } catch {
-            /* fall back to wait text */
-          }
+          const handle = this.getTerminalHandle(job.terminalId);
+          const internalName = handle ? (handle.internalName || handle.sessionName || null) : null;
+          const transcriptSettleMs = Number.isFinite(job.metadata._transcript_settle_ms)
+            ? Math.max(0, Math.floor(job.metadata._transcript_settle_ms))
+            : 0;
+          const transcriptDeadline = Date.now() + transcriptSettleMs;
+          do {
+            try {
+              const candidate = await this.readLastAssistantReplyText(
+                internalName,
+                job.metadata._sent_data,
+                job.createdAt
+              );
+              if (typeof candidate === 'string' && candidate.trim()) {
+                const candidateVerdict = evaluateReplyRegex(
+                  job.metadata.until_reply_regex,
+                  null,
+                  candidate,
+                  job.metadata._sent_data
+                );
+                if (
+                  !isAutomaticCompletionContract(job.metadata.until_reply_regex)
+                  || candidateVerdict.reply_matched
+                ) {
+                  transcriptReply = candidate;
+                  break;
+                }
+              }
+            } catch {
+              /* retry within the bounded transcript settle window */
+            }
+            if (Date.now() >= transcriptDeadline) break;
+            await new Promise((resolve) => setTimeout(resolve, DEFAULT_AGENT_TRANSCRIPT_SETTLE_POLL_MS));
+          } while (true);
           if (typeof transcriptReply === 'string' && transcriptReply.trim()) {
             job.assistantReply = transcriptReply;
           }
@@ -6069,17 +6173,23 @@ class HopMCPServer {
         terminal_id: terminalId,
         data: withAgentSessionMarker(initialTask),
         async: true,
+        until_regex: automaticContract ? automaticContract.regex : undefined,
+        match_target: automaticContract ? 'screen' : undefined,
         until_reply_regex: completionRegex,
+        transcript_settle_ms: preset === 'claude' || preset === 'codex'
+          ? DEFAULT_AGENT_TRANSCRIPT_SETTLE_MS
+          : 0,
         max_wait_ms: args.max_wait_ms
       });
-      if (!dispatch.isError && dispatch.content && dispatch.content[0] && typeof dispatch.content[0].text === 'string') {
+      let dispatchPayload = null;
+      if (dispatch.content && dispatch.content[0] && typeof dispatch.content[0].text === 'string') {
         try {
-          const parsed = JSON.parse(dispatch.content[0].text);
-          if (parsed && typeof parsed.wait_id === 'string') {
-            result.wait_id = parsed.wait_id;
+          dispatchPayload = JSON.parse(dispatch.content[0].text);
+          if (!dispatch.isError && dispatchPayload && typeof dispatchPayload.wait_id === 'string') {
+            result.wait_id = dispatchPayload.wait_id;
             result.dispatched = true;
-            if (parsed.pre_submit) result.pre_submit = parsed.pre_submit;
-            if (parsed.submit) result.submit = parsed.submit;
+            if (dispatchPayload.pre_submit) result.pre_submit = dispatchPayload.pre_submit;
+            if (dispatchPayload.submit) result.submit = dispatchPayload.submit;
           }
         } catch {
           /* leave dispatch details out; the task may still be running */
@@ -6088,7 +6198,10 @@ class HopMCPServer {
       if (!result.wait_id) {
         result.ok = false;
         result.dispatched = false;
-        result.hint = 'initial_task dispatch did not return a wait_id — check the terminal with hopx_agent_turn(control="wait").';
+        result.dispatch_error = dispatchPayload;
+        result.hint = dispatchPayload?.error
+          ? `Initial task dispatch failed: ${dispatchPayload.error}`
+          : 'initial_task dispatch did not return a wait_id — check the terminal with hopx_agent_turn(control="wait").';
       } else if (args.async === true) {
         result.task_completed = false;
         result.task_status = 'pending';
@@ -6109,6 +6222,15 @@ class HopMCPServer {
             completionPayload = { ok: false, status: 'error', error: 'Could not parse initial-task result.' };
           }
           result.initial_task_result = completionPayload;
+          if (typeof completionPayload.assistant_reply === 'string') {
+            result.assistant_reply = completionPayload.assistant_reply;
+          }
+          if (typeof completionPayload.reply_matched === 'boolean') {
+            result.reply_matched = completionPayload.reply_matched;
+          }
+          if (typeof completionPayload.reply_match === 'string') {
+            result.reply_match = completionPayload.reply_match;
+          }
           result.ok = completionPayload.ok === true;
           result.task_completed = result.ok;
           result.task_status = completionPayload.status || (result.ok ? 'matched' : 'error');
@@ -6464,6 +6586,9 @@ class HopMCPServer {
             rawTailMaxEvents: args.rawTailMaxEvents,
             includeUiRawTail,
             _sent_data: data || null,
+            ...(Number.isFinite(args.transcript_settle_ms)
+              ? { _transcript_settle_ms: Math.max(0, Math.floor(args.transcript_settle_ms)) }
+              : {}),
             ...(typeof args.until_reply_regex === 'string' ? { until_reply_regex: args.until_reply_regex } : {})
           });
           return this.wrapJson({
@@ -6589,6 +6714,9 @@ class HopMCPServer {
         selected_mode: selectedMode,
         text_only: readableTextOnly,
         _sent_data: data || null,
+        ...(Number.isFinite(args.transcript_settle_ms)
+          ? { _transcript_settle_ms: Math.max(0, Math.floor(args.transcript_settle_ms)) }
+          : {}),
         ...(typeof args.until_reply_regex === 'string' ? { until_reply_regex: args.until_reply_regex } : {})
       });
       return this.wrapJson({

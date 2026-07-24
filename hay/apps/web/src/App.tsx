@@ -667,6 +667,9 @@ const App = () => {
   const paneDragRef = useRef<{ id: string; dir: "row" | "col"; rect: DOMRect } | null>(null);
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
+  // Monotonic fetch id so a stale in-flight /api/sessions response can't
+  // overwrite a newer one (rename/kill refresh vs the periodic poll).
+  const fetchSeqRef = useRef(0);
   // Bell-notification plumbing: the terminal effect that registers onBell runs
   // once per session, so it reads the live toggle/label through refs. The seq
   // map dedupes so each session notifies at most once per bellSeq value.
@@ -2229,6 +2232,11 @@ const App = () => {
     if (showLoading) {
       setLoadingSessions(true);
     }
+    // Sequence guard: the periodic 5s poll and an action-triggered refresh
+    // (rename/kill/create) can be in flight together. Without this, a slow
+    // stale poll landing AFTER the rename refetch overwrote the new name with
+    // the old one — the rename "didn't display" until the next poll ~5s later.
+    const seq = ++fetchSeqRef.current;
     try {
       const res = await fetch("/api/sessions");
       const data = await res.json();
@@ -2311,6 +2319,9 @@ const App = () => {
         saveSeenMarkers(markers);
       }
 
+      // Drop a response superseded by a newer fetch started while this was
+      // in flight (see the sequence-guard note above).
+      if (seq !== fetchSeqRef.current) return;
       setSessions(list);
       setSessionsError(false);
       sessionListLoadedRef.current = true;

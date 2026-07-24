@@ -2962,6 +2962,10 @@ button.primary {
   white-space: nowrap;
 }
 
+.switcher-focus-label.down {
+  color: var(--warn);
+}
+
 .switcher-focus-bar button {
   padding: 0 4px;
   border: none;

@@ -116,6 +116,8 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
   // contains old-size bytes and looks mangled for a beat. Matching font
   // metrics (below) make the veil-to-terminal swap nearly invisible.
   const [veiled, setVeiled] = useState(true);
+  // Connection state surfaced in the focus bar: a dead socket must LOOK dead.
+  const [conn, setConn] = useState<"live" | "down">("live");
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
@@ -159,9 +161,20 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
     // 64KB replay: enough tail for a wall tile, and the snapshot parses ~4x
     // faster than the full-scrollback replay — focus latency is dominated by
     // connect + snapshot + repaint.
-    const ws = new WebSocket(
-      `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=65536&cols=${term.cols}&rows=${term.rows}`
-    );
+    const wsUrl = () =>
+      `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=65536&cols=${term.cols}&rows=${term.rows}`;
+    // The socket is a mutable slot with a real lifecycle. An idle tile's
+    // connection dies silently (laptop sleep, tunnel idle timeout); without
+    // onclose handling the tile kept rendering its last frame, kept blinking
+    // its cursor, and swallowed every keystroke at the readyState guard — a
+    // zombie only unfocus/refocus could revive. Mirror the main terminal:
+    // onclose → backoff reconnect, wake/refocus → immediate reconnect, and
+    // input typed while down is briefly buffered, never silently dropped.
+    let ws: WebSocket | null = null;
+    let disposed = false;
+    let reconnectTimer = 0;
+    let reconnectAttempt = 0;
+    const pendingInput: Array<{ data: string; at: number }> = [];
     // Claim lifecycle. The server sends the session's CURRENT active_size on
     // attach, which races our claim — resizing the local grid to it produced
     // a zoomed-out old-size view until the claim round-tripped (two reflows).
@@ -198,7 +211,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
     // `deliberate` marks a human click: the server (new hosts) lets it win
     // the election outright; old hosts strip the flag and apply attach rules.
     const sendClaim = (claim?: "attach", deliberate = false) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const dims = box.clientWidth > 0 && box.clientHeight > 0 ? fitAddon.proposeDimensions() : undefined;
       if (!dims?.cols || !dims?.rows) return;
       claimed = { cols: dims.cols, rows: dims.rows };
@@ -224,34 +237,96 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
     unveilSoon(2500);
     let sawSnapshot = false;
     let sawRepaint = false;
-    // The mount IS the user's click on this tile — a deliberate claim.
-    ws.onopen = () => sendClaim("attach", true);
-    ws.onmessage = (ev) => {
-      try {
-        const m = JSON.parse(String(ev.data));
-        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); sawSnapshot = true; unveilSoon(600); }
-        else if (m.type === "output") {
-          term.write(m.data);
-          if (sawSnapshot && !sawRepaint && !claimPending) { sawRepaint = true; unveilSoon(120); }
-        }
-        else if (m.type === "active_size") {
-          if (claimPending) {
-            if (m.cols === claimed.cols && m.rows === claimed.rows) {
-              // Claim confirmed — apply and let the repaint land on it.
-              claimPending = false;
-              window.clearTimeout(claimTimer);
-              applyClaimed();
-            } else {
-              remoteEcho = { cols: m.cols, rows: m.rows };
-            }
-          } else if (m.cols !== term.cols || m.rows !== term.rows) {
-            // Another client won the election — observe at its size, scaled.
-            term.resize(m.cols, m.rows);
-            setTimeout(rescale, 30);
-          }
-        }
-      } catch { /* non-JSON frame */ }
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      setConn("down");
+      window.clearTimeout(reconnectTimer);
+      const delay = Math.min(1000 * 2 ** reconnectAttempt, 15000);
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(() => connect(), delay);
     };
+    const connect = () => {
+      if (disposed) return;
+      window.clearTimeout(reconnectTimer);
+      if (ws) { try { ws.close(); } catch { /* replacing */ } }
+      claimPending = false;
+      remoteEcho = null;
+      const sock = new WebSocket(wsUrl());
+      ws = sock;
+      // The mount IS the user's click on this tile — a deliberate claim.
+      // (On reconnect the fresh snapshot repaints the grid, so no re-veil.)
+      sock.onopen = () => {
+        if (disposed || ws !== sock) return;
+        reconnectAttempt = 0;
+        setConn("live");
+        sendClaim("attach", true);
+        // Replay keystrokes typed while down — fresh ones only: firing stale
+        // input into a shell long after it was typed is worse than losing it
+        // (the user has usually retyped by then).
+        const cutoff = Date.now() - 15000;
+        for (const p of pendingInput) {
+          if (p.at >= cutoff) sock.send(JSON.stringify({ type: "input", data: p.data }));
+        }
+        pendingInput.length = 0;
+      };
+      sock.onmessage = (ev) => {
+        try {
+          const m = JSON.parse(String(ev.data));
+          if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); sawSnapshot = true; unveilSoon(600); }
+          else if (m.type === "output") {
+            term.write(m.data);
+            if (sawSnapshot && !sawRepaint && !claimPending) { sawRepaint = true; unveilSoon(120); }
+          }
+          else if (m.type === "active_size") {
+            if (claimPending) {
+              if (m.cols === claimed.cols && m.rows === claimed.rows) {
+                // Claim confirmed — apply and let the repaint land on it.
+                claimPending = false;
+                window.clearTimeout(claimTimer);
+                applyClaimed();
+              } else {
+                remoteEcho = { cols: m.cols, rows: m.rows };
+              }
+            } else if (m.cols !== term.cols || m.rows !== term.rows) {
+              // Another client won the election — observe at its size, scaled.
+              term.resize(m.cols, m.rows);
+              setTimeout(rescale, 30);
+            }
+          }
+        } catch { /* non-JSON frame */ }
+      };
+      sock.onclose = () => {
+        if (disposed || ws !== sock) return;
+        scheduleReconnect();
+      };
+      sock.onerror = () => {
+        try { sock.close(); } catch { /* already closing */ }
+      };
+    };
+    connect();
+    // Wake/refocus recovery. A socket that died while the tab was hidden
+    // reconnects the moment the user returns; after a LONG absence (system
+    // sleep) even a socket claiming OPEN may be half-dead — the OS hasn't
+    // noticed the peer vanish, so sends black-hole. Reconnect proactively;
+    // the snapshot repaint makes it visually free.
+    let hiddenAt = 0;
+    const onVisibility = () => {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      const away = hiddenAt ? Date.now() - hiddenAt : 0;
+      hiddenAt = 0;
+      if (!ws || ws.readyState !== WebSocket.OPEN || away > 60000) {
+        reconnectAttempt = 0;
+        connect();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    const onWindowFocus = () => {
+      if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+        reconnectAttempt = 0;
+        connect();
+      }
+    };
+    window.addEventListener("focus", onWindowFocus);
     // Two reserved chords — everything else (Enter, Escape, arrows…) belongs
     // to the remote app: ⌘⏎/Ctrl⏎ opens the session full screen, ⌘./Ctrl+.
     // releases focus back to the wall.
@@ -268,9 +343,21 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
     });
     let lastTypeClaimAt = 0;
     const sub = term.onData((data) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ type: "input", data }));
       noteInteraction();
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        // Never silently eat typing: buffer it (replayed on reconnect if
+        // still fresh), surface the state, and kick a reconnect if none is
+        // in flight.
+        pendingInput.push({ data, at: Date.now() });
+        if (pendingInput.length > 200) pendingInput.shift();
+        setConn("down");
+        if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+          reconnectAttempt = 0;
+          connect();
+        }
+        return;
+      }
+      ws.send(JSON.stringify({ type: "input", data }));
       // Typing in the tile reasserts its size (typing recency wins the
       // election). One claim per burst, not per keystroke.
       const now = Date.now();
@@ -302,28 +389,34 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
     };
     box.addEventListener("pointerdown", onBoxPointerDown);
     const retryTimer = window.setInterval(() => {
-      if (!claimPending && !ownsSize() && ws.readyState === WebSocket.OPEN
+      if (!claimPending && !ownsSize() && ws && ws.readyState === WebSocket.OPEN
           && Date.now() - interactedAt < 10_000) {
         sendClaim("attach");
       }
     }, 1000);
     const focusTimer = window.setTimeout(() => { term.focus(); rescale(); }, 50);
     return () => {
+      disposed = true;
       window.clearTimeout(focusTimer);
       window.clearTimeout(unveilTimer);
       window.clearTimeout(claimTimer);
+      window.clearTimeout(reconnectTimer);
       window.clearInterval(retryTimer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onWindowFocus);
       box.removeEventListener("pointerdown", onBoxPointerDown);
       ro.disconnect();
       sub.dispose();
-      try { ws.close(); } catch { /* closing */ }
+      try { ws?.close(); } catch { /* closing */ }
       term.dispose();
     };
   }, [wsBase, room, userName, theme, fontSize]);
   return (
     <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
       <div className="switcher-focus-bar">
-        <span className="switcher-focus-label">interactive — ⌘⏎ full screen · ⌘. release</span>
+        <span className={`switcher-focus-label${conn === "down" ? " down" : ""}`}>
+          {conn === "down" ? "connection lost — reconnecting…" : "interactive — ⌘⏎ full screen · ⌘. release"}
+        </span>
         <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
         <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
       </div>

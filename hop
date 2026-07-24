@@ -3747,23 +3747,30 @@ function claudeConfigRootsForRestore(recConfigDir) {
 // `claude -p` that inherited HOP_SESSION) — resuming that would fail with
 // "No conversation found" in the restored terminal. Verify before planning a
 // resume; the caller falls back to a plain shell with a visible warning.
-function claudeTranscriptExists(rec) {
-    if (!rec || !rec.sessionId || !rec.cwd) return false;
+function resolveClaudeTranscriptPath(rec) {
+    if (!rec || !rec.sessionId || !rec.cwd) return null;
     for (const root of claudeConfigRootsForRestore(rec.configDir)) {
         for (const slug of claudeProjectDirCandidates(rec.cwd)) {
             const base = path.join(root, 'projects', slug);
-            try { fs.accessSync(path.join(base, `${rec.sessionId}.jsonl`)); return true; } catch (e) { /* next */ }
+            const file = path.join(base, `${rec.sessionId}.jsonl`);
+            try { fs.accessSync(file); return file; } catch (e) { /* next */ }
             // Newer layout: a per-session DIRECTORY. Only counts when it holds a
             // real transcript jsonl — a dir with only subagents/ metadata is a
             // conversation that never persisted (resume would fail on it).
             try {
                 const dir = path.join(base, rec.sessionId);
-                if (fs.statSync(dir).isDirectory()
-                    && fs.readdirSync(dir).some((f) => f.endsWith('.jsonl'))) return true;
+                if (fs.statSync(dir).isDirectory()) {
+                    const jsonl = fs.readdirSync(dir).find((f) => f.endsWith('.jsonl'));
+                    if (jsonl) return path.join(dir, jsonl);
+                }
             } catch (e) { /* next */ }
         }
     }
-    return false;
+    return null;
+}
+
+function claudeTranscriptExists(rec) {
+    return resolveClaudeTranscriptPath(rec) !== null;
 }
 
 // Rebuild a restorable claude command from a recorded argv string (the hook's
@@ -6578,6 +6585,26 @@ function startAuthProxy(authEmitter) {
                 res.end(JSON.stringify({ matches: [] }));
                 return;
             }
+            // Multi-word queries are AND-terms anywhere in the corpus, not an
+            // exact phrase — "restore failed" should find a session where both
+            // words appear on different lines.
+            const terms = q.split(/\s+/).filter(Boolean);
+            const snippetAround = (text, idx, len) => {
+                const lineStart = text.lastIndexOf('\n', idx) + 1;
+                const lineEnd = text.indexOf('\n', idx + len);
+                const line = text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
+                return line.length > 140 ? `…${line.slice(Math.max(0, idx - lineStart - 40), idx - lineStart + 100)}…` : line;
+            };
+            const matchAll = (text) => {
+                const hay = text.toLowerCase();
+                let anchor = -1;
+                for (const t of terms) {
+                    const idx = hay.lastIndexOf(t);
+                    if (idx === -1) return null;
+                    if (anchor === -1) anchor = idx;
+                }
+                return { idx: anchor, len: terms[0].length };
+            };
             let matches = [];
             try {
                 const listed = await callExternalHayHostApi('/rooms');
@@ -6588,27 +6615,52 @@ function startAuthProxy(authEmitter) {
                     if (!id || !SESSION_NAME_RE.test(id)) return null;
                     let entry = sessionSearchTextCache.get(id);
                     if (!entry || now - entry.at > 3000) {
-                        const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview`);
+                        // Deeper-than-screen tail (?bytes honored by newer hosts).
+                        const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview?bytes=262144`);
                         const raw = typeof prev?.data?.output === 'string' ? prev.data.output : '';
-                        entry = { at: now, text: stripAnsiForSearch(raw) };
+                        // The CONVERSATION transcript reaches back much further
+                        // than any screen tail — grep its recent text too, so
+                        // "the session where we discussed X" is findable even
+                        // when X scrolled away an hour ago.
+                        let transcriptText = '';
+                        try {
+                            const tPath = resolveClaudeTranscriptPath(readClaudeSessionRecord(id));
+                            if (tPath) {
+                                const stat = fs.statSync(tPath);
+                                const fd = fs.openSync(tPath, 'r');
+                                const readLen = Math.min(stat.size, 262144);
+                                const buf = Buffer.alloc(readLen);
+                                fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
+                                fs.closeSync(fd);
+                                transcriptText = (buf.toString('utf8').match(/"text":"((?:[^"\\]|\\.){4,2000})"/g) || [])
+                                    .map((m) => m.slice(8, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'))
+                                    .join('\n');
+                            }
+                        } catch (e) { /* no transcript — screen only */ }
+                        entry = { at: now, text: stripAnsiForSearch(raw), transcript: transcriptText };
                         sessionSearchTextCache.set(id, entry);
                         if (sessionSearchTextCache.size > 150) {
                             // Bounded: drop the oldest entries.
                             for (const key of [...sessionSearchTextCache.keys()].slice(0, 50)) sessionSearchTextCache.delete(key);
                         }
                     }
-                    const hay = entry.text.toLowerCase();
-                    const idx = hay.lastIndexOf(q);
-                    if (idx === -1) return null;
-                    // Grep-style snippet: the line around the LAST occurrence.
-                    const lineStart = entry.text.lastIndexOf('\n', idx) + 1;
-                    const lineEnd = entry.text.indexOf('\n', idx + q.length);
-                    const line = entry.text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
-                    return {
-                        internalName: id,
-                        name: getSessionDisplayName(id) || id,
-                        snippet: line.length > 140 ? `…${line.slice(Math.max(0, idx - lineStart - 40), idx - lineStart + 100)}…` : line
-                    };
+                    const onScreen = matchAll(entry.text);
+                    if (onScreen) {
+                        return {
+                            internalName: id,
+                            name: getSessionDisplayName(id) || id,
+                            snippet: snippetAround(entry.text, onScreen.idx, onScreen.len)
+                        };
+                    }
+                    const inTranscript = entry.transcript ? matchAll(entry.transcript) : null;
+                    if (inTranscript) {
+                        return {
+                            internalName: id,
+                            name: getSessionDisplayName(id) || id,
+                            snippet: `≡ ${snippetAround(entry.transcript, inTranscript.idx, inTranscript.len)}`
+                        };
+                    }
+                    return null;
                 });
                 matches = (await Promise.all(lookups)).filter(Boolean);
             } catch (e) { /* host unreachable — return what we have */ }

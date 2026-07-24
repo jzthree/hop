@@ -5034,12 +5034,13 @@ async function renderSessionPreviewText(source) {
     for (let i = 0; i < rows; i++) {
         const line = buffer.getLine(buffer.baseY + i);
         if (!line) { lines.push(''); continue; }
-        // Crop, never wrap: a row marked isWrapped continues the previous
-        // row's logical line — output written when the terminal was wider
-        // than we render at. Re-wrapped fragments read as garbage in a
-        // preview tile; dropping them crops each line at the right edge.
-        if (line.isWrapped) continue;
-        lines.push(line.translateToString(true));
+        const text = line.translateToString(true);
+        // Crop, don't cascade: SHORT wrap-continuation rows are the orphan
+        // tails of re-wrapped lines ("itance", "ies.") — garbage in a tile.
+        // FULL continuation rows are real text (a streaming paragraph fills
+        // the screen with them; dropping those blanked busy sessions).
+        if (line.isWrapped && text.trim().length < Math.min(40, cols * 0.3)) continue;
+        lines.push(text);
     }
     try { term.dispose(); } catch (e) { /* ignore */ }
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
@@ -6677,7 +6678,10 @@ function startAuthProxy(authEmitter) {
                 }
                 const rendered = await renderSessionPreviewText(source);
                 let payload = { text: typeof rendered === 'string' ? rendered : '', cols: source.cols, rows: source.rows };
-                if (payload.text.trim()) {
+                // Quality bar, not just non-empty: a mid-churn frame of bare
+                // glyphs ("⏺") must not replace a real screen. 8+ chars keeps
+                // shell prompts in while junk frames serve the last good one.
+                if (payload.text.trim().length >= 8) {
                     lastGoodPreviewByRoom.set(internalName, payload);
                     if (lastGoodPreviewByRoom.size > 500) {
                         lastGoodPreviewByRoom.delete(lastGoodPreviewByRoom.keys().next().value);

@@ -998,6 +998,11 @@ const App = () => {
   // Set by an explicit session switch; the next attach claim carries
   // user:true (deliberate — wins the size election outright on new hosts).
   const deliberateAttachRef = useRef(false);
+  // Rooms the user asked full history for: their next connect replays the
+  // server maximum instead of the fast bounded snapshot.
+  const deepReplayRoomsRef = useRef(new Set<string>());
+  const snapshotWasCappedRef = useRef(false);
+  const [historyPillVisible, setHistoryPillVisible] = useState(false);
   // The ws handler needs the latest fetchSessions (declared later); assigned
   // each render, same pattern as switchSessionRef.
   const fetchSessionsRef = useRef<((o?: { showLoading?: boolean }) => void) | null>(null);
@@ -1145,16 +1150,19 @@ const App = () => {
     const cols = termRef.current?.cols ?? 80;
     const rows = termRef.current?.rows ?? 24;
     // Bound the attach snapshot: long-lived sessions sit at the server's
-    // 1.5MB retention cap, and downloading + parsing that on every switch
-    // cost ~1s through the tunnel — switching stopped feeling instant once
+    // 1.5MB replay cap, and downloading + parsing that on every switch cost
+    // ~1s through the tunnel — switching stopped feeling instant once
     // buffers filled. 384KB keeps thousands of scrollback lines and lands in
-    // ~0.3s worst-case; the CLI still replays full depth.
+    // ~0.3s worst-case. Scrolling to the very top offers a full-depth
+    // reload (deepReplayRoomsRef); the CLI always replays full depth.
+    const replay = deepReplayRoomsRef.current.has(nextSession.room) ? 1572864 : 393216;
     const url = `${wsUrl}?room=${encodeURIComponent(nextSession.room)}&name=${encodeURIComponent(
       nextSession.name
-    )}&cols=${cols}&rows=${rows}&replay=393216`;
+    )}&cols=${cols}&rows=${rows}&replay=${replay}`;
 
     wsRef.current?.close();
     setStatus("connecting");
+    setHistoryPillVisible(false);
     shouldReconnectRef.current = true;
 
     const ws = new WebSocket(url);
@@ -1247,6 +1255,10 @@ const App = () => {
           remoteMouseSgrRef.current = message.mouseSgr === true;
           optimisticEchoRef.current.reset();
           userScrolledUpRef.current = false;
+          // A snapshot near the requested bound was almost certainly cut —
+          // that's when the "load full history" pill is worth offering.
+          snapshotWasCappedRef.current = typeof message.data === "string" && message.data.length >= 350000
+            && !deepReplayRoomsRef.current.has(activeSessionRoomRef.current || "");
           if (termRef.current) {
             // reset() (not clear()) so a stale cursor column, SGR attrs, or
             // leftover alt-screen/mouse-reporting mode from the previous
@@ -1576,6 +1588,10 @@ const App = () => {
         const el = xtermViewport as HTMLElement;
         const atBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 5;
         userScrolledUpRef.current = !atBottom;
+        // Hitting the very TOP of a bounded-replay buffer means the user
+        // wants more history than the fast snapshot carried — offer the
+        // full-depth reload.
+        setHistoryPillVisible(el.scrollTop <= 2 && snapshotWasCappedRef.current);
       });
     }
 
@@ -3317,6 +3333,23 @@ const App = () => {
                       <IosSpinner />
                       <span className="terminal-loading-label">Loading session…</span>
                     </div>
+                  )}
+                  {historyPillVisible && status === "connected" && (
+                    <button
+                      type="button"
+                      className="history-pill"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const room = activeSessionRoomRef.current;
+                        if (!room) return;
+                        deepReplayRoomsRef.current.add(room);
+                        setHistoryPillVisible(false);
+                        pushNotice("Loading full history…");
+                        setReconnectToken((value) => value + 1);
+                      }}
+                    >
+                      ↑ top of fast snapshot — load full history
+                    </button>
                   )}
                   {searchActive && (
                     <div className="terminal-find" onClick={(e) => e.stopPropagation()}>

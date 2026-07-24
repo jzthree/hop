@@ -1750,6 +1750,30 @@ button.primary {
   padding: 8px 0;
 }
 
+/* Chip shown at the top of the buffer when the fast bounded snapshot has
+   more history behind it — clicking reconnects with a full-depth replay. */
+.history-pill {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+
+.history-pill:hover {
+  color: var(--ink);
+  background: var(--bg-alt);
+}
+
 /* iOS-style loading overlay while a mobile session connects. Sits over the
    terminal, dims it slightly, and centers the activity indicator. */
 .terminal-loading {

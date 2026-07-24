@@ -2047,6 +2047,30 @@ button.primary {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
 }
 
+/* Origin + sort segmented controls share a row; let it wrap on narrow panels
+   so neither gets clipped, and let the sort control's labels breathe. */
+.switcher-filter-row {
+  flex-wrap: wrap;
+}
+.switcher-sort button {
+  min-width: 0;
+}
+
+/* Manual-order drag affordances. */
+.switcher-hint {
+  margin: 0 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+.switcher-card.draggable {
+  cursor: grab;
+}
+.switcher-card.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
 .switcher-header h2 {
   margin: 0;
   font-family: var(--font-mono);

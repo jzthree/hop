@@ -15,7 +15,8 @@ import {
   filterSessionsByOrigin,
   relativeTime,
   type SessionOriginScope,
-  type SwitcherSession
+  type SwitcherSession,
+  type SwitcherSortMode
 } from "../utils/switcherModel";
 
 // Full-screen, in-app session switcher (mobile-first). Hot sessions — current,
@@ -334,6 +335,49 @@ export const SessionSwitcher = ({
     setTileSize(size);
     localStorage.setItem("hay_tile_size", size);
   };
+  // Organization mode: recent (tiers), project (grouped by workdir), or manual
+  // (a persisted drag order). Persisted so the choice sticks across sessions.
+  const [sortMode, setSortMode] = useState<SwitcherSortMode>(() => {
+    const saved = localStorage.getItem("hay_sort_mode");
+    return saved === "project" || saved === "manual" ? saved : "recent";
+  });
+  const changeSortMode = (mode: SwitcherSortMode) => {
+    setSortMode(mode);
+    localStorage.setItem("hay_sort_mode", mode);
+  };
+  // Manual drag order: the ordered list of session keys. Seeded lazily from
+  // the current recency order the first time the user drags, so nothing jumps.
+  const [manualOrder, setManualOrder] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("hay_manual_order_v1") || "[]");
+      return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const persistManualOrder = (order: string[]) => {
+    setManualOrder(order);
+    try {
+      localStorage.setItem("hay_manual_order_v1", JSON.stringify(order));
+    } catch {
+      /* quota — order is best-effort */
+    }
+  };
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  // Move `from` to just before `to` in the manual order. Seeds the order from
+  // the current visual sequence on first drag so untouched sessions keep place.
+  const reorderManual = (from: string | null, to: string) => {
+    if (!from || from === to) return;
+    const current = flatNavRef.current.map(sessionKey);
+    const base = manualOrder.length ? manualOrder.slice() : current;
+    // Ensure every visible session is represented before moving.
+    for (const k of current) if (!base.includes(k)) base.push(k);
+    const without = base.filter((k) => k !== from);
+    const toIdx = without.indexOf(to);
+    if (toIdx === -1) return;
+    without.splice(toIdx, 0, from);
+    persistManualOrder(without);
+  };
   // Fullscreen: the in-session palette can expand to the whole viewport for a
   // workspace feel, or stay compact for quick switching. Persisted.
   const [fullscreen, setFullscreen] = useState(() => localStorage.getItem("hay_switcher_fullscreen") === "1");
@@ -387,7 +431,7 @@ export const SessionSwitcher = ({
   // ones wait for the thaw.
   const frozenOrderRef = useRef<{ hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
   const model = useMemo(() => {
-    const live = buildSwitcherModel(visibleSessions, currentRoom, filter);
+    const live = buildSwitcherModel(visibleSessions, currentRoom, filter, sortMode, manualOrder);
     if (!focusedKey || live.mode !== "tiers") {
       frozenOrderRef.current = null;
       return live;
@@ -408,7 +452,7 @@ export const SessionSwitcher = ({
         .filter((g) => g.rows.length > 0),
       currentInHero: live.currentInHero
     };
-  }, [visibleSessions, currentRoom, filter, focusedKey]);
+  }, [visibleSessions, currentRoom, filter, focusedKey, sortMode, manualOrder]);
 
   // ── Keyboard-first palette: ⌘K → type to filter → ↑↓ → Enter, no mouse. ──
   const filterInputRef = useRef<HTMLInputElement>(null);
@@ -459,10 +503,12 @@ export const SessionSwitcher = ({
   // Flat navigation order = exactly the visual order: heroes, then group rows
   // (and under a filter: name matches, then on-screen content matches).
   const flatNav = useMemo<SwitcherSession[]>(
-    () =>
-      model.mode === "filter"
-        ? [...model.rows, ...extraContentMatches.map((m) => m.session)]
-        : [...model.hero, ...model.groups.flatMap((g) => g.rows)],
+    () => {
+      if (model.mode === "filter") return [...model.rows, ...extraContentMatches.map((m) => m.session)];
+      if (model.mode === "manual") return model.rows;
+      if (model.mode === "project") return model.groups.flatMap((g) => g.rows);
+      return [...model.hero, ...model.groups.flatMap((g) => g.rows)];
+    },
     [model, extraContentMatches]
   );
   const navIndexByKey = useMemo(() => {
@@ -470,6 +516,9 @@ export const SessionSwitcher = ({
     flatNav.forEach((s, i) => m.set(sessionKey(s), i));
     return m;
   }, [flatNav]);
+  // Latest visual order, for reorderManual (defined earlier in the component).
+  const flatNavRef = useRef(flatNav);
+  flatNavRef.current = flatNav;
 
   // Default selection: the first session that isn't the current one (Enter on
   // open = jump to most relevant other session); with a filter, the top match.
@@ -539,13 +588,18 @@ export const SessionSwitcher = ({
   // previews on demand anyway. Paused while the tab is hidden.
   const lastColdRefreshRef = useRef(0);
   useEffect(() => {
-    if (!open || model.mode !== "tiers") return;
+    if (!open || model.mode === "filter") return;
     let cancelled = false;
-    const hotKeys = new Set(model.hero.map(sessionKey));
+    // Hot = the hero tiles in recency mode; the other modes have no hero tier,
+    // so every visible tile refreshes at the cold rate.
+    const hotKeys = new Set(model.mode === "tiers" ? model.hero.map(sessionKey) : []);
     // EVERY session previews — dead ones serve their retained last screen
     // from the daemon, so a tile is never a blank box.
-    const all = [...model.hero, ...model.groups.flatMap((g) => g.rows)]
-      .filter((s) => s.type !== "port");
+    const all = (
+      model.mode === "tiers" ? [...model.hero, ...model.groups.flatMap((g) => g.rows)]
+      : model.mode === "project" ? model.groups.flatMap((g) => g.rows)
+      : model.rows
+    ).filter((s) => s.type !== "port");
     const refresh = async () => {
       if (cancelled || document.hidden || all.length === 0) return;
       // Time-based cold tier (not tick-based: the first mount often races the
@@ -923,13 +977,21 @@ export const SessionSwitcher = ({
     const preview = previewCacheRef.current!.get(key);
     const current = isCurrentSession(s);
     const kbdSelected = navIndexByKey.get(key) === kbdIndex;
+    // Manual mode: cards are draggable to reorder. Dragging is disabled while
+    // an XL tile is focused (that tile owns the pointer for interaction).
+    const draggable = sortMode === "manual" && !focusedKey;
     return (
       <div
         key={key}
         role="button"
         tabIndex={0}
         data-nav-index={navIndexByKey.get(key)}
-        className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}`}
+        className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}`}
+        draggable={draggable}
+        onDragStart={draggable ? (e) => { setDragKey(key); e.dataTransfer.effectAllowed = "move"; } : undefined}
+        onDragOver={draggable ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } : undefined}
+        onDrop={draggable ? (e) => { e.preventDefault(); reorderManual(dragKey, key); setDragKey(null); } : undefined}
+        onDragEnd={draggable ? () => setDragKey(null) : undefined}
         onClick={() => {
           if (tileSize === "xl" && tileWsBase && s.active && s.type !== "port") setFocusedKey(key);
           else handleTap(s);
@@ -1133,6 +1195,24 @@ export const SessionSwitcher = ({
               </button>
             ))}
           </div>
+          <div className="switcher-origin switcher-sort" role="group" aria-label="Organize sessions by">
+            {([
+              ["recent", "Recent", "Most recently active first"],
+              ["project", "Project", "Grouped by working directory"],
+              ["manual", "Manual", "Your own drag order"]
+            ] as const).map(([mode, label, title]) => (
+              <button
+                key={mode}
+                type="button"
+                className={sortMode === mode ? "active" : ""}
+                aria-pressed={sortMode === mode}
+                title={title}
+                onClick={() => changeSortMode(mode)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {(finePointer || visibleSessions.length > FILTER_THRESHOLD || filter) && (
             <input
               ref={filterInputRef}
@@ -1180,6 +1260,29 @@ export const SessionSwitcher = ({
                   })}
                 </div>
               </section>
+            )}
+          </>
+        ) : model.mode === "project" ? (
+          <>
+            {originScope === "agent" && visibleSessions.length === 0 && (
+              <div className="switcher-empty">No agent sessions</div>
+            )}
+            {model.groups.map((group) => (
+              <section key={group.label} className="switcher-group">
+                <h3 className="switcher-group-label">{group.label}</h3>
+                <div className="switcher-grid">{group.rows.map(renderCard)}</div>
+              </section>
+            ))}
+          </>
+        ) : model.mode === "manual" ? (
+          <>
+            {model.rows.length === 0 ? (
+              <div className="switcher-empty">No sessions</div>
+            ) : (
+              <>
+                <p className="switcher-hint">Drag tiles to reorder</p>
+                <div className="switcher-grid">{model.rows.map(renderCard)}</div>
+              </>
             )}
           </>
         ) : (

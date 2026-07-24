@@ -28,6 +28,12 @@ export type SwitcherSession = {
 
 export type SessionOriginScope = "user" | "agent" | "all";
 
+// How the switcher orders sessions when not filtering:
+//   recent  — attention-first tiers + project-grouped tail (the default)
+//   project — every session grouped strictly by workdir
+//   manual  — a flat, user-dragged order the client persists
+export type SwitcherSortMode = "recent" | "project" | "manual";
+
 export type SwitcherGroup = {
   label: string;
   rows: SwitcherSession[];
@@ -35,7 +41,9 @@ export type SwitcherGroup = {
 
 export type SwitcherModel =
   | { mode: "tiers"; hero: SwitcherSession[]; groups: SwitcherGroup[]; currentInHero: boolean }
-  | { mode: "filter"; rows: SwitcherSession[] };
+  | { mode: "filter"; rows: SwitcherSession[] }
+  | { mode: "project"; groups: SwitcherGroup[] }
+  | { mode: "manual"; rows: SwitcherSession[] };
 
 // Minimum hero-card count (including the current session). All attention
 // sessions are always hero cards — attention must never be buried in the tail.
@@ -112,10 +120,48 @@ export const filterSessionsByOrigin = (
   return sessions.filter((session) => session.createdBy !== "agent");
 };
 
+/** Group every session by workdir (ports last), each group recency-sorted. */
+const groupByProject = (sessions: SwitcherSession[]): SwitcherGroup[] => {
+  const groupMap = new Map<string, SwitcherSession[]>();
+  for (const s of sessions) {
+    const label = s.type === "port" ? "Ports" : projectKey(s.cwd);
+    const bucket = groupMap.get(label);
+    if (bucket) bucket.push(s);
+    else groupMap.set(label, [s]);
+  }
+  return Array.from(groupMap.entries())
+    .map(([label, rows]) => ({ label, rows: rows.sort(byAttentionThenRecency) }))
+    .sort((a, b) => {
+      // Ports sink to the bottom; other groups by most recent activity.
+      if (a.label === "Ports") return 1;
+      if (b.label === "Ports") return -1;
+      return Math.max(...b.rows.map(activity)) - Math.max(...a.rows.map(activity));
+    });
+};
+
+/**
+ * Order sessions by a saved list of keys (the user's manual drag order),
+ * appending any session not yet in the saved order at the end by recency —
+ * so a brand-new session shows up predictably rather than vanishing.
+ */
+const orderManually = (sessions: SwitcherSession[], manualOrder: string[]): SwitcherSession[] => {
+  const rank = new Map(manualOrder.map((key, i) => [key, i]));
+  return [...sessions].sort((a, b) => {
+    const ra = rank.get(sessionKey(a));
+    const rb = rank.get(sessionKey(b));
+    if (ra !== undefined && rb !== undefined) return ra - rb;
+    if (ra !== undefined) return -1; // saved sessions before unsaved
+    if (rb !== undefined) return 1;
+    return byAttentionThenRecency(a, b); // both new → recency
+  });
+};
+
 export const buildSwitcherModel = (
   sessions: SwitcherSession[],
   currentRoom: string | null,
-  filter: string
+  filter: string,
+  sortMode: SwitcherSortMode = "recent",
+  manualOrder: string[] = []
 ): SwitcherModel => {
   const query = filter.trim();
   if (query) {
@@ -126,6 +172,14 @@ export const buildSwitcherModel = (
       .sort((a, b) => b.score - a.score || byAttentionThenRecency(a.s, b.s))
       .map((x) => x.s);
     return { mode: "filter", rows };
+  }
+
+  // Search overrides sort mode; otherwise honor the chosen organization.
+  if (sortMode === "project") {
+    return { mode: "project", groups: groupByProject(sessions) };
+  }
+  if (sortMode === "manual") {
+    return { mode: "manual", rows: orderManually(sessions, manualOrder) };
   }
 
   const current = sessions.find((s) => isCurrent(s, currentRoom)) ?? null;
@@ -155,21 +209,7 @@ export const buildSwitcherModel = (
     });
 
   const tail = sessions.filter((s) => !heroKeys.has(sessionKey(s)));
-  const groupMap = new Map<string, SwitcherSession[]>();
-  for (const s of tail) {
-    const label = s.type === "port" ? "Ports" : projectKey(s.cwd);
-    const bucket = groupMap.get(label);
-    if (bucket) bucket.push(s);
-    else groupMap.set(label, [s]);
-  }
-  const groups: SwitcherGroup[] = Array.from(groupMap.entries())
-    .map(([label, rows]) => ({ label, rows: rows.sort(byAttentionThenRecency) }))
-    .sort((a, b) => {
-      // Ports sink to the bottom; other groups by most recent activity.
-      if (a.label === "Ports") return 1;
-      if (b.label === "Ports") return -1;
-      return Math.max(...b.rows.map(activity)) - Math.max(...a.rows.map(activity));
-    });
+  const groups = groupByProject(tail);
 
   return { mode: "tiers", hero, groups, currentInHero: current !== null };
 };

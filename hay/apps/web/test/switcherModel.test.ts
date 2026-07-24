@@ -141,6 +141,40 @@ describe("buildSwitcherModel", () => {
     if (model.mode !== "filter") throw new Error("expected filter");
     expect(model.rows.map((s) => s.name)).toEqual(["hopper", "misc"]);
   });
+
+  it("project mode groups every session by workdir, ports last", () => {
+    const sessions = [
+      mk({ name: "a", cwd: "/Users/x/Code/hop2", lastActivityAt: 900 }),
+      mk({ name: "b", cwd: "/Users/x/Code/other", lastActivityAt: 800 }),
+      mk({ name: "c", cwd: "/Users/x/Code/hop2/sub", lastActivityAt: 500 }),
+      mk({ name: "p", type: "port", port: 3000 })
+    ];
+    const model = buildSwitcherModel(sessions, null, "", "project");
+    if (model.mode !== "project") throw new Error("expected project");
+    const labels = model.groups.map((g) => g.label);
+    expect(labels).toContain("~/Code/hop2");
+    expect(labels[labels.length - 1]).toBe("Ports");
+    const hop2 = model.groups.find((g) => g.label === "~/Code/hop2");
+    expect(hop2?.rows.map((s) => s.name).sort()).toEqual(["a", "c"]);
+  });
+
+  it("manual mode honors the saved order and appends new sessions", () => {
+    const sessions = [
+      mk({ name: "first", lastActivityAt: 10 }),
+      mk({ name: "second", lastActivityAt: 900 }),
+      mk({ name: "brandnew", lastActivityAt: 500 })
+    ];
+    // Saved order lists second then first; brandnew isn't saved yet.
+    const model = buildSwitcherModel(sessions, null, "", "manual", ["second", "first"]);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.rows.map((s) => s.name)).toEqual(["second", "first", "brandnew"]);
+  });
+
+  it("a filter query overrides project/manual sort modes", () => {
+    const sessions = [mk({ name: "alpha" }), mk({ name: "beta" })];
+    const model = buildSwitcherModel(sessions, null, "alph", "manual", ["beta", "alpha"]);
+    expect(model.mode).toBe("filter");
+  });
 });
 
 describe("filterSessionsByOrigin", () => {

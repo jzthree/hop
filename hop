@@ -5024,7 +5024,35 @@ function fetchHayRoomPreviewSource(internalName, bytes) {
 // refetch) survive only as the fallback path for hosts predating /output.
 // Grids are lazy (created on first preview request) and reaped when idle,
 // preserving the idle-rooms-cost-nothing property. ──
-const roomGrids = new Map(); // internalName -> { term, offset, cols, rows, lastUsedAt }
+const roomGrids = new Map(); // internalName -> { term, serialize, offset, cols, rows, lastUsedAt }
+// Serialize addon (same 5.x line as xterm-headless): turns a grid into the
+// compact ANSI string that repaints the CURRENT screen — the fast-attach
+// first paint. Best-effort: without it, grids still serve text previews.
+let serializeAddonTried = false;
+let serializeAddonCtor = null;
+function loadSerializeAddon() {
+    if (serializeAddonTried) return serializeAddonCtor;
+    serializeAddonTried = true;
+    // The addon's color helpers touch `document` at module load; a stub
+    // canvas-less element is enough (hex parsing has a non-canvas path).
+    if (!global.document) {
+        global.document = { createElement: () => ({ getContext: () => null, style: {} }) };
+    }
+    const candidates = [
+        path.join(__dirname, 'hay', 'node_modules', 'xterm-addon-serialize'),
+        'xterm-addon-serialize'
+    ];
+    for (const candidate of candidates) {
+        try {
+            const mod = require(candidate);
+            if (mod && typeof mod.SerializeAddon === 'function') {
+                serializeAddonCtor = mod.SerializeAddon;
+                return serializeAddonCtor;
+            }
+        } catch (e) { /* try next candidate */ }
+    }
+    return null;
+}
 const ROOM_GRID_MAX = 80; // LRU cap — a scrollback-0 grid is ~0.5-2MB
 const ROOM_GRID_IDLE_MS = 5 * 60_000;
 // null = unknown, false = this host has no /output endpoint (pre-restart).
@@ -5139,7 +5167,17 @@ async function getRoomGridPreview(internalName) {
         } catch (e) {
             return null;
         }
-        grid = { term, offset: res.offset, cols, rows, lastUsedAt: Date.now() };
+        let serialize = null;
+        const SerializeCtor = loadSerializeAddon();
+        if (SerializeCtor) {
+            try {
+                serialize = new SerializeCtor();
+                term.loadAddon(serialize);
+            } catch (e) {
+                serialize = null;
+            }
+        }
+        grid = { term, serialize, offset: res.offset, cols, rows, lastUsedAt: Date.now() };
         roomGrids.set(internalName, grid);
         if (roomGrids.size > ROOM_GRID_MAX) {
             let oldestKey = null;
@@ -6912,6 +6950,37 @@ function startAuthProxy(authEmitter) {
                 aliases: sessionAliases,
                 runtimeAvailable: snapshot.runtimeAvailable
             }));
+            return;
+        }
+
+        // API: Serialized CURRENT screen (ANSI, colors included) from the
+        // room grid — the switch-time fast first paint. The client writes it
+        // into a fresh terminal immediately; the WS snapshot supersedes it.
+        if (parsedUrl.pathname === '/api/sessions/screen' && req.method === 'GET') {
+            const internalName = typeof parsedUrl.query.name === 'string' ? parsedUrl.query.name : '';
+            if (!internalName || !SESSION_NAME_RE.test(internalName)) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid session name' }));
+                return;
+            }
+            try {
+                await getRoomGridPreviewShared(internalName); // freshen (or create) the grid
+                const grid = roomGrids.get(internalName);
+                let data = null;
+                if (grid && grid.serialize) {
+                    try { data = grid.serialize.serialize(); } catch (e) { data = null; }
+                }
+                if (typeof data === 'string' && data.length > 0) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ data, cols: grid.cols, rows: grid.rows }));
+                    return;
+                }
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'No screen available' }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Screen failed' }));
+            }
             return;
         }
 

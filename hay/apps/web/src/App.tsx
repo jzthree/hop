@@ -1149,6 +1149,33 @@ const App = () => {
     userScrolledUpRef.current = false;
     termRef.current?.reset();
 
+    // Fast first paint: the daemon can serialize the session's CURRENT
+    // screen from its preview grid in one small response — paint that
+    // immediately so the switch shows content while the WS snapshot's
+    // ~384KB download+parse is still in flight (the dominant switch cost on
+    // a phone over the tunnel). The snapshot handler reset()s the terminal
+    // before writing, so this paint is fully superseded; if the snapshot
+    // wins the race, the response is discarded. Best-effort throughout.
+    let snapshotLanded = false;
+    fetch(`/api/sessions/screen?name=${encodeURIComponent(targetRoom)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((screen: { data?: string; cols?: number; rows?: number } | null) => {
+        if (!screen || typeof screen.data !== "string" || !screen.data) return;
+        if (connectionNonce !== connectNonceRef.current || activeSessionRoomRef.current !== targetRoom) return;
+        if (snapshotLanded || !termRef.current) return;
+        // Paint at the session's real dims — writing a 250-col screen into
+        // an 80-col local grid would wrap into mush. The post-snapshot
+        // autofit/claim dance re-sizes exactly as it does today.
+        const cols = Number(screen.cols);
+        const rows = Number(screen.rows);
+        if (Number.isInteger(cols) && Number.isInteger(rows) && cols > 1 && rows > 1
+            && (termRef.current.cols !== cols || termRef.current.rows !== rows)) {
+          try { termRef.current.resize(cols, rows); } catch { /* keep local size */ }
+        }
+        termRef.current.write(screen.data);
+      })
+      .catch(() => { /* fast paint is best-effort */ });
+
     const wsUrl = resolveWsUrl();
     const cols = termRef.current?.cols ?? 80;
     const rows = termRef.current?.rows ?? 24;
@@ -1242,6 +1269,9 @@ const App = () => {
           }
           break;
         case "snapshot":
+          // The authoritative replay has arrived — the fast-paint prefetch
+          // must no longer touch the terminal.
+          snapshotLanded = true;
           // Fresh connection: recompute from the snapshot. The server's tracked
           // flag wins when present (the enable may predate the retained buffer);
           // otherwise scan the replayed buffer itself from a clean slate.

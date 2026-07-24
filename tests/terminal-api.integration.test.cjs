@@ -453,6 +453,14 @@ test('incremental output endpoint + grid-backed preview', async () => {
   assert.equal(countMarks(second.data.text), countMarks(first.data.text),
     'second (incremental) poll must not duplicate screen content');
 
+  // Serialized screen (fast attach): ANSI repaint of the current screen.
+  const screen = await requestJson(state.port, state.sessionSecret, 'GET',
+    `/api/sessions/screen?name=${encodeURIComponent(entry.internalName)}`);
+  assert.equal(screen.status, 200);
+  assert.ok(typeof screen.data.data === 'string' && screen.data.data.includes('grid-marker-one'),
+    'expected serialized screen to contain the marker');
+  assert.ok(Number.isInteger(screen.data.cols) && screen.data.cols > 0);
+
   const del = await requestJson(state.port, state.sessionSecret, 'DELETE',
     `/api/terminals/${create.data.id}?killSession=true`, null, userHeaders);
   assert.equal(del.status, 200);

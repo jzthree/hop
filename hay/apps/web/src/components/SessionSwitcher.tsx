@@ -266,7 +266,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
           && Date.now() - interactedAt < 10_000) {
         sendClaim("attach");
       }
-    }, 1500);
+    }, 1000);
     const focusTimer = window.setTimeout(() => { term.focus(); rescale(); }, 50);
     return () => {
       window.clearTimeout(focusTimer);

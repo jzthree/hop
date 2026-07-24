@@ -98,9 +98,13 @@ const RESIZE_CLAIM_IDLE_MS = (() => {
 // A claim:"attach" resize (a fresh client's first autofit) is deliberate:
 // someone just opened the session there. It takes the shared size unless a
 // peer typed within this window — only an actively-typing peer holds it.
+// 2.5s (was 5s): an actively typing peer keeps refreshing its own window, so
+// this only decides how long a PAUSED typist blocks a deliberate new attach —
+// measured 5s made wall-tile focus feel stuck (converged at ~5s through the
+// tunnel; ~3s with this).
 const ATTACH_CLAIM_IDLE_MS = (() => {
   const env = Number(process.env.HAY_ATTACH_CLAIM_IDLE_MS);
-  return Number.isFinite(env) && env >= 0 ? env : 5_000;
+  return Number.isFinite(env) && env >= 0 ? env : 2_500;
 })();
 const CONTROL_SEQUENCE_TAIL = 32;
 const DEBUG_STATE = process.env.HAY_DEBUG === "1";

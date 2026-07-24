@@ -998,6 +998,9 @@ const App = () => {
   // Set by an explicit session switch; the next attach claim carries
   // user:true (deliberate — wins the size election outright on new hosts).
   const deliberateAttachRef = useRef(false);
+  // The ws handler needs the latest fetchSessions (declared later); assigned
+  // each render, same pattern as switchSessionRef.
+  const fetchSessionsRef = useRef<((o?: { showLoading?: boolean }) => void) | null>(null);
   // Last size actually sent, to skip redundant resize messages. Reset when a
   // new connection opens so the server always learns the size once.
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
@@ -1304,7 +1307,9 @@ const App = () => {
           setStatus("ended");
           // A dead screen is a dead end — bring up the switcher so the next
           // session is one keystroke away. Delayed a beat so the ended notice
-          // registers before the overlay covers it.
+          // registers before the overlay covers it. Refresh the list so the
+          // dead session isn't still presented as a live/current entry.
+          fetchSessionsRef.current?.({ showLoading: false });
           window.setTimeout(() => setSwitcherOpen(true), 400);
           break;
         case "session_renamed":
@@ -2294,6 +2299,7 @@ const App = () => {
       }
     }
   }, []);
+  fetchSessionsRef.current = fetchSessions;
 
   // Fetch sessions when drawer opens
   useEffect(() => {
@@ -3496,7 +3502,9 @@ const App = () => {
           <SessionSwitcher
             open={switcherOpen}
             sessions={sessions}
-            currentRoom={session.room}
+            // A killed/ended session is nobody's "current": presenting it as
+            // such badged a dead room and anchored keyboard selection on it.
+            currentRoom={status === "ended" ? null : session.room}
             onClose={() => { paneTargetRef.current = null; setSwitcherOpen(false); }}
             onSwitch={(next) => {
               const targetPane = paneTargetRef.current;

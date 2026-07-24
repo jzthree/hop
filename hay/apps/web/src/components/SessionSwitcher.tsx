@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
@@ -28,6 +29,31 @@ import {
 const LONG_PRESS_MS = 450;
 const PREVIEW_REFRESH_MS = 5000;
 const FILTER_THRESHOLD = 10;
+
+// Zoom ladder: one +/− press per step. Each level sets the grid's minimum
+// tile width, the preview window height, and the preview font size (the
+// focused terminal inherits the same metrics so preview → terminal stays a
+// swap in place). How much of the ladder is REACHABLE depends on the
+// viewport: the first level whose tiles lay out as a single full-width
+// column is the ceiling — past it "+" has nothing left to grow into.
+const ZOOM_LEVELS = [
+  { min: 100, h: "40px", fs: "4px" },
+  { min: 120, h: "56px", fs: "5px" }, // old S
+  { min: 150, h: "84px", fs: "6px" }, // old M
+  { min: 210, h: "130px", fs: "7.5px" },
+  { min: 300, h: "200px", fs: "9.5px" }, // old L
+  { min: 420, h: "300px", fs: "11px" }, // old XL — interactive from here up
+  { min: 560, h: "min(46vh, 480px)", fs: "11px" },
+  { min: 720, h: "min(56vh, 640px)", fs: "12px" },
+  { min: 900, h: "min(66vh, 820px)", fs: "13px" }
+];
+// From this level up the type is legible enough to work in: clicking a tile
+// focuses a real terminal in place instead of switching to the session.
+const INTERACTIVE_ZOOM = 5;
+const GRID_GAP = 10;
+const DEFAULT_ZOOM = 2;
+// Old persisted hay_tile_size values map onto the ladder.
+const LEGACY_ZOOM: Record<string, number> = { s: 1, m: 2, l: 4, xl: 5 };
 
 type Props = {
   open: boolean;
@@ -80,9 +106,9 @@ const runningApp = (s: SwitcherSession) => {
 // full input, auto-fit to its box, instant rendering, connected as the user
 // (it participates in presence like any client). Every other tile stays a
 // cheap polled text preview, so the XL wall costs one websocket, not nine.
-const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, onUnfocus }: {
+const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFullscreen, onUnfocus }: {
   wsBase: string; room: string; userName: string; theme: object | undefined;
-  fallback: string; onFullscreen: () => void; onUnfocus: () => void;
+  fallback: string; fontSize: number; onFullscreen: () => void; onUnfocus: () => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
   // The last preview frame stays painted OVER the terminal until the claimed
@@ -99,13 +125,13 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     // last owns the size — so typing in the big background terminal snaps the
     // session back, and the tile falls back to observing at active_size,
     // scaled down to fit.
-    // Same font metrics as .switcher-preview AND the main terminal (11px,
-    // shared --font-terminal stack, 1.2 line height) so preview → tile → the
-    // real session are one continuous font, not three.
+    // Same font metrics as .switcher-preview at the current zoom (shared
+    // --font-terminal stack, 1.3 line height) so preview → tile → the real
+    // session are one continuous font, not three.
     const monoStack = getComputedStyle(document.documentElement).getPropertyValue("--font-terminal").trim() || "monospace";
     const term = new Terminal({
       scrollback: 2000,
-      fontSize: 11,
+      fontSize,
       lineHeight: 1.3,
       fontFamily: monoStack,
       cursorBlink: true,
@@ -293,7 +319,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
       try { ws.close(); } catch { /* closing */ }
       term.dispose();
     };
-  }, [wsBase, room, userName, theme]);
+  }, [wsBase, room, userName, theme, fontSize]);
   return (
     <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
       <div className="switcher-focus-bar">
@@ -326,14 +352,64 @@ export const SessionSwitcher = ({
 }: Props) => {
   const [filter, setFilter] = useState("");
   const [originScope, setOriginScope] = useState<SessionOriginScope>("user");
-  // Hero-tile size: bigger tiles show more of each terminal preview.
-  const [tileSize, setTileSize] = useState<"s" | "m" | "l" | "xl">(() => {
-    const saved = localStorage.getItem("hay_tile_size");
-    return saved === "s" || saved === "l" || saved === "xl" ? saved : "m";
+  // Tile zoom: bigger tiles show more of each terminal preview.
+  const [zoom, setZoom] = useState(() => {
+    const saved = localStorage.getItem("hay_tile_zoom");
+    if (saved !== null && /^\d+$/.test(saved)) {
+      return Math.min(Number(saved), ZOOM_LEVELS.length - 1);
+    }
+    const legacy = localStorage.getItem("hay_tile_size");
+    if (legacy && legacy in LEGACY_ZOOM) return LEGACY_ZOOM[legacy];
+    return DEFAULT_ZOOM;
   });
-  const changeTileSize = (size: "s" | "m" | "l" | "xl") => {
-    setTileSize(size);
-    localStorage.setItem("hay_tile_size", size);
+  // Grid content width, kept fresh across viewport/panel resizes — it decides
+  // how far the zoom ladder is climbable on THIS screen.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [gridWidth, setGridWidth] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => {
+      const cs = getComputedStyle(el);
+      const w = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+      setGridWidth(w > 0 ? w : 0);
+    };
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [open]);
+  // Ceiling: the first level that lays out as ONE full-width column. A tile
+  // already spanning the whole grid has nothing left to grow into.
+  const maxZoom = useMemo(() => {
+    if (!gridWidth) return ZOOM_LEVELS.length - 1;
+    for (let i = 0; i < ZOOM_LEVELS.length; i++) {
+      if (Math.floor((gridWidth + GRID_GAP) / (ZOOM_LEVELS[i].min + GRID_GAP)) <= 1) return i;
+    }
+    return ZOOM_LEVELS.length - 1;
+  }, [gridWidth]);
+  const effectiveZoom = Math.min(zoom, maxZoom);
+  const zoomLevel = ZOOM_LEVELS[effectiveZoom];
+  // Above the threshold every active tile is one click away from being a real
+  // terminal (the focused tile below). Announced once per open via onNotice;
+  // the ⌨ chip in the header is the standing indicator.
+  const interactiveTiles = effectiveZoom >= INTERACTIVE_ZOOM && !!tileWsBase;
+  const noticedInteractiveRef = useRef(false);
+  useEffect(() => { if (open) noticedInteractiveRef.current = false; }, [open]);
+  const changeZoom = (next: number) => {
+    const clamped = Math.max(0, Math.min(next, maxZoom));
+    if (clamped === effectiveZoom) return;
+    if (clamped >= INTERACTIVE_ZOOM && effectiveZoom < INTERACTIVE_ZOOM && tileWsBase && !noticedInteractiveRef.current) {
+      noticedInteractiveRef.current = true;
+      onNotice("Tiles are interactive at this zoom — click one to type in it (⌘⏎ full screen, ⌘. release)");
+    }
+    setZoom(clamped);
+    localStorage.setItem("hay_tile_zoom", String(clamped));
   };
   // Organization mode: recent (tiers), project (grouped by workdir), or manual
   // (a persisted drag order). Persisted so the choice sticks across sessions.
@@ -388,10 +464,11 @@ export const SessionSwitcher = ({
     });
   };
   const [sheet, setSheet] = useState<Sheet | null>(null);
-  // XL wall: the single interactive tile. Cleared on close / leaving XL.
+  // The wall's single interactive tile. Cleared on close / zooming below the
+  // interactive threshold.
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   useEffect(() => { if (!open) setFocusedKey(null); }, [open]);
-  useEffect(() => { if (tileSize !== "xl") setFocusedKey(null); }, [tileSize]);
+  useEffect(() => { if (!interactiveTiles) setFocusedKey(null); }, [interactiveTiles]);
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState("");
@@ -588,18 +665,32 @@ export const SessionSwitcher = ({
   // previews on demand anyway. Paused while the tab is hidden.
   const lastColdRefreshRef = useRef(0);
   useEffect(() => {
-    if (!open || model.mode === "filter") return;
+    if (!open) return;
     let cancelled = false;
-    // Hot = the hero tiles in recency mode; the other modes have no hero tier,
-    // so every visible tile refreshes at the cold rate.
-    const hotKeys = new Set(model.mode === "tiers" ? model.hero.map(sessionKey) : []);
+    // Hot = the hero tiles in recency mode. A filter's result set is small,
+    // so every match is hot — its preview is the evidence the user is
+    // scanning. The other modes have no hero tier; everything refreshes at
+    // the cold rate.
+    const hotKeys = new Set(
+      model.mode === "tiers" ? model.hero.map(sessionKey)
+      : model.mode === "filter" ? [...model.rows.map(sessionKey), ...contentMatches.map((m) => sessionKey(m.session))]
+      : []
+    );
     // EVERY session previews — dead ones serve their retained last screen
     // from the daemon, so a tile is never a blank box.
+    const seenKeys = new Set<string>();
     const all = (
       model.mode === "tiers" ? [...model.hero, ...model.groups.flatMap((g) => g.rows)]
       : model.mode === "project" ? model.groups.flatMap((g) => g.rows)
+      : model.mode === "filter" ? [...model.rows, ...contentMatches.map((m) => m.session)]
       : model.rows
-    ).filter((s) => s.type !== "port");
+    ).filter((s) => {
+      if (s.type === "port") return false;
+      const key = sessionKey(s);
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
+      return true;
+    });
     const refresh = async () => {
       if (cancelled || document.hidden || all.length === 0) return;
       // Time-based cold tier (not tick-based: the first mount often races the
@@ -639,7 +730,7 @@ export const SessionSwitcher = ({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [open, model]);
+  }, [open, model, contentMatches]);
 
   const startLongPress = (event: ReactPointerEvent, session: SwitcherSession) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
@@ -690,17 +781,31 @@ export const SessionSwitcher = ({
     const onNavKey = (event: KeyboardEvent) => {
       if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
       if (sheet || creating) return;
-      // ⌘⏎ (Ctrl⏎): focus the selected XL tile for in-place interaction.
+      // ⌘⏎ (Ctrl⏎): focus the selected tile for in-place interaction.
       // Plain Enter stays "switch to session" — the muscle-memory action.
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
         const target = flatNav[kbdIndex];
-        if (target && tileSize === "xl" && tileWsBase && target.active && target.type !== "port") {
+        if (target && interactiveTiles && target.active && target.type !== "port") {
           event.preventDefault();
           setFocusedKey(sessionKey(target));
         }
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // +/− step the tile zoom — but never while editing the filter text
+      // ("-" is a legal character in session names).
+      if (document.activeElement !== filterInputRef.current) {
+        if (event.key === "+" || event.key === "=") {
+          event.preventDefault();
+          changeZoom(effectiveZoom + 1);
+          return;
+        }
+        if (event.key === "-") {
+          event.preventDefault();
+          changeZoom(effectiveZoom - 1);
+          return;
+        }
+      }
       if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "ArrowLeft" || event.key === "ArrowRight") {
         // ←→ must keep editing the filter text when there is any.
         if (
@@ -765,7 +870,7 @@ export const SessionSwitcher = ({
     window.addEventListener("keydown", onNavKey);
     return () => window.removeEventListener("keydown", onNavKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sheet, creating, flatNav, kbdIndex]);
+  }, [open, sheet, creating, flatNav, kbdIndex, effectiveZoom, maxZoom, interactiveTiles]);
 
   const openSheet = (session: SwitcherSession, anchor?: { x: number; y: number }) => {
     cancelLongPress();
@@ -972,13 +1077,15 @@ export const SessionSwitcher = ({
     }
   });
 
-  const renderCard = (s: SwitcherSession) => {
+  // `snippet` (search content hits): the matching output line, shown under
+  // the preview so the card says WHY it matched.
+  const renderCard = (s: SwitcherSession, snippet?: string) => {
     const key = sessionKey(s);
     const preview = previewCacheRef.current!.get(key);
     const current = isCurrentSession(s);
     const kbdSelected = navIndexByKey.get(key) === kbdIndex;
     // Manual mode: cards are draggable to reorder. Dragging is disabled while
-    // an XL tile is focused (that tile owns the pointer for interaction).
+    // a tile is focused (that tile owns the pointer for interaction).
     const draggable = sortMode === "manual" && !focusedKey;
     return (
       <div
@@ -993,13 +1100,13 @@ export const SessionSwitcher = ({
         onDrop={draggable ? (e) => { e.preventDefault(); reorderManual(dragKey, key); setDragKey(null); } : undefined}
         onDragEnd={draggable ? () => setDragKey(null) : undefined}
         onClick={() => {
-          if (tileSize === "xl" && tileWsBase && s.active && s.type !== "port") setFocusedKey(key);
+          if (interactiveTiles && s.active && s.type !== "port") setFocusedKey(key);
           else handleTap(s);
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             // ⌘⏎ focuses the tile; plain Enter switches (mirrors onNavKey).
-            if ((e.metaKey || e.ctrlKey) && tileSize === "xl" && tileWsBase && s.active && s.type !== "port") setFocusedKey(key);
+            if ((e.metaKey || e.ctrlKey) && interactiveTiles && s.active && s.type !== "port") setFocusedKey(key);
             else handleTap(s);
           }
         }}
@@ -1015,52 +1122,25 @@ export const SessionSwitcher = ({
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
           {inlineActions(s)}
         </div>
-        {tileSize === "xl" && tileWsBase && s.active && s.type !== "port" && focusedKey === key ? (
+        {interactiveTiles && tileWsBase && s.active && s.type !== "port" && focusedKey === key ? (
           <FocusedTile
             wsBase={tileWsBase}
             room={key}
             userName={userName || "user"}
             theme={terminalTheme}
             fallback={preview || " "}
+            fontSize={parseInt(zoomLevel.fs, 10) || 11}
             onFullscreen={() => onSwitch(s)}
             onUnfocus={() => setFocusedKey(null)}
           />
         ) : (
           <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>
         )}
+        {snippet && <div className="switcher-card-snippet" title={snippet}>{snippet}</div>}
         <div className="switcher-card-meta">
           <span className="switcher-card-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : "\u00a0"}</span>
           <span className="switcher-card-when">{meta(s)}</span>
         </div>
-      </div>
-    );
-  };
-
-  const renderRow = (s: SwitcherSession) => {
-    const key = sessionKey(s);
-    const kbdSelected = navIndexByKey.get(key) === kbdIndex;
-    return (
-      <div
-        key={key}
-        role="button"
-        tabIndex={0}
-        data-nav-index={navIndexByKey.get(key)}
-        className={`switcher-row${isCurrentSession(s) ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}`}
-        onClick={() => handleTap(s)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") handleTap(s);
-        }}
-        {...pressHandlers(s)}
-      >
-        {dots(s)}
-        <span className="switcher-row-name">{s.displayName}</span>
-        {originScope === "all" && s.createdBy === "agent" && (
-          <span className="switcher-chip agent">AGENT</span>
-        )}
-        {s.type === "port" && <span className="switcher-chip port">PORT {s.port}</span>}
-        <span className="switcher-row-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : ""}</span>
-        <span className="switcher-row-meta">{meta(s)}</span>
-        {inlineActions(s)}
       </div>
     );
   };
@@ -1106,7 +1186,8 @@ export const SessionSwitcher = ({
 
   return (
     <div
-      className={`switcher-overlay tile-${tileSize}${dismissable ? "" : " switcher-hub"}${dismissable && fullscreen ? " switcher-fullscreen" : ""}`}
+      className={`switcher-overlay${zoomLevel.min < 300 ? " tile-dense" : ""}${dismissable ? "" : " switcher-hub"}${dismissable && fullscreen ? " switcher-fullscreen" : ""}`}
+      style={{ "--tile-min": `${zoomLevel.min}px`, "--tile-h": zoomLevel.h, "--tile-fs": zoomLevel.fs } as CSSProperties}
       role="dialog"
       aria-label="Sessions"
       onClick={(e) => {
@@ -1120,19 +1201,37 @@ export const SessionSwitcher = ({
         <header className="switcher-header">
           <h2>Sessions</h2>
           <span className="switcher-count">{visibleSessions.length}</span>
-          <div className="switcher-tilesize" role="group" aria-label="Tile size">
-            {(["s", "m", "l", "xl"] as const).map((size) => (
-              <button
-                key={size}
-                type="button"
-                className={tileSize === size ? "active" : ""}
-                aria-label={`Tile size ${size.toUpperCase()}`}
-                onClick={() => changeTileSize(size)}
-              >
-                {size.toUpperCase()}
-              </button>
-            ))}
+          <div className="switcher-tilesize" role="group" aria-label="Tile zoom">
+            <button
+              type="button"
+              aria-label="Smaller tiles"
+              title="Smaller tiles (−)"
+              disabled={effectiveZoom <= 0}
+              onClick={() => changeZoom(effectiveZoom - 1)}
+            >
+              −
+            </button>
+            <span className="switcher-zoom-readout" aria-hidden="true">
+              {effectiveZoom + 1}
+            </span>
+            <button
+              type="button"
+              aria-label="Bigger tiles"
+              title={effectiveZoom >= maxZoom ? "Tiles already span the full width" : "Bigger tiles (+)"}
+              disabled={effectiveZoom >= maxZoom}
+              onClick={() => changeZoom(effectiveZoom + 1)}
+            >
+              +
+            </button>
           </div>
+          {interactiveTiles && (
+            <span
+              className="switcher-chip live"
+              title="Tiles are live terminals at this zoom — click one to type in it. ⌘⏎ opens it full screen, ⌘. releases it."
+            >
+              ⌨ interactive
+            </span>
+          )}
           <span className="switcher-header-spacer" />
           {dismissable && (
             <button type="button" className="switcher-action" aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"} title={fullscreen ? "Exit fullscreen" : "Fullscreen"} onClick={toggleFullscreen}>
@@ -1225,39 +1324,22 @@ export const SessionSwitcher = ({
           )}
         </div>
       </div>
-      <div className="switcher-scroll">
+      <div className="switcher-scroll" ref={scrollRef}>
         {model.mode === "filter" ? (
+          // Matches keep their terminal previews: search results are preview
+          // cards at the current zoom, same as the wall — the screen content
+          // is usually WHY you're looking for the session.
           <>
-            <div className="switcher-rows">
-              {model.rows.length === 0 && extraContentMatches.length === 0 ? (
-                <div className="switcher-empty">No sessions match “{filter.trim()}”</div>
-              ) : (
-                model.rows.map(renderRow)
-              )}
-            </div>
+            {model.rows.length === 0 && extraContentMatches.length === 0 ? (
+              <div className="switcher-empty">No sessions match “{filter.trim()}”</div>
+            ) : (
+              <div className="switcher-grid">{model.rows.map((s) => renderCard(s))}</div>
+            )}
             {extraContentMatches.length > 0 && (
               <section className="switcher-group">
                 <h3 className="switcher-group-label">found in terminal output</h3>
-                <div className="switcher-rows">
-                  {extraContentMatches.map(({ session: s, snippet }) => {
-                    const key = sessionKey(s);
-                    const kbdSelected = navIndexByKey.get(key) === kbdIndex;
-                    return (
-                      <div
-                        key={key}
-                        role="button"
-                        tabIndex={0}
-                        data-nav-index={navIndexByKey.get(key)}
-                        className={`switcher-row${kbdSelected ? " kbd-selected" : ""}`}
-                        onClick={() => handleTap(s)}
-                        onKeyDown={(e) => { if (e.key === "Enter") handleTap(s); }}
-                      >
-                        {dots(s)}
-                        <span className="switcher-row-name">{s.displayName}</span>
-                        <span className="switcher-snippet">{snippet}</span>
-                      </div>
-                    );
-                  })}
+                <div className="switcher-grid">
+                  {extraContentMatches.map(({ session: s, snippet }) => renderCard(s, snippet))}
                 </div>
               </section>
             )}
@@ -1270,7 +1352,7 @@ export const SessionSwitcher = ({
             {model.groups.map((group) => (
               <section key={group.label} className="switcher-group">
                 <h3 className="switcher-group-label">{group.label}</h3>
-                <div className="switcher-grid">{group.rows.map(renderCard)}</div>
+                <div className="switcher-grid">{group.rows.map((s) => renderCard(s))}</div>
               </section>
             ))}
           </>
@@ -1281,7 +1363,7 @@ export const SessionSwitcher = ({
             ) : (
               <>
                 <p className="switcher-hint">Drag tiles to reorder</p>
-                <div className="switcher-grid">{model.rows.map(renderCard)}</div>
+                <div className="switcher-grid">{model.rows.map((s) => renderCard(s))}</div>
               </>
             )}
           </>
@@ -1291,7 +1373,7 @@ export const SessionSwitcher = ({
               <div className="switcher-empty">No agent sessions</div>
             )}
             <div className="switcher-grid">
-              {model.hero.map(renderCard)}
+              {model.hero.map((s) => renderCard(s))}
               {originScope !== "agent" && (creating ? (
                 <form className="switcher-card new inline-edit" onSubmit={submitCreate}>
                   <input
@@ -1317,7 +1399,7 @@ export const SessionSwitcher = ({
             {model.groups.map((group) => (
               <section key={group.label} className="switcher-group">
                 <h3 className="switcher-group-label">{group.label}</h3>
-                <div className="switcher-grid">{group.rows.map(renderCard)}</div>
+                <div className="switcher-grid">{group.rows.map((s) => renderCard(s))}</div>
               </section>
             ))}
           </>

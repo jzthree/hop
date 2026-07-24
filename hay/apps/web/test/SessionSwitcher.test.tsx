@@ -52,6 +52,46 @@ afterEach(() => {
   delete (HTMLElement.prototype as { scrollTo?: unknown }).scrollTo;
 });
 
+describe("SessionSwitcher tile zoom", () => {
+  it("steps the zoom ladder with +/− and persists the level", () => {
+    render(<SessionSwitcher {...props} open />);
+    const dialog = screen.getByRole("dialog", { name: "Sessions" });
+    // Default level (old M): 150px min tiles.
+    expect(dialog.style.getPropertyValue("--tile-min")).toBe("150px");
+
+    fireEvent.click(screen.getByRole("button", { name: "Bigger tiles" }));
+    expect(dialog.style.getPropertyValue("--tile-min")).toBe("210px");
+    expect(localStorage.getItem("hay_tile_zoom")).toBe("3");
+
+    fireEvent.click(screen.getByRole("button", { name: "Smaller tiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Smaller tiles" }));
+    expect(dialog.style.getPropertyValue("--tile-min")).toBe("120px");
+    expect(localStorage.getItem("hay_tile_zoom")).toBe("1");
+  });
+
+  it("migrates a legacy hay_tile_size value onto the ladder", () => {
+    localStorage.setItem("hay_tile_size", "xl");
+    render(<SessionSwitcher {...props} open />);
+    const dialog = screen.getByRole("dialog", { name: "Sessions" });
+    expect(dialog.style.getPropertyValue("--tile-min")).toBe("420px");
+  });
+
+  it("announces interactive tiles above the threshold when a ws base exists", () => {
+    localStorage.setItem("hay_tile_zoom", "5");
+    render(<SessionSwitcher {...props} open tileWsBase="ws://x" />);
+    expect(screen.getByText("⌨ interactive")).toBeTruthy();
+  });
+
+  it("keeps preview tiles for filter matches", () => {
+    render(<SessionSwitcher {...props} open />);
+    // Type-anywhere filtering: stray printables land in the filter.
+    fireEvent.keyDown(window, { key: "r" });
+    const card = screen.getByText("research").closest(".switcher-card");
+    expect(card).toBeTruthy();
+    expect(card!.querySelector(".switcher-preview")).toBeTruthy();
+  });
+});
+
 describe("SessionSwitcher origin scope", () => {
   it("starts with user sessions and switches cleanly between Agent and All", () => {
     render(<SessionSwitcher {...props} open />);

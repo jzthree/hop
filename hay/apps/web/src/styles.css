@@ -2126,9 +2126,13 @@ button.primary {
   padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
 }
 
+/* Tile geometry is driven by three CSS vars the component sets from its zoom
+   ladder (--tile-min / --tile-h / --tile-fs) — one source of truth for every
+   context instead of per-size class overrides. The min() guard keeps a tile
+   from forcing horizontal scroll when the level's minimum exceeds the grid. */
 .switcher-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(var(--tile-min, 150px), 100%), 1fr));
   gap: 10px;
   margin-bottom: 18px;
 }
@@ -2264,13 +2268,13 @@ button.primary {
   color: var(--ink);
 }
 
-/* Micro terminal preview: a fixed-height window onto the screen tail. */
+/* Micro terminal preview: a zoom-sized window onto the screen tail. */
 .switcher-preview {
   margin: 0;
-  height: 84px;
+  height: var(--tile-h, 84px);
   overflow: hidden;
   font-family: var(--font-terminal);
-  font-size: 6px;
+  font-size: var(--tile-fs, 6px);
   line-height: 1.3;
   white-space: pre;
   color: var(--ink-muted);
@@ -2613,10 +2617,6 @@ button.primary {
     max-height: none;
     flex: 1;
   }
-  .switcher-overlay.switcher-hub .switcher-grid {
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 14px;
-  }
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -2768,10 +2768,6 @@ button.primary {
       var(--bg);
     padding: 18px 22px 48px;
   }
-  .switcher-overlay.switcher-hub .switcher-grid {
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 12px;
-  }
   .switcher-hub .switcher-card {
     border-radius: 8px;
     box-shadow: none;
@@ -2807,17 +2803,18 @@ button.primary {
   background: color-mix(in srgb, var(--accent) 7%, var(--panel));
 }
 
-/* Content-match snippet in the switcher's "on screen" section */
-.switcher-snippet {
-  flex: 1;
-  min-width: 0;
+/* Content-match snippet under a search-result card: the output line that
+   matched, so the card says WHY it's in the results. */
+.switcher-card-snippet {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink);
+  background: var(--bg-alt);
+  border-radius: 5px;
+  padding: 3px 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-muted);
-  text-align: right;
 }
 
 /* Tap-a-URL prompt (mobile: remote apps can't open the phone's browser) */
@@ -2868,9 +2865,12 @@ button.primary {
   }
 }
 
-/* ── Tile-size control (S/M/L) + presets: bigger tiles show more terminal ── */
+/* ── Tile-zoom control (− level +): bigger tiles show more terminal. The
+   ladder itself (widths, heights, font sizes, how many levels this viewport
+   can climb) lives in the component; CSS just renders its vars. ── */
 .switcher-tilesize {
   display: inline-flex;
+  align-items: center;
   gap: 2px;
   margin-left: 10px;
   border: 1px solid var(--line);
@@ -2881,60 +2881,30 @@ button.primary {
 .switcher-tilesize button {
   padding: 2px 8px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 1.4;
   border-radius: 5px;
   background: transparent;
   color: var(--ink-muted);
 }
 
-.switcher-tilesize button.active {
-  background: var(--accent);
-  color: var(--accent-fg);
+.switcher-tilesize button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
-/* S: dense overview */
-.switcher-overlay.tile-s .switcher-grid {
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-}
-.switcher-overlay.tile-s .switcher-preview {
-  height: 56px;
-  font-size: 5px;
-}
-
-/* L: mini terminals — read real output from the grid */
-.switcher-overlay.tile-l .switcher-grid {
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-}
-.switcher-overlay.tile-l .switcher-preview {
-  height: 200px;
-  font-size: 9.5px;
+.switcher-zoom-readout {
+  min-width: 14px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-muted);
 }
 
-@media (min-width: 769px) {
-  .switcher-overlay.switcher-hub.tile-s .switcher-grid {
-    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  }
-  .switcher-overlay.switcher-hub.tile-l .switcher-grid {
-    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  }
-  .switcher-overlay.switcher-hub.tile-l .switcher-preview {
-    height: 260px;
-    font-size: 10.5px;
-  }
-}
-
-/* XL: dashboard tiles — near-readable full panes. In fullscreen/hub the
-   viewport is the workspace, so tiles grow with it instead of staying at the
-   compact-panel size that made XL feel small on a big monitor. */
-.switcher-overlay.tile-xl .switcher-grid {
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-}
-.switcher-overlay.tile-xl .switcher-preview {
-  height: 300px;
-  font-size: 11px;
-  /* Match the terminal's line-height (1.3), shared by the focused xterm and
-     the veil, so preview → focus → real session are one continuous layout. */
-  line-height: 1.3;
+/* Standing "tiles are live terminals" indicator next to the zoom control. */
+.switcher-chip.live {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
 }
 
 /* Last preview frame held over a freshly focused tile until the claimed
@@ -2951,7 +2921,7 @@ button.primary {
   margin: 0;
   overflow: hidden;
   font-family: var(--font-terminal);
-  font-size: 11px;
+  font-size: var(--tile-fs, 11px);
   line-height: 1.3;
   white-space: pre;
   color: var(--ink-muted);
@@ -2960,22 +2930,11 @@ button.primary {
   pointer-events: none;
 }
 
-.switcher-overlay.switcher-fullscreen.tile-xl .switcher-grid,
-.switcher-overlay.switcher-hub.tile-xl .switcher-grid {
-  grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
-}
-
-.switcher-overlay.switcher-fullscreen.tile-xl .switcher-preview,
-.switcher-overlay.switcher-hub.tile-xl .switcher-preview,
-.switcher-overlay.switcher-fullscreen.tile-xl .switcher-focus-tile,
-.switcher-overlay.switcher-hub.tile-xl .switcher-focus-tile {
-  height: min(52vh, 640px);
-}
-
-/* Focused XL tile: THE interactive terminal of the wall. */
-.switcher-overlay.tile-xl .switcher-focus-tile {
+/* Focused tile: THE interactive terminal of the wall. Same box as the
+   preview it replaces. */
+.switcher-focus-tile {
   position: relative;
-  height: 300px;
+  height: var(--tile-h, 300px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -3043,13 +3002,6 @@ button.primary {
   }
   .switcher-overlay:not(.switcher-hub) > .switcher-scroll {
     max-height: calc(90vh - 120px);
-  }
-  .switcher-overlay.switcher-hub.tile-xl .switcher-grid {
-    grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
-  }
-  .switcher-overlay.switcher-hub.tile-xl .switcher-preview {
-    height: 380px;
-    font-size: 12px;
   }
 }
 
@@ -3229,14 +3181,13 @@ button.primary {
   }
 }
 
-/* S/M cards are too narrow for inline rename/kill (they reserve layout space
-   even while hover-hidden, squeezing the name to a couple of characters) —
-   those actions live in the ⋯ menu there. The CURRENT chip is likewise
-   redundant with the accent border at these sizes. The name owns the row. */
-.switcher-overlay.tile-s .switcher-card-head .switcher-icon-btn:not(:last-child),
-.switcher-overlay.tile-m .switcher-card-head .switcher-icon-btn:not(:last-child),
-.switcher-overlay.tile-s .switcher-card-head .switcher-chip.current,
-.switcher-overlay.tile-m .switcher-card-head .switcher-chip.current {
+/* Dense-zoom cards are too narrow for inline rename/kill (they reserve
+   layout space even while hover-hidden, squeezing the name to a couple of
+   characters) — those actions live in the ⋯ menu there. The CURRENT chip is
+   likewise redundant with the accent border at these sizes. The name owns
+   the row. */
+.switcher-overlay.tile-dense .switcher-card-head .switcher-icon-btn:not(:last-child),
+.switcher-overlay.tile-dense .switcher-card-head .switcher-chip.current {
   display: none;
 }
 

@@ -6616,8 +6616,10 @@ function startAuthProxy(authEmitter) {
                 const line = text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
                 return line.length > 140 ? `…${line.slice(Math.max(0, idx - lineStart - 40), idx - lineStart + 100)}…` : line;
             };
-            const matchAll = (text) => {
-                const hay = text.toLowerCase();
+            // `hay` is pre-lowercased at cache-build time — lowercasing the
+            // corpora per keystroke was the search's real cost once the tails
+            // grew past a few hundred KB per room.
+            const matchAll = (hay) => {
                 let anchor = -1;
                 for (const t of terms) {
                     const idx = hay.lastIndexOf(t);
@@ -6637,35 +6639,57 @@ function startAuthProxy(authEmitter) {
                     let entry = sessionSearchTextCache.get(id);
                     if (!entry || now - entry.at > 3000) {
                         // Deeper-than-screen tail (?bytes honored by newer hosts).
-                        const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview?bytes=262144`);
+                        const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview?bytes=524288`);
                         const raw = typeof prev?.data?.output === 'string' ? prev.data.output : '';
                         // The CONVERSATION transcript reaches back much further
                         // than any screen tail — grep its recent text too, so
                         // "the session where we discussed X" is findable even
-                        // when X scrolled away an hour ago.
-                        let transcriptText = '';
+                        // when X scrolled away an hour ago. The 1MB read+parse
+                        // is skipped when the file hasn't changed since the
+                        // last search (stat signature match) — steady-state
+                        // searches re-read nothing.
+                        let transcriptText = entry ? entry.transcript : '';
+                        let transcriptLower = entry ? entry.transcriptLower : '';
+                        let transcriptSig = entry ? entry.transcriptSig : '';
                         try {
                             const tPath = resolveClaudeTranscriptPath(readClaudeSessionRecord(id));
                             if (tPath) {
                                 const stat = fs.statSync(tPath);
-                                const fd = fs.openSync(tPath, 'r');
-                                const readLen = Math.min(stat.size, 262144);
-                                const buf = Buffer.alloc(readLen);
-                                fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
-                                fs.closeSync(fd);
-                                transcriptText = (buf.toString('utf8').match(/"text":"((?:[^"\\]|\\.){4,2000})"/g) || [])
-                                    .map((m) => m.slice(8, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'))
-                                    .join('\n');
+                                const sig = `${tPath}:${stat.size}:${stat.mtimeMs}`;
+                                if (sig !== transcriptSig) {
+                                    const fd = fs.openSync(tPath, 'r');
+                                    const readLen = Math.min(stat.size, 1048576);
+                                    const buf = Buffer.alloc(readLen);
+                                    fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
+                                    fs.closeSync(fd);
+                                    transcriptText = (buf.toString('utf8').match(/"text":"((?:[^"\\]|\\.){4,2000})"/g) || [])
+                                        .map((m) => m.slice(8, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'))
+                                        .join('\n');
+                                    transcriptLower = transcriptText.toLowerCase();
+                                    transcriptSig = sig;
+                                }
+                            } else {
+                                transcriptText = '';
+                                transcriptLower = '';
+                                transcriptSig = '';
                             }
                         } catch (e) { /* no transcript — screen only */ }
-                        entry = { at: now, text: stripAnsiForSearch(raw), transcript: transcriptText };
+                        const screenText = stripAnsiForSearch(raw);
+                        entry = {
+                            at: now,
+                            text: screenText,
+                            textLower: screenText.toLowerCase(),
+                            transcript: transcriptText || '',
+                            transcriptLower: transcriptLower || '',
+                            transcriptSig: transcriptSig || ''
+                        };
                         sessionSearchTextCache.set(id, entry);
                         if (sessionSearchTextCache.size > 150) {
                             // Bounded: drop the oldest entries.
                             for (const key of [...sessionSearchTextCache.keys()].slice(0, 50)) sessionSearchTextCache.delete(key);
                         }
                     }
-                    const onScreen = matchAll(entry.text);
+                    const onScreen = matchAll(entry.textLower);
                     if (onScreen) {
                         return {
                             internalName: id,
@@ -6673,7 +6697,7 @@ function startAuthProxy(authEmitter) {
                             snippet: snippetAround(entry.text, onScreen.idx, onScreen.len)
                         };
                     }
-                    const inTranscript = entry.transcript ? matchAll(entry.transcript) : null;
+                    const inTranscript = entry.transcriptLower ? matchAll(entry.transcriptLower) : null;
                     if (inTranscript) {
                         return {
                             internalName: id,

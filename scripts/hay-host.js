@@ -240,7 +240,14 @@ async function main() {
             const getPreview = typeof rooms.getRoomPreviewSource === 'function'
                 ? rooms.getRoomPreviewSource.bind(rooms)
                 : null;
-            const source = roomId && getPreview ? getPreview(roomId) : null;
+            // ?bytes= lets the daemon fetch a DEEPER tail when the default
+            // 64KB renders sparse (a churning TUI's content can sit far
+            // behind its spinner redraws).
+            const bytesRaw = Number(reqUrl.searchParams.get('bytes'));
+            const bytes = Number.isFinite(bytesRaw) && bytesRaw > 0
+                ? Math.min(1048576, Math.floor(bytesRaw))
+                : undefined;
+            const source = roomId && getPreview ? getPreview(roomId, bytes) : null;
             if (!source) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Room not found' }));

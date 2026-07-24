@@ -4963,10 +4963,29 @@ function loadHeadlessTerminal() {
 // Last non-empty rendered preview per room. A live TUI mid-repaint (or a
 // briefly unreachable host) can render an empty frame; a blank tile that was
 // showing content a second ago reads as a dead session, so serve the previous
-// good frame instead and let the next poll catch up.
+// good frame instead and let the next poll catch up. Persisted to disk —
+// daemon restarts are routine and wiping the cache re-blanked every tile
+// whose session was mid-churn at that moment.
 const lastGoodPreviewByRoom = new Map();
+const PREVIEW_CACHE_FILE = path.join(HOME_DIR, 'preview-cache.json');
+try {
+    for (const [k, v] of JSON.parse(fs.readFileSync(PREVIEW_CACHE_FILE, 'utf8'))) {
+        if (v && typeof v.text === 'string') lastGoodPreviewByRoom.set(k, v);
+    }
+} catch (e) { /* absent or corrupt — start empty */ }
+let previewCacheSaveTimer = null;
+function schedulePreviewCacheSave() {
+    if (previewCacheSaveTimer) return;
+    previewCacheSaveTimer = setTimeout(() => {
+        previewCacheSaveTimer = null;
+        try {
+            fs.writeFileSync(PREVIEW_CACHE_FILE, JSON.stringify([...lastGoodPreviewByRoom]), { mode: 0o600 });
+        } catch (e) { /* best-effort */ }
+    }, 5000);
+    previewCacheSaveTimer.unref?.();
+}
 
-function fetchHayRoomPreviewSource(internalName) {
+function fetchHayRoomPreviewSource(internalName, bytes) {
     const host = hayHostState || readHayHostStateFile();
     if (!host || !Number.isInteger(host.port) || host.port <= 0) return Promise.resolve(null);
     return new Promise((resolve) => {
@@ -4975,7 +4994,7 @@ function fetchHayRoomPreviewSource(internalName) {
         const req = http.request({
             hostname: '127.0.0.1',
             port: host.port,
-            path: `/rooms/${encodeURIComponent(internalName)}/preview`,
+            path: `/rooms/${encodeURIComponent(internalName)}/preview${bytes ? `?bytes=${bytes}` : ''}`,
             method: 'GET'
         }, (res) => {
             if ((res.statusCode || 0) !== 200) { res.resume(); done(null); return; }
@@ -5000,8 +5019,11 @@ function trimPreviewSource(output) {
     // A marker with almost nothing after it is a mid-repaint cursor-home, not
     // a frame start — inline TUIs (claude) emit these constantly, and cutting
     // there rendered EMPTY previews. Use the latest marker that still has a
-    // frame's worth of content following it.
-    const MIN_FRAME_TAIL = 1500;
+    // frame's worth of content following it. 6KB, not 1.5KB: a 250-col frame
+    // easily exceeds 1.5KB while still being a sliver — TUIs overdraw from
+    // cursor-home, so anchoring a frame earlier keeps the previous frame's
+    // pixels beneath the partial repaint instead of a near-blank screen.
+    const MIN_FRAME_TAIL = 6000;
     let frameStart = -1;
     let m;
     while ((m = CLEAR_RE.exec(output)) !== null) {
@@ -5012,12 +5034,15 @@ function trimPreviewSource(output) {
     return nl > 0 && nl < 8192 ? output.slice(nl + 1) : output;
 }
 
-async function renderSessionPreviewText(source) {
+async function renderSessionPreviewText(source, { noTrim = false } = {}) {
     if (!source || typeof source.output !== 'string') return null;
     const Term = loadHeadlessTerminal();
     if (!Term) return null;
-    source = { ...source, output: trimPreviewSource(source.output) };
-    const cols = Math.max(2, Math.min(220, Math.floor(Number(source.cols) || 80)));
+    if (!noTrim) source = { ...source, output: trimPreviewSource(source.output) };
+    // Clamp must exceed real-world PTY widths: rendering NARROWER than the
+    // content was written re-wraps every long line into garbage (a 253-col
+    // session clamped to 220 blanked its tiles).
+    const cols = Math.max(2, Math.min(400, Math.floor(Number(source.cols) || 80)));
     const rows = Math.max(2, Math.min(80, Math.floor(Number(source.rows) || 24)));
     let term;
     try {
@@ -6678,6 +6703,18 @@ function startAuthProxy(authEmitter) {
                 }
                 const rendered = await renderSessionPreviewText(source);
                 let payload = { text: typeof rendered === 'string' ? rendered : '', cols: source.cols, rows: source.rows };
+                if (payload.text.trim().length < 8) {
+                    // Sparse frame: the visible content may sit far behind a
+                    // churning TUI's spinner redraws. Replay a much deeper
+                    // tail untrimmed — overdraw reconstructs the screen.
+                    const deep = await fetchHayRoomPreviewSource(internalName, 524288);
+                    if (deep && typeof deep.output === 'string' && deep.output.length > (source.output || '').length) {
+                        const deepText = await renderSessionPreviewText(deep, { noTrim: true });
+                        if (typeof deepText === 'string' && deepText.trim().length > payload.text.trim().length) {
+                            payload = { text: deepText, cols: deep.cols, rows: deep.rows };
+                        }
+                    }
+                }
                 // Quality bar, not just non-empty: a mid-churn frame of bare
                 // glyphs ("⏺") must not replace a real screen. 8+ chars keeps
                 // shell prompts in while junk frames serve the last good one.
@@ -6686,6 +6723,7 @@ function startAuthProxy(authEmitter) {
                     if (lastGoodPreviewByRoom.size > 500) {
                         lastGoodPreviewByRoom.delete(lastGoodPreviewByRoom.keys().next().value);
                     }
+                    schedulePreviewCacheSave();
                 } else if (cached) {
                     payload = { ...cached, stale: true };
                 }

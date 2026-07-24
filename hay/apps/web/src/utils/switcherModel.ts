@@ -81,17 +81,26 @@ export const projectKey = (cwd?: string) => {
   return (lead ? lead + "/" : "/") + kept.join("/");
 };
 
-const matchesFilter = (s: SwitcherSession, query: string) => {
-  const q = query.toLowerCase();
-  const cwd = s.cwd || "";
-  return (
-    (s.displayName || s.name).toLowerCase().includes(q) ||
-    cwd.toLowerCase().includes(q) ||
-    // The UI shows home-shortened paths (~/Code/hop2), so the filter must
-    // match what the user sees, not just the raw /Users/... path.
-    (cwd.length > 0 && shortenForGroup(cwd).toLowerCase().includes(q)) ||
-    (s.foregroundProcess || "").toLowerCase().includes(q)
-  );
+/**
+ * Ranked filter matching: exact beats prefix beats substring, and the
+ * home-shortened cwd the UI displays is first-class ("~" must rank sessions
+ * whose workdir IS ~ above everything that merely lives under it).
+ */
+export const filterScore = (s: SwitcherSession, q: string): number => {
+  const name = (s.displayName || s.name).toLowerCase();
+  const cwdRaw = (s.cwd || "").toLowerCase();
+  const cwdShort = s.cwd ? shortenForGroup(s.cwd).toLowerCase() : "";
+  const proc = (s.foregroundProcess || "").toLowerCase();
+  if (name === q) return 100;
+  if (cwdShort === q) return 90; // exact workdir ("~", "~/code/hop2")
+  if (name.startsWith(q)) return 80;
+  const cwdBase = cwdShort.split("/").filter(Boolean).pop() || "";
+  if (cwdBase === q) return 70; // project dir name typed exactly
+  if (name.includes(q)) return 60;
+  if (cwdShort.startsWith(q)) return 55; // workdir prefix ("~/code")
+  if (cwdShort.includes(q) || cwdRaw.includes(q)) return 40;
+  if (proc.includes(q)) return 30;
+  return 0;
 };
 
 export const filterSessionsByOrigin = (
@@ -110,7 +119,12 @@ export const buildSwitcherModel = (
 ): SwitcherModel => {
   const query = filter.trim();
   if (query) {
-    const rows = sessions.filter((s) => matchesFilter(s, query)).sort(byAttentionThenRecency);
+    const q = query.toLowerCase();
+    const rows = sessions
+      .map((s) => ({ s, score: filterScore(s, q) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score || byAttentionThenRecency(a.s, b.s))
+      .map((x) => x.s);
     return { mode: "filter", rows };
   }
 

@@ -559,7 +559,10 @@ export const SessionSwitcher = ({
             if (!res.ok) return;
             const data = await res.json();
             const text = typeof data.text === "string" ? data.text.replace(/\s+$/, "") : "";
-            if (!cancelled && text) {
+            // Quality gate mirrors the daemon's: a mid-churn junk frame
+            // ("⏺", 1-5 chars) must never REPLACE a good cached screen —
+            // that's how tiles went blank after having shown content.
+            if (!cancelled && text.trim().length >= 8) {
               previewCacheRef.current!.set(key, text);
             }
           } catch {

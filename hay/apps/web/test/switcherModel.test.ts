@@ -119,6 +119,28 @@ describe("buildSwitcherModel", () => {
     expect(byTilde.rows.map((s) => s.name).sort()).toEqual(["home", "root"]);
     expect(byTildePath.rows.map((s) => s.name)).toEqual(["home"]);
   });
+
+  it("exact workdir match outranks everything merely under it", () => {
+    const sessions = [
+      mk({ name: "deep", cwd: "/Users/x/Code/hop2", lastActivityAt: 900, bellUnseen: true }),
+      mk({ name: "athome", cwd: "/Users/x", lastActivityAt: 10 }),
+      mk({ name: "deeper", cwd: "/Users/x/tmp", lastActivityAt: 500 })
+    ];
+    const model = buildSwitcherModel(sessions, null, "~");
+    if (model.mode !== "filter") throw new Error("expected filter");
+    // cwd === "~" wins despite lower activity and no attention.
+    expect(model.rows[0].name).toBe("athome");
+  });
+
+  it("name matches outrank cwd substring matches", () => {
+    const sessions = [
+      mk({ name: "hopper", cwd: "/Users/x/other" }),
+      mk({ name: "misc", cwd: "/Users/x/Code/hop2" })
+    ];
+    const model = buildSwitcherModel(sessions, null, "hop");
+    if (model.mode !== "filter") throw new Error("expected filter");
+    expect(model.rows.map((s) => s.name)).toEqual(["hopper", "misc"]);
+  });
 });
 
 describe("filterSessionsByOrigin", () => {

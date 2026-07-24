@@ -6802,7 +6802,7 @@ function startAuthProxy(authEmitter) {
                         ? parsed.cwdName
                         : path.basename(cwdPath).replace(/[^a-zA-Z0-9_-]/g, '-');
                     const claimed = await withLocalCliClaimLock(() => (
-                        claimUnnamedLocalCliSession({ cwdPath, cwdName })
+                        claimUnnamedLocalCliSession({ cwdPath, cwdName, createdBy: resolveActor(req) === 'agent' ? 'agent' : 'user' })
                     ));
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
@@ -6826,6 +6826,10 @@ function startAuthProxy(authEmitter) {
             req.on('end', async () => {
                 try {
                     let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName } = JSON.parse(body);
+                    // Sessions created by an agent-marked request (X-Hop-Actor,
+                    // set by MCP/hopa and by the CLI under a claude env) land
+                    // in the agent bucket instead of impersonating the human.
+                    const actorCreatedBy = resolveActor(req) === 'agent' ? 'agent' : 'user';
                     const displayName = name;
                     const internalName = toInternalSessionName(displayName);
                     if (!internalName || !displayName) {
@@ -6877,8 +6881,8 @@ function startAuthProxy(authEmitter) {
                                 folderId: targetFolderId,
                                 createdAt: new Date().toISOString(),
                                 updatedAt: new Date().toISOString(),
-                                createdBy: 'user',
-                                agentPermitted: false,
+                                createdBy: actorCreatedBy,
+                                agentPermitted: actorCreatedBy === 'agent',
                                 workspaceName: targetWorkspaceName
                             });
                             if (!saved) {
@@ -6905,8 +6909,8 @@ function startAuthProxy(authEmitter) {
                                     folderId: targetFolderId,
                                     createdAt: new Date().toISOString(),
                                     updatedAt: new Date().toISOString(),
-                                    createdBy: 'user',
-                                    agentPermitted: false,
+                                    createdBy: actorCreatedBy,
+                                    agentPermitted: actorCreatedBy === 'agent',
                                     workspaceName: targetWorkspaceName
                                 });
                                 if (!saved) {
@@ -6922,7 +6926,8 @@ function startAuthProxy(authEmitter) {
                         } else if (isExternalTerminalBackend()) {
                             await ensureExternalRuntimeSession(internalName, cwd, displayName, {
                                 folderId: targetFolderId,
-                                saveDefinition: false
+                                saveDefinition: false,
+                                createdBy: actorCreatedBy
                             });
                         } else {
                             getOrCreateSession(internalName, cwd, displayName);
@@ -9346,6 +9351,12 @@ async function claimLocalCliSession(existingTunnel, cwdPath, cwdName) {
 async function callLocalApi(existingTunnel, apiPath, method = 'GET', body = null) {
     return await new Promise((resolve, reject) => {
         const headers = { 'Authorization': `Bearer ${existingTunnel.sessionSecret}` };
+        // The hop CLI run from inside a claude session (its Bash tool sets
+        // CLAUDECODE) is acting as an agent: sessions it creates must land in
+        // the agent bucket, not impersonate the human (Mybot/Stella confusion).
+        if (process.env.CLAUDECODE === '1' || process.env.CLAUDE_CODE_SESSION_ID) {
+            headers['X-Hop-Actor'] = 'agent';
+        }
         let payload = null;
         if (body) {
             payload = JSON.stringify(body);
@@ -9675,12 +9686,13 @@ async function claimUnnamedLocalCliSession(opts = {}) {
     }
 
     if (selection.createdNew) {
+        const claimCreatedBy = opts.createdBy === 'agent' ? 'agent' : 'user';
         rememberRuntimeSessionMetadata(target.internalName, {
             type: 'terminal',
             cwd: cwdPath,
             displayName: target.displayName,
-            createdBy: 'user',
-            agentPermitted: false,
+            createdBy: claimCreatedBy,
+            agentPermitted: claimCreatedBy === 'agent',
             workspaceName: null
         });
     }

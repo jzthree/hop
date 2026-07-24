@@ -98,9 +98,10 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     // last owns the size — so typing in the big background terminal snaps the
     // session back, and the tile falls back to observing at active_size,
     // scaled down to fit.
-    // Same font metrics as .switcher-preview (11px, app mono stack, 1.2 line
-    // height) so preview → terminal is a swap, not a mode change.
-    const monoStack = getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim() || "monospace";
+    // Same font metrics as .switcher-preview AND the main terminal (11px,
+    // shared --font-terminal stack, 1.2 line height) so preview → tile → the
+    // real session are one continuous font, not three.
+    const monoStack = getComputedStyle(document.documentElement).getPropertyValue("--font-terminal").trim() || "monospace";
     const term = new Terminal({
       scrollback: 2000,
       fontSize: 11,

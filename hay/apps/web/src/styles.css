@@ -6,6 +6,11 @@
 :root {
   color-scheme: light;
   --font-mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+  /* Terminal-content font: the xterm terminal, its preview tiles, and the
+     focus-tile veil must all render in ONE stack, or a preview looks like a
+     different app than the session it previews. Kept separate from
+     --font-mono (UI chrome) and matched to the main xterm fontFamily. */
+  --font-terminal: Menlo, Monaco, "Courier New", monospace;
   --bg: #f2f2f7;
   --bg-alt: #e9e9ed;
   --ink: #1d1d1f;
@@ -2240,7 +2245,7 @@ button.primary {
   margin: 0;
   height: 84px;
   overflow: hidden;
-  font-family: var(--font-mono);
+  font-family: var(--font-terminal);
   font-size: 6px;
   line-height: 1.35;
   white-space: pre;
@@ -2921,7 +2926,7 @@ button.primary {
   z-index: 2;
   margin: 0;
   overflow: hidden;
-  font-family: var(--font-mono);
+  font-family: var(--font-terminal);
   font-size: 11px;
   line-height: 1.2;
   white-space: pre;

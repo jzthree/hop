@@ -1383,7 +1383,11 @@ const App = () => {
     }
 
     const terminal = new Terminal({
-      fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+      // Single source of truth with the switcher preview/focus tiles: xterm
+      // takes a string (can't read the CSS var), so resolve --font-terminal
+      // once. Same stack the preview <pre> uses → previews match the session.
+      fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-terminal").trim()
+        || "Menlo, Monaco, 'Courier New', monospace",
       fontSize,
       lineHeight: 1.3,
       cursorBlink: true,

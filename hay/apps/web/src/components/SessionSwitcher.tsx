@@ -823,9 +823,15 @@ export const SessionSwitcher = ({
     if (!sheet) return;
     await killSessionByRef(sheet.session);
   };
-  const startRename = (s: SwitcherSession) => {
+  const startRename = (s: SwitcherSession, anchor?: { x: number; y: number }) => {
     setRenameDraft(s.displayName || s.name);
-    setSheet({ session: s, mode: "rename" });
+    // Anchor is REQUIRED by the sheet's positioning math — a missing one
+    // crashed the render (the ⋯ gray-screen bug's sibling). Default centers.
+    setSheet({
+      session: s,
+      mode: "rename",
+      anchor: anchor ?? { x: window.innerWidth / 2 + 132, y: window.innerHeight / 3 }
+    });
   };
 
   const submitCreate = async (event: FormEvent) => {
@@ -1001,7 +1007,7 @@ export const SessionSwitcher = ({
         className="switcher-icon-btn"
         aria-label={`Rename ${s.displayName}`}
         title="Rename"
-        onClick={(e) => { e.stopPropagation(); startRename(s); }}
+        onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); startRename(s, { x: r.right, y: r.bottom }); }}
         onPointerDown={(e) => e.stopPropagation()}
       >
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>

@@ -167,7 +167,9 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     // The local grid is NEVER resized optimistically on a claim — only on
     // acceptance. A rejected claim (someone active elsewhere) must cause
     // zero visual churn, or periodic re-claims flap the tile between sizes.
-    const sendClaim = (claim?: "attach") => {
+    // `deliberate` marks a human click: the server (new hosts) lets it win
+    // the election outright; old hosts strip the flag and apply attach rules.
+    const sendClaim = (claim?: "attach", deliberate = false) => {
       if (ws.readyState !== WebSocket.OPEN) return;
       const dims = box.clientWidth > 0 && box.clientHeight > 0 ? fitAddon.proposeDimensions() : undefined;
       if (!dims?.cols || !dims?.rows) return;
@@ -176,7 +178,10 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
       remoteEcho = null;
       window.clearTimeout(claimTimer);
       claimTimer = window.setTimeout(resolveClaim, 250);
-      ws.send(JSON.stringify({ type: "resize", cols: claimed.cols, rows: claimed.rows, ...(claim ? { claim } : {}) }));
+      ws.send(JSON.stringify({
+        type: "resize", cols: claimed.cols, rows: claimed.rows,
+        ...(claim ? { claim } : {}), ...(deliberate ? { user: true } : {})
+      }));
     };
     const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
     setVeiled(true);
@@ -191,7 +196,8 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     unveilSoon(2500);
     let sawSnapshot = false;
     let sawRepaint = false;
-    ws.onopen = () => sendClaim("attach");
+    // The mount IS the user's click on this tile — a deliberate claim.
+    ws.onopen = () => sendClaim("attach", true);
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(String(ev.data));
@@ -260,7 +266,13 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     // another window must never steal the size.
     let interactedAt = Date.now();
     const noteInteraction = () => { interactedAt = Date.now(); };
-    box.addEventListener("pointerdown", noteInteraction);
+    // Clicking INTO a tile that lost the size takes it back — the click is
+    // as deliberate as the one that focused it.
+    const onBoxPointerDown = () => {
+      noteInteraction();
+      if (!ownsSize() && !claimPending) sendClaim("attach", true);
+    };
+    box.addEventListener("pointerdown", onBoxPointerDown);
     const retryTimer = window.setInterval(() => {
       if (!claimPending && !ownsSize() && ws.readyState === WebSocket.OPEN
           && Date.now() - interactedAt < 10_000) {
@@ -273,7 +285,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
       window.clearTimeout(unveilTimer);
       window.clearTimeout(claimTimer);
       window.clearInterval(retryTimer);
-      box.removeEventListener("pointerdown", noteInteraction);
+      box.removeEventListener("pointerdown", onBoxPointerDown);
       ro.disconnect();
       sub.dispose();
       try { ws.close(); } catch { /* closing */ }

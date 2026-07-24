@@ -412,7 +412,7 @@ export class Room extends EventEmitter {
         this.handleInput(client, message.data);
         break;
       case "resize":
-        this.handleResize(client, message.cols, message.rows, message.claim);
+        this.handleResize(client, message.cols, message.rows, message.claim, message.user === true);
         break;
       case "typing":
         client.typing = message.active;
@@ -753,7 +753,7 @@ export class Room extends EventEmitter {
     this.emit("pty_input", { roomId: this.id, clientId: client.id, data, timestamp: now() });
   }
 
-  private handleResize(client: ClientState, cols: number, rows: number, claim?: "attach") {
+  private handleResize(client: ClientState, cols: number, rows: number, claim?: "attach", userClaim = false) {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
     if (cols < 1 || cols > 500 || rows < 1 || rows > 200) return;
 
@@ -773,7 +773,10 @@ export class Room extends EventEmitter {
       ...[...this.clients.values()].filter((c) => c.id !== client.id).map((c) => c.lastInputAt)
     );
     const claimIdleMs = claim === "attach" ? ATTACH_CLAIM_IDLE_MS : RESIZE_CLAIM_IDLE_MS;
-    const isActive =
+    // A user-flagged claim is a deliberate human act (clicking a wall tile,
+    // switching to the session): it wins outright. Anyone actively typing
+    // elsewhere reclaims with their next keystroke, so misfires self-heal.
+    const isActive = userClaim ||
       client.lastInputAt >= maxInputAt || now() - othersMaxInputAt > claimIdleMs;
     if (isActive) {
       this.pty.resize(cols, rows);

@@ -10,7 +10,12 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("resize"),
     cols: z.number().int().min(2),
     rows: z.number().int().min(2),
-    claim: z.enum(["attach"]).optional()
+    claim: z.enum(["attach"]).optional(),
+    // A claim carrying user:true came from a deliberate human act (clicking a
+    // wall tile, switching to the session) — it wins the election outright.
+    // A subsequent typist elsewhere reclaims instantly, so misfires self-heal.
+    // Old servers strip the field and fall back to attach-claim semantics.
+    user: z.boolean().optional()
   }),
   z.object({ type: z.literal("typing"), active: z.boolean() }),
   z.object({ type: z.literal("toggle_collab"), enabled: z.boolean() }),

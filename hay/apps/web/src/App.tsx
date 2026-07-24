@@ -995,6 +995,9 @@ const App = () => {
   const lastTypeFitAtRef = useRef(0);
   // Ctrl+Q double-press arm deadline (CLI-parity kill binding).
   const killArmedAtRef = useRef(0);
+  // Set by an explicit session switch; the next attach claim carries
+  // user:true (deliberate — wins the size election outright on new hosts).
+  const deliberateAttachRef = useRef(false);
   // Last size actually sent, to skip redundant resize messages. Reset when a
   // new connection opens so the server always learns the size once.
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
@@ -1011,11 +1014,14 @@ const App = () => {
       return;
     }
     lastSentSizeRef.current = { cols, rows };
+    const deliberate = claim === "attach" && deliberateAttachRef.current;
+    if (deliberate) deliberateAttachRef.current = false;
     sendMessage({
       type: "resize",
       cols,
       rows,
-      ...(claim ? { claim } : {})
+      ...(claim ? { claim } : {}),
+      ...(deliberate ? { user: true } : {})
     });
   };
 
@@ -2411,6 +2417,9 @@ const App = () => {
     const nextPath = buildSessionPath(nextSession.name);
     const currentRoom = session?.room ?? sessionLabel;
     const canSwitchInPlace = sessionSwitchMode === "instant" && nextSession.type !== "port";
+    // A switch is a deliberate human act — its attach claim wins the size
+    // election outright (see the resize handler). Reconnects don't set this.
+    deliberateAttachRef.current = true;
 
     // Switching to it counts as seeing it — clear its attention indicators.
     const markers = loadSeenMarkers();

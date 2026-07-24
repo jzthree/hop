@@ -544,6 +544,14 @@ export const SessionSwitcher = ({
     setSortMode(mode);
     localStorage.setItem("hay_sort_mode", mode);
   };
+  // Project view density: sectional (a header per project) vs compact (one
+  // continuous grid — the card's workdir line already names the project).
+  // Sections waste rows when most projects hold one or two sessions.
+  const [projectCompact, setProjectCompact] = useState(() => localStorage.getItem("hay_project_compact") === "1");
+  const changeProjectCompact = (compact: boolean) => {
+    setProjectCompact(compact);
+    localStorage.setItem("hay_project_compact", compact ? "1" : "0");
+  };
   // Manual drag order: the ordered list of session keys. Seeded lazily from
   // the current recency order the first time the user drags, so nothing jumps.
   const [manualOrder, setManualOrder] = useState<string[]>(() => {
@@ -1437,6 +1445,25 @@ export const SessionSwitcher = ({
               </button>
             ))}
           </div>
+          {sortMode === "project" && (
+            <div className="switcher-origin switcher-density" role="group" aria-label="Project view density">
+              {([
+                [false, "Sections", "A header per project"],
+                [true, "Compact", "One continuous grid — the project is on each card"]
+              ] as const).map(([compact, label, title]) => (
+                <button
+                  key={label}
+                  type="button"
+                  className={projectCompact === compact ? "active" : ""}
+                  aria-pressed={projectCompact === compact}
+                  title={title}
+                  onClick={() => changeProjectCompact(compact)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           {(finePointer || visibleSessions.length > FILTER_THRESHOLD || filter) && (
             <input
               ref={filterInputRef}
@@ -1474,12 +1501,21 @@ export const SessionSwitcher = ({
             {originScope === "agent" && visibleSessions.length === 0 && (
               <div className="switcher-empty">No agent sessions</div>
             )}
-            {model.groups.map((group) => (
-              <section key={group.label} className="switcher-group">
-                <h3 className="switcher-group-label">{group.label}</h3>
-                <div className="switcher-grid">{group.rows.map((s) => renderCard(s))}</div>
-              </section>
-            ))}
+            {projectCompact ? (
+              // Compact: group ORDER is kept (recency-ranked projects), but
+              // everything flows in one grid — the card's workdir line names
+              // the project, so section headers only cost rows.
+              <div className="switcher-grid">
+                {model.groups.flatMap((group) => group.rows).map((s) => renderCard(s))}
+              </div>
+            ) : (
+              model.groups.map((group) => (
+                <section key={group.label} className="switcher-group">
+                  <h3 className="switcher-group-label">{group.label}</h3>
+                  <div className="switcher-grid">{group.rows.map((s) => renderCard(s))}</div>
+                </section>
+              ))
+            )}
           </>
         ) : model.mode === "manual" ? (
           <>

@@ -92,6 +92,27 @@ describe("SessionSwitcher tile zoom", () => {
   });
 });
 
+describe("SessionSwitcher project view density", () => {
+  it("toggles between sectional and compact project views", () => {
+    const withCwd: SwitcherSession[] = [
+      { name: "alpha-work", displayName: "alpha-work", internalName: "alpha-work", active: true, starting: false, createdBy: "user", cwd: "/Users/x/Code/alpha" },
+      { name: "beta-work", displayName: "beta-work", internalName: "beta-work", active: true, starting: false, createdBy: "user", cwd: "/Users/x/Code/beta" }
+    ];
+    render(<SessionSwitcher {...props} sessions={withCwd} open />);
+    fireEvent.click(screen.getByRole("button", { name: "Project" }));
+    // Sectional (default): one header per project.
+    expect(screen.getByText("~/Code/alpha")).toBeTruthy();
+    expect(screen.getByText("~/Code/beta")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Compact" }));
+    // Headers gone, both cards still present, choice persisted.
+    expect(document.querySelector(".switcher-group-label")).toBeNull();
+    expect(screen.getByText("alpha-work")).toBeTruthy();
+    expect(screen.getByText("beta-work")).toBeTruthy();
+    expect(localStorage.getItem("hay_project_compact")).toBe("1");
+  });
+});
+
 describe("SessionSwitcher origin scope", () => {
   it("starts with user sessions and switches cleanly between Agent and All", () => {
     render(<SessionSwitcher {...props} open />);

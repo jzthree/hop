@@ -776,8 +776,18 @@ export class Room extends EventEmitter {
       this.activeCols = cols;
       this.activeRows = rows;
       this.activeClientId = client.id;
-      // Broadcast the new active size to other clients so they can adjust
+      // Broadcast the new active size to other clients so they can adjust —
+      // and CONFIRM to the winner: a claimant otherwise learns nothing on
+      // success and can only distinguish accept from reject by timeout.
       this.broadcastActiveSize(client);
+      client.socket.send(
+        JSON.stringify({
+          type: "active_size",
+          clientId: client.id,
+          cols,
+          rows
+        } satisfies ServerMessage)
+      );
       this.emit("pty_resize", { roomId: this.id, clientId: client.id, cols, rows, timestamp: now() });
     } else if (cols !== this.activeCols || rows !== this.activeRows) {
       // The resize lost the election (a passive viewer auto-fitted itself).

@@ -137,30 +137,46 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     // Claim lifecycle. The server sends the session's CURRENT active_size on
     // attach, which races our claim — resizing the local grid to it produced
     // a zoomed-out old-size view until the claim round-tripped (two reflows).
-    // While a claim is pending we swallow non-matching echoes; if the claim
-    // isn't confirmed in 700ms we adopt the last echo (rejected → observe).
+    // While a claim is pending we swallow non-matching echoes. A rejection
+    // arrives as a corrective echo within one RTT; hearing nothing for 250ms
+    // means accepted (newer hosts also confirm the winner explicitly).
     let claimPending = false;
     let remoteEcho: { cols: number; rows: number } | null = null;
     let claimTimer = 0;
+    const applyClaimed = () => {
+      if (term.cols !== claimed.cols || term.rows !== claimed.rows) {
+        term.resize(claimed.cols, claimed.rows);
+      }
+      setTimeout(rescale, 30);
+    };
     const resolveClaim = () => {
       if (!claimPending) return;
       claimPending = false;
-      if (remoteEcho && (remoteEcho.cols !== term.cols || remoteEcho.rows !== term.rows)) {
-        term.resize(remoteEcho.cols, remoteEcho.rows);
-        setTimeout(rescale, 30);
+      if (remoteEcho && (remoteEcho.cols !== claimed.cols || remoteEcho.rows !== claimed.rows)) {
+        // Rejected — observe the winner's size, scaled.
+        if (remoteEcho.cols !== term.cols || remoteEcho.rows !== term.rows) {
+          term.resize(remoteEcho.cols, remoteEcho.rows);
+          setTimeout(rescale, 30);
+        }
+      } else {
+        // Silence = accepted (newer hosts also confirm explicitly).
+        applyClaimed();
       }
       remoteEcho = null;
     };
+    // The local grid is NEVER resized optimistically on a claim — only on
+    // acceptance. A rejected claim (someone active elsewhere) must cause
+    // zero visual churn, or periodic re-claims flap the tile between sizes.
     const sendClaim = (claim?: "attach") => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
-      claimed = { cols: term.cols, rows: term.rows };
+      const dims = box.clientWidth > 0 && box.clientHeight > 0 ? fitAddon.proposeDimensions() : undefined;
+      if (!dims?.cols || !dims?.rows) return;
+      claimed = { cols: dims.cols, rows: dims.rows };
       claimPending = true;
       remoteEcho = null;
       window.clearTimeout(claimTimer);
-      claimTimer = window.setTimeout(resolveClaim, 700);
-      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows, ...(claim ? { claim } : {}) }));
-      rescale();
+      claimTimer = window.setTimeout(resolveClaim, 250);
+      ws.send(JSON.stringify({ type: "resize", cols: claimed.cols, rows: claimed.rows, ...(claim ? { claim } : {}) }));
     };
     const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
     setVeiled(true);
@@ -187,9 +203,10 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
         else if (m.type === "active_size") {
           if (claimPending) {
             if (m.cols === claimed.cols && m.rows === claimed.rows) {
-              // Claim confirmed — the next output is the fitted repaint.
+              // Claim confirmed — apply and let the repaint land on it.
               claimPending = false;
               window.clearTimeout(claimTimer);
+              applyClaimed();
             } else {
               remoteEcho = { cols: m.cols, rows: m.rows };
             }
@@ -219,6 +236,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     const sub = term.onData((data) => {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: "input", data }));
+      noteInteraction();
       // Typing in the tile reasserts its size (typing recency wins the
       // election). One claim per burst, not per keystroke.
       const now = Date.now();
@@ -234,11 +252,28 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
       else rescale();
     });
     ro.observe(box);
+    // A rejected focus-claim (someone typed in that session <5s ago — often
+    // an agent) left the tile zoomed-out until the user typed. Re-claim
+    // quietly while the user has RECENTLY ENGAGED the tile (clicked or
+    // typed within 10s) so the view converges once the peer goes idle. Not
+    // gated on DOM focus: a tile left focused while the user works in
+    // another window must never steal the size.
+    let interactedAt = Date.now();
+    const noteInteraction = () => { interactedAt = Date.now(); };
+    box.addEventListener("pointerdown", noteInteraction);
+    const retryTimer = window.setInterval(() => {
+      if (!claimPending && !ownsSize() && ws.readyState === WebSocket.OPEN
+          && Date.now() - interactedAt < 10_000) {
+        sendClaim("attach");
+      }
+    }, 1500);
     const focusTimer = window.setTimeout(() => { term.focus(); rescale(); }, 50);
     return () => {
       window.clearTimeout(focusTimer);
       window.clearTimeout(unveilTimer);
       window.clearTimeout(claimTimer);
+      window.clearInterval(retryTimer);
+      box.removeEventListener("pointerdown", noteInteraction);
       ro.disconnect();
       sub.dispose();
       try { ws.close(); } catch { /* closing */ }
@@ -332,10 +367,35 @@ export const SessionSwitcher = ({
     () => filterSessionsByOrigin(sessions, originScope),
     [sessions, originScope]
   );
-  const model = useMemo(
-    () => buildSwitcherModel(visibleSessions, currentRoom, filter),
-    [visibleSessions, currentRoom, filter]
-  );
+  // While a tile is focused the wall's ORDER freezes: attention/recency
+  // resorting yanked the terminal out from under the user's hands. Contents
+  // still refresh (fresh session objects are looked up by key); the order
+  // thaws when focus is released. Sessions that vanish drop out; brand-new
+  // ones wait for the thaw.
+  const frozenOrderRef = useRef<{ hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
+  const model = useMemo(() => {
+    const live = buildSwitcherModel(visibleSessions, currentRoom, filter);
+    if (!focusedKey || live.mode !== "tiers") {
+      frozenOrderRef.current = null;
+      return live;
+    }
+    if (!frozenOrderRef.current) {
+      frozenOrderRef.current = {
+        hero: live.hero.map(sessionKey),
+        groups: live.groups.map((g) => ({ label: g.label, rows: g.rows.map(sessionKey) }))
+      };
+    }
+    const byKey = new Map(visibleSessions.map((s) => [sessionKey(s), s]));
+    const frozen = frozenOrderRef.current;
+    return {
+      mode: "tiers" as const,
+      hero: frozen.hero.map((k) => byKey.get(k)).filter((s): s is SwitcherSession => !!s),
+      groups: frozen.groups
+        .map((g) => ({ label: g.label, rows: g.rows.map((k) => byKey.get(k)).filter((s): s is SwitcherSession => !!s) }))
+        .filter((g) => g.rows.length > 0),
+      currentInHero: live.currentInHero
+    };
+  }, [visibleSessions, currentRoom, filter, focusedKey]);
 
   // ── Keyboard-first palette: ⌘K → type to filter → ↑↓ → Enter, no mouse. ──
   const filterInputRef = useRef<HTMLInputElement>(null);

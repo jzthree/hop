@@ -5055,8 +5055,12 @@ function loadSerializeAddon() {
 }
 const ROOM_GRID_MAX = 80; // LRU cap — a scrollback-0 grid is ~0.5-2MB
 const ROOM_GRID_IDLE_MS = 5 * 60_000;
-// null = unknown, false = this host has no /output endpoint (pre-restart).
-let hostSupportsOutputSince = null;
+// Whether the CURRENT host incarnation serves /output — probed lazily, and
+// scoped to that incarnation: a restarted host may have gained the endpoint,
+// and grid cursors from a previous incarnation are meaningless against the
+// new one's offsets (same room ids, different streams), so a host change
+// resets the probe AND disposes every grid.
+let outputSinceProbe = { hostKey: '', supported: null };
 
 function disposeRoomGrid(internalName) {
     const grid = roomGrids.get(internalName);
@@ -5139,7 +5143,15 @@ function getRoomGridPreviewShared(internalName) {
 // or null when this path can't serve (old host, no live room, no headless
 // terminal) and the legacy pipeline should take over.
 async function getRoomGridPreview(internalName) {
-    if (hostSupportsOutputSince === false) return null;
+    const host = hayHostState || readHayHostStateFile();
+    if (host && Number.isInteger(host.port) && host.port > 0) {
+        const hostKey = `${host.pid}:${host.startedAt}`;
+        if (outputSinceProbe.hostKey !== hostKey) {
+            outputSinceProbe = { hostKey, supported: null };
+            for (const key of [...roomGrids.keys()]) disposeRoomGrid(key);
+        }
+    }
+    if (outputSinceProbe.supported === false) return null;
     const Term = loadHeadlessTerminal();
     if (!Term) return null;
     let grid = roomGrids.get(internalName);
@@ -5150,11 +5162,11 @@ async function getRoomGridPreview(internalName) {
         return grid ? readGridScreen(grid) : null;
     }
     if (res.notFound) {
-        if (res.endpointMissing) hostSupportsOutputSince = false;
+        if (res.endpointMissing) outputSinceProbe.supported = false;
         disposeRoomGrid(internalName);
         return null;
     }
-    hostSupportsOutputSince = true;
+    outputSinceProbe.supported = true;
     // Generous clamps: rendering NARROWER than the PTY re-wraps every long
     // line into garbage (the old 400 clamp mangled a real 476-col session).
     const cols = Math.max(2, Math.min(1000, Math.floor(Number(res.cols) || 80)));

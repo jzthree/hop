@@ -19,6 +19,7 @@ import {
   type SwitcherSession,
   type SwitcherSortMode
 } from "../utils/switcherModel";
+import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 
 // Full-screen, in-app session switcher (mobile-first). Hot sessions — current,
 // attention, most recent — are preview cards; the tail is compact rows grouped
@@ -106,9 +107,10 @@ const runningApp = (s: SwitcherSession) => {
 // full input, auto-fit to its box, instant rendering, connected as the user
 // (it participates in presence like any client). Every other tile stays a
 // cheap polled text preview, so the XL wall costs one websocket, not nine.
-const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFullscreen, onUnfocus }: {
+const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claudeApp, onFullscreen, onUnfocus }: {
   wsBase: string; room: string; userName: string; theme: object | undefined;
-  fallback: string; fontSize: number; onFullscreen: () => void; onUnfocus: () => void;
+  fallback: string; fontSize: number; claudeApp: boolean;
+  onFullscreen: () => void; onUnfocus: () => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
   // The last preview frame stays painted OVER the terminal until the claimed
@@ -118,6 +120,10 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
   const [veiled, setVeiled] = useState(true);
   // Connection state surfaced in the focus bar: a dead socket must LOOK dead.
   const [conn, setConn] = useState<"live" | "down">("live");
+  // Read at key time via a ref — the foreground process changes as commands
+  // run, and a prop-dep here would tear down the whole connection each time.
+  const claudeAppRef = useRef(claudeApp);
+  claudeAppRef.current = claudeApp;
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
@@ -237,6 +243,9 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
     unveilSoon(2500);
     let sawSnapshot = false;
     let sawRepaint = false;
+    // Enhanced-keyboard state, tracked from the tile's own stream (snapshot
+    // flag + live protocol toggles) — gates the Shift+Enter CSI-u encoding.
+    let kbdEnhanced = false;
     const scheduleReconnect = () => {
       if (disposed) return;
       setConn("down");
@@ -272,9 +281,18 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
       sock.onmessage = (ev) => {
         try {
           const m = JSON.parse(String(ev.data));
-          if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); sawSnapshot = true; unveilSoon(600); }
+          if (m.type === "snapshot") {
+            term.reset();
+            term.write(m.data, rescale);
+            sawSnapshot = true;
+            kbdEnhanced = typeof m.keyboardEnhanced === "boolean"
+              ? m.keyboardEnhanced
+              : scanKeyboardProtocol(String(m.data || ""), false);
+            unveilSoon(600);
+          }
           else if (m.type === "output") {
             term.write(m.data);
+            kbdEnhanced = scanKeyboardProtocol(String(m.data || ""), kbdEnhanced);
             if (sawSnapshot && !sawRepaint && !claimPending) { sawRepaint = true; unveilSoon(120); }
           }
           else if (m.type === "active_size") {
@@ -327,27 +345,12 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
       }
     };
     window.addEventListener("focus", onWindowFocus);
-    // Two reserved chords — everything else (Enter, Escape, arrows…) belongs
-    // to the remote app: ⌘⏎/Ctrl⏎ opens the session full screen, ⌘./Ctrl+.
-    // releases focus back to the wall.
-    term.attachCustomKeyEventHandler((ev) => {
-      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === "Enter") {
-        if (ev.type === "keydown") onFullscreen();
-        return false;
-      }
-      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === ".") {
-        if (ev.type === "keydown") onUnfocus();
-        return false;
-      }
-      return true;
-    });
+    // One path for typed data AND synthesized key encodings: buffer +
+    // kick a reconnect when the socket is down — never silently drop.
     let lastTypeClaimAt = 0;
-    const sub = term.onData((data) => {
+    const sendInput = (data: string) => {
       noteInteraction();
       if (!ws || ws.readyState !== WebSocket.OPEN) {
-        // Never silently eat typing: buffer it (replayed on reconnect if
-        // still fresh), surface the state, and kick a reconnect if none is
-        // in flight.
         pendingInput.push({ data, at: Date.now() });
         if (pendingInput.length > 200) pendingInput.shift();
         setConn("down");
@@ -365,7 +368,34 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, onFull
         lastTypeClaimAt = now;
         sendClaim();
       }
+    };
+    // Reserved chords — everything else (Enter, Escape, arrows…) belongs
+    // to the remote app: ⌘⏎/Ctrl⏎ opens the session full screen, ⌘./Ctrl+.
+    // releases focus back to the wall.
+    term.attachCustomKeyEventHandler((ev) => {
+      // Shift+Enter must reach the app as a distinct key (Claude Code:
+      // newline, not submit). xterm.js would emit a plain \r — synthesize
+      // the kitty CSI-u encoding under the same gate as the main terminal:
+      // the app negotiated enhanced keyboard reporting, or it's Claude Code
+      // (parses CSI-u unconditionally but no longer advertises the
+      // protocol at boot). A plain shell renders raw CSI-u as junk, hence
+      // the gate.
+      if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey
+          && (kbdEnhanced || claudeAppRef.current)) {
+        if (ev.type === "keydown") sendInput("\x1b[13;2u");
+        return false;
+      }
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === "Enter") {
+        if (ev.type === "keydown") onFullscreen();
+        return false;
+      }
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === ".") {
+        if (ev.type === "keydown") onUnfocus();
+        return false;
+      }
+      return true;
     });
+    const sub = term.onData(sendInput);
     const ro = new ResizeObserver(() => {
       // Box changed (viewport/tile-size): refit our claim if we hold the
       // size; otherwise just rescale the observed grid.
@@ -1224,6 +1254,7 @@ export const SessionSwitcher = ({
             theme={terminalTheme}
             fallback={preview || " "}
             fontSize={parseInt(zoomLevel.fs, 10) || 11}
+            claudeApp={appLabel(s) === "claude"}
             onFullscreen={() => onSwitch(s)}
             onUnfocus={() => setFocusedKey(null)}
           />

@@ -11,6 +11,7 @@ import {
 } from "hay-shared";
 import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
+import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -202,25 +203,6 @@ const paneTreeHasPrimary = (n: PaneNode): boolean =>
 const LATENCY_COMP = true;
 const AUTO_FIT_ON_TYPE = true;
 
-// Scan a chunk of remote output for enhanced-keyboard protocol toggles: kitty
-// keyboard push/pop (CSI > flags u / CSI < u) and xterm modifyOtherKeys
-// (CSI > 4 ; level m). Returns the NET state after the chunk, so a re-render
-// that pops and re-pushes inside one chunk stays "on". Mirrors the hop CLI.
-const KBD_PROTO_RE = /\x1b\[([<>=])[0-9;:]*u|\x1b\[>([0-9;]*)m/g;
-const scanKeyboardProtocol = (data: string, current: boolean): boolean => {
-  let next = current;
-  KBD_PROTO_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = KBD_PROTO_RE.exec(data)) !== null) {
-    if (m[1] !== undefined) {
-      next = m[1] !== "<"; // kitty: pop disables, push/set enable
-    } else {
-      const parts = (m[2] ?? "").split(";");
-      if (parts[0] === "4") next = (parts[1] ?? "0") !== "0";
-    }
-  }
-  return next;
-};
 type SessionSwitchMode = "page" | "instant";
 const DEFAULT_SESSION_SWITCH_MODE: SessionSwitchMode = "instant";
 const SESSION_LIST_STALE_MS = 5000;

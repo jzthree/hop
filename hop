@@ -5041,6 +5041,27 @@ function trimPreviewSource(output) {
     return nl > 0 && nl < 8192 ? output.slice(nl + 1) : output;
 }
 
+// Density = count of lines with real content. A coherent screen has several;
+// a differential-repaint miss has 1-4 scattered live cells.
+function previewFrameDensity(text) {
+    if (typeof text !== 'string') return 0;
+    return text.split('\n').filter((l) => l.trim().length >= 2).length;
+}
+
+// Sparse = too few non-blank lines to be a real screen (a spinner/counter
+// frame, or a mid-repaint capture). Tuned so a bare shell prompt or a short
+// command's output (1-2 dense lines) still counts as real, while 3-4
+// scattered fragments (a differential-repaint miss) do not.
+function previewFrameIsSparse(text) {
+    if (typeof text !== 'string') return true;
+    const len = text.trim().length;
+    if (len < 8) return true;
+    const dense = previewFrameDensity(text);
+    if (dense >= 5) return false;         // real screen
+    if (dense <= 2) return len < 12;      // shell prompt / tiny output
+    return len < 60;                      // 3-4 fragments → sparse unless substantial
+}
+
 async function renderSessionPreviewText(source, { noTrim = false } = {}) {
     if (!source || typeof source.output !== 'string') return null;
     const Term = loadHeadlessTerminal();
@@ -6755,22 +6776,28 @@ function startAuthProxy(authEmitter) {
                 }
                 const rendered = await renderSessionPreviewText(source);
                 let payload = { text: typeof rendered === 'string' ? rendered : '', cols: source.cols, rows: source.rows };
-                if (payload.text.trim().length < 8) {
-                    // Sparse frame: the visible content may sit far behind a
-                    // churning TUI's spinner redraws. Replay a much deeper
-                    // tail untrimmed — overdraw reconstructs the screen.
+                // A DIFFERENTIAL-repaint TUI (claude inline) writes only the
+                // cells that changed; a bounded tail that misses the last full
+                // repaint renders as a near-empty screen with a few scattered
+                // live cells (a spinner, a counter — "1m 23s", "58"). That is
+                // NOT a good frame even though it has >8 chars. Measure density
+                // by non-blank lines, not raw length.
+                if (previewFrameIsSparse(payload.text)) {
+                    // Deeper untrimmed replay: overdraw from an earlier full
+                    // repaint reconstructs the screen (host honors ?bytes).
                     const deep = await fetchHayRoomPreviewSource(internalName, 524288);
                     if (deep && typeof deep.output === 'string' && deep.output.length > (source.output || '').length) {
                         const deepText = await renderSessionPreviewText(deep, { noTrim: true });
-                        if (typeof deepText === 'string' && deepText.trim().length > payload.text.trim().length) {
+                        if (typeof deepText === 'string' && previewFrameDensity(deepText) > previewFrameDensity(payload.text)) {
                             payload = { text: deepText, cols: deep.cols, rows: deep.rows };
                         }
                     }
                 }
-                // Quality bar, not just non-empty: a mid-churn frame of bare
-                // glyphs ("⏺") must not replace a real screen. 8+ chars keeps
-                // shell prompts in while junk frames serve the last good one.
-                if (payload.text.trim().length >= 8) {
+                // A dense frame becomes the cached "last good"; a sparse one is
+                // never cached (it would overwrite a real screen) and, when a
+                // cached frame exists, is not even served — the tile keeps its
+                // last real screen until a dense frame arrives.
+                if (!previewFrameIsSparse(payload.text)) {
                     lastGoodPreviewByRoom.set(internalName, payload);
                     if (lastGoodPreviewByRoom.size > 500) {
                         lastGoodPreviewByRoom.delete(lastGoodPreviewByRoom.keys().next().value);

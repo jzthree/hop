@@ -105,7 +105,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     const term = new Terminal({
       scrollback: 2000,
       fontSize: 11,
-      lineHeight: 1.2,
+      lineHeight: 1.3,
       fontFamily: monoStack,
       cursorBlink: true,
       theme: theme as never

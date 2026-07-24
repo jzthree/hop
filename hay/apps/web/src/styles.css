@@ -2247,7 +2247,7 @@ button.primary {
   overflow: hidden;
   font-family: var(--font-terminal);
   font-size: 6px;
-  line-height: 1.35;
+  line-height: 1.3;
   white-space: pre;
   color: var(--ink-muted);
   background: var(--terminal-bg);
@@ -2908,9 +2908,9 @@ button.primary {
 .switcher-overlay.tile-xl .switcher-preview {
   height: 300px;
   font-size: 11px;
-  /* Match the focused tile's xterm metrics (11px / 1.2) so focusing a tile
-     swaps content in place instead of reading as a mode change. */
-  line-height: 1.2;
+  /* Match the terminal's line-height (1.3), shared by the focused xterm and
+     the veil, so preview → focus → real session are one continuous layout. */
+  line-height: 1.3;
 }
 
 /* Last preview frame held over a freshly focused tile until the claimed
@@ -2928,7 +2928,7 @@ button.primary {
   overflow: hidden;
   font-family: var(--font-terminal);
   font-size: 11px;
-  line-height: 1.2;
+  line-height: 1.3;
   white-space: pre;
   color: var(--ink-muted);
   background: var(--terminal-bg);
@@ -2996,6 +2996,11 @@ button.primary {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* Inset the xterm content by the SAME amount the preview/veil <pre> insets
+     its text (4px 5px) so preview → focused terminal is a swap in place, not
+     a jump. The veil (inset:0 + matching padding) then lines up glyph-for-
+     row with the xterm beneath it. */
+  padding: 4px 5px;
 }
 
 .switcher-card.focused {

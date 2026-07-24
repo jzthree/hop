@@ -134,18 +134,39 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     const ws = new WebSocket(
       `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=65536&cols=${term.cols}&rows=${term.rows}`
     );
+    // Claim lifecycle. The server sends the session's CURRENT active_size on
+    // attach, which races our claim — resizing the local grid to it produced
+    // a zoomed-out old-size view until the claim round-tripped (two reflows).
+    // While a claim is pending we swallow non-matching echoes; if the claim
+    // isn't confirmed in 700ms we adopt the last echo (rejected → observe).
+    let claimPending = false;
+    let remoteEcho: { cols: number; rows: number } | null = null;
+    let claimTimer = 0;
+    const resolveClaim = () => {
+      if (!claimPending) return;
+      claimPending = false;
+      if (remoteEcho && (remoteEcho.cols !== term.cols || remoteEcho.rows !== term.rows)) {
+        term.resize(remoteEcho.cols, remoteEcho.rows);
+        setTimeout(rescale, 30);
+      }
+      remoteEcho = null;
+    };
     const sendClaim = (claim?: "attach") => {
       if (ws.readyState !== WebSocket.OPEN) return;
       if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
       claimed = { cols: term.cols, rows: term.rows };
+      claimPending = true;
+      remoteEcho = null;
+      window.clearTimeout(claimTimer);
+      claimTimer = window.setTimeout(resolveClaim, 700);
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows, ...(claim ? { claim } : {}) }));
       rescale();
     };
     const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
     setVeiled(true);
-    // Unveil as soon as the post-claim repaint actually ARRIVES (first output
-    // after the snapshot, +120ms for the burst to paint). The timers are only
-    // fallbacks: 500ms for an idle room that will never repaint, 2.5s hard cap.
+    // Unveil on the first output AFTER the claim resolves — that burst is the
+    // repaint at the fitted size, so the veil lifts straight onto the final
+    // layout (never the zoomed-out intermediate). Timers are fallbacks only.
     let unveilTimer = 0;
     const unveilSoon = (ms: number) => {
       window.clearTimeout(unveilTimer);
@@ -158,15 +179,25 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(String(ev.data));
-        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); sawSnapshot = true; unveilSoon(500); }
+        if (m.type === "snapshot") { term.reset(); term.write(m.data, rescale); sawSnapshot = true; unveilSoon(600); }
         else if (m.type === "output") {
           term.write(m.data);
-          if (sawSnapshot && !sawRepaint) { sawRepaint = true; unveilSoon(120); }
+          if (sawSnapshot && !sawRepaint && !claimPending) { sawRepaint = true; unveilSoon(120); }
         }
-        else if (m.type === "active_size" && (m.cols !== term.cols || m.rows !== term.rows)) {
-          // Another client won the election — observe at its size, scaled.
-          term.resize(m.cols, m.rows);
-          setTimeout(rescale, 30);
+        else if (m.type === "active_size") {
+          if (claimPending) {
+            if (m.cols === claimed.cols && m.rows === claimed.rows) {
+              // Claim confirmed — the next output is the fitted repaint.
+              claimPending = false;
+              window.clearTimeout(claimTimer);
+            } else {
+              remoteEcho = { cols: m.cols, rows: m.rows };
+            }
+          } else if (m.cols !== term.cols || m.rows !== term.rows) {
+            // Another client won the election — observe at its size, scaled.
+            term.resize(m.cols, m.rows);
+            setTimeout(rescale, 30);
+          }
         }
       } catch { /* non-JSON frame */ }
     };
@@ -207,6 +238,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, onFullscreen, on
     return () => {
       window.clearTimeout(focusTimer);
       window.clearTimeout(unveilTimer);
+      window.clearTimeout(claimTimer);
       ro.disconnect();
       sub.dispose();
       try { ws.close(); } catch { /* closing */ }

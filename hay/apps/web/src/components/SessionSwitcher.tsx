@@ -571,19 +571,25 @@ export const SessionSwitcher = ({
     }
   };
   const [dragKey, setDragKey] = useState<string | null>(null);
-  // Move `from` to just before `to` in the manual order. Seeds the order from
-  // the current visual sequence on first drag so untouched sessions keep place.
-  const reorderManual = (from: string | null, to: string) => {
+  // Live reorder while dragging: dragging over a card moves the dragged
+  // session to that card's index immediately, so the grid reflows in real
+  // time and the drop is just a release. Index-move semantics keep this
+  // stable (the classic sortable-hover pattern): after the move the hovered
+  // card occupies the dragged card's old index, so re-entering it computes
+  // from === to and no-ops instead of oscillating. Seeds the order from the
+  // current visual sequence on first drag so untouched sessions keep place.
+  const moveManual = (from: string | null, to: string) => {
     if (!from || from === to) return;
     const current = flatNavRef.current.map(sessionKey);
     const base = manualOrder.length ? manualOrder.slice() : current;
     // Ensure every visible session is represented before moving.
     for (const k of current) if (!base.includes(k)) base.push(k);
-    const without = base.filter((k) => k !== from);
-    const toIdx = without.indexOf(to);
-    if (toIdx === -1) return;
-    without.splice(toIdx, 0, from);
-    persistManualOrder(without);
+    const fromIdx = base.indexOf(from);
+    const toIdx = base.indexOf(to);
+    if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+    base.splice(fromIdx, 1);
+    base.splice(toIdx, 0, from);
+    persistManualOrder(base);
   };
   // Fullscreen: the in-session palette can expand to the whole viewport for a
   // workspace feel, or stay compact for quick switching. Persisted.
@@ -1228,8 +1234,10 @@ export const SessionSwitcher = ({
         className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}`}
         draggable={draggable}
         onDragStart={draggable ? (e) => { setDragKey(key); e.dataTransfer.effectAllowed = "move"; } : undefined}
+        onDragEnter={draggable ? () => { if (dragKey && dragKey !== key) moveManual(dragKey, key); } : undefined}
         onDragOver={draggable ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } : undefined}
-        onDrop={draggable ? (e) => { e.preventDefault(); reorderManual(dragKey, key); setDragKey(null); } : undefined}
+        // Order was already applied live during the drag — drop/end just clean up.
+        onDrop={draggable ? (e) => { e.preventDefault(); setDragKey(null); } : undefined}
         onDragEnd={draggable ? () => setDragKey(null) : undefined}
         onClick={() => {
           if (interactiveTiles && s.active && s.type !== "port") setFocusedKey(key);

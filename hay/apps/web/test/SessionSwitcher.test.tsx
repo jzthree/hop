@@ -113,6 +113,28 @@ describe("SessionSwitcher project view density", () => {
   });
 });
 
+describe("SessionSwitcher manual drag", () => {
+  it("reorders live as the drag passes over other tiles, before any drop", () => {
+    const three: SwitcherSession[] = ["one", "two", "three"].map((n) => ({
+      name: n, displayName: n, internalName: n, active: true, starting: false, createdBy: "user" as const
+    }));
+    render(<SessionSwitcher {...props} sessions={three} open />);
+    fireEvent.click(screen.getByRole("button", { name: "Manual" }));
+    const names = () =>
+      Array.from(document.querySelectorAll(".switcher-card-name")).map((n) => n.textContent);
+    expect(names()).toEqual(["one", "two", "three"]);
+
+    const source = screen.getByText("one").closest(".switcher-card")!;
+    const target = screen.getByText("three").closest(".switcher-card")!;
+    fireEvent.dragStart(source, { dataTransfer: { effectAllowed: "" } });
+    fireEvent.dragEnter(target);
+
+    // The grid reflowed during the drag — no drop needed.
+    expect(names()).toEqual(["two", "three", "one"]);
+    expect(JSON.parse(localStorage.getItem("hay_manual_order_v1")!)).toEqual(["two", "three", "one"]);
+  });
+});
+
 describe("SessionSwitcher origin scope", () => {
   it("starts with user sessions and switches cleanly between Agent and All", () => {
     render(<SessionSwitcher {...props} open />);

@@ -199,6 +199,10 @@ export class Room extends EventEmitter {
   // the host for minutes under a busy fleet and got it killed as unresponsive.
   private outputChunks: string[] = [];
   private outputBytes = 0;
+  // Absolute stream offset (UTF-16 units) of the FIRST retained char — i.e.
+  // how much has been trimmed off the head over the room's lifetime. Lets
+  // getOutputSince hand out stable cursors into an ever-trimming ring.
+  private outputStart = 0;
   private alternateScreen = false;
   // Enhanced keyboard reporting requested by the remote app (kitty keyboard protocol
   // or xterm modifyOtherKeys). Tracked like alternateScreen so a reattaching client
@@ -881,11 +885,13 @@ export class Room extends EventEmitter {
     this.outputBytes += data.length;
     while (this.outputChunks.length > 1 && this.outputBytes - this.outputChunks[0].length >= MAX_BUFFER_SIZE) {
       this.outputBytes -= this.outputChunks[0].length;
+      this.outputStart += this.outputChunks[0].length;
       this.outputChunks.shift();
     }
     // A single chunk larger than the whole cap (giant seed/paste): slice once.
     if (this.outputChunks.length === 1 && this.outputBytes > MAX_BUFFER_SIZE) {
       const only = this.outputChunks[0].slice(this.outputChunks[0].length - MAX_BUFFER_SIZE);
+      this.outputStart += this.outputChunks[0].length - only.length;
       this.outputChunks[0] = only;
       this.outputBytes = only.length;
     }
@@ -942,6 +948,36 @@ export class Room extends EventEmitter {
    */
   getPreviewSource(maxBytes = 65536): { cols: number; rows: number; output: string } {
     return { cols: this.activeCols, rows: this.activeRows, output: this.tailOutput(maxBytes) };
+  }
+
+  /**
+   * Incremental output for a persistent consumer-side screen parser (the
+   * daemon's preview grids). `since` is an absolute cursor from a previous
+   * call's `offset`; the response is exactly the chars appended after it, so
+   * parser state carries forward with no arbitrary cut points. A cursor
+   * that's unknown, ahead of the stream, fallen off the retained ring, or too
+   * far behind to be worth replaying comes back as `reset: true` with a
+   * bounded tail and a fresh cursor — the caller re-seeds.
+   */
+  getOutputSince(
+    since?: number,
+    maxBytes = 1_048_576
+  ): { offset: number; data: string; reset: boolean; cols: number; rows: number } {
+    const end = this.outputStart + this.outputBytes;
+    const dims = { cols: this.activeCols, rows: this.activeRows };
+    if (
+      typeof since !== "number" ||
+      !Number.isFinite(since) ||
+      since < this.outputStart ||
+      since > end ||
+      end - since > maxBytes
+    ) {
+      return { offset: end, data: this.tailOutput(maxBytes), reset: true, ...dims };
+    }
+    // The delta from `since` to the end IS the tail of that length, and
+    // since >= outputStart guarantees every char of it is still retained.
+    const deltaLen = end - since;
+    return { offset: end, data: deltaLen === 0 ? "" : this.tailOutput(deltaLen), reset: false, ...dims };
   }
 
   /**
@@ -1042,6 +1078,11 @@ export class RoomManager {
   getRoomPreviewSource(id: string, maxBytes?: number) {
     const room = this.rooms.get(id);
     return room ? room.getPreviewSource(maxBytes) : null;
+  }
+
+  getRoomOutputSince(id: string, since?: number, maxBytes?: number) {
+    const room = this.rooms.get(id);
+    return room ? room.getOutputSince(since, maxBytes) : null;
   }
 
   /**

@@ -185,7 +185,8 @@ async function main() {
             res.end(JSON.stringify({
                 ok: true,
                 capabilities: {
-                    localCliCount: true
+                    localCliCount: true,
+                    outputSince: true
                 }
             }));
             return;
@@ -255,6 +256,36 @@ async function main() {
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(source));
+            return;
+        }
+        // Incremental output for the daemon's persistent preview terminals:
+        // ?since= is the absolute cursor returned by the previous call; the
+        // response is exactly the chars appended after it (reset:true + a
+        // bounded tail when the cursor is stale/unknown). This is what lets
+        // previews be parsed incrementally instead of re-cut from a raw tail.
+        const outputMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)\/output$/);
+        if (outputMatch && req.method === 'GET') {
+            const roomId = hay.sanitizeRoom(decodeURIComponent(outputMatch[1]));
+            const getSince = typeof rooms.getRoomOutputSince === 'function'
+                ? rooms.getRoomOutputSince.bind(rooms)
+                : null;
+            // Number(null) is 0 — an ABSENT since must stay undefined (reset
+            // semantics), not become a valid cursor at offset 0.
+            const sinceParam = reqUrl.searchParams.get('since');
+            const sinceRaw = sinceParam === null ? NaN : Number(sinceParam);
+            const since = Number.isFinite(sinceRaw) && sinceRaw >= 0 ? sinceRaw : undefined;
+            const bytesRaw = Number(reqUrl.searchParams.get('bytes'));
+            const bytes = Number.isFinite(bytesRaw) && bytesRaw > 0
+                ? Math.min(2097152, Math.floor(bytesRaw))
+                : undefined;
+            const result = roomId && getSince ? getSince(roomId, since, bytes) : null;
+            if (!result) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Room not found' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
             return;
         }
         const deleteRoomMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)$/);

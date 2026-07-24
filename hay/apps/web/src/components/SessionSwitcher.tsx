@@ -798,10 +798,11 @@ export const SessionSwitcher = ({
             if (!res.ok) return;
             const data = await res.json();
             const text = typeof data.text === "string" ? data.text.replace(/\s+$/, "") : "";
-            // Quality gate mirrors the daemon's: a mid-churn junk frame
-            // ("⏺", 1-5 chars) must never REPLACE a good cached screen —
-            // that's how tiles went blank after having shown content.
-            if (!cancelled && text.trim().length >= 8) {
+            // The daemon serves exact grid screens now (or its own cached
+            // good frame), so tiny frames are real screens — a fresh shell's
+            // bare prompt must fill the tile, not be filtered as junk. Only
+            // an empty frame never replaces existing content.
+            if (!cancelled && text.trim().length > 0) {
               previewCacheRef.current!.set(key, text);
             }
           } catch {

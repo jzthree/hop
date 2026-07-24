@@ -544,4 +544,92 @@ describe("Room", () => {
     const snapshot = findMessages(late, "snapshot").at(-1);
     expect(snapshot?.keyboardEnhanced).toBe(true);
   });
+
+  describe("getOutputSince (incremental preview feed)", () => {
+    const makeRoom = () => {
+      let ptyInstance: FakePty | null = null;
+      const factory: PtyFactory = () => {
+        ptyInstance = new FakePty() as unknown as FakePty;
+        return ptyInstance as any;
+      };
+      const manager = new RoomManager(factory);
+      const room = manager.getRoom("inc", { cols: 80, rows: 24 }, "/tmp");
+      return { room, manager, pty: () => ptyInstance! };
+    };
+
+    it("hands out a reset tail first, then exact deltas from the cursor", () => {
+      const { room, pty } = makeRoom();
+      pty().emit("hello ");
+      const first = room.getOutputSince(undefined);
+      expect(first.reset).toBe(true);
+      expect(first.data).toBe("hello ");
+      expect(first.cols).toBe(80);
+
+      pty().emit("world");
+      const second = room.getOutputSince(first.offset);
+      expect(second.reset).toBe(false);
+      expect(second.data).toBe("world");
+
+      // No new output → empty delta, same cursor.
+      const third = room.getOutputSince(second.offset);
+      expect(third.reset).toBe(false);
+      expect(third.data).toBe("");
+      expect(third.offset).toBe(second.offset);
+    });
+
+    it("spans chunk boundaries in a single delta", () => {
+      const { room, pty } = makeRoom();
+      pty().emit("a");
+      const start = room.getOutputSince(undefined);
+      pty().emit("bb");
+      pty().emit("ccc");
+      pty().emit("d");
+      const delta = room.getOutputSince(start.offset);
+      expect(delta.reset).toBe(false);
+      expect(delta.data).toBe("bbcccd");
+    });
+
+    it("resets when the cursor is ahead of the stream or nonsense", () => {
+      const { room, pty } = makeRoom();
+      pty().emit("xyz");
+      const ahead = room.getOutputSince(9999);
+      expect(ahead.reset).toBe(true);
+      expect(ahead.data).toBe("xyz");
+      const negative = room.getOutputSince(Number.NaN);
+      expect(negative.reset).toBe(true);
+    });
+
+    it("resets with a bounded tail when the delta exceeds maxBytes", () => {
+      const { room, pty } = makeRoom();
+      pty().emit("seed");
+      const start = room.getOutputSince(undefined);
+      pty().emit("x".repeat(50));
+      const capped = room.getOutputSince(start.offset, 10);
+      expect(capped.reset).toBe(true);
+      expect(capped.data).toBe("x".repeat(10));
+      // The fresh cursor is usable for the next incremental call.
+      pty().emit("tail");
+      const next = room.getOutputSince(capped.offset);
+      expect(next.reset).toBe(false);
+      expect(next.data).toBe("tail");
+    });
+
+    it("keeps cursors stable across ring trims", () => {
+      const { room, pty } = makeRoom();
+      pty().emit("early");
+      const start = room.getOutputSince(undefined);
+      // Blow well past the retention cap so the head (and the old cursor's
+      // position) is trimmed away.
+      const big = "y".repeat(8 * 1024 * 1024);
+      pty().emit(big);
+      pty().emit(big);
+      pty().emit(big);
+      const later = room.getOutputSince(start.offset, 1024);
+      expect(later.reset).toBe(true);
+      pty().emit("fresh");
+      const delta = room.getOutputSince(later.offset);
+      expect(delta.reset).toBe(false);
+      expect(delta.data).toBe("fresh");
+    });
+  });
 });

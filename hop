@@ -5015,6 +5015,157 @@ function fetchHayRoomPreviewSource(internalName, bytes) {
     });
 }
 
+// ── Grid previews: a persistent headless terminal per recently-previewed
+// room, fed INCREMENTALLY via the host's /rooms/:id/output?since= endpoint.
+// Parser state carries forward, so there is never an arbitrary cut point in
+// a differential-repaint stream — the grid IS the screen, and "render a
+// preview" becomes "read ~50 lines out of an existing grid". The
+// guess-the-frame heuristics below (trim markers, density gate, deep
+// refetch) survive only as the fallback path for hosts predating /output.
+// Grids are lazy (created on first preview request) and reaped when idle,
+// preserving the idle-rooms-cost-nothing property. ──
+const roomGrids = new Map(); // internalName -> { term, offset, cols, rows, lastUsedAt }
+const ROOM_GRID_MAX = 80; // LRU cap — a scrollback-0 grid is ~0.5-2MB
+const ROOM_GRID_IDLE_MS = 5 * 60_000;
+// null = unknown, false = this host has no /output endpoint (pre-restart).
+let hostSupportsOutputSince = null;
+
+function disposeRoomGrid(internalName) {
+    const grid = roomGrids.get(internalName);
+    if (grid) {
+        try { grid.term.dispose(); } catch (e) { /* already dead */ }
+        roomGrids.delete(internalName);
+    }
+}
+setInterval(() => {
+    const cutoff = Date.now() - ROOM_GRID_IDLE_MS;
+    for (const [key, grid] of roomGrids) {
+        if (grid.lastUsedAt < cutoff) disposeRoomGrid(key);
+    }
+}, 60_000).unref();
+
+function fetchHayRoomOutputSince(internalName, since) {
+    const host = hayHostState || readHayHostStateFile();
+    if (!host || !Number.isInteger(host.port) || host.port <= 0) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: host.port,
+            path: `/rooms/${encodeURIComponent(internalName)}/output${since === undefined ? '' : `?since=${since}`}`,
+            method: 'GET'
+        }, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                if ((res.statusCode || 0) === 404) {
+                    // Distinguish "room gone" (new host, endpoint exists) from
+                    // "endpoint missing" (old host catch-all): the endpoint's
+                    // own 404 says 'Room not found'.
+                    let endpointMissing = true;
+                    try { endpointMissing = JSON.parse(data || '{}').error !== 'Room not found'; } catch (e) { /* opaque 404 */ }
+                    done({ notFound: true, endpointMissing });
+                    return;
+                }
+                if ((res.statusCode || 0) !== 200) { done(null); return; }
+                try { done(JSON.parse(data || 'null')); } catch (e) { done(null); }
+            });
+        });
+        req.on('error', () => done(null));
+        req.setTimeout(2000, () => { req.destroy(); done(null); });
+        req.end();
+    });
+}
+
+function readGridScreen(grid) {
+    try {
+        const buffer = grid.term.buffer.active;
+        const lines = [];
+        for (let i = 0; i < grid.rows; i++) {
+            const line = buffer.getLine(buffer.baseY + i);
+            lines.push(line ? line.translateToString(true) : '');
+        }
+        while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+        return { text: lines.join('\n'), cols: grid.cols, rows: grid.rows };
+    } catch (e) {
+        return null;
+    }
+}
+
+// Concurrent tile fetches for the SAME room must not interleave: two calls
+// sharing one grid would each fetch the same delta and write it twice
+// (duplicated scroll lines), or race create/dispose. Coalesce — concurrent
+// callers want the same screen anyway.
+const roomGridInflight = new Map(); // internalName -> Promise
+function getRoomGridPreviewShared(internalName) {
+    const inflight = roomGridInflight.get(internalName);
+    if (inflight) return inflight;
+    const p = getRoomGridPreview(internalName)
+        .finally(() => roomGridInflight.delete(internalName));
+    roomGridInflight.set(internalName, p);
+    return p;
+}
+
+// The grid path's whole contract: returns the room's ACTUAL current screen,
+// or null when this path can't serve (old host, no live room, no headless
+// terminal) and the legacy pipeline should take over.
+async function getRoomGridPreview(internalName) {
+    if (hostSupportsOutputSince === false) return null;
+    const Term = loadHeadlessTerminal();
+    if (!Term) return null;
+    let grid = roomGrids.get(internalName);
+    const res = await fetchHayRoomOutputSince(internalName, grid ? grid.offset : undefined);
+    if (!res) {
+        // Host unreachable: an existing grid still holds the last true
+        // screen — serve that rather than nothing.
+        return grid ? readGridScreen(grid) : null;
+    }
+    if (res.notFound) {
+        if (res.endpointMissing) hostSupportsOutputSince = false;
+        disposeRoomGrid(internalName);
+        return null;
+    }
+    hostSupportsOutputSince = true;
+    // Generous clamps: rendering NARROWER than the PTY re-wraps every long
+    // line into garbage (the old 400 clamp mangled a real 476-col session).
+    const cols = Math.max(2, Math.min(1000, Math.floor(Number(res.cols) || 80)));
+    const rows = Math.max(2, Math.min(200, Math.floor(Number(res.rows) || 24)));
+    if (!grid || res.reset) {
+        disposeRoomGrid(internalName);
+        let term;
+        try {
+            term = new Term({ cols, rows, scrollback: 0, allowProposedApi: true });
+        } catch (e) {
+            return null;
+        }
+        grid = { term, offset: res.offset, cols, rows, lastUsedAt: Date.now() };
+        roomGrids.set(internalName, grid);
+        if (roomGrids.size > ROOM_GRID_MAX) {
+            let oldestKey = null;
+            let oldestAt = Infinity;
+            for (const [key, g] of roomGrids) {
+                if (g.lastUsedAt < oldestAt) { oldestAt = g.lastUsedAt; oldestKey = key; }
+            }
+            if (oldestKey && oldestKey !== internalName) disposeRoomGrid(oldestKey);
+        }
+    } else if (grid.cols !== cols || grid.rows !== rows) {
+        // Session resized: resize the grid BEFORE writing the delta — the
+        // delta was emitted for the new size (and TUIs repaint on resize).
+        try { grid.term.resize(cols, rows); } catch (e) { /* keep old dims */ }
+        grid.cols = cols;
+        grid.rows = rows;
+    }
+    grid.offset = res.offset;
+    grid.lastUsedAt = Date.now();
+    if (res.data) {
+        await new Promise((resolve) => {
+            try { grid.term.write(res.data, () => resolve()); } catch (e) { resolve(); }
+        });
+    }
+    return readGridScreen(grid);
+}
+
 // The preview source is a raw tail cut at an arbitrary byte: it can begin
 // mid-escape-sequence (renders as garbage text) or mid-redraw (renders a
 // half-painted frame until the next poll's cut happens to land clean). Start
@@ -5069,9 +5220,10 @@ async function renderSessionPreviewText(source, { noTrim = false } = {}) {
     if (!noTrim) source = { ...source, output: trimPreviewSource(source.output) };
     // Clamp must exceed real-world PTY widths: rendering NARROWER than the
     // content was written re-wraps every long line into garbage (a 253-col
-    // session clamped to 220 blanked its tiles).
-    const cols = Math.max(2, Math.min(400, Math.floor(Number(source.cols) || 80)));
-    const rows = Math.max(2, Math.min(80, Math.floor(Number(source.rows) || 24)));
+    // session clamped to 220 blanked its tiles; a real 476-col session blew
+    // past the old 400 cap).
+    const cols = Math.max(2, Math.min(1000, Math.floor(Number(source.cols) || 80)));
+    const rows = Math.max(2, Math.min(200, Math.floor(Number(source.rows) || 24)));
     let term;
     try {
         term = new Term({ cols, rows, scrollback: 0, allowProposedApi: true });
@@ -6772,6 +6924,22 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             try {
+                // Grid path first: the persistent parser's screen is exact —
+                // no trim/density/deep-refetch guesswork. Cache non-empty
+                // frames only as the host-unreachable fallback.
+                const gridScreen = await getRoomGridPreviewShared(internalName);
+                if (gridScreen && typeof gridScreen.text === 'string') {
+                    if (gridScreen.text.trim()) {
+                        lastGoodPreviewByRoom.set(internalName, gridScreen);
+                        if (lastGoodPreviewByRoom.size > 500) {
+                            lastGoodPreviewByRoom.delete(lastGoodPreviewByRoom.keys().next().value);
+                        }
+                        schedulePreviewCacheSave();
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(gridScreen));
+                    return;
+                }
                 const source = await fetchHayRoomPreviewSource(internalName);
                 const cached = lastGoodPreviewByRoom.get(internalName);
                 if (!source) {
@@ -6782,15 +6950,20 @@ function startAuthProxy(authEmitter) {
                     }
                     // No live room (dead / not-yet-restored session): serve its
                     // retained shutdown buffer so every tile shows a last
-                    // screen, not a blank box.
+                    // screen, not a blank box. Render at the session's STORED
+                    // dims — a wide session's buffer re-wrapped at 100 cols
+                    // came out as a mangled sliver, not its last screen.
                     const bufPath = shellSessionBufferPath(internalName);
                     let buf = null;
                     if (bufPath) { try { buf = fs.readFileSync(bufPath, 'utf8'); } catch (e) { /* none */ } }
                     if (buf && buf.trim()) {
-                        const text = await renderSessionPreviewText({ output: buf, cols: 100, rows: 30 });
+                        const cfg = getSessionConfig(internalName);
+                        const deadCols = Number.isInteger(cfg?.cols) && cfg.cols > 10 ? cfg.cols : 100;
+                        const deadRows = Number.isInteger(cfg?.rows) && cfg.rows > 5 ? cfg.rows : 30;
+                        const text = await renderSessionPreviewText({ output: buf, cols: deadCols, rows: deadRows });
                         if (typeof text === 'string' && text.trim()) {
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ text, cols: 100, rows: 30, stale: true }));
+                            res.end(JSON.stringify({ text, cols: deadCols, rows: deadRows, stale: true }));
                             return;
                         }
                     }

@@ -399,3 +399,61 @@ test('agent session origin survives a daemon restart', async () => {
   );
   assert.equal(cleanup.status, 200);
 });
+
+test('incremental output endpoint + grid-backed preview', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'prevgrid',
+    cwd: tempDir,
+    startup: 'echo grid-marker-one',
+    autoStart: true
+  }, userHeaders);
+  assert.equal(create.status, 200);
+  await waitForSseEvent(state.port, state.sessionSecret, create.data.id, (payload) => {
+    return (payload.type === 'output' || payload.type === 'snapshot')
+      && typeof payload.data === 'string' && payload.data.includes('grid-marker-one');
+  }, 6000);
+
+  const sessions = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const entry = sessions.data.sessions.find(s => s.displayName === 'prevgrid');
+  assert.ok(entry, 'expected prevgrid session listed');
+
+  // Direct host endpoint: /rooms/:id/output hands out a reset tail, then
+  // exact deltas from the returned cursor.
+  const hostState = JSON.parse(await fs.readFile(path.join(hopHome, '.hay-host-state'), 'utf8'));
+  const hostGet = (p) => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port: hostState.port, path: p, method: 'GET' }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, data: data ? JSON.parse(data) : null }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  const seed = await hostGet(`/rooms/${encodeURIComponent(entry.internalName)}/output`);
+  assert.equal(seed.status, 200);
+  assert.equal(seed.data.reset, true);
+  assert.ok(seed.data.data.includes('grid-marker-one'));
+  assert.ok(Number.isInteger(seed.data.cols) && seed.data.cols > 0);
+  const idle = await hostGet(`/rooms/${encodeURIComponent(entry.internalName)}/output?since=${seed.data.offset}`);
+  assert.equal(idle.status, 200);
+  assert.equal(idle.data.reset, false);
+  assert.equal(idle.data.data, '');
+
+  // Grid-backed preview: the marker is on screen, and a second poll (the
+  // incremental path) must not duplicate screen content.
+  const first = await requestJson(state.port, state.sessionSecret, 'GET',
+    `/api/sessions/preview?name=${encodeURIComponent(entry.internalName)}`);
+  assert.equal(first.status, 200);
+  assert.ok(typeof first.data.text === 'string' && first.data.text.includes('grid-marker-one'),
+    `expected marker in preview, got: ${JSON.stringify(first.data).slice(0, 300)}`);
+  const second = await requestJson(state.port, state.sessionSecret, 'GET',
+    `/api/sessions/preview?name=${encodeURIComponent(entry.internalName)}`);
+  assert.equal(second.status, 200);
+  const countMarks = (t) => t.split('grid-marker-one').length - 1;
+  assert.equal(countMarks(second.data.text), countMarks(first.data.text),
+    'second (incremental) poll must not duplicate screen content');
+
+  const del = await requestJson(state.port, state.sessionSecret, 'DELETE',
+    `/api/terminals/${create.data.id}?killSession=true`, null, userHeaders);
+  assert.equal(del.status, 200);
+});

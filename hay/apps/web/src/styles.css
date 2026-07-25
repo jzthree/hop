@@ -2822,7 +2822,9 @@ button.primary {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.switcher-overlay.tile-dense .switcher-card-tagline {
+/* Only the very smallest tiles have no room for it; the default zoom shows
+   the tagline (that is the whole point of generating one). */
+.switcher-overlay.tile-micro .switcher-card-tagline {
   display: none;
 }
 
@@ -3332,3 +3334,12 @@ button.primary {
   color: var(--ink-muted);
 }
 .empty-pane-close:hover { background: var(--bg-alt); color: var(--ink); }
+
+/* Coarse-pointer devices with a short list: the filter still exists (it is
+   where the palette parks keyboard focus) but shrinks out of the way until
+   the user actually types. */
+.switcher-filter.compact {
+  flex: 0 1 92px;
+  min-width: 0;
+  opacity: 0.75;
+}

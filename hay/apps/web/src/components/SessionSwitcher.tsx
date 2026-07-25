@@ -812,6 +812,26 @@ export const SessionSwitcher = ({
     }
   }, [open]);
 
+  // Focus containment. Blurring once on open is not enough: the terminal's
+  // hidden textarea (and the mobile keyboard's) can take focus back at any
+  // time — a tap that lands past the panel, an autofit, a pane change. When
+  // that happened the user's typing went into an invisible textarea and
+  // simply vanished. While the palette is open, focus that escapes it is
+  // pulled back to the filter box, which is where typing belongs.
+  useEffect(() => {
+    if (!open) return;
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target || typeof target.closest !== "function") return;
+      if (target.closest(".switcher-overlay")) return;
+      const input = filterInputRef.current;
+      if (input) input.focus();
+      else if (typeof target.blur === "function") target.blur();
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [open]);
+
   // Keep relative times fresh while open.
   useEffect(() => {
     if (!open) return;
@@ -1295,9 +1315,11 @@ export const SessionSwitcher = ({
     // Window comfortably exceeds the 10s relative-time tick so a busy
     // session's glow holds steady rather than flickering between polls.
     const activeNow = !current && now - (s.lastActivityAt || 0) < 12000;
-    // Manual mode: cards are draggable to reorder. Dragging is disabled while
-    // a tile is focused (that tile owns the pointer for interaction).
-    const draggable = sortMode === "manual" && !focusedKey;
+    // Manual mode: cards are draggable to reorder. Only the FOCUSED tile
+    // itself opts out (its terminal owns the pointer for selection/typing) —
+    // blocking drag on every other card whenever any tile was focused made
+    // reordering silently dead until you unfocused.
+    const draggable = sortMode === "manual" && focusedKey !== key;
     return (
       <div
         key={key}
@@ -1404,7 +1426,10 @@ export const SessionSwitcher = ({
 
   return (
     <div
-      className={`switcher-overlay${zoomLevel.min < 300 ? " tile-dense" : ""}${dismissable ? "" : " switcher-hub"}${dismissable && fullscreen ? " switcher-fullscreen" : ""}`}
+      // tile-dense: too narrow for inline actions. tile-micro: too short for
+      // a second text line at all — the tagline shows from the DEFAULT zoom
+      // up (hiding it there meant nobody ever saw one).
+      className={`switcher-overlay${zoomLevel.min < 300 ? " tile-dense" : ""}${zoomLevel.min < 150 ? " tile-micro" : ""}${dismissable ? "" : " switcher-hub"}${dismissable && fullscreen ? " switcher-fullscreen" : ""}`}
       style={{ "--tile-min": `${zoomLevel.min}px`, "--tile-h": zoomLevel.h, "--tile-fs": zoomLevel.fs } as CSSProperties}
       role="dialog"
       aria-label="Sessions"
@@ -1551,16 +1576,17 @@ export const SessionSwitcher = ({
               ))}
             </div>
           )}
-          {(finePointer || visibleSessions.length > FILTER_THRESHOLD || filter) && (
-            <input
-              ref={filterInputRef}
-              className="switcher-filter"
-              placeholder="Filter…"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              aria-label="Filter sessions"
-            />
-          )}
+          {/* Always rendered: it is the palette's focus home. When it wasn't
+              (coarse pointer + a short list) there was nowhere to put focus,
+              so keystrokes fell through to the terminal behind. */}
+          <input
+            ref={filterInputRef}
+            className={`switcher-filter${finePointer || visibleSessions.length > FILTER_THRESHOLD || filter ? "" : " compact"}`}
+            placeholder="Filter…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            aria-label="Filter sessions"
+          />
         </div>
       </div>
       <div className="switcher-scroll" ref={scrollRef}>

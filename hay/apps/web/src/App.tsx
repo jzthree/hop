@@ -2772,6 +2772,31 @@ const App = () => {
   // can't open the phone's browser — claude login prints a URL that was
   // otherwise un-tappable.)
   const [linkPrompt, setLinkPrompt] = useState<string | null>(null);
+  // Passkey nudge: biometric sign-in works but is invisible — the login page
+  // only offers Touch ID / Face ID once a credential exists for this
+  // hostname, so a user who never opened the settings drawer never learns it
+  // exists. Ask once per device, only when this domain has no passkey yet
+  // and the browser supports WebAuthn.
+  const [passkeyNudge, setPasskeyNudge] = useState(false);
+  useEffect(() => {
+    if (!isEmbeddedInHop()) return;
+    if (typeof window === "undefined" || !window.PublicKeyCredential) return;
+    if (localStorage.getItem("hay_passkey_nudge_done") === "1") return;
+    let cancelled = false;
+    const t = window.setTimeout(async () => {
+      try {
+        const res = await fetch("/api/passkeys/login-options", { method: "POST" });
+        const data = await res.json();
+        // ok:true means credentials already exist for this hostname.
+        if (!cancelled && data && data.ok === false) setPasskeyNudge(true);
+      } catch { /* offline or old daemon — never nag */ }
+    }, 4000);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, []);
+  const dismissPasskeyNudge = () => {
+    localStorage.setItem("hay_passkey_nudge_done", "1");
+    setPasskeyNudge(false);
+  };
 
   // Reconstruct the URL under a tapped cell. Wrapped rows are joined into the
   // logical line first — OAuth URLs span many screen rows.
@@ -3714,6 +3739,24 @@ const App = () => {
                 ))}
               </div>
             </>
+          )}
+          {passkeyNudge && (
+            <div className="link-prompt passkey-nudge" role="dialog" aria-label="Enable biometric sign-in">
+              <span className="link-prompt-url">
+                {isMacPlatform ? "Sign in with Touch ID / Face ID next time?" : "Sign in with a passkey next time?"}
+              </span>
+              <button
+                type="button"
+                className="link-prompt-open"
+                onClick={async () => {
+                  dismissPasskeyNudge();
+                  await enrollPasskey();
+                }}
+              >
+                Enable
+              </button>
+              <button type="button" onClick={dismissPasskeyNudge}>Not now</button>
+            </div>
           )}
           {linkPrompt && (
             <div className="link-prompt" role="dialog" aria-label="Open link">

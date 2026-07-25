@@ -3343,3 +3343,11 @@ button.primary {
   min-width: 0;
   opacity: 0.75;
 }
+
+/* A focused tile reorders by its title bar (its terminal owns the pointer). */
+.switcher-card-head.drag-handle {
+  cursor: grab;
+}
+.switcher-card-head.drag-handle:active {
+  cursor: grabbing;
+}

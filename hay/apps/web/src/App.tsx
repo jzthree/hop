@@ -97,22 +97,27 @@ const darkTerminalTheme = {
   cursorAccent: "#0d1117",
   selectionBackground: "#264f78",
   selectionForeground: "#e6edf3",
+  // ANSI palette: the VS Code Dark+ terminal colors. The previous set was
+  // Tailwind pastels (red #f87171, green #4ade80 …) — pretty, but visibly
+  // washed out next to a normal terminal, which is what made Claude Code
+  // look duller in hop than in iTerm. These are saturated like a real
+  // terminal while staying readable on #0d1117.
   black: "#0d1117",
-  red: "#f87171",
-  green: "#4ade80",
-  yellow: "#facc15",
-  blue: "#60a5fa",
-  magenta: "#c084fc",
-  cyan: "#22d3ee",
-  white: "#e5e7eb",
+  red: "#cd3131",
+  green: "#0dbc79",
+  yellow: "#e5e510",
+  blue: "#2472c8",
+  magenta: "#bc3fbc",
+  cyan: "#11a8cd",
+  white: "#e5e5e5",
   brightBlack: "#6b7280",
-  brightRed: "#fca5a5",
-  brightGreen: "#86efac",
-  brightYellow: "#fde68a",
-  brightBlue: "#93c5fd",
-  brightMagenta: "#d8b4fe",
-  brightCyan: "#67e8f9",
-  brightWhite: "#f9fafb"
+  brightRed: "#f14c4c",
+  brightGreen: "#23d18b",
+  brightYellow: "#f5f543",
+  brightBlue: "#3b8eea",
+  brightMagenta: "#d670d6",
+  brightCyan: "#29b8db",
+  brightWhite: "#ffffff"
 };
 
 // Light theme modeled on iTerm2's "Light Background" profile
@@ -149,7 +154,10 @@ const lightTerminalTheme = {
 // dark background, so on our dark theme (#0d1117, close to that assumption)
 // no correction is needed and colors render faithfully. The light theme
 // still needs it, or dark-tuned near-white text lands on white.
-const contrastFloorFor = (mode: string) => (resolveTerminalTheme(mode) === lightTerminalTheme ? 4.5 : 1);
+// 2 (not WCAG-AA 4.5) on light: enough that dark-tuned near-white text stays
+// visible on white, low enough that it stops repainting every mid-tone the
+// app chose. Dark gets 1 — no correction at all.
+const contrastFloorFor = (mode: string) => (resolveTerminalTheme(mode) === lightTerminalTheme ? 2 : 1);
 
 const resolveTerminalTheme = (mode: string) => {
   if (mode === "dark") return darkTerminalTheme;

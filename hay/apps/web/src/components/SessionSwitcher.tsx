@@ -575,6 +575,21 @@ export const SessionSwitcher = ({
     }
   };
   const [dragKey, setDragKey] = useState<string | null>(null);
+  // A focused tile is a live terminal: making the whole card draggable would
+  // hijack text selection inside it. So it becomes draggable only while the
+  // pointer is down on its HEADER — grab the title bar to move it, drag
+  // inside the terminal to select text.
+  const [dragArmKey, setDragArmKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!dragArmKey) return;
+    const disarm = () => setDragArmKey(null);
+    window.addEventListener("pointerup", disarm);
+    window.addEventListener("dragend", disarm);
+    return () => {
+      window.removeEventListener("pointerup", disarm);
+      window.removeEventListener("dragend", disarm);
+    };
+  }, [dragArmKey]);
   // Live reorder while dragging: dragging over a card moves the dragged
   // session to that card's index immediately, so the grid reflows in real
   // time and the drop is just a release. Index-move semantics keep this
@@ -1315,11 +1330,11 @@ export const SessionSwitcher = ({
     // Window comfortably exceeds the 10s relative-time tick so a busy
     // session's glow holds steady rather than flickering between polls.
     const activeNow = !current && now - (s.lastActivityAt || 0) < 12000;
-    // Manual mode: cards are draggable to reorder. Only the FOCUSED tile
-    // itself opts out (its terminal owns the pointer for selection/typing) —
-    // blocking drag on every other card whenever any tile was focused made
-    // reordering silently dead until you unfocused.
-    const draggable = sortMode === "manual" && focusedKey !== key;
+    // Manual mode: cards are draggable to reorder. The focused tile drags
+    // from its header only (see dragArmKey) so its terminal keeps the
+    // pointer for text selection; every other card drags from anywhere.
+    const isFocusedCard = focusedKey === key;
+    const draggable = sortMode === "manual" && (!isFocusedCard || dragArmKey === key);
     return (
       <div
         key={key}
@@ -1347,7 +1362,10 @@ export const SessionSwitcher = ({
         }}
         {...pressHandlers(s)}
       >
-        <div className="switcher-card-head">
+        <div
+          className={`switcher-card-head${sortMode === "manual" && isFocusedCard ? " drag-handle" : ""}`}
+          onPointerDown={sortMode === "manual" && isFocusedCard ? () => setDragArmKey(key) : undefined}
+        >
           {dots(s)}
           <span className="switcher-card-name">{s.displayName}</span>
           {current && <span className="switcher-chip current">CURRENT</span>}

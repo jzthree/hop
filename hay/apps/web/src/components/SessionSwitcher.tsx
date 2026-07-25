@@ -839,6 +839,13 @@ export const SessionSwitcher = ({
       const target = event.target as HTMLElement | null;
       if (!target || typeof target.closest !== "function") return;
       if (target.closest(".switcher-overlay")) return;
+      // Only the TERMINAL is stolen from — that's the leak this guard exists
+      // for. Other surfaces the palette opens (settings drawer, find bar,
+      // dialogs) are legitimate focus targets; yanking focus out of them made
+      // the settings button feel broken.
+      const stealsInput = target.closest(".terminal-frame, .xterm, .mobile-keyboard")
+        || target.tagName === "BODY";
+      if (!stealsInput) return;
       const input = filterInputRef.current;
       if (input) input.focus();
       else if (typeof target.blur === "function") target.blur();

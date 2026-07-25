@@ -154,10 +154,21 @@ const lightTerminalTheme = {
 // dark background, so on our dark theme (#0d1117, close to that assumption)
 // no correction is needed and colors render faithfully. The light theme
 // still needs it, or dark-tuned near-white text lands on white.
+// Terminal surface vs app chrome. TUI apps (Claude Code above all) paint
+// with 256-palette colors chosen for a DARK terminal — measured: claude
+// emits only 38;5;N, e.g. 231 near-white text, and never truecolor or basic
+// ANSI. On a light background every one of those has to be rewritten to stay
+// visible, which is what made hop's rendering look wrong next to iTerm.
+// So the terminal keeps its own surface, defaulting to dark regardless of
+// the app theme (a dark terminal in a light app is the normal arrangement),
+// and only follows the app theme if the user asks for it.
+const terminalSurfaceFollowsApp = () => localStorage.getItem("hay_terminal_surface") === "app";
+const resolveTerminalSurface = (mode: string) =>
+  terminalSurfaceFollowsApp() ? resolveTerminalTheme(mode) : darkTerminalTheme;
 // 2 (not WCAG-AA 4.5) on light: enough that dark-tuned near-white text stays
 // visible on white, low enough that it stops repainting every mid-tone the
 // app chose. Dark gets 1 — no correction at all.
-const contrastFloorFor = (mode: string) => (resolveTerminalTheme(mode) === lightTerminalTheme ? 2 : 1);
+const contrastFloorFor = (mode: string) => (resolveTerminalSurface(mode) === lightTerminalTheme ? 2 : 1);
 
 const resolveTerminalTheme = (mode: string) => {
   if (mode === "dark") return darkTerminalTheme;
@@ -356,6 +367,8 @@ const App = () => {
     return notificationsSupported && saved === "true";
   });
   type ThemeMode = "system" | "light" | "dark";
+  // Whether the terminal surface follows the app theme (false = always dark).
+  const [terminalSurfaceMode, setTerminalSurfaceMode] = useState(() => terminalSurfaceFollowsApp());
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     return (localStorage.getItem("hay_theme") as ThemeMode) || "system";
   });
@@ -471,7 +484,8 @@ const App = () => {
     // Update terminal theme live
     if (termRef.current) {
       const t = termRef.current;
-      const newTheme = resolveTerminalTheme(themeMode);
+      void terminalSurfaceMode; // re-run when the surface choice changes too
+      const newTheme = resolveTerminalSurface(themeMode);
       t.options.theme = newTheme;
       // The floor is theme-dependent — switching themes must move it too.
       t.options.minimumContrastRatio = contrastFloorFor(themeMode);
@@ -486,7 +500,7 @@ const App = () => {
       }
       t.refresh(0, t.rows - 1);
     }
-  }, [themeMode]);
+  }, [themeMode, terminalSurfaceMode]);
   useEffect(() => {
     localStorage.setItem("hay_session_switch_mode", sessionSwitchMode);
   }, [sessionSwitchMode]);
@@ -1480,7 +1494,7 @@ const App = () => {
       scrollSensitivity: 4,
       fastScrollSensitivity: 12,
       minimumContrastRatio: contrastFloorFor(themeMode),
-      theme: resolveTerminalTheme(themeMode)
+      theme: resolveTerminalSurface(themeMode)
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
@@ -3057,7 +3071,7 @@ const App = () => {
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
             userName={name}
-            terminalTheme={resolveTerminalTheme(themeMode)}
+            terminalTheme={resolveTerminalSurface(themeMode)}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -3329,6 +3343,27 @@ const App = () => {
                   <button type="button" className={themeMode === "system" ? "active" : ""} onClick={() => setThemeMode("system")}>Auto</button>
                   <button type="button" className={themeMode === "light" ? "active" : ""} onClick={() => setThemeMode("light")}>Light</button>
                   <button type="button" className={themeMode === "dark" ? "active" : ""} onClick={() => setThemeMode("dark")}>Dark</button>
+                </div>
+              </div>
+              <div className="drawer-row">
+                <label>Terminal</label>
+                <div className="view-mode-buttons">
+                  <button
+                    type="button"
+                    className={!terminalSurfaceMode ? "active" : ""}
+                    title="Terminal stays dark — TUI apps pick their colors for a dark background"
+                    onClick={() => { localStorage.setItem("hay_terminal_surface", "dark"); setTerminalSurfaceMode(false); }}
+                  >
+                    Always dark
+                  </button>
+                  <button
+                    type="button"
+                    className={terminalSurfaceMode ? "active" : ""}
+                    title="Terminal background follows the app theme"
+                    onClick={() => { localStorage.setItem("hay_terminal_surface", "app"); setTerminalSurfaceMode(true); }}
+                  >
+                    Match app
+                  </button>
                 </div>
               </div>
               <div className="drawer-row">
@@ -3635,7 +3670,7 @@ const App = () => {
                     cols={120}
                     rows={30}
                     fontSize={fontSize}
-                    theme={resolveTerminalTheme(themeMode)}
+                    theme={resolveTerminalSurface(themeMode)}
                     focused={focusedPaneId === node.id}
                     onFocus={() => setFocusedPaneId(node.id)}
                     onClose={() => closePane(node.id)}
@@ -3698,7 +3733,7 @@ const App = () => {
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
             userName={name}
-            terminalTheme={resolveTerminalTheme(themeMode)}
+            terminalTheme={resolveTerminalSurface(themeMode)}
             onOpenSettings={() => {
               setSwitcherOpen(false);
               setDrawerOpen(true);

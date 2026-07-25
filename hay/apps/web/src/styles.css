@@ -3351,3 +3351,66 @@ button.primary {
 .switcher-card-head.drag-handle:active {
   cursor: grabbing;
 }
+
+/* ＋ New: creating a session is a top-level act, not a card buried in one mode. */
+.switcher-new-top {
+  flex-shrink: 0;
+  margin-left: 8px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.switcher-new-top:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.switcher-create-row {
+  display: flex;
+  gap: 6px;
+  padding: 0 16px 10px;
+}
+.switcher-create-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--accent);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.switcher-create-row button {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Parked sessions: out of the wall, one toggle away. */
+.switcher-parked-toggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 2px;
+  border: none;
+  background: none;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.switcher-parked-toggle:hover {
+  color: var(--ink);
+}
+.switcher-row.parked .switcher-row-dir {
+  direction: ltr;
+  font-family: inherit;
+}

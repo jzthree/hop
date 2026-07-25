@@ -374,6 +374,13 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claude
     // to the remote app: ⌘⏎/Ctrl⏎ opens the session full screen, ⌘./Ctrl+.
     // releases focus back to the wall.
     term.attachCustomKeyEventHandler((ev) => {
+      // ⌘F leaves the tile: find belongs to the switcher's filter, and this
+      // is the escape hatch when the tile holds the keyboard. The event
+      // still bubbles to the window handler, which focuses the filter.
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "f") {
+        if (ev.type === "keydown") onUnfocus();
+        return false;
+      }
       // Shift+Enter must reach the app as a distinct key (Claude Code:
       // newline, not submit). xterm.js would emit a plain \r — synthesize
       // the kitty CSI-u encoding under the same gate as the main terminal:
@@ -657,6 +664,12 @@ export const SessionSwitcher = ({
     () => filterSessionsByOrigin(sessions, originScope),
     [sessions, originScope]
   );
+  // Parked sessions leave the wall but stay one glance away in a collapsed
+  // section — and the FILTER still searches them, so a parked session is
+  // never more than ⌘K + a few letters from coming back.
+  const wallSessions = useMemo(() => visibleSessions.filter((s) => !s.parked), [visibleSessions]);
+  const parkedSessions = useMemo(() => visibleSessions.filter((s) => s.parked), [visibleSessions]);
+  const [parkedOpen, setParkedOpen] = useState(false);
   // While the switcher is OPEN the wall's ORDER freezes at what the user
   // first saw: attention/recency resorting yanked tiles around mid-scan
   // (and out from under a focused tile's hands). Contents still refresh —
@@ -668,7 +681,10 @@ export const SessionSwitcher = ({
   const frozenOrderRef = useRef<{ mode: "tiers" | "project"; hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
   useEffect(() => { if (!open) frozenOrderRef.current = null; }, [open]);
   const model = useMemo(() => {
-    const live = buildSwitcherModel(visibleSessions, currentRoom, filter, sortMode, manualOrder);
+    // A filter query searches EVERYTHING (parked included); the browsing
+    // wall shows only unparked sessions.
+    const pool = filter.trim() ? visibleSessions : wallSessions;
+    const live = buildSwitcherModel(pool, currentRoom, filter, sortMode, manualOrder);
     if (!open || (live.mode !== "tiers" && live.mode !== "project")) return live;
     let frozen = frozenOrderRef.current;
     if (!frozen || frozen.mode !== live.mode) {
@@ -686,9 +702,9 @@ export const SessionSwitcher = ({
       frozenOrderRef.current = frozen;
       return live;
     }
-    const byKey = new Map(visibleSessions.map((s) => [sessionKey(s), s]));
+    const byKey = new Map(pool.map((s) => [sessionKey(s), s]));
     const knownKeys = new Set([...frozen.hero, ...frozen.groups.flatMap((g) => g.rows)]);
-    const fresh = visibleSessions.filter((s) => !knownKeys.has(sessionKey(s)));
+    const fresh = pool.filter((s) => !knownKeys.has(sessionKey(s)));
     const resolve = (keys: string[]) => keys.map((k) => byKey.get(k)).filter((s): s is SwitcherSession => !!s);
     if (live.mode === "tiers") {
       return {
@@ -712,7 +728,7 @@ export const SessionSwitcher = ({
       else groups.push({ label, rows: [s] });
     }
     return { mode: "project" as const, groups: groups.filter((g) => g.rows.length > 0) };
-  }, [open, visibleSessions, currentRoom, filter, sortMode, manualOrder, originScope]);
+  }, [open, visibleSessions, wallSessions, currentRoom, filter, sortMode, manualOrder, originScope]);
 
   // ── Keyboard-first palette: ⌘K → type to filter → ↑↓ → Enter, no mouse. ──
   const filterInputRef = useRef<HTMLInputElement>(null);
@@ -992,6 +1008,15 @@ export const SessionSwitcher = ({
       onClose();
       return;
     }
+    // Opening a parked session IS unparking it — best-effort, never blocking
+    // the switch itself.
+    if (session.parked) {
+      fetch("/api/sessions/park", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internalName: sessionKey(session), parked: false })
+      }).catch(() => { /* daemon will still show it parked; harmless */ });
+    }
     onSwitch(session);
   };
 
@@ -1000,8 +1025,18 @@ export const SessionSwitcher = ({
   useEffect(() => {
     if (!open) return;
     const onNavKey = (event: KeyboardEvent) => {
-      if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
       if (sheet || creating) return;
+      // ⌘F/Ctrl+F: the switcher's find IS the filter box — never browser
+      // find. Handled BEFORE the focused-tile guard so it's the rescue hatch
+      // when a tile owns the keyboard: unfocus, jump to the filter.
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setFocusedKey(null);
+        filterInputRef.current?.focus();
+        setKbdIndex(-1);
+        return;
+      }
+      if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
       // ⌘⏎ (Ctrl⏎): focus the selected tile for in-place interaction.
       // Plain Enter stays "switch to session" — the muscle-memory action.
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
@@ -1010,13 +1045,6 @@ export const SessionSwitcher = ({
           event.preventDefault();
           setFocusedKey(sessionKey(target));
         }
-        return;
-      }
-      // ⌘F/Ctrl+F: the switcher's find IS the filter box — never browser find.
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
-        event.preventDefault();
-        filterInputRef.current?.focus();
-        setKbdIndex(-1);
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -1234,6 +1262,51 @@ export const SessionSwitcher = ({
     if (!sheet) return;
     await killSessionByRef(sheet.session);
   };
+  // Park: hide from the wall, keep running — instant bring-back via the
+  // parked section or the filter. Unparking also clears the archived flag.
+  const togglePark = async () => {
+    if (!sheet) return;
+    const next = sheet.session.parked !== true;
+    try {
+      const res = await fetch("/api/sessions/park", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internalName: sessionKey(sheet.session), parked: next })
+      });
+      if (!res.ok) {
+        onNotice("Failed to update park state");
+        return;
+      }
+      onNotice(next ? "Parked — find it under “parked” at the bottom" : "Back on the wall");
+      setSheet(null);
+      onRefresh();
+    } catch {
+      onNotice("Failed to update park state");
+    }
+  };
+  // Archive: stop the process but stay resumable — the daemon pre-writes the
+  // resume command into the session's startup, so reopening it later picks
+  // the conversation back up.
+  const archiveSession = async () => {
+    if (!sheet) return;
+    try {
+      const res = await fetch("/api/sessions/archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internalName: sessionKey(sheet.session) })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({} as { error?: string }));
+        onNotice(data.error || "Failed to stop session");
+        return;
+      }
+      onNotice("Stopped & parked — opening it later resumes the conversation");
+      setSheet(null);
+      onRefresh();
+    } catch {
+      onNotice("Failed to stop session");
+    }
+  };
   const startRename = (s: SwitcherSession, anchor?: { x: number; y: number }) => {
     setRenameDraft(s.displayName || s.name);
     // Anchor is REQUIRED by the sheet's positioning math — a missing one
@@ -1356,8 +1429,14 @@ export const SessionSwitcher = ({
         // Order was already applied live during the drag — drop/end just clean up.
         onDrop={draggable ? (e) => { e.preventDefault(); setDragKey(null); } : undefined}
         onDragEnd={draggable ? () => setDragKey(null) : undefined}
-        onClick={() => {
-          if (interactiveTiles && s.active && s.type !== "port") setFocusedKey(key);
+        onClick={(e) => {
+          // Only a click on the TERMINAL AREA focuses the tile — clicking
+          // the header/name/meta switches. A whole-card focus target meant
+          // any stray click at interactive zoom silently rerouted the
+          // keyboard into that session ("typing goes to a terminal").
+          const el = e.target as HTMLElement | null;
+          const onTerminalArea = !!el?.closest?.(".switcher-preview, .switcher-focus-tile");
+          if (interactiveTiles && s.active && s.type !== "port" && onTerminalArea) setFocusedKey(key);
           else handleTap(s);
         }}
         onKeyDown={(e) => {
@@ -1469,6 +1548,17 @@ export const SessionSwitcher = ({
         <header className="switcher-header">
           <h2>Sessions</h2>
           <span className="switcher-count">{visibleSessions.length}</span>
+          {originScope !== "agent" && (
+            <button
+              type="button"
+              className="switcher-new-top"
+              title="New session"
+              aria-label="New session"
+              onClick={() => setCreating(true)}
+            >
+              ＋ New
+            </button>
+          )}
           <div className="switcher-tilesize" role="group" aria-label="Tile zoom">
             <button
               type="button"
@@ -1613,6 +1703,22 @@ export const SessionSwitcher = ({
             aria-label="Filter sessions"
           />
         </div>
+        {/* Create form lives in the top bar so the header ＋ works from EVERY
+            mode — the dashed grid card only exists in recent mode. */}
+        {creating && (
+          <form className="switcher-create-row inline-edit" onSubmit={submitCreate}>
+            <input
+              placeholder="session-name"
+              value={createDraft}
+              onChange={(e) => setCreateDraft(e.target.value)}
+              maxLength={64}
+              autoFocus
+              aria-label="New session name"
+            />
+            <button type="submit">Create</button>
+            <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); }}>✕</button>
+          </form>
+        )}
       </div>
       <div className="switcher-scroll" ref={scrollRef}>
         {model.mode === "filter" ? (
@@ -1673,27 +1779,12 @@ export const SessionSwitcher = ({
             )}
             <div className="switcher-grid">
               {model.hero.map((s) => renderCard(s))}
-              {originScope !== "agent" && (creating ? (
-                <form className="switcher-card new inline-edit" onSubmit={submitCreate}>
-                  <input
-                    placeholder="session-name"
-                    value={createDraft}
-                    onChange={(e) => setCreateDraft(e.target.value)}
-                    maxLength={64}
-                    autoFocus
-                    aria-label="New session name"
-                  />
-                  <div className="switcher-new-actions">
-                    <button type="submit">Create</button>
-                    <button type="button" onClick={() => setCreating(false)}>✕</button>
-                  </div>
-                </form>
-              ) : (
+              {originScope !== "agent" && !creating && (
                 <button type="button" className="switcher-card new" onClick={() => setCreating(true)}>
                   <span className="switcher-new-plus">+</span>
                   <span>New session</span>
                 </button>
-              ))}
+              )}
             </div>
             {model.groups.map((group) => (
               <section key={group.label} className="switcher-group">
@@ -1702,6 +1793,43 @@ export const SessionSwitcher = ({
               </section>
             ))}
           </>
+        )}
+        {model.mode !== "filter" && parkedSessions.length > 0 && (
+          <section className="switcher-group switcher-parked">
+            <button
+              type="button"
+              className="switcher-parked-toggle"
+              aria-expanded={parkedOpen}
+              onClick={() => setParkedOpen((v) => !v)}
+            >
+              {parkedOpen ? "▾" : "▸"} parked · {parkedSessions.length}
+            </button>
+            {parkedOpen && (
+              <div className="switcher-rows">
+                {parkedSessions.map((s) => {
+                  const key = sessionKey(s);
+                  return (
+                    <div
+                      key={key}
+                      role="button"
+                      tabIndex={0}
+                      className="switcher-row parked"
+                      onClick={() => handleTap(s)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) handleTap(s); }}
+                      {...pressHandlers(s)}
+                    >
+                      {dots(s)}
+                      <span className="switcher-row-name">{s.displayName}</span>
+                      <span className="switcher-chip">{s.active ? "PARKED" : "STOPPED"}</span>
+                      {s.tagline && <span className="switcher-row-dir">{s.tagline}</span>}
+                      <span className="switcher-row-meta">{meta(s)}</span>
+                      {inlineActions(s)}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         )}
       </div>
       {sheet && sheetSession && (
@@ -1755,6 +1883,16 @@ export const SessionSwitcher = ({
                 {sheetSession.type !== "port" && (
                   <button type="button" onClick={toggleOrigin}>
                     {sheetSession.createdBy === "agent" ? "Move to user sessions" : "Move to agent sessions"}
+                  </button>
+                )}
+                {sheetSession.type !== "port" && (
+                  <button type="button" onClick={togglePark}>
+                    {sheetSession.parked ? "Unpark session" : "Park session"}
+                  </button>
+                )}
+                {sheetSession.type !== "port" && sheetSession.active && (
+                  <button type="button" onClick={archiveSession}>
+                    Stop &amp; park (resumable)
                   </button>
                 )}
                 <button type="button" className="danger" onClick={killSession}>

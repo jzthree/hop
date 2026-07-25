@@ -27,6 +27,10 @@ export type SwitcherSession = {
   // Short human-readable line describing the session's work, written by
   // `hop ai tagline`. Absent unless the user has run it.
   tagline?: string;
+  // Parked: hidden from the wall (still running unless also archived).
+  parked?: boolean;
+  // Archived: process stopped, but reopening resumes the conversation.
+  archived?: boolean;
 };
 
 export type SessionOriginScope = "user" | "agent" | "all";

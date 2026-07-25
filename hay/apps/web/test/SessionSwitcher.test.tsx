@@ -113,6 +113,34 @@ describe("SessionSwitcher project view density", () => {
   });
 });
 
+describe("SessionSwitcher parked sessions", () => {
+  it("moves parked sessions off the wall into a collapsible section", () => {
+    const mixed: SwitcherSession[] = [
+      { name: "active-one", displayName: "active-one", internalName: "active-one", active: true, starting: false, createdBy: "user" },
+      { name: "napping", displayName: "napping", internalName: "napping", active: true, starting: false, createdBy: "user", parked: true }
+    ];
+    render(<SessionSwitcher {...props} sessions={mixed} open />);
+    // Not on the wall…
+    expect(document.querySelector(".switcher-grid")?.textContent).not.toContain("napping");
+    // …but one toggle away, with its state chip.
+    fireEvent.click(screen.getByRole("button", { name: /parked · 1/ }));
+    const row = screen.getByText("napping").closest(".switcher-row")!;
+    expect(row.textContent).toContain("PARKED");
+  });
+
+  it("still finds parked sessions through the filter", () => {
+    const mixed: SwitcherSession[] = [
+      { name: "active-one", displayName: "active-one", internalName: "active-one", active: true, starting: false, createdBy: "user" },
+      { name: "napping", displayName: "napping", internalName: "napping", active: true, starting: false, createdBy: "user", parked: true }
+    ];
+    render(<SessionSwitcher {...props} sessions={mixed} open />);
+    fireEvent.keyDown(window, { key: "n" });
+    fireEvent.keyDown(window, { key: "a" });
+    fireEvent.keyDown(window, { key: "p" });
+    expect(screen.getByText("napping")).toBeTruthy();
+  });
+});
+
 describe("SessionSwitcher frozen ordering", () => {
   const at = (n: string, lastActivityAt: number): SwitcherSession => ({
     name: n, displayName: n, internalName: n, active: true, starting: false,

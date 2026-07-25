@@ -3958,7 +3958,17 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
     const isAgentCreated = (e) =>
         e.createdBy === 'agent' || readClaudeSessionMeta(e.internalName)?.createdBy === 'agent';
     const skippedAgents = includeAgents ? [] : candidates.filter(isAgentCreated).map((e) => e.displayName || e.internalName);
-    const kept = includeAgents ? candidates : candidates.filter((e) => !isAgentCreated(e));
+    // Archived sessions were stopped ON PURPOSE, resumable on demand — a
+    // fleet restore must not resurrect them (they'd sit running, hidden,
+    // burning a claude session each). Opening one from the parked section
+    // still resumes it any time.
+    const keptUnarchived = (includeAgents ? candidates : candidates.filter((e) => !isAgentCreated(e)))
+        .filter((e) => {
+            const archived = getEffectiveSessionConfig(e.internalName)?.archived === true
+                || readClaudeSessionMeta(e.internalName)?.archived === true;
+            return !archived;
+        });
+    const kept = keptUnarchived;
     const planned = kept.map((e) => {
         const plan = restorePlanForSession(e);
         return {
@@ -6136,6 +6146,8 @@ async function reconcileExternalRuntimeSessions() {
             // outlive the daemon that generated it.
             tagline: savedConfig?.tagline || runtimeConfig?.tagline || durableMeta?.tagline,
             taglineAt: savedConfig?.taglineAt || runtimeConfig?.taglineAt || durableMeta?.taglineAt,
+            parked: savedConfig?.parked ?? runtimeConfig?.parked ?? durableMeta?.parked,
+            archived: savedConfig?.archived ?? runtimeConfig?.archived ?? durableMeta?.archived,
             folderId: savedConfig?.folderId || runtimeConfig?.folderId || null,
             shell: savedConfig?.shell || runtimeConfig?.shell,
             env: savedConfig?.env || runtimeConfig?.env,
@@ -7226,6 +7238,8 @@ function startAuthProxy(authEmitter) {
                 // sessions nothing has happened to.
                 tagline: getEffectiveSessionConfig(s.internalName)?.tagline || undefined,
                 taglineAt: getEffectiveSessionConfig(s.internalName)?.taglineAt || undefined,
+                parked: getEffectiveSessionConfig(s.internalName)?.parked === true || undefined,
+                archived: getEffectiveSessionConfig(s.internalName)?.archived === true || undefined,
                 agentPermitted: s.agentPermitted === true,
                 hasLocalCli: !!s.hasLocalCli,
                 localCliCount: s.localCliCount || 0
@@ -7245,6 +7259,103 @@ function startAuthProxy(authEmitter) {
                 aliases: sessionAliases,
                 runtimeAvailable: snapshot.runtimeAvailable
             }));
+            return;
+        }
+
+        // API: Park / unpark. Parked sessions leave the wall but keep
+        // running; unparking also clears the archived flag (the session is
+        // being brought back deliberately).
+        if (parsedUrl.pathname === '/api/sessions/park' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', () => {
+                try {
+                    const { name, internalName, parked } = JSON.parse(body);
+                    const resolved = resolveSessionInternalName(name, internalName);
+                    if (!resolved) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const savedConfig = getSessionConfig(resolved);
+                    const config = getEffectiveSessionConfig(resolved);
+                    if (!config || config.type === 'port') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not a terminal' }));
+                        return;
+                    }
+                    const on = parked === true;
+                    const next = { ...config, parked: on || undefined, archived: on ? config.archived : undefined, updatedAt: new Date().toISOString() };
+                    if (savedConfig) setSessionConfig(resolved, next);
+                    else rememberRuntimeSessionMetadata(resolved, next);
+                    const durable = readClaudeSessionMeta(resolved) || {};
+                    writeClaudeSessionMeta(resolved, { ...durable, internalName: resolved, parked: on || undefined, archived: on ? durable.archived : undefined });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, parked: on }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Archive — stop the process but stay RESUMABLE. The restore
+        // plan (resume command + config root + cwd) is pre-written into the
+        // session's startup, so the next open recreates the room and picks
+        // the conversation back up; every record/meta/buffer survives.
+        if (parsedUrl.pathname === '/api/sessions/archive' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', async () => {
+                try {
+                    const { name, internalName } = JSON.parse(body);
+                    const resolved = resolveSessionInternalName(name, internalName);
+                    if (!resolved) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const savedConfig = getSessionConfig(resolved);
+                    const config = getEffectiveSessionConfig(resolved);
+                    if (!config || config.type === 'port') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not a terminal' }));
+                        return;
+                    }
+                    const plan = restorePlanForSession({
+                        internalName: resolved,
+                        cwd: config.cwd,
+                        startup: config.startup,
+                        autoStart: config.autoStart
+                    });
+                    const next = {
+                        ...config,
+                        parked: true,
+                        archived: true,
+                        startup: plan?.command || config.startup,
+                        cwd: plan?.cwd || config.cwd,
+                        updatedAt: new Date().toISOString()
+                    };
+                    if (savedConfig) setSessionConfig(resolved, next);
+                    else rememberRuntimeSessionMetadata(resolved, next);
+                    const durable = readClaudeSessionMeta(resolved) || {};
+                    writeClaudeSessionMeta(resolved, { ...durable, internalName: resolved, parked: true, archived: true, cwd: next.cwd });
+                    // Stop the process — records, metas, and buffers all stay.
+                    if (isExternalTerminalBackend()) {
+                        await terminateExternalHaySession(resolved);
+                    } else if (hayRooms.hasRoom(resolved)) {
+                        hayRooms.closeRoom(resolved);
+                    }
+                    if (activeSessions[resolved]) delete activeSessions[resolved];
+                    sessionClientSummary.delete(resolved);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, resumable: !!plan?.command }));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Archive failed' }));
+                }
+            });
             return;
         }
 

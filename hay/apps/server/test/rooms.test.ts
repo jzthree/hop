@@ -545,6 +545,31 @@ describe("Room", () => {
     expect(snapshot?.keyboardEnhanced).toBe(true);
   });
 
+  describe("headless terminal-identity answers", () => {
+    it("answers color/DA/truecolor probes only while no client is attached", () => {
+      let ptyInstance: FakePty | null = null;
+      const factory: PtyFactory = () => {
+        ptyInstance = new FakePty() as unknown as FakePty;
+        return ptyInstance as any;
+      };
+      const manager = new RoomManager(factory);
+      const room = manager.getRoom("probe", { cols: 80, rows: 24 }, "/tmp");
+
+      // Headless: the room answers as the terminal.
+      ptyInstance!.emit("\x1b]11;?\x07 \x1b[0c \x1bP+q524742\x1b\\");
+      const answered = ptyInstance!.writes.join("");
+      expect(answered).toContain("]11;rgb:0d0d/1111/1717");
+      expect(answered).toContain("[?62;22c");
+      expect(answered).toContain("P1+r524742");
+
+      // Attached: the real terminal answers; the room stays silent.
+      room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, new FakeSocket());
+      ptyInstance!.writes.length = 0;
+      ptyInstance!.emit("\x1b]11;?\x07");
+      expect(ptyInstance!.writes.join("")).toBe("");
+    });
+  });
+
   describe("getOutputSince (incremental preview feed)", () => {
     const makeRoom = () => {
       let ptyInstance: FakePty | null = null;

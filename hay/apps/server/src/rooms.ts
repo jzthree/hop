@@ -253,6 +253,7 @@ export class Room extends EventEmitter {
       this.lastActivityAt = now();
       this.appendOutput(data);
       this.updateTerminalState(data);
+      this.answerTerminalQueriesIfHeadless(data);
       this.broadcast({ type: "output", data });
       this.emit("pty_output", { roomId: this.id, data, timestamp: now() });
     });
@@ -876,6 +877,52 @@ export class Room extends EventEmitter {
         this.emit("empty");
       }
     }, CLEANUP_DELAY_MS);
+  }
+
+  /**
+   * Headless terminal-identity: hop rooms usually start with NO client
+   * attached, so an app's startup probes — "what's your background color?"
+   * (OSC 10/11), "who are you?" (DA1), "do you support truecolor?"
+   * (XTGETTCAP RGB/Tc) — go unanswered, and the app falls back to its most
+   * conservative palette. Measured live: Claude Code emits only 256-color
+   * SGR in hop while emitting truecolor in iTerm2, purely because iTerm
+   * answers these and nobody here did. When a room is headless, the ROOM is
+   * the terminal — answer as one (dark background, truecolor-capable).
+   * With a client attached, the real terminal answers and we stay silent.
+   */
+  private answerTerminalQueriesIfHeadless(data: string) {
+    if (this.clients.size > 0 || this.ended) return;
+    if (data.indexOf("\x1b") === -1) return;
+    let reply = "";
+    // OSC 10/11: foreground / background color queries. Colors match the web
+    // client's terminal surface (always-dark: #e6edf3 on #0d1117).
+    if (/\x1b\]10;\?(?:\x07|\x1b\\)/.test(data)) reply += "\x1b]10;rgb:e6e6/eded/f3f3\x1b\\";
+    if (/\x1b\]11;\?(?:\x07|\x1b\\)/.test(data)) reply += "\x1b]11;rgb:0d0d/1111/1717\x1b\\";
+    // DA1: identify as a VT220-class terminal (matches xterm.js's own reply).
+    if (/\x1b\[0?c/.test(data)) reply += "\x1b[?62;22c";
+    // DSR 5 (status): "OK".
+    if (/\x1b\[5n/.test(data)) reply += "\x1b[0n";
+    // XTGETTCAP: confirm truecolor for the two conventional capability names
+    // (RGB / Tc, hex-encoded); other capability requests get a valid "not
+    // recognized" so the app never hangs waiting.
+    const tcap = data.match(/\x1bP\+q([0-9a-fA-F;]+)\x1b\\/g);
+    if (tcap) {
+      for (const q of tcap) {
+        const names = (q.slice(4, -2) || "").split(";"); // strip ESC P + q … ESC \
+        for (const hex of names) {
+          const name = Buffer.from(hex, "hex").toString("utf8");
+          if (name === "RGB" || name === "Tc") reply += `\x1bP1+r${hex}\x1b\\`;
+          else reply += `\x1bP0+r${hex}\x1b\\`;
+        }
+      }
+    }
+    if (reply) {
+      try {
+        this.pty.write(reply);
+      } catch {
+        /* pty gone — nothing to answer */
+      }
+    }
   }
 
   /** O(1) append; trims whole chunks from the head past MAX_BUFFER_SIZE. */

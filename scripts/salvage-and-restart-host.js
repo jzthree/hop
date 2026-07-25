@@ -35,12 +35,17 @@ const hostGet = (p) => new Promise((resolve, reject) => {
 
 const stripAnsi = (raw) => String(raw)
   .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+  // Movement/erase paints gaps without spaces — substitute one so words in
+  // salvaged transcripts don't glue together (mirrors the daemon's search
+  // stripper fix).
+  .replace(/\x1b\[[0-9;:?<=>]*[ -/]*[A-HJKf`d]/g, ' ')
   .replace(/\x1b\[[0-9;:?<=>]*[ -/]*[@-~]/g, '')
   .replace(/\x1b[PX^_][^\x1b]*\x1b\\/g, '')
   .replace(/\x1b[()][A-Za-z0-9]/g, '')
   .replace(/\x1b[@-~]/g, '')
   .replace(/\r/g, '\n')
   .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+  .replace(/[ \t]{2,}/g, ' ')
   .replace(/\n{3,}/g, '\n\n');
 
 // Capture one room's snapshot (the ~1.5MB replay tail) over WS.

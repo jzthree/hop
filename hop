@@ -10360,7 +10360,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -10729,6 +10729,97 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop update` — self-update from the git checkout's origin.
+    // Sessions SURVIVE: only the daemon restarts (the hay-host, which owns
+    // every PTY, is untouched); the committed hay-web bundle means no build
+    // step. --host additionally chains the detached graceful salvage-restart
+    // so host-side changes activate too (that one DOES cycle sessions
+    // through restore). --check reports without touching anything.
+    if (process.argv[2] === 'update') {
+        const checkOnly = process.argv.includes('--check');
+        const withHost = process.argv.includes('--host');
+        const runGit = (cmd, timeout = 60000) =>
+            execSync(cmd, { cwd: __dirname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim();
+        try { runGit('git rev-parse --git-dir'); } catch (e) {
+            log('Not a git checkout — cannot self-update.', RED);
+            process.exit(1);
+        }
+        log('Checking for updates…', CYAN);
+        try { runGit('git fetch --quiet origin', 120000); } catch (e) {
+            log(`Fetch failed: ${e.message}`, RED);
+            process.exit(1);
+        }
+        const local = runGit('git rev-parse HEAD');
+        let upstream;
+        try { upstream = runGit('git rev-parse @{u}'); } catch (e) {
+            try { upstream = runGit('git rev-parse origin/main'); } catch (e2) {
+                log('No upstream to compare against.', RED);
+                process.exit(1);
+            }
+        }
+        if (local === upstream) {
+            log(`Already up to date (${local.slice(0, 7)}).`, GREEN);
+            process.exit(0);
+        }
+        const behind = runGit(`git rev-list --count HEAD..${upstream}`);
+        const ahead = runGit(`git rev-list --count ${upstream}..HEAD`);
+        log(`Update available: ${behind} new commit(s)${ahead !== '0' ? ` — but local is ${ahead} ahead; resolve manually` : ''}`, YELLOW);
+        try { log(runGit(`git log --oneline --no-decorate HEAD..${upstream} -15`), RESET); } catch (e) { }
+        if (checkOnly) process.exit(0);
+        if (ahead !== '0') process.exit(1);
+        let dirty = '';
+        try { dirty = runGit('git status --porcelain'); } catch (e) { }
+        if (dirty) {
+            log('Working tree has local changes — commit or stash them first.', RED);
+            process.exit(1);
+        }
+        // Dependency fingerprint across the pull: reinstall only when a
+        // lockfile actually changed.
+        const lockRev = (ref, file) => { try { return runGit(`git rev-parse ${ref}:${file}`); } catch (e) { return ''; } };
+        const locks = ['package-lock.json', 'hay/package-lock.json'];
+        const before = locks.map((f) => lockRev('HEAD', f));
+        try { runGit(`git merge --ff-only ${upstream}`); } catch (e) {
+            log(`Fast-forward failed: ${e.message}`, RED);
+            process.exit(1);
+        }
+        const after = locks.map((f) => lockRev('HEAD', f));
+        for (let i = 0; i < locks.length; i++) {
+            if (before[i] !== after[i]) {
+                const dir = locks[i].startsWith('hay/') ? path.join(__dirname, 'hay') : __dirname;
+                log(`Dependencies changed (${locks[i]}) — installing…`, CYAN);
+                try {
+                    execSync('npm install --no-audit --no-fund', { cwd: dir, stdio: 'inherit', timeout: 600000 });
+                } catch (e) {
+                    log(`npm install failed in ${dir}: ${e.message}`, RED);
+                    process.exit(1);
+                }
+            }
+        }
+        // Restart the daemon onto the new code. The host keeps every session
+        // alive through this.
+        const state = isServerRunning();
+        if (state) {
+            log('Restarting daemon…', CYAN);
+            try { process.kill(state.pid, 'SIGTERM'); } catch (e) { }
+            for (let i = 0; i < 40 && isProcessAlive(state.pid); i++) {
+                await new Promise((r) => setTimeout(r, 250));
+            }
+            startDaemon();
+            await waitForDaemonReady();
+        }
+        log(`✓ Updated to ${runGit('git rev-parse --short HEAD')} — daemon restarted; sessions untouched.`, GREEN);
+        if (withHost) {
+            const script = path.join(__dirname, 'scripts', 'salvage-and-restart-host.js');
+            const child = spawn(process.execPath, [script], { detached: true, stdio: 'ignore' });
+            child.unref();
+            log('Host salvage-restart launched (detached) — progress: ~/.hop2/transcript-salvage/restart.log', YELLOW);
+            log('It waits for the fleet to go idle, then cycles the host through salvage → restore.', YELLOW);
+        } else {
+            log(`Host still runs the previous code; ${CYAN}hop update --host${RESET} (or the salvage script) cycles it when convenient.`, RESET);
+        }
+        process.exit(0);
+    }
+
     // Handle `hop restore` - recreate saved sessions, resuming claude conversations
     if (process.argv[2] === 'restore') {
         const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
@@ -11069,6 +11160,7 @@ async function main() {
         log('');
         log(`${BOLD}Restore:${RESET}`, RESET);
         log(`  hop restore [--dry-run]   Recreate your saved sessions, resuming claude conversations`, RESET);
+        log(`  hop update [--check|--host] Self-update from GitHub (daemon restart; sessions survive; --host cycles the host too)`, RESET);
         log(`  hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`, RESET);
         log(`  hop claude-hook status|remove   Check or remove the hook`, RESET);
         log(`  hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`, RESET);

@@ -970,6 +970,13 @@ export const SessionSwitcher = ({
         }
         return;
       }
+      // ⌘F/Ctrl+F: the switcher's find IS the filter box — never browser find.
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        filterInputRef.current?.focus();
+        setKbdIndex(-1);
+        return;
+      }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       // +/− step the tile zoom — but never while editing the filter text
       // ("-" is a legal character in session names).
@@ -996,6 +1003,17 @@ export const SessionSwitcher = ({
         }
         event.preventDefault();
         setKbdIndex((i) => {
+          // Selection parked in the filter box (-1): ↓ re-enters the wall at
+          // the top; the other arrows stay in the box.
+          if (i === -1) {
+            if (event.key === "ArrowDown") {
+              requestAnimationFrame(() => {
+                document.querySelector('[data-nav-index="0"]')?.scrollIntoView({ block: "nearest" });
+              });
+              return 0;
+            }
+            return -1;
+          }
           // Geometric navigation: the wall is a grid, the tail is rows — pick
           // the nearest tile in the pressed direction from real layout, so
           // all four arrows work in every mode without column bookkeeping.
@@ -1021,6 +1039,12 @@ export const SessionSwitcher = ({
             if (primary < 4) continue; // wrong direction (or same row/col slot)
             const score = primary + cross * 3;
             if (!best || score < best.score) best = { idx, score };
+          }
+          // ↑ with nothing above: the search box sits above the wall — park
+          // the selection there so the top row flows into the filter.
+          if (!best && event.key === "ArrowUp") {
+            requestAnimationFrame(() => filterInputRef.current?.focus());
+            return -1;
           }
           const next = best ? best.idx : i;
           requestAnimationFrame(() => {

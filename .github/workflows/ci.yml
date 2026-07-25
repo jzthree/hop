@@ -1,0 +1,25 @@
+# CI: syntax + unit suites. Integration tests (real daemon + PTYs + fake
+# tunnel) stay local-only for now — they're timing-sensitive on shared
+# runners; promote them once they've proven stable.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install root deps
+        run: npm ci
+      - name: Install hay workspace deps
+        run: npm --prefix hay ci
+      - name: Syntax + repo unit tests
+        run: npm test
+      - name: hay unit tests (shared, server, web)
+        run: npm --prefix hay run test:unit

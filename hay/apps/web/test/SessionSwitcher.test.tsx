@@ -113,6 +113,18 @@ describe("SessionSwitcher project view density", () => {
   });
 });
 
+describe("SessionSwitcher focus capture", () => {
+  it("blurs the opener on open so typed search can't leak into the terminal", () => {
+    const outside = document.createElement("input");
+    document.body.appendChild(outside);
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+    render(<SessionSwitcher {...props} open />);
+    expect(document.activeElement).not.toBe(outside);
+    outside.remove();
+  });
+});
+
 describe("SessionSwitcher manual drag", () => {
   it("reorders live as the drag passes over other tiles, before any drop", () => {
     const three: SwitcherSession[] = ["one", "two", "three"].map((n) => ({

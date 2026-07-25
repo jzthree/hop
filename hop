@@ -261,12 +261,18 @@ const sessionSearchTextCache = new Map();
 function stripAnsiForSearch(raw) {
     return String(raw)
         .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')      // OSC
-        .replace(/\x1b\[[0-9;:?<=>]*[ -\/]*[@-~]/g, '')          // CSI
+        // Cursor movement/erase paints layout gaps WITHOUT emitting spaces —
+        // deleting those sequences glues adjacent words together ("Ran 2
+        // shell" became "Ran2shell" in snippets). Substitute one space so
+        // word boundaries survive, for matching and for the snippet shown.
+        .replace(/\x1b\[[0-9;:?<=>]*[ -\/]*[A-HJKf`d]/g, ' ')    // CUU/CUD/CUF/CUB/CNL/CPL/CHA/CUP/ED/EL/HVP/HPA/VPA
+        .replace(/\x1b\[[0-9;:?<=>]*[ -\/]*[@-~]/g, '')          // other CSI
         .replace(/\x1b[PX^_][^\x1b]*\x1b\\/g, '')                // DCS/PM/APC
         .replace(/\x1b[()][A-Za-z0-9]/g, '')                     // charset
         .replace(/\x1b[@-~]/g, '')                               // other ESC
         .replace(/\r/g, '\n')
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        .replace(/[ \t]{2,}/g, ' ')
         .replace(/\n{3,}/g, '\n\n');
 }
 

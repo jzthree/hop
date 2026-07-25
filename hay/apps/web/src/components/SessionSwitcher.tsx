@@ -768,6 +768,16 @@ export const SessionSwitcher = ({
       setSheet(null);
       setCreating(false);
       setCreateDraft("");
+      // The opener — usually the main terminal's xterm textarea — still holds
+      // DOM focus at this instant, so until the filter's delayed autofocus
+      // lands (fine pointers only, 40ms), every keystroke goes to the
+      // SESSION: typed search text leaked into the terminal behind the
+      // overlay. Blur anything focused outside the switcher immediately; the
+      // type-anywhere handler then owns the keyboard from the first key.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && typeof active.blur === "function" && !active.closest(".switcher-overlay")) {
+        active.blur();
+      }
     }
   }, [open]);
 

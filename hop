@@ -5433,6 +5433,7 @@ async function sweepTaglines() {
     if (!provider) return;
     taglineSweepBusy = true;
     try {
+        log(`[tagline] sweep tick (provider=${provider})`, CYAN);
         const snapshot = await listAllSessionEntriesRuntimeFirst();
         const now = Date.now();
         const candidates = (snapshot.entries || []).filter((s) => {
@@ -13017,8 +13018,16 @@ async function main() {
     if (DAEMON_FLAG) {
         // Taglines maintain themselves: one session per tick, only when it
         // needs one. First pass a minute after boot so startup stays quiet.
-        setTimeout(() => { sweepTaglines(); }, 60000).unref?.();
-        setInterval(() => { sweepTaglines(); }, 180000).unref?.();
+        // Errors are logged rather than swallowed — a silent no-op feature is
+        // indistinguishable from a broken one.
+        const runSweep = () => {
+            Promise.resolve()
+                .then(() => sweepTaglines())
+                .catch((e) => log(`[tagline] sweep error: ${e && e.message}`, YELLOW));
+        };
+        log(`[tagline] auto-sweep ${TAGLINE_DISABLED ? 'disabled by HOP_AI_TAGLINES' : 'enabled'}`, CYAN);
+        setTimeout(runSweep, 60000).unref?.();
+        setInterval(runSweep, 180000).unref?.();
     }
 
     if (DAEMON_FLAG) {

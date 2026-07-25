@@ -526,6 +526,14 @@ const App = () => {
   };
   const drawerOpenRef = useRef(drawerOpen);
   drawerOpenRef.current = drawerOpen;
+  // Read at keystroke time by handleUserInput: while the session palette is
+  // open, NOTHING typed may reach the session. Blurring the terminal on open
+  // wasn't enough — on mobile the keyboard's hidden textarea keeps forwarding,
+  // and any re-focus (pane change, fit, tap) re-opens the leak. Guarding the
+  // single input path closes the whole class. The palette's own interactive
+  // tile has its own socket and does not go through here.
+  const switcherOpenRef = useRef(switcherOpen);
+  switcherOpenRef.current = switcherOpen;
   const shortcutHelpRef = useRef(shortcutHelpOpen);
   shortcutHelpRef.current = shortcutHelpOpen;
 
@@ -927,6 +935,11 @@ const App = () => {
   };
 
   const handleUserInput = (data: string) => {
+    // The palette owns the keyboard while it's open — typed filter text must
+    // never also land in the session behind it.
+    if (switcherOpenRef.current) {
+      return;
+    }
     // Strip focus reporting sequences that can be echoed back as visible text
     const sanitized = data.replace(/\x1b\[I/g, '').replace(/\x1b\[O/g, '');
     if (!sanitized) {
@@ -3720,7 +3733,10 @@ const App = () => {
           {isMobile && (
             <MobileKeyboard
               onInput={handleKeyboardInput}
-              visible={keyboardVisible}
+              // Hidden while the palette is open: its system-keyboard textarea
+              // holds focus on phones, so leaving it mounted meant filter
+              // typing went straight to the session.
+              visible={keyboardVisible && !switcherOpen}
               onToggle={handleKeyboardToggle}
               onHeightChange={setKeyboardHeight}
               hapticsEnabled={hapticsEnabled}

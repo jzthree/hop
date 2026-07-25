@@ -71,8 +71,28 @@ function recordSession(dir, hopSession, payload) {
     updatedAt: new Date().toISOString()
   });
   // One file per hop session avoids concurrent-write races between sessions.
+  const file = path.join(dir, `${hopSession}.json`);
+  // Second nested-claude guard, for the case the env check above cannot see:
+  // hop SCRUBS CLAUDE_CODE_* when it spawns a session shell, so a claude
+  // started by a tool/MCP inside this session may carry no parent id at all.
+  // Such a claude almost always runs in a DIFFERENT directory than the
+  // session's own conversation (an agent workspace, a scratch tree). Never
+  // let it silently take over an existing record: keep the incumbent and
+  // park this one alongside for diagnosis. A genuine re-launch in the same
+  // directory (the normal case — user quits claude and starts it again)
+  // still updates the record.
   try {
-    fs.writeFileSync(path.join(dir, `${hopSession}.json`), record, { mode: 0o600 });
+    const prevRaw = fs.readFileSync(file, "utf8");
+    const prev = JSON.parse(prevRaw);
+    if (prev && prev.sessionId && prev.sessionId !== sessionId && prev.cwd && prev.cwd !== cwd) {
+      try {
+        fs.writeFileSync(path.join(dir, `${hopSession}.other.json`), record, { mode: 0o600 });
+      } catch { /* ignore */ }
+      return;
+    }
+  } catch { /* no incumbent (or unreadable) — record normally */ }
+  try {
+    fs.writeFileSync(file, record, { mode: 0o600 });
   } catch { /* ignore */ }
 }
 

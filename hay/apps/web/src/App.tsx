@@ -142,6 +142,15 @@ const lightTerminalTheme = {
   brightWhite: "#feffff"
 };
 
+// Contrast floor, applied ONLY on the light theme. xterm rewrites every
+// foreground color to meet this ratio against the background, which visibly
+// desaturates the mid-tones a TUI like Claude Code paints with — its output
+// looked washed out next to the same app in iTerm. Agent palettes assume a
+// dark background, so on our dark theme (#0d1117, close to that assumption)
+// no correction is needed and colors render faithfully. The light theme
+// still needs it, or dark-tuned near-white text lands on white.
+const contrastFloorFor = (mode: string) => (resolveTerminalTheme(mode) === lightTerminalTheme ? 4.5 : 1);
+
 const resolveTerminalTheme = (mode: string) => {
   if (mode === "dark") return darkTerminalTheme;
   if (mode === "light") return lightTerminalTheme;
@@ -456,6 +465,8 @@ const App = () => {
       const t = termRef.current;
       const newTheme = resolveTerminalTheme(themeMode);
       t.options.theme = newTheme;
+      // The floor is theme-dependent — switching themes must move it too.
+      t.options.minimumContrastRatio = contrastFloorFor(themeMode);
       // xterm sets background-color inline on the viewport element — update it
       const viewport = containerRef.current?.querySelector('.xterm-viewport') as HTMLElement | null;
       if (viewport) {
@@ -939,6 +950,15 @@ const App = () => {
     // never also land in the session behind it.
     if (switcherOpenRef.current) {
       return;
+    }
+    // Typing is "I am at the prompt": any earlier scroll-up turned
+    // follow-mode OFF, so the line you just submitted (and everything the
+    // app printed after it) stayed below the fold — the "I hit enter and
+    // can't see my prompt" report. Every real terminal snaps to the bottom
+    // on input; do the same.
+    if (userScrolledUpRef.current) {
+      userScrolledUpRef.current = false;
+      termRef.current?.scrollToBottom();
     }
     // Strip focus reporting sequences that can be echoed back as visible text
     const sanitized = data.replace(/\x1b\[I/g, '').replace(/\x1b\[O/g, '');
@@ -1451,12 +1471,7 @@ const App = () => {
       // Shift+wheel multiplier for blasting through very long transcripts.
       scrollSensitivity: 4,
       fastScrollSensitivity: 12,
-      // Sessions are one shared byte stream viewed on different backgrounds:
-      // an agent theme tuned for a dark terminal prints near-white code text,
-      // unreadable on our light theme. Let the renderer nudge foreground
-      // colors to WCAG-AA contrast against the actual background (same
-      // default VS Code ships) instead of rendering white-on-white.
-      minimumContrastRatio: 4.5,
+      minimumContrastRatio: contrastFloorFor(themeMode),
       theme: resolveTerminalTheme(themeMode)
     });
     const fitAddon = new FitAddon();

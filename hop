@@ -705,6 +705,13 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName) {
     } else {
         rememberRuntimeSessionMetadata(internalName, next);
     }
+    // Durable copy: the workspace store no-ops without an active workspace
+    // (the common case), so the meta file is what actually carries a rename
+    // across a daemon restart. Mirrors how createdBy is persisted.
+    {
+        const durable = readClaudeSessionMeta(internalName) || {};
+        writeClaudeSessionMeta(internalName, { ...durable, internalName, displayName: newDisplayName });
+    }
 
     // newDisplayName now belongs to this session, so any pre-existing alias
     // that pointed at it (target) or used it as an old name (source) is stale;
@@ -5872,7 +5879,15 @@ async function reconcileExternalRuntimeSessions() {
         rememberRuntimeSessionMetadata(room.id, {
             type: 'terminal',
             cwd: room.cwd || savedConfig?.cwd || runtimeConfig?.cwd,
-            displayName: savedConfig?.displayName || runtimeConfig?.displayName || toDisplaySessionName(room.id) || room.id,
+            // The durable meta carries the rename: the workspace store only
+            // persists when a workspace exists, so without this a renamed
+            // session reverted to its internal name on every daemon restart.
+            displayName: savedConfig?.displayName || runtimeConfig?.displayName || durableMeta?.displayName
+                || toDisplaySessionName(room.id) || room.id,
+            // Same for the AI tagline — written by `hop ai tagline`, it must
+            // outlive the daemon that generated it.
+            tagline: savedConfig?.tagline || runtimeConfig?.tagline || durableMeta?.tagline,
+            taglineAt: savedConfig?.taglineAt || runtimeConfig?.taglineAt || durableMeta?.taglineAt,
             folderId: savedConfig?.folderId || runtimeConfig?.folderId || null,
             shell: savedConfig?.shell || runtimeConfig?.shell,
             env: savedConfig?.env || runtimeConfig?.env,
@@ -7036,7 +7051,7 @@ function startAuthProxy(authEmitter) {
                     if (savedConfig) setSessionConfig(resolved, next);
                     else rememberRuntimeSessionMetadata(resolved, next);
                     const durable = readClaudeSessionMeta(resolved) || {};
-                    writeClaudeSessionMeta(resolved, { ...durable, tagline: clean || undefined, taglineAt: next.taglineAt });
+                    writeClaudeSessionMeta(resolved, { ...durable, internalName: resolved, tagline: clean || undefined, taglineAt: next.taglineAt });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, tagline: clean }));
                 } catch (e) {
@@ -10912,12 +10927,19 @@ async function main() {
             const missing = named.filter((n) => !allSessions.some((s) => s.displayName === n || s.internalName === n));
             for (const m of missing) log(`No such session: ${m}`, YELLOW);
         }
-        // Freshness: skip sessions whose tagline already postdates their last
-        // activity — nothing new has happened to describe.
+        // Freshness: a tagline names the session's DURABLE goal, so it should
+        // not churn. Re-tag only when there isn't one, or when it's older
+        // than a work-session's worth of time AND the session has actually
+        // done something since. Otherwise this command is a cheap no-op you
+        // can run as often as you like.
+        const TAGLINE_MIN_AGE_MS = 6 * 60 * 60 * 1000;
         if (!force) {
+            const nowMs = Date.now();
             targets = targets.filter((s) => {
-                const cfgAt = Number(s.taglineAt || 0);
-                return !s.tagline || !cfgAt || cfgAt < Number(s.lastActivityAt || 0);
+                if (!s.tagline) return true;
+                const at = Number(s.taglineAt || 0);
+                if (!at) return true;
+                return nowMs - at > TAGLINE_MIN_AGE_MS && Number(s.lastActivityAt || 0) > at;
             });
         }
         if (targets.length === 0) {
@@ -10941,24 +10963,83 @@ async function main() {
             return t;
         };
 
-        const buildPrompt = (s, screen) => [
-            'Write a short tagline for a terminal session, for display in a session switcher.',
+        // Git branch: often the single most durable statement of what a
+        // session is for, and free to read.
+        const gitBranch = (cwd) => {
+            if (!cwd) return '';
+            try {
+                return execSync('git rev-parse --abbrev-ref HEAD 2>/dev/null', {
+                    cwd, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore']
+                }).trim();
+            } catch (e) { return ''; }
+        };
+
+        // The visible screen is a keyhole — it shows the last minute, so a
+        // screen-only tagline describes a moment instead of the work (and
+        // goes stale the moment the screen scrolls). The conversation
+        // transcript is what makes a tagline broad AND durable: take the
+        // user's OWN prompts across the session, which state intent directly
+        // and change far more slowly than the screen. Screen content stays
+        // in the prompt as the "what's happening lately" signal.
+        const userPrompts = (internalName) => {
+            try {
+                const tPath = resolveClaudeTranscriptPath(readClaudeSessionRecord(internalName));
+                if (!tPath) return [];
+                const stat = fs.statSync(tPath);
+                const readLen = Math.min(stat.size, 2 * 1024 * 1024);
+                const fd = fs.openSync(tPath, 'r');
+                const buf = Buffer.alloc(readLen);
+                fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
+                fs.closeSync(fd);
+                const out = [];
+                for (const line of buf.toString('utf8').split('\n')) {
+                    if (!line.includes('"type":"user"')) continue;
+                    let j;
+                    try { j = JSON.parse(line); } catch (e) { continue; }
+                    const c = j?.message?.content;
+                    const text = typeof c === 'string'
+                        ? c
+                        : Array.isArray(c) ? c.filter((p) => p?.type === 'text').map((p) => p.text).join(' ') : '';
+                    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+                    // Skip tool-result echoes, hook noise, and pasted walls.
+                    if (!clean || clean.length < 12 || clean.length > 400) continue;
+                    if (/^(<|\[Request interrupted|caveat:)/i.test(clean)) continue;
+                    out.push(clean.slice(0, 240));
+                }
+                // First few state the original goal; last few state where it
+                // went. Both matter; the middle is usually detail.
+                return out.length > 8 ? [...out.slice(0, 4), ...out.slice(-4)] : out;
+            } catch (e) {
+                return [];
+            }
+        };
+
+        const buildPrompt = (s, screen, prompts, branch) => [
+            'Write a short tagline for a terminal session, shown under its name in a session switcher.',
             '',
             'Rules:',
             '- 3 to 6 words, sentence case, no trailing period.',
-            '- Describe the ONGOING WORK or topic, not a momentary status like "waiting" or "blocked".',
+            '- Name the ONGOING PROJECT OR GOAL — what this session is FOR across its whole life.',
+            '- Do NOT describe momentary status (waiting, blocked, debugging one error) or the last command.',
+            '- It should still read correctly hours from now, after the current task finishes.',
             '- Natural readable words. No kebab-case, snake_case, file paths, or quotes.',
             '- Do not repeat the working directory (already shown next to it).',
             '- Output ONLY the tagline, nothing else.',
             '',
             `Working directory: ${s.cwd || 'unknown'}`,
+            branch ? `Git branch: ${branch}` : '',
             `Foreground app: ${s.foregroundProcess || 'shell'}`,
             '',
-            'Current screen:',
+            prompts.length ? "What the user has asked for in this session (earliest first — the best signal of the durable goal):" : '',
+            prompts.length ? '---' : '',
+            ...prompts,
+            prompts.length ? '---' : '',
+            '',
+            'Recent screen (supporting detail only — do not tag the moment):',
             '---',
             screen,
             '---'
-        ].join('\n');
+        ].filter((l) => l !== '').join('\n');
 
         let written = 0;
         let skipped = 0;
@@ -10982,7 +11063,7 @@ async function main() {
             }
             let tagline = '';
             try {
-                tagline = cleanTagline(askProvider(provider.id, buildPrompt(s, screen)));
+                tagline = cleanTagline(askProvider(provider.id, buildPrompt(s, screen, userPrompts(key), gitBranch(s.cwd))));
             } catch (e) {
                 const msg = String(e.stderr || e.message || '').split('\n').find((l) => l.trim()) || 'provider failed';
                 log(`  ${s.displayName}: ${msg.slice(0, 120)}`, RED);

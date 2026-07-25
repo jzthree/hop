@@ -203,6 +203,10 @@ export class Room extends EventEmitter {
   // how much has been trimmed off the head over the room's lifetime. Lets
   // getOutputSince hand out stable cursors into an ever-trimming ring.
   private outputStart = 0;
+  // Last viewer's terminal colors (6-hex, no '#'), used to answer OSC 10/11
+  // while headless. Defaults to the web client's dark surface.
+  private clientBg = "0d1117";
+  private clientFg = "e6edf3";
   private alternateScreen = false;
   // Enhanced keyboard reporting requested by the remote app (kitty keyboard protocol
   // or xterm modifyOtherKeys). Tracked like alternateScreen so a reattaching client
@@ -894,10 +898,17 @@ export class Room extends EventEmitter {
     if (this.clients.size > 0 || this.ended) return;
     if (data.indexOf("\x1b") === -1) return;
     let reply = "";
-    // OSC 10/11: foreground / background color queries. Colors match the web
-    // client's terminal surface (always-dark: #e6edf3 on #0d1117).
-    if (/\x1b\]10;\?(?:\x07|\x1b\\)/.test(data)) reply += "\x1b]10;rgb:e6e6/eded/f3f3\x1b\\";
-    if (/\x1b\]11;\?(?:\x07|\x1b\\)/.test(data)) reply += "\x1b]11;rgb:0d0d/1111/1717\x1b\\";
+    // OSC 10/11: foreground / background color queries — answered with the
+    // LAST VIEWER'S actual colors, so an app that themes itself from the
+    // background (Claude Code picks light vs dark this way) matches what the
+    // user is really looking at. Falls back to the dark default before any
+    // client has ever attached.
+    const osc = (n: number, hex: string) => {
+      const p = (i: number) => hex.slice(i, i + 2).repeat(2);
+      return `\x1b]${n};rgb:${p(0)}/${p(2)}/${p(4)}\x1b\\`;
+    };
+    if (/\x1b\]10;\?(?:\x07|\x1b\\)/.test(data)) reply += osc(10, this.clientFg);
+    if (/\x1b\]11;\?(?:\x07|\x1b\\)/.test(data)) reply += osc(11, this.clientBg);
     // DA1: identify as a VT220-class terminal (matches xterm.js's own reply).
     if (/\x1b\[0?c/.test(data)) reply += "\x1b[?62;22c";
     // DSR 5 (status): "OK".
@@ -1006,6 +1017,12 @@ export class Room extends EventEmitter {
    * far behind to be worth replaying comes back as `reset: true` with a
    * bounded tail and a fresh cursor — the caller re-seeds.
    */
+  /** Remember the viewer's terminal colors for headless OSC 10/11 answers. */
+  setClientColors(bg?: string | null, fg?: string | null) {
+    if (bg && /^[0-9a-f]{6}$/i.test(bg)) this.clientBg = bg.toLowerCase();
+    if (fg && /^[0-9a-f]{6}$/i.test(fg)) this.clientFg = fg.toLowerCase();
+  }
+
   getOutputSince(
     since?: number,
     maxBytes = 1_048_576

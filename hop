@@ -3664,6 +3664,31 @@ function readClaudeSessionRecord(internalName) {
     }
 }
 
+// The rival record the hook parks when a differently-rooted claude tries to
+// take over a session (see scripts/claude-session-hook.js).
+function readClaudeSessionRecordOther(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    try {
+        const rec = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.other.json`), 'utf8'));
+        return rec && typeof rec.sessionId === 'string' && rec.sessionId ? rec : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function writeClaudeSessionRecord(internalName, rec) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
+    try { fs.mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true }); } catch (e) { /* best effort */ }
+    try {
+        fs.writeFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.json`), JSON.stringify(rec), { mode: 0o600 });
+    } catch (e) { /* best effort */ }
+}
+
+function removeClaudeSessionRecordOther(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
+    try { fs.unlinkSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.other.json`)); } catch (e) { /* absent */ }
+}
+
 // The SessionStart hook writes one record per hop session, so the set of these
 // files is itself a durable, crash-surviving list of what to restore — it does
 // not depend on the workspace-scoped session store (which is dormant unless a
@@ -3849,6 +3874,17 @@ function restorePlanForSession(entry) {
     // rather than resume the wrong history.
     const liveCwd = readClaudeSessionMeta(entry.internalName)?.cwd || entry.cwd;
     if (rec && rec.sessionId && liveCwd && rec.cwd && rec.cwd !== liveCwd) {
+        // The incumbent record disagrees with the room's real directory. The
+        // hook parks a rival record at <session>.other.json when it refuses
+        // to clobber; if THAT one matches the room, it is the session's true
+        // conversation and the incumbent was the intruder (a helper claude
+        // that got there first). Promote it rather than dropping to a shell.
+        const rival = readClaudeSessionRecordOther(entry.internalName);
+        if (rival && rival.sessionId && rival.cwd === liveCwd) {
+            writeClaudeSessionRecord(entry.internalName, rival);
+            removeClaudeSessionRecordOther(entry.internalName);
+            return restorePlanForSession(entry);
+        }
         return {
             command: null,
             cwd: liveCwd,
@@ -5276,6 +5312,13 @@ const TAGLINE_DISABLED = /^(0|false|off|no)$/i.test(String(process.env.HOP_AI_TA
 // (which silently disables its transcript saving). Auth tokens are kept.
 function aiChildEnv() {
     const env = { ...process.env };
+    // HOP_SESSION must NOT leak into a helper claude: the SessionStart hook
+    // keys its record on it, so a tagline helper running in os.tmpdir()
+    // recorded ITSELF as that session's conversation — and restore then had
+    // to refuse it (correctly) and open a plain shell. Observed live:
+    // Solstice's record became `claude -p --model haiku` in a tmpdir.
+    delete env.HOP_SESSION;
+    delete env.HOP_SESSION_INTERNAL;
     for (const k of Object.keys(env)) {
         if (k === 'CLAUDECODE' || k === 'CLAUDE_EFFORT' || k === 'CLAUDE_CONFIG_DIR' || k === 'CLAUDE_PID'
             || (k.startsWith('CLAUDE_CODE_') && !k.startsWith('CLAUDE_CODE_OAUTH_TOKEN'))) {

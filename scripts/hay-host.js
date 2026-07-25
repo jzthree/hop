@@ -342,6 +342,16 @@ async function main() {
         if (Date.now() - __t0 > 100) console.log(`[hay-host] slow room create (ws) room=${roomId} ${Date.now() - __t0}ms`);
 
         const replayRaw = Number(wsUrl.searchParams.get('replay'));
+        // The viewer's actual terminal colors (hex, no '#'). TUI apps pick a
+        // light or dark theme from the background they're told — so a room
+        // must report the background the USER is looking at, not a guess.
+        // Remembered on the room for the headless answers that come later.
+        const hex = (v) => (/^[0-9a-fA-F]{6}$/.test(String(v || '')) ? String(v).toLowerCase() : null);
+        const clientBg = hex(wsUrl.searchParams.get('bg'));
+        const clientFg = hex(wsUrl.searchParams.get('fg'));
+        if (clientBg && typeof room.setClientColors === 'function') {
+            room.setClientColors(clientBg, clientFg);
+        }
         room.attachClient(
             {
                 id: randomUUID(),

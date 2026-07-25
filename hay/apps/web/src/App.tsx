@@ -160,7 +160,11 @@ const lightTerminalTheme = {
 // DA1, XTGETTCAP) when headless, and an attached xterm answers with the
 // ACTUAL theme — so apps adapt to the background exactly as they do in
 // iTerm, and the terminal simply follows the app theme.
-const contrastFloorFor = (mode: string) => (resolveTerminalTheme(mode) === lightTerminalTheme ? 2 : 1);
+// No contrast rewriting, either theme. Apps are now TOLD the real background
+// (OSC 10/11, both live and headless) and pick colors that suit it, so
+// second-guessing them is what produced the damage — a dim red status line
+// darkened until it read as black on the light theme.
+const contrastFloorFor = (_mode: string) => 1;
 
 const resolveTerminalTheme = (mode: string) => {
   if (mode === "dark") return darkTerminalTheme;
@@ -1233,9 +1237,14 @@ const App = () => {
     // ~0.3s worst-case. Scrolling to the very top offers a full-depth
     // reload (deepReplayRoomsRef); the CLI always replays full depth.
     const replay = deepReplayRoomsRef.current.has(nextSession.room) ? 1572864 : 393216;
+    // Tell the room what this viewer's terminal actually looks like: apps
+    // that theme themselves from the background (Claude Code picks light vs
+    // dark) then match the screen instead of a guess.
+    const surface = resolveTerminalTheme(themeMode);
+    const hex = (c?: string) => (c || "").replace("#", "").slice(0, 6);
     const url = `${wsUrl}?room=${encodeURIComponent(nextSession.room)}&name=${encodeURIComponent(
       nextSession.name
-    )}&cols=${cols}&rows=${rows}&replay=${replay}`;
+    )}&cols=${cols}&rows=${rows}&replay=${replay}&bg=${hex(surface.background)}&fg=${hex(surface.foreground)}`;
 
     wsRef.current?.close();
     setStatus("connecting");

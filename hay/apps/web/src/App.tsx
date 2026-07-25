@@ -12,6 +12,7 @@ import {
 import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
+import { originalPathHint } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -900,6 +901,26 @@ const App = () => {
       wsRef.current.send(JSON.stringify(message));
     }
   };
+
+  // ── Drag-and-drop onto the terminal ──
+  // A browser never reveals a dropped file's real path, so a file drop can't
+  // paste one. Catch the drop and teach the working gesture instead: the
+  // OS-specific copy-path hotkey (⌘⌥C in Finder / Ctrl+Shift+C in Explorer).
+  // Dragged TEXT (a path string from anywhere) pastes normally.
+  const [dropActive, setDropActive] = useState(false);
+  const dragDepthRef = useRef(0);
+  const platformString = `${navigator.platform || ""} ${navigator.userAgent || ""}`;
+  // Without these guards a drop that misses the target navigates the whole
+  // page to the file, killing the session view.
+  useEffect(() => {
+    const prevent = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", prevent);
+    window.addEventListener("drop", prevent);
+    return () => {
+      window.removeEventListener("dragover", prevent);
+      window.removeEventListener("drop", prevent);
+    };
+  }, []);
 
   const sendTyping = (active: boolean) => {
     sendMessage({ type: "typing", active });
@@ -3351,10 +3372,41 @@ const App = () => {
                       termRef.current?.focus();
                     }
                   }}
+                  onDragEnter={(e) => {
+                    if (Array.from(e.dataTransfer?.types || []).includes("Files")) {
+                      e.preventDefault();
+                      dragDepthRef.current += 1;
+                      setDropActive(true);
+                    }
+                  }}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDragLeave={() => {
+                    if (dragDepthRef.current > 0 && --dragDepthRef.current === 0) {
+                      setDropActive(false);
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    dragDepthRef.current = 0;
+                    setDropActive(false);
+                    if ((e.dataTransfer?.files?.length || 0) > 0) {
+                      pushNotice(originalPathHint(platformString));
+                      return;
+                    }
+                    // A dragged text snippet (e.g. a path string) pastes like
+                    // a paste — bracketed-paste markers included.
+                    const text = e.dataTransfer?.getData("text/plain");
+                    if (text) termRef.current?.paste(text);
+                  }}
                 >
                   <div className="terminal-scroll">
                     <div className="terminal-inner" ref={containerRef} />
                   </div>
+                  {dropActive && (
+                    <div className="terminal-drop-overlay" aria-hidden="true">
+                      <span>{originalPathHint(platformString)}</span>
+                    </div>
+                  )}
                   {isMobile && status === "connecting" && (
                     <div className="terminal-loading" role="status" aria-live="polite">
                       <IosSpinner />

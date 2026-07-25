@@ -3009,6 +3009,26 @@ button.primary {
   }
 }
 
+/* File dragged over the terminal: browsers hide file paths, so the overlay
+   teaches the OS copy-path hotkey instead of pretending to accept the drop. */
+.terminal-drop-overlay {
+  position: absolute;
+  inset: 6px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 12px;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  pointer-events: none;
+}
+
 /* ⌘/ shortcut cheatsheet */
 .shortcut-help {
   position: fixed;

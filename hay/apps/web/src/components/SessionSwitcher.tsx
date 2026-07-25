@@ -1335,6 +1335,10 @@ export const SessionSwitcher = ({
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
           {inlineActions(s)}
         </div>
+        {/* Tagline sits directly under the name: it explains the session the
+            way the name can't. Hidden at dense zooms where the card has no
+            room for a second text line. */}
+        {s.tagline && <div className="switcher-card-tagline" title={s.tagline}>{s.tagline}</div>}
         {interactiveTiles && tileWsBase && s.active && s.type !== "port" && focusedKey === key ? (
           <FocusedTile
             wsBase={tileWsBase}

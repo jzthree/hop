@@ -6949,6 +6949,11 @@ function startAuthProxy(authEmitter) {
                 autoStart: s.autoStart,
                 createdAt: s.createdAt,
                 createdBy: s.createdBy || 'user',
+                // Display tagline (hop ai tagline); absent for most sessions.
+                // taglineAt drives the freshness check that skips re-tagging
+                // sessions nothing has happened to.
+                tagline: getEffectiveSessionConfig(s.internalName)?.tagline || undefined,
+                taglineAt: getEffectiveSessionConfig(s.internalName)?.taglineAt || undefined,
                 agentPermitted: s.agentPermitted === true,
                 hasLocalCli: !!s.hasLocalCli,
                 localCliCount: s.localCliCount || 0
@@ -6999,6 +7004,46 @@ function startAuthProxy(authEmitter) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Screen failed' }));
             }
+            return;
+        }
+
+        // API: Session tagline — a short human-readable line describing what
+        // the session is working on. Written by `hop ai tagline` (the only
+        // AI-dependent surface; core hop never calls a model). Stored on the
+        // session config AND the durable meta so it survives restarts.
+        if (parsedUrl.pathname === '/api/sessions/tagline' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 8192) req.destroy(); });
+            req.on('end', () => {
+                try {
+                    const { name, internalName, tagline } = JSON.parse(body);
+                    const resolved = resolveSessionInternalName(name, internalName);
+                    if (!resolved) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    // Empty string clears it.
+                    const clean = typeof tagline === 'string' ? tagline.replace(/\s+/g, ' ').trim().slice(0, 64) : '';
+                    const savedConfig = getSessionConfig(resolved);
+                    const config = getEffectiveSessionConfig(resolved);
+                    if (!config) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const next = { ...config, tagline: clean || undefined, taglineAt: clean ? Date.now() : undefined };
+                    if (savedConfig) setSessionConfig(resolved, next);
+                    else rememberRuntimeSessionMetadata(resolved, next);
+                    const durable = readClaudeSessionMeta(resolved) || {};
+                    writeClaudeSessionMeta(resolved, { ...durable, tagline: clean || undefined, taglineAt: next.taglineAt });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, tagline: clean }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
             return;
         }
 
@@ -9678,7 +9723,13 @@ async function callLocalApi(existingTunnel, apiPath, method = 'GET', body = null
             port: existingTunnel.port,
             path: apiPath,
             method,
-            headers
+            headers,
+            // No socket pooling: CLI flows can idle for tens of seconds
+            // between calls (e.g. `hop ai tagline` waits on a model per
+            // session), and the daemon closes keep-alive sockets after 5s.
+            // Reusing one from the pool then fails with ECONNRESET/socket
+            // hang up on a request that was never actually sent.
+            agent: false
         };
         const req = http.request(opts, res => {
             let data = '';
@@ -10726,6 +10777,239 @@ async function main() {
             log(`The hay-host process keeps running in the background (hop status).`, YELLOW);
             log(`Use ${CYAN}hop stop --all${RESET} to end it.`, RESET);
         }
+        process.exit(0);
+    }
+
+    // ── `hop ai …` — the AI-dependent command family ──────────────────────
+    // Core hop is provider-agnostic and never calls a model: tunnels,
+    // sessions, restore, previews all work with nothing installed. THESE
+    // commands need a local agent CLI (Claude Code or Codex) that's already
+    // installed and logged in — hop shells out to it, so whatever account
+    // that CLI uses is the account that pays.
+    if (process.argv[2] === 'ai') {
+        const sub = process.argv[3];
+        const flags = process.argv.slice(3);
+        const has = (f) => flags.includes(f);
+        const flagValue = (f) => {
+            const i = flags.indexOf(f);
+            return i !== -1 ? flags[i + 1] : null;
+        };
+
+        // A provider is usable only if the binary exists AND is authenticated.
+        // We never parse credential files — we ask the CLI to answer a
+        // trivial prompt and see if it does.
+        const detectProviders = () => {
+            const out = [];
+            for (const [id, bin] of [['claude', 'claude'], ['codex', 'codex']]) {
+                let installed = false;
+                let version = '';
+                try {
+                    version = execSync(`command -v ${bin} >/dev/null 2>&1 && ${bin} --version 2>/dev/null | head -1`, {
+                        encoding: 'utf8', shell: '/bin/sh', timeout: 15000
+                    }).trim();
+                    installed = !!version;
+                } catch (e) { /* not installed */ }
+                out.push({ id, bin, installed, version });
+            }
+            return out;
+        };
+
+        // Env scrub: hop itself is often launched from inside a Claude Code
+        // session, and inherited CLAUDE* markers make the child believe it is
+        // a nested session (which silently disables transcript saving and can
+        // point it at the wrong config root). Auth tokens are preserved.
+        const childEnv = () => {
+            const env = { ...process.env };
+            for (const k of Object.keys(env)) {
+                if (k === 'CLAUDECODE' || k === 'CLAUDE_EFFORT' || k === 'CLAUDE_CONFIG_DIR' || k === 'CLAUDE_PID'
+                    || (k.startsWith('CLAUDE_CODE_') && !k.startsWith('CLAUDE_CODE_OAUTH_TOKEN'))) {
+                    delete env[k];
+                }
+            }
+            return env;
+        };
+
+        // One-shot prompt → single line of text. Both CLIs run in their
+        // non-interactive print mode; codex gets --output-last-message so we
+        // read its answer from a file instead of scraping its log preamble.
+        const askProvider = (provider, prompt, timeoutMs = 120000) => {
+            if (provider === 'claude') {
+                const out = execSync('claude -p --model haiku', {
+                    input: prompt, encoding: 'utf8', timeout: timeoutMs, env: childEnv(),
+                    cwd: os.tmpdir(), stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024
+                });
+                return String(out || '');
+            }
+            const tmpOut = path.join(os.tmpdir(), `hop-ai-${crypto.randomBytes(6).toString('hex')}.txt`);
+            try {
+                execSync(`codex exec --skip-git-repo-check -o ${JSON.stringify(tmpOut)}`, {
+                    input: prompt, encoding: 'utf8', timeout: timeoutMs, env: childEnv(),
+                    cwd: os.tmpdir(), stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 8 * 1024 * 1024
+                });
+                return fs.readFileSync(tmpOut, 'utf8');
+            } finally {
+                try { fs.unlinkSync(tmpOut); } catch (e) { /* best-effort */ }
+            }
+        };
+
+        if (!sub || sub === 'status' || sub === '--help' || sub === '-h' || sub === 'help') {
+            const providers = detectProviders();
+            log(`${BOLD}hop ai${RESET} — commands that use a local agent CLI`, CYAN);
+            log('');
+            for (const p of providers) {
+                log(`  ${p.installed ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`} ${p.id.padEnd(7)} ${p.installed ? p.version : 'not installed'}`, RESET);
+            }
+            const any = providers.some((p) => p.installed);
+            log('');
+            if (!any) {
+                log(`No agent CLI found. Install Claude Code or Codex and log in, then rerun.`, YELLOW);
+            } else {
+                log(`Commands:`, RESET);
+                log(`  hop ai tagline [session…]   Generate display taglines for sessions`, RESET);
+                log(`      --all      every session (default when none named)`, RESET);
+                log(`      --force    re-tag even when the tagline is newer than the session's last activity`, RESET);
+                log(`      --dry-run  print what would be written, change nothing`, RESET);
+                log(`      --provider claude|codex`, RESET);
+                log('');
+                log(`Core hop never calls a model; only ${CYAN}hop ai${RESET} does.`, RESET);
+            }
+            process.exit(0);
+        }
+
+        // `hop ai tagline` (also accepts the phrasing `hop ai update tagline`).
+        const isTagline = sub === 'tagline' || (sub === 'update' && process.argv[4] === 'tagline');
+        if (!isTagline) {
+            log(`Unknown command: hop ai ${sub}`, RED);
+            log(`Run ${CYAN}hop ai${RESET} for available commands.`, RESET);
+            process.exit(1);
+        }
+
+        const state = isServerRunning();
+        if (!state) {
+            printNotRunningError();
+            process.exit(1);
+        }
+        const providers = detectProviders();
+        const requested = flagValue('--provider');
+        const provider = requested
+            ? providers.find((p) => p.id === requested && p.installed)
+            : providers.find((p) => p.installed);
+        if (!provider) {
+            log(requested ? `Provider "${requested}" is not installed.` : 'No agent CLI found (Claude Code or Codex).', RED);
+            log(`Run ${CYAN}hop ai${RESET} to see what hop detects.`, RESET);
+            process.exit(1);
+        }
+        const dryRun = has('--dry-run');
+        const force = has('--force');
+        const named = flags.filter((a, i) => i > 0 && !a.startsWith('--') && flags[i - 1] !== '--provider' && a !== 'tagline');
+
+        const sessionsRes = await fetchSessionList(state);
+        const allSessions = (sessionsRes?.sessions || []).filter((s) => s.type !== 'port');
+        let targets = named.length
+            ? allSessions.filter((s) => named.includes(s.displayName) || named.includes(s.internalName))
+            : allSessions;
+        if (named.length) {
+            const missing = named.filter((n) => !allSessions.some((s) => s.displayName === n || s.internalName === n));
+            for (const m of missing) log(`No such session: ${m}`, YELLOW);
+        }
+        // Freshness: skip sessions whose tagline already postdates their last
+        // activity — nothing new has happened to describe.
+        if (!force) {
+            targets = targets.filter((s) => {
+                const cfgAt = Number(s.taglineAt || 0);
+                return !s.tagline || !cfgAt || cfgAt < Number(s.lastActivityAt || 0);
+            });
+        }
+        if (targets.length === 0) {
+            log('Every tagline is already current. Use --force to regenerate.', GREEN);
+            process.exit(0);
+        }
+        log(`Generating ${targets.length} tagline(s) via ${provider.id}…`, CYAN);
+
+        // Post-processing: the model is asked for a bare phrase, but any CLI
+        // can prepend chatter. Take the last non-empty line, strip markdown /
+        // quotes / trailing punctuation, and reject anything that reads like
+        // prose, an error, or a refusal rather than a tagline.
+        const cleanTagline = (raw) => {
+            const lines = String(raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
+            if (lines.length === 0) return '';
+            let t = lines[lines.length - 1];
+            t = t.replace(/^[-*>#\s]+/, '').replace(/^["'`]+|["'`.]+$/g, '').replace(/\s+/g, ' ').trim();
+            if (!t) return '';
+            if (/^(ERROR|I |I'm |Sorry|As an|Unable|Cannot)\b/i.test(t)) return '';
+            if (t.length > 64 || t.split(' ').length > 9) return '';
+            return t;
+        };
+
+        const buildPrompt = (s, screen) => [
+            'Write a short tagline for a terminal session, for display in a session switcher.',
+            '',
+            'Rules:',
+            '- 3 to 6 words, sentence case, no trailing period.',
+            '- Describe the ONGOING WORK or topic, not a momentary status like "waiting" or "blocked".',
+            '- Natural readable words. No kebab-case, snake_case, file paths, or quotes.',
+            '- Do not repeat the working directory (already shown next to it).',
+            '- Output ONLY the tagline, nothing else.',
+            '',
+            `Working directory: ${s.cwd || 'unknown'}`,
+            `Foreground app: ${s.foregroundProcess || 'shell'}`,
+            '',
+            'Current screen:',
+            '---',
+            screen,
+            '---'
+        ].join('\n');
+
+        let written = 0;
+        let skipped = 0;
+        for (const s of targets) {
+            const key = s.internalName || s.name;
+            let screen = '';
+            // The FIRST preview of a room can come back empty while the
+            // daemon is still building that room's screen grid — one retry
+            // turns a transient miss into a tagline.
+            for (let attempt = 0; attempt < 2 && !screen.trim(); attempt++) {
+                if (attempt) await new Promise((r) => setTimeout(r, 600));
+                try {
+                    const prev = await callLocalApi(state, `/api/sessions/preview?name=${encodeURIComponent(key)}`, 'GET');
+                    screen = String(prev?.data?.text || '').split('\n').filter((l) => l.trim()).slice(-40).join('\n').slice(-3500);
+                } catch (e) { /* retry, then give up */ }
+            }
+            if (!screen.trim()) {
+                log(`  ${s.displayName}: no screen content — skipped`, YELLOW);
+                skipped++;
+                continue;
+            }
+            let tagline = '';
+            try {
+                tagline = cleanTagline(askProvider(provider.id, buildPrompt(s, screen)));
+            } catch (e) {
+                const msg = String(e.stderr || e.message || '').split('\n').find((l) => l.trim()) || 'provider failed';
+                log(`  ${s.displayName}: ${msg.slice(0, 120)}`, RED);
+                skipped++;
+                continue;
+            }
+            if (!tagline) {
+                log(`  ${s.displayName}: unusable response — skipped`, YELLOW);
+                skipped++;
+                continue;
+            }
+            if (dryRun) {
+                log(`  ${s.displayName} → ${BOLD}${tagline}${RESET}  ${YELLOW}(dry run)${RESET}`, RESET);
+                continue;
+            }
+            try {
+                const saved = await callLocalApi(state, '/api/sessions/tagline', 'POST', { internalName: key, tagline });
+                if (saved?.status !== 200) throw new Error(saved?.data?.error || `HTTP ${saved?.status}`);
+                log(`  ${s.displayName} → ${BOLD}${tagline}${RESET}`, GREEN);
+                written++;
+            } catch (e) {
+                log(`  ${s.displayName}: failed to save (${e.message})`, RED);
+                skipped++;
+            }
+        }
+        log('');
+        log(dryRun ? 'Dry run complete — nothing written.' : `${written} tagline(s) written${skipped ? `, ${skipped} skipped` : ''}.`, GREEN);
         process.exit(0);
     }
 

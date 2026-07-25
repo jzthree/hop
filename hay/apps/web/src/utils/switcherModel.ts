@@ -24,6 +24,9 @@ export type SwitcherSession = {
   cols?: number;
   rows?: number;
   createdBy?: "user" | "agent";
+  // Short human-readable line describing the session's work, written by
+  // `hop ai tagline`. Absent unless the user has run it.
+  tagline?: string;
 };
 
 export type SessionOriginScope = "user" | "agent" | "all";

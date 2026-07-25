@@ -2810,6 +2810,22 @@ button.primary {
   background: color-mix(in srgb, var(--accent) 7%, var(--panel));
 }
 
+/* AI tagline (hop ai tagline): what this session is working on, in words the
+   session name can't carry. Prose, not an identifier — so the UI font, not
+   the mono stack. */
+.switcher-card-tagline {
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--ink);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.switcher-overlay.tile-dense .switcher-card-tagline {
+  display: none;
+}
+
 /* Content-match snippet under a search-result card: the output line that
    matched, so the card says WHY it's in the results. */
 .switcher-card-snippet {

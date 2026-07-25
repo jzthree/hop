@@ -2158,6 +2158,13 @@ button.primary {
   border-color: var(--accent);
 }
 
+/* The wall's order freezes while open — a session producing output RIGHT NOW
+   signals in place with a tinted ring instead of jumping to the top. */
+.switcher-card.active-now {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
 .switcher-card.new {
   align-items: center;
   justify-content: center;

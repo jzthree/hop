@@ -14,6 +14,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
+  projectKey,
   relativeTime,
   type SessionOriginScope,
   type SwitcherSession,
@@ -543,6 +544,9 @@ export const SessionSwitcher = ({
   const changeSortMode = (mode: SwitcherSortMode) => {
     setSortMode(mode);
     localStorage.setItem("hay_sort_mode", mode);
+    // A deliberate re-sort is the one time reordering is EXPECTED — drop the
+    // frozen capture so the new mode lays out fresh.
+    frozenOrderRef.current = null;
   };
   // Project view density: sectional (a header per project) vs compact (one
   // continuous grid — the card's workdir line already names the project).
@@ -638,35 +642,62 @@ export const SessionSwitcher = ({
     () => filterSessionsByOrigin(sessions, originScope),
     [sessions, originScope]
   );
-  // While a tile is focused the wall's ORDER freezes: attention/recency
-  // resorting yanked the terminal out from under the user's hands. Contents
-  // still refresh (fresh session objects are looked up by key); the order
-  // thaws when focus is released. Sessions that vanish drop out; brand-new
-  // ones wait for the thaw.
-  const frozenOrderRef = useRef<{ hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
+  // While the switcher is OPEN the wall's ORDER freezes at what the user
+  // first saw: attention/recency resorting yanked tiles around mid-scan
+  // (and out from under a focused tile's hands). Contents still refresh —
+  // fresh session objects are looked up by key — and activity shows IN
+  // PLACE (the active-now glow + attention dots) instead of as movement.
+  // The order recaptures on reopen or when the user changes scope/sort;
+  // sessions that vanish drop out; brand-new ones append at the end rather
+  // than reshuffling the wall.
+  const frozenOrderRef = useRef<{ mode: "tiers" | "project"; hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
+  useEffect(() => { if (!open) frozenOrderRef.current = null; }, [open]);
   const model = useMemo(() => {
     const live = buildSwitcherModel(visibleSessions, currentRoom, filter, sortMode, manualOrder);
-    if (!focusedKey || live.mode !== "tiers") {
-      frozenOrderRef.current = null;
+    if (!open || (live.mode !== "tiers" && live.mode !== "project")) return live;
+    let frozen = frozenOrderRef.current;
+    if (!frozen || frozen.mode !== live.mode) {
+      frozen = live.mode === "tiers"
+        ? {
+            mode: "tiers",
+            hero: live.hero.map(sessionKey),
+            groups: live.groups.map((g) => ({ label: g.label, rows: g.rows.map(sessionKey) }))
+          }
+        : {
+            mode: "project",
+            hero: [],
+            groups: live.groups.map((g) => ({ label: g.label, rows: g.rows.map(sessionKey) }))
+          };
+      frozenOrderRef.current = frozen;
       return live;
     }
-    if (!frozenOrderRef.current) {
-      frozenOrderRef.current = {
-        hero: live.hero.map(sessionKey),
-        groups: live.groups.map((g) => ({ label: g.label, rows: g.rows.map(sessionKey) }))
+    const byKey = new Map(visibleSessions.map((s) => [sessionKey(s), s]));
+    const knownKeys = new Set([...frozen.hero, ...frozen.groups.flatMap((g) => g.rows)]);
+    const fresh = visibleSessions.filter((s) => !knownKeys.has(sessionKey(s)));
+    const resolve = (keys: string[]) => keys.map((k) => byKey.get(k)).filter((s): s is SwitcherSession => !!s);
+    if (live.mode === "tiers") {
+      return {
+        mode: "tiers" as const,
+        // New sessions join at the end of the hero wall — visible without
+        // displacing anything the user is already looking at.
+        hero: [...resolve(frozen.hero), ...fresh],
+        groups: frozen.groups
+          .map((g) => ({ label: g.label, rows: resolve(g.rows) }))
+          .filter((g) => g.rows.length > 0),
+        currentInHero: live.currentInHero
       };
     }
-    const byKey = new Map(visibleSessions.map((s) => [sessionKey(s), s]));
-    const frozen = frozenOrderRef.current;
-    return {
-      mode: "tiers" as const,
-      hero: frozen.hero.map((k) => byKey.get(k)).filter((s): s is SwitcherSession => !!s),
-      groups: frozen.groups
-        .map((g) => ({ label: g.label, rows: g.rows.map((k) => byKey.get(k)).filter((s): s is SwitcherSession => !!s) }))
-        .filter((g) => g.rows.length > 0),
-      currentInHero: live.currentInHero
-    };
-  }, [visibleSessions, currentRoom, filter, focusedKey, sortMode, manualOrder]);
+    // Project mode: a new session lands in its own project's frozen group
+    // when one exists, otherwise in a trailing group.
+    const groups = frozen.groups.map((g) => ({ label: g.label, rows: resolve(g.rows) }));
+    for (const s of fresh) {
+      const label = s.type === "port" ? "Ports" : projectKey(s.cwd);
+      const g = groups.find((x) => x.label === label);
+      if (g) g.rows.push(s);
+      else groups.push({ label, rows: [s] });
+    }
+    return { mode: "project" as const, groups: groups.filter((g) => g.rows.length > 0) };
+  }, [open, visibleSessions, currentRoom, filter, sortMode, manualOrder, originScope]);
 
   // ── Keyboard-first palette: ⌘K → type to filter → ↑↓ → Enter, no mouse. ──
   const filterInputRef = useRef<HTMLInputElement>(null);
@@ -999,7 +1030,10 @@ export const SessionSwitcher = ({
         });
         return;
       }
-      if (event.key === "Enter") {
+      // Plain Enter only: Shift+Enter is a terminal keystroke (newline in
+      // claude) — when a focused tile has lost DOM focus it must fall
+      // through to NOTHING here, not switch the session to full screen.
+      if (event.key === "Enter" && !event.shiftKey) {
         const target = flatNav[kbdIndex];
         if (target) {
           event.preventDefault();
@@ -1232,6 +1266,11 @@ export const SessionSwitcher = ({
     const preview = previewCacheRef.current!.get(key);
     const current = isCurrentSession(s);
     const kbdSelected = navIndexByKey.get(key) === kbdIndex;
+    // The frozen wall trades movement for a signal-in-place: a session
+    // producing output RIGHT NOW glows instead of jumping to the top.
+    // Window comfortably exceeds the 10s relative-time tick so a busy
+    // session's glow holds steady rather than flickering between polls.
+    const activeNow = !current && now - (s.lastActivityAt || 0) < 12000;
     // Manual mode: cards are draggable to reorder. Dragging is disabled while
     // a tile is focused (that tile owns the pointer for interaction).
     const draggable = sortMode === "manual" && !focusedKey;
@@ -1241,7 +1280,7 @@ export const SessionSwitcher = ({
         role="button"
         tabIndex={0}
         data-nav-index={navIndexByKey.get(key)}
-        className={`switcher-card${current ? " current" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}`}
+        className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}`}
         draggable={draggable}
         onDragStart={draggable ? (e) => { setDragKey(key); e.dataTransfer.effectAllowed = "move"; } : undefined}
         onDragEnter={draggable ? () => { if (dragKey && dragKey !== key) moveManual(dragKey, key); } : undefined}
@@ -1254,7 +1293,7 @@ export const SessionSwitcher = ({
           else handleTap(s);
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          if (e.key === "Enter" && !e.shiftKey) {
             // ⌘⏎ focuses the tile; plain Enter switches (mirrors onNavKey).
             if ((e.metaKey || e.ctrlKey) && interactiveTiles && s.active && s.type !== "port") setFocusedKey(key);
             else handleTap(s);
@@ -1439,6 +1478,8 @@ export const SessionSwitcher = ({
                 onClick={() => {
                   setOriginScope(scope);
                   setCreating(false);
+                  // Scope change relays a different population — refreeze.
+                  frozenOrderRef.current = null;
                 }}
               >
                 {label}

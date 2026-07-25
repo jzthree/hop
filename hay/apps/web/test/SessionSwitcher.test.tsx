@@ -113,6 +113,35 @@ describe("SessionSwitcher project view density", () => {
   });
 });
 
+describe("SessionSwitcher frozen ordering", () => {
+  const at = (n: string, lastActivityAt: number): SwitcherSession => ({
+    name: n, displayName: n, internalName: n, active: true, starting: false,
+    createdBy: "user", lastActivityAt
+  });
+
+  it("keeps the order captured at open while activity reshuffles underneath", () => {
+    const view = render(<SessionSwitcher {...props} sessions={[at("alpha", 2000), at("beta", 1000)]} open />);
+    const names = () =>
+      Array.from(document.querySelectorAll(".switcher-card-name")).map((n) => n.textContent);
+    expect(names()).toEqual(["alpha", "beta"]);
+
+    // beta becomes the most recent — a live rebuild would put it first.
+    view.rerender(<SessionSwitcher {...props} sessions={[at("alpha", 2000), at("beta", 99000)]} open />);
+    expect(names()).toEqual(["alpha", "beta"]);
+
+    // A brand-new session appends at the end instead of reshuffling.
+    view.rerender(
+      <SessionSwitcher {...props} sessions={[at("alpha", 2000), at("beta", 99000), at("gamma", 500000)]} open />
+    );
+    expect(names()).toEqual(["alpha", "beta", "gamma"]);
+
+    // Reopen recaptures: now the live recency order shows.
+    view.rerender(<SessionSwitcher {...props} sessions={[at("alpha", 2000), at("beta", 99000), at("gamma", 500000)]} open={false} />);
+    view.rerender(<SessionSwitcher {...props} sessions={[at("alpha", 2000), at("beta", 99000), at("gamma", 500000)]} open />);
+    expect(names()).toEqual(["gamma", "beta", "alpha"]);
+  });
+});
+
 describe("SessionSwitcher focus capture", () => {
   it("blurs the opener on open so typed search can't leak into the terminal", () => {
     const outside = document.createElement("input");

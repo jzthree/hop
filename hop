@@ -5080,7 +5080,12 @@ function schedulePreviewCacheSave() {
     previewCacheSaveTimer = setTimeout(() => {
         previewCacheSaveTimer = null;
         try {
-            fs.writeFileSync(PREVIEW_CACHE_FILE, JSON.stringify([...lastGoodPreviewByRoom]), { mode: 0o600 });
+            // Persist TEXT only: colour runs are regenerated from the live
+            // grid on every serve, and writing them would bloat this file by
+            // an order of magnitude for a fallback that only has to say what
+            // the screen said.
+            const slim = [...lastGoodPreviewByRoom].map(([k, v]) => [k, { ...v, color: undefined }]);
+            fs.writeFileSync(PREVIEW_CACHE_FILE, JSON.stringify(slim), { mode: 0o600 });
         } catch (e) { /* best-effort */ }
     }, 5000);
     previewCacheSaveTimer.unref?.();
@@ -5204,6 +5209,77 @@ function fetchHayRoomOutputSince(internalName, since) {
     });
 }
 
+// xterm's 256-colour cube, for palette-indexed cells. Indices 0-15 are left
+// to the VIEWER's theme (sent as null) so basic colours follow the user's
+// terminal palette exactly as they do in the real terminal.
+const ANSI_256 = (() => {
+    const out = new Array(256).fill(null);
+    const steps = [0, 95, 135, 175, 215, 255];
+    const hx = (n) => n.toString(16).padStart(2, '0');
+    for (let i = 0; i < 216; i++) {
+        const r = steps[Math.floor(i / 36) % 6], g = steps[Math.floor(i / 6) % 6], b = steps[i % 6];
+        out[16 + i] = `#${hx(r)}${hx(g)}${hx(b)}`;
+    }
+    for (let i = 0; i < 24; i++) {
+        const v = 8 + i * 10;
+        out[232 + i] = `#${hx(v)}${hx(v)}${hx(v)}`;
+    }
+    return out;
+})();
+
+// Colour-preserving read of the grid: consecutive cells sharing attributes
+// collapse into one run. Previews were plain translateToString() text — the
+// grid is a REAL terminal, but flattening it to a string threw every colour
+// away, which is why tiles stayed monochrome after the sessions themselves
+// regained colour. Runs carry only what differs from default, so an ordinary
+// screen costs little more than its text.
+function readGridColorLines(grid) {
+    const buffer = grid.term.buffer.active;
+    const cell = buffer.getNullCell();
+    const lines = [];
+    for (let y = 0; y < grid.rows; y++) {
+        const line = buffer.getLine(buffer.baseY + y);
+        if (!line) { lines.push([]); continue; }
+        const runs = [];
+        let cur = null;
+        for (let x = 0; x < grid.cols; x++) {
+            line.getCell(x, cell);
+            if (cell.getWidth() === 0) continue; // trailing half of a wide glyph
+            const ch = cell.getChars() || ' ';
+            const fg = cell.isFgRGB() ? `#${cell.getFgColor().toString(16).padStart(6, '0')}`
+                : cell.isFgPalette() ? ANSI_256[cell.getFgColor()] : null;
+            const bg = cell.isBgRGB() ? `#${cell.getBgColor().toString(16).padStart(6, '0')}`
+                : cell.isBgPalette() ? ANSI_256[cell.getBgColor()] : null;
+            const dim = cell.isDim() ? 1 : 0;
+            const bold = cell.isBold() ? 1 : 0;
+            const inv = cell.isInverse() ? 1 : 0;
+            if (cur && cur.f === fg && cur.b === bg && cur.d === dim && cur.o === bold && cur.i === inv) {
+                cur.t += ch;
+            } else {
+                cur = { t: ch, f: fg, b: bg, d: dim, o: bold, i: inv };
+                runs.push(cur);
+            }
+        }
+        // Drop trailing blank, unstyled run — pure padding.
+        while (runs.length) {
+            const last = runs[runs.length - 1];
+            if (!last.f && !last.b && !last.i && !last.t.trim()) runs.pop();
+            else break;
+        }
+        // Strip the defaults so the payload only carries what matters.
+        for (const r of runs) {
+            if (!r.f) delete r.f;
+            if (!r.b) delete r.b;
+            if (!r.d) delete r.d;
+            if (!r.o) delete r.o;
+            if (!r.i) delete r.i;
+        }
+        lines.push(runs);
+    }
+    while (lines.length && lines[lines.length - 1].length === 0) lines.pop();
+    return lines;
+}
+
 function readGridScreen(grid) {
     try {
         const buffer = grid.term.buffer.active;
@@ -5213,7 +5289,9 @@ function readGridScreen(grid) {
             lines.push(line ? line.translateToString(true) : '');
         }
         while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-        return { text: lines.join('\n'), cols: grid.cols, rows: grid.rows };
+        let color = null;
+        try { color = readGridColorLines(grid); } catch (e) { /* text still fine */ }
+        return { text: lines.join('\n'), color, cols: grid.cols, rows: grid.rows };
     } catch (e) {
         return null;
     }

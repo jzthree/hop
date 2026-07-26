@@ -92,6 +92,33 @@ type Sheet = {
 
 const sessionKey = (s: SwitcherSession) => s.internalName || s.name;
 
+// One styled span of preview text. The daemon reads these straight off the
+// room's grid (a real terminal), so a tile shows the session's ACTUAL colors
+// instead of the flattened text previews used before.
+type PreviewRun = { t: string; f?: string; b?: string; d?: 1; o?: 1; i?: 1 };
+type PreviewFrame = { text: string; color?: PreviewRun[][] | null };
+
+const renderPreviewRuns = (lines: PreviewRun[][]) =>
+  lines.map((runs, y) => (
+    <div key={y} className="switcher-preview-line">
+      {runs.length === 0 ? " " : runs.map((r, i) => (
+        <span
+          key={i}
+          style={{
+            // Inverse swaps fg/bg the way the terminal does; unset sides fall
+            // back to the tile's own colors.
+            color: r.i ? r.b || "var(--terminal-bg)" : r.f,
+            background: r.i ? r.f || "var(--ink)" : r.b,
+            opacity: r.d ? 0.6 : undefined,
+            fontWeight: r.o ? 600 : undefined
+          }}
+        >
+          {r.t}
+        </span>
+      ))}
+    </div>
+  ));
+
 const shortDir = (p?: string) => {
   const parts = String(p || "").replace(/\/+$/, "").split("/").filter(Boolean);
   if (parts.length === 0) return "";
@@ -638,19 +665,21 @@ export const SessionSwitcher = ({
   const [, setTick] = useState(0);
   // Preview cache survives page reloads via sessionStorage: a freshly loaded
   // page paints last-known screens instantly instead of a wall of blanks.
-  const previewCacheRef = useRef<Map<string, string> | null>(null);
+  const previewCacheRef = useRef<Map<string, PreviewFrame> | null>(null);
   if (!previewCacheRef.current) {
-    const seeded = new Map<string, string>();
+    const seeded = new Map<string, PreviewFrame>();
     try {
       const saved = JSON.parse(sessionStorage.getItem("hop_preview_cache_v1") || "[]") as Array<[string, string]>;
-      for (const [k, v] of saved) seeded.set(k, v);
+      // Text-only on purpose: the reload seed just needs to paint something
+      // instantly; color arrives with the first live refresh.
+      for (const [k, v] of saved) seeded.set(k, { text: v });
     } catch { /* corrupt or absent — start empty */ }
     previewCacheRef.current = seeded;
   }
   const persistPreviewCache = () => {
     try {
       const entries = Array.from(previewCacheRef.current!.entries()).map(
-        ([k, v]) => [k, v.length > 4000 ? v.slice(-4000) : v] as [string, string]
+        ([k, v]) => [k, v.text.length > 4000 ? v.text.slice(-4000) : v.text] as [string, string]
       );
       sessionStorage.setItem("hop_preview_cache_v1", JSON.stringify(entries));
     } catch { /* quota — previews are best-effort */ }
@@ -946,7 +975,10 @@ export const SessionSwitcher = ({
             // bare prompt must fill the tile, not be filtered as junk. Only
             // an empty frame never replaces existing content.
             if (!cancelled && text.trim().length > 0) {
-              previewCacheRef.current!.set(key, text);
+              previewCacheRef.current!.set(key, {
+                text,
+                color: Array.isArray(data.color) ? (data.color as PreviewRun[][]) : null
+              });
             }
           } catch {
             /* keep the cached preview */
@@ -1471,14 +1503,16 @@ export const SessionSwitcher = ({
             room={key}
             userName={userName || "user"}
             theme={terminalTheme}
-            fallback={preview || " "}
+            fallback={preview?.text || " "}
             fontSize={parseInt(zoomLevel.fs, 10) || 11}
             claudeApp={appLabel(s) === "claude"}
             onFullscreen={() => onSwitch(s)}
             onUnfocus={() => setFocusedKey(null)}
           />
         ) : (
-          <pre className="switcher-preview" aria-hidden="true">{preview || " "}</pre>
+          <pre className="switcher-preview" aria-hidden="true">
+            {preview?.color?.length ? renderPreviewRuns(preview.color) : (preview?.text || " ")}
+          </pre>
         )}
         {snippet && <div className="switcher-card-snippet" title={snippet}>{snippet}</div>}
         <div className="switcher-card-meta">

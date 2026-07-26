@@ -1936,6 +1936,23 @@ function saveHopConfig(config) {
     writePrivateFile(HOP_CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
+// Claude asks how to resume a large conversation ("1. Resume from summary
+// (recommended) / 2. Resume full session as-is / 3. Don't ask me again"), so a
+// restored session comes back alive but frozen on a question. There is no CLI
+// flag for it, so hop answers on the user's behalf. Default: FULL — a restored
+// session should be the session you left, not a summary of it. Set
+// resume_mode to "summary" (cheaper) or "ask" (leave the prompt alone).
+const RESUME_PROMPT_RE = /Resuming the full session|Resume from summary|Resume full session as-is/i;
+function getResumeMode() {
+    const mode = String(getHopConfig().resume_mode || '').toLowerCase();
+    return mode === 'summary' || mode === 'ask' ? mode : 'full';
+}
+function resumeChoiceKey(mode) {
+    if (mode === 'summary') return '1';
+    if (mode === 'full') return '2';
+    return null;
+}
+
 function getNamingTheme() {
     const config = getHopConfig();
     if (config.naming_theme && isValidTheme(config.naming_theme)) {
@@ -4211,7 +4228,13 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 continue;
             }
             if (job.state === 'verify') {
-                if (running) { finish('resumed'); continue; }
+                if (running) {
+                    const key = resumeChoiceKey(getResumeMode());
+                    if (!key) { finish('resumed'); continue; }
+                    job.state = 'answer-prompt';
+                    job.since = Date.now();
+                    continue;
+                }
                 // Claude takes a beat to exec; only retry after a real wait,
                 // and only once — a retry storm is what we are fixing.
                 if (Date.now() - job.since < 12_000) continue;
@@ -4220,6 +4243,22 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 // has nothing left to try.
                 if (job.attempts < 2) { job.state = 'wait-ready'; job.since = Date.now(); continue; }
                 finish('never-started');
+                continue;
+            }
+            if (job.state === 'answer-prompt') {
+                // Bounded: a conversation small enough not to ask is the
+                // common case, so give up quickly and call it resumed.
+                if (Date.now() - job.since > 45_000) { finish('resumed'); continue; }
+                let screen = '';
+                try {
+                    const grid = await getRoomGridPreviewShared(job.plan.internalName);
+                    screen = String(grid?.text || '');
+                } catch (e) { continue; }
+                if (!RESUME_PROMPT_RE.test(screen)) continue;
+                const key = resumeChoiceKey(getResumeMode());
+                try { sendTerminalInput(job.entry, `${key}\r`); } catch (e) { /* fall through */ }
+                log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: resumed full session`, DIM);
+                finish('resumed-answered');
             }
         }
     }
@@ -11104,7 +11143,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -11656,6 +11695,43 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop resume-waiting` — answer claude's resume question for any
+    // session currently parked on it (sessions restored before this existed,
+    // or restored with resume_mode=ask and since reconsidered).
+    if (process.argv[2] === 'resume-waiting') {
+        const state = isServerRunning();
+        if (!state) { printNotRunningError(); process.exit(1); }
+        const modeArg = String(process.argv[3] || '').toLowerCase();
+        const mode = ['full', 'summary'].includes(modeArg) ? modeArg : getResumeMode();
+        const key = resumeChoiceKey(mode);
+        if (!key) {
+            log(`Resume mode is "ask" — pass a mode: ${CYAN}hop resume-waiting full${RESET}`, YELLOW);
+            process.exit(1);
+        }
+        const sessionsRes = await fetchSessionList(state);
+        const all = (sessionsRes?.sessions || []).filter((x) => x.type !== 'port' && x.live);
+        let answered = 0;
+        for (const sess of all) {
+            const name = sess.internalName || sess.name;
+            let screen = '';
+            try {
+                const prev = await callLocalApi(state, `/api/sessions/preview?name=${encodeURIComponent(name)}`, 'GET');
+                screen = String(prev?.data?.text || '');
+            } catch (e) { continue; }
+            if (!RESUME_PROMPT_RE.test(screen)) continue;
+            try {
+                const at = await callLocalApi(state, '/api/terminals/attach', 'POST', { name: sess.displayName || name });
+                if (at?.status !== 200 || !at.data?.id) continue;
+                await callLocalApi(state, `/api/terminals/${at.data.id}/write`, 'POST', { data: `${key}\r` });
+                await callLocalApi(state, `/api/terminals/${at.data.id}`, 'DELETE');
+                log(`  ${sess.displayName || name}: resumed ${mode === 'full' ? 'full conversation' : 'from summary'}`, GREEN);
+                answered++;
+            } catch (e) { /* next session */ }
+        }
+        log(answered ? `Answered ${answered} session(s).` : 'No sessions were waiting.', answered ? GREEN : RESET);
+        process.exit(0);
+    }
+
     // Handle `hop update` — self-update from the git checkout's origin.
     // Sessions SURVIVE: only the daemon restarts (the hay-host, which owns
     // every PTY, is untouched); the committed hay-web bundle means no build
@@ -12104,6 +12180,7 @@ async function main() {
         log(`  hop health [--restart]    Check tunnel health (--restart forces a tunnel restart)`, RESET);
         log(`  hop wipe [--all] [--yes]  Remove workspace-defined sessions (--all kills live; --yes skips confirmation)`, RESET);
         log(`  hop wipe --agent          Close all agent-created terminal API sessions`, RESET);
+        log(`  hop config resume <mode>  How restores answer claude's resume question (full|summary|ask)`, RESET);
         log('');
         process.exit(0);
     }
@@ -12112,6 +12189,28 @@ async function main() {
     // Handle `hop config` command
     if (process.argv[2] === 'config') {
         const subCmd = process.argv[3];
+        // How restored sessions answer claude's resume question.
+        if (subCmd === 'resume' || subCmd === 'resume-mode') {
+            const modeArg = String(process.argv[4] || '').toLowerCase();
+            if (modeArg) {
+                if (!['full', 'summary', 'ask'].includes(modeArg)) {
+                    log(`Unknown resume mode "${modeArg}". Use: full | summary | ask`, RED);
+                    process.exit(1);
+                }
+                const cfg = getHopConfig();
+                cfg.resume_mode = modeArg;
+                saveHopConfig(cfg);
+                log(`Restored sessions will ${modeArg === 'ask' ? 'leave claude\'s resume question for you' : `resume ${modeArg === 'full' ? 'the FULL conversation' : 'from a summary'}`}.`, GREEN);
+            } else {
+                const mode = getResumeMode();
+                log(`Resume mode: ${BOLD}${mode}${RESET}`, RESET);
+                log(`  full     restore the whole conversation as-is (default)`, DIM);
+                log(`  summary  let claude resume from its summary (cheaper)`, DIM);
+                log(`  ask      leave the question on screen for you`, DIM);
+                log(`Change with: ${CYAN}hop config resume <mode>${RESET}`, RESET);
+            }
+            process.exit(0);
+        }
         if (subCmd === 'theme' || subCmd === 'naming-theme') {
             const themeArg = process.argv[4];
             if (themeArg) {

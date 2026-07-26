@@ -3421,9 +3421,3 @@ button.primary {
   font-family: inherit;
 }
 
-/* Color preview runs: each line is a row of styled spans read from the room's
-   real terminal grid, so a tile shows the session's actual colors. */
-.switcher-preview-line {
-  white-space: pre;
-  min-height: 1em;
-}

@@ -100,8 +100,8 @@ type PreviewFrame = { text: string; color?: PreviewRun[][] | null };
 
 const renderPreviewRuns = (lines: PreviewRun[][]) =>
   lines.map((runs, y) => (
-    <div key={y} className="switcher-preview-line">
-      {runs.length === 0 ? " " : runs.map((r, i) => (
+    <span key={y}>
+      {runs.map((r, i) => (
         <span
           key={i}
           style={{
@@ -116,7 +116,8 @@ const renderPreviewRuns = (lines: PreviewRun[][]) =>
           {r.t}
         </span>
       ))}
-    </div>
+      {y < lines.length - 1 ? "\n" : null}
+    </span>
   ));
 
 const shortDir = (p?: string) => {

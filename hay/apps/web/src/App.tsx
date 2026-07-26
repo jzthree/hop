@@ -3104,13 +3104,6 @@ const App = () => {
         </main>
       ) : (
         <main
-          // THE focus rule, in one place: while the palette is open the whole
-          // session area is inert, so nothing inside it — main terminal,
-          // split panes, the mobile keyboard's hidden textarea — can take
-          // focus or receive input. Chasing individual focus() callers was
-          // whack-a-mole (each new terminal surface reopened the leak); the
-          // browser enforces this for every descendant, present and future.
-          inert={switcherOpen}
           className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}`}
           style={sessionStyle}
         >
@@ -3444,7 +3437,7 @@ const App = () => {
             // evaluated on the hub page (session can be null there), and the
             // pane renderer places it wherever the tree's primary leaf sits.
             const renderPrimarySection = (): ReactElement => (
-              <section className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
+              <section inert={switcherOpen} className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
                 <div
                   className="terminal-frame"
                   onClick={() => {
@@ -3682,7 +3675,7 @@ const App = () => {
             // so adding/removing panes never re-parents the live terminal.
             const rootSplit = paneTree.kind === "split" ? paneTree : null;
             return (
-              <div className="pane-root">
+              <div className="pane-root" inert={switcherOpen}>
                 <div key="rootsplit" className={`pane-split ${rootSplit?.dir === "col" ? "dir-col" : "dir-row"}`}>
                   <div key="cell-a" className="pane-cell" style={{ flexGrow: rootSplit ? rootSplit.ratio : 1, flexBasis: 0 }}>
                     {rootSplit && rootSplit.a.kind !== "leaf" ? renderPaneNode(rootSplit.a) : primaryWrap}
@@ -3819,7 +3812,7 @@ const App = () => {
           {isMobile && (
             <MobileKeyboard
               onInput={handleKeyboardInput}
-              visible={keyboardVisible}
+              visible={keyboardVisible && !switcherOpen}
               onToggle={handleKeyboardToggle}
               onHeightChange={setKeyboardHeight}
               hapticsEnabled={hapticsEnabled}

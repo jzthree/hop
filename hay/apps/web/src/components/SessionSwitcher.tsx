@@ -859,45 +859,9 @@ export const SessionSwitcher = ({
       setSheet(null);
       setCreating(false);
       setCreateDraft("");
-      // The opener — usually the main terminal's xterm textarea — still holds
-      // DOM focus at this instant, so until the filter's delayed autofocus
-      // lands (fine pointers only, 40ms), every keystroke goes to the
-      // SESSION: typed search text leaked into the terminal behind the
-      // overlay. Blur anything focused outside the switcher immediately; the
-      // type-anywhere handler then owns the keyboard from the first key.
-      const active = document.activeElement as HTMLElement | null;
-      if (active && typeof active.blur === "function" && !active.closest(".switcher-overlay")) {
-        active.blur();
-      }
     }
   }, [open]);
 
-  // Focus containment. Blurring once on open is not enough: the terminal's
-  // hidden textarea (and the mobile keyboard's) can take focus back at any
-  // time — a tap that lands past the panel, an autofit, a pane change. When
-  // that happened the user's typing went into an invisible textarea and
-  // simply vanished. While the palette is open, focus that escapes it is
-  // pulled back to the filter box, which is where typing belongs.
-  useEffect(() => {
-    if (!open) return;
-    const onFocusIn = (event: FocusEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (!target || typeof target.closest !== "function") return;
-      if (target.closest(".switcher-overlay")) return;
-      // Only the TERMINAL is stolen from — that's the leak this guard exists
-      // for. Other surfaces the palette opens (settings drawer, find bar,
-      // dialogs) are legitimate focus targets; yanking focus out of them made
-      // the settings button feel broken.
-      const stealsInput = target.closest(".terminal-frame, .xterm, .mobile-keyboard")
-        || target.tagName === "BODY";
-      if (!stealsInput) return;
-      const input = filterInputRef.current;
-      if (input) input.focus();
-      else if (typeof target.blur === "function") target.blur();
-    };
-    document.addEventListener("focusin", onFocusIn);
-    return () => document.removeEventListener("focusin", onFocusIn);
-  }, [open]);
 
   // Keep relative times fresh while open.
   useEffect(() => {

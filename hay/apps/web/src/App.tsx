@@ -524,6 +524,9 @@ const App = () => {
   // output/snapshot stream; the server's snapshot flag seeds reattach.
   const remoteKbdEnhancedRef = useRef(false);
   const lastDropToastRef = useRef(0);
+  // Measured time from connect to snapshot on this client's link; null until
+  // the first switch. Gates the fast-paint prefetch (see connect()).
+  const lastSnapshotMsRef = useRef<number | null>(null);
   // Keystrokes typed while the socket is down are buffered per room and
   // replayed in order on reconnect — a mobile radio blip must not eat input.
   // Entries past the age cap are discarded rather than replayed: firing stale
@@ -552,14 +555,6 @@ const App = () => {
   };
   const drawerOpenRef = useRef(drawerOpen);
   drawerOpenRef.current = drawerOpen;
-  // Read at keystroke time by handleUserInput: while the session palette is
-  // open, NOTHING typed may reach the session. Blurring the terminal on open
-  // wasn't enough — on mobile the keyboard's hidden textarea keeps forwarding,
-  // and any re-focus (pane change, fit, tap) re-opens the leak. Guarding the
-  // single input path closes the whole class. The palette's own interactive
-  // tile has its own socket and does not go through here.
-  const switcherOpenRef = useRef(switcherOpen);
-  switcherOpenRef.current = switcherOpen;
   const shortcutHelpRef = useRef(shortcutHelpOpen);
   shortcutHelpRef.current = shortcutHelpOpen;
 
@@ -961,11 +956,6 @@ const App = () => {
   };
 
   const handleUserInput = (data: string) => {
-    // The palette owns the keyboard while it's open — typed filter text must
-    // never also land in the session behind it.
-    if (switcherOpenRef.current) {
-      return;
-    }
     // Typing is "I am at the prompt": any earlier scroll-up turned
     // follow-mode OFF, so the line you just submitted (and everything the
     // app printed after it) stayed below the fold — the "I hit enter and
@@ -1204,11 +1194,17 @@ const App = () => {
     // screen from its preview grid in one small response — paint that
     // immediately so the switch shows content while the WS snapshot's
     // ~384KB download+parse is still in flight (the dominant switch cost on
-    // a phone over the tunnel). The snapshot handler reset()s the terminal
-    // before writing, so this paint is fully superseded; if the snapshot
-    // wins the race, the response is discarded. Best-effort throughout.
+    // a phone over the tunnel). The snapshot supersedes it; if the snapshot
+    // wins the race the response is discarded. Best-effort throughout.
+    //
+    // Only worth doing when the snapshot will actually be slow. On a fast
+    // link the snapshot lands in a few tens of ms, and the extra request +
+    // parse + resize is pure churn (it also costs a grid refresh daemon-
+    // side). Skip it when the last snapshot for this client arrived quickly.
     let snapshotLanded = false;
-    fetch(`/api/sessions/screen?name=${encodeURIComponent(targetRoom)}`)
+    const snapshotAt = performance.now();
+    const wantFastPaint = lastSnapshotMsRef.current === null || lastSnapshotMsRef.current > 250;
+    if (wantFastPaint) fetch(`/api/sessions/screen?name=${encodeURIComponent(targetRoom)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((screen: { data?: string; cols?: number; rows?: number } | null) => {
         if (!screen || typeof screen.data !== "string" || !screen.data) return;
@@ -1328,6 +1324,9 @@ const App = () => {
           // The authoritative replay has arrived — the fast-paint prefetch
           // must no longer touch the terminal.
           snapshotLanded = true;
+          // How long the authoritative replay took decides whether the next
+          // switch bothers with a fast paint at all.
+          lastSnapshotMsRef.current = performance.now() - snapshotAt;
           // Fresh connection: recompute from the snapshot. The server's tracked
           // flag wins when present (the enable may predate the retained buffer);
           // otherwise scan the replayed buffer itself from a clean slate.
@@ -1348,13 +1347,15 @@ const App = () => {
           // that's when the "load full history" pill is worth offering.
           snapshotWasCappedRef.current = typeof message.data === "string" && message.data.length >= 350000
             && !deepReplayRoomsRef.current.has(activeSessionRoomRef.current || "");
-          if (termRef.current) {
-            // reset() (not clear()) so a stale cursor column, SGR attrs, or
-            // leftover alt-screen/mouse-reporting mode from the previous
-            // connection don't bleed into the freshly replayed snapshot.
-            termRef.current.reset();
-          }
-          writeToTerminal(message.data);
+          // Reset IN the stream (RIS) rather than as a separate call. A bare
+          // reset() paints an empty terminal immediately, while the snapshot
+          // write is queued and lands a frame or more later — so switching
+          // flashed colour → black → colour, with the black gap widening on
+          // slower devices. Feeding ESC c at the head of the same write makes
+          // the clear and the repaint one parse pass: no intermediate paint,
+          // same clean slate (cursor, SGR attrs, alt-screen and mouse modes
+          // all cleared) that reset() gave us.
+          writeToTerminal(termRef.current ? `\x1bc${message.data}` : message.data);
           // Seed alt-screen state from the snapshot: reset() above cleared xterm's
           // modes, and the rendered snapshot doesn't re-emit the DECSET that the
           // live ?h/?l handlers would catch, so the server's flag is the only signal.
@@ -3103,6 +3104,13 @@ const App = () => {
         </main>
       ) : (
         <main
+          // THE focus rule, in one place: while the palette is open the whole
+          // session area is inert, so nothing inside it — main terminal,
+          // split panes, the mobile keyboard's hidden textarea — can take
+          // focus or receive input. Chasing individual focus() callers was
+          // whack-a-mole (each new terminal surface reopened the leak); the
+          // browser enforces this for every descendant, present and future.
+          inert={switcherOpen}
           className={`session${isMobile && keyboardVisible ? " has-keyboard" : ""}${selectionMode ? " selection-mode" : ""}`}
           style={sessionStyle}
         >
@@ -3811,10 +3819,7 @@ const App = () => {
           {isMobile && (
             <MobileKeyboard
               onInput={handleKeyboardInput}
-              // Hidden while the palette is open: its system-keyboard textarea
-              // holds focus on phones, so leaving it mounted meant filter
-              // typing went straight to the session.
-              visible={keyboardVisible && !switcherOpen}
+              visible={keyboardVisible}
               onToggle={handleKeyboardToggle}
               onHeightChange={setKeyboardHeight}
               hapticsEnabled={hapticsEnabled}

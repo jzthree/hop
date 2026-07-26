@@ -8,6 +8,14 @@ export type PtyFactoryOptions = {
   cwd: string;
   env?: Record<string, string>;
   shell?: string;
+  // Launch the session ON this command instead of typing it into a shell
+  // afterwards. Restore used to attach, wait a fixed delay, and type the
+  // relaunch — which silently lost the keystrokes whenever the shell wasn't
+  // at its prompt yet. Passing the command as argv removes the whole class:
+  // there is no prompt to race, nothing to half-type, and no command echo in
+  // the scrollback. The shell is re-exec'd afterwards so the session behaves
+  // exactly as before once the command exits.
+  command?: string;
 };
 
 export type PtyFactory = (options: PtyFactoryOptions) => IPty;
@@ -25,7 +33,7 @@ const resolveShell = (shellOverride?: string) => {
   return "/bin/bash";
 };
 
-export const createPty: PtyFactory = ({ cols, rows, cwd, env: envOverrides, shell }) => {
+export const createPty: PtyFactory = ({ cols, rows, cwd, env: envOverrides, shell, command }) => {
   const mode = process.env.PTY_MODE ?? "native";
   if (mode === "mock") {
     return createMockPty();
@@ -66,7 +74,14 @@ export const createPty: PtyFactory = ({ cols, rows, cwd, env: envOverrides, shel
     if (env.FORCE_COLOR === "0" && (!envOverrides || !("FORCE_COLOR" in envOverrides))) {
       delete env.FORCE_COLOR;
     }
-    return pty.spawn(resolveShell(shell), [], {
+    const shellPath = resolveShell(shell);
+    // `-lc` runs the command in a login shell (rc files, aliases, PATH all
+    // as the user has them), then `exec <shell> -l` replaces it with the
+    // normal interactive shell, so exiting the app leaves a usable session.
+    const args = command
+      ? ["-lc", `${command}; exec ${shellPath} -l`]
+      : [];
+    return pty.spawn(shellPath, args, {
       cols,
       rows,
       cwd,

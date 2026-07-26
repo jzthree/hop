@@ -68,9 +68,47 @@ const salvageRoom = (port, id) => new Promise((resolve) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Same lifecycle lock the hop CLI takes (~/.hop2/.lifecycle.lock): this run
+// cycles the host, and a `hop stop`/`start`/`restore` landing in the middle
+// of it kills sessions mid-relaunch. Stale holders (dead pid, absurdly old)
+// are taken over so a crash can't wedge restarts forever.
+const LOCK = path.join(HOME, '.lifecycle.lock');
+const lockHeldByOther = () => {
+  try {
+    const cur = JSON.parse(fs.readFileSync(LOCK, 'utf8'));
+    if (!cur || !Number.isInteger(cur.pid) || cur.pid === process.pid) return null;
+    try { process.kill(cur.pid, 0); } catch (e) { return null; }
+    if (Date.now() - Number(cur.at || 0) > 10 * 60_000) return null;
+    return cur;
+  } catch (e) { return null; }
+};
+const takeLock = async () => {
+  for (let i = 0; i < 240; i++) {
+    const held = lockHeldByOther();
+    if (!held) {
+      fs.writeFileSync(LOCK, JSON.stringify({ pid: process.pid, op: 'salvage-restart', at: Date.now() }), { mode: 0o600 });
+      return true;
+    }
+    if (i === 0) log(`waiting for ${held.op} (pid ${held.pid}) to finish…`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+};
+const releaseLock = () => {
+  try {
+    const cur = JSON.parse(fs.readFileSync(LOCK, 'utf8'));
+    if (cur && cur.pid === process.pid) fs.unlinkSync(LOCK);
+  } catch (e) { /* already gone */ }
+};
+
 (async () => {
   try {
     log('=== salvage-and-restart begins ===');
+    if (!await takeLock()) {
+      log('FATAL: another hop lifecycle operation held the lock for 2 minutes — aborting');
+      return;
+    }
+    process.on('exit', releaseLock);
     const oldHost = hostState();
     log(`host pid=${oldHost.pid} port=${oldHost.port}`);
 

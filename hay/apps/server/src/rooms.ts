@@ -39,6 +39,9 @@ export type RoomCreateOptions = {
   // session's last screen (so reopening it picks up where it left off) ahead of
   // the fresh shell's first prompt. Clamped to the buffer cap like live output.
   seedOutput?: string;
+  // Launch the room ON this command (passed to the shell as argv) instead of
+  // typing it in afterwards — see PtyFactoryOptions.command.
+  command?: string;
 };
 
 export type RoomSummary = {
@@ -240,7 +243,8 @@ export class Room extends EventEmitter {
       // hook can map a running claude conversation back to this hop session (used
       // by `hop restore` to resume the exact conversation per session).
       env: { ...(options.env || {}), HOP_SESSION: id },
-      shell: options.shell
+      shell: options.shell,
+      command: options.command
     });
     this.activeCols = initialSize.cols;
     this.activeRows = initialSize.rows;

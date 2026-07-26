@@ -3421,3 +3421,10 @@ button.primary {
   font-family: inherit;
 }
 
+
+/* A restored session parked on claude's resume question: running, but nothing
+   moves until the human answers. Louder than STARTING — it needs an action. */
+.switcher-chip.waiting {
+  background: var(--warn);
+  color: #1a1200;
+}

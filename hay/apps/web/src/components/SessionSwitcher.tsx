@@ -92,6 +92,15 @@ type Sheet = {
 
 const sessionKey = (s: SwitcherSession) => s.internalName || s.name;
 
+// A restored session can come back sitting on Claude's own "resume from
+// summary / full session" question — running, but waiting on a keypress that
+// only the human should answer (the full-session choice can eat a large share
+// of a usage limit). Restore reports it as up, so without this it looks live
+// while nothing moves. Detected from the preview text the wall already has,
+// so it costs no extra request.
+const RESUME_PROMPT_RE = /Resume from summary|Resuming the full session|Don't ask me again/i;
+const waitingOnUser = (frame?: PreviewFrame) => !!frame && RESUME_PROMPT_RE.test(frame.text);
+
 // One styled span of preview text. The daemon reads these straight off the
 // room's grid (a real terminal), so a tile shows the session's ACTUAL colors
 // instead of the flattened text previews used before.
@@ -1458,6 +1467,11 @@ export const SessionSwitcher = ({
             <span className="switcher-chip agent">AGENT</span>
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
+          {waitingOnUser(preview) && (
+            <span className="switcher-chip waiting" title="Claude is asking how to resume this conversation — open it and choose">
+              NEEDS YOU
+            </span>
+          )}
           {inlineActions(s)}
         </div>
         {/* Tagline sits directly under the name: it explains the session the

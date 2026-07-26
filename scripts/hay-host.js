@@ -228,7 +228,10 @@ async function main() {
                     ? body.seedOutput
                     : undefined;
                 const __t0 = Date.now();
-                const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, { cwd: existingCwdOr(cwd, FALLBACK_CWD), shell, env, seedOutput }));
+                // `command`: launch the room ON this command (argv) rather
+                // than typing it in after the shell is up — see pty.ts.
+                const command = typeof body.command === 'string' && body.command.trim() ? body.command : undefined;
+                const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, { cwd: existingCwdOr(cwd, FALLBACK_CWD), shell, env, seedOutput, command }));
                 if (Date.now() - __t0 > 100) console.log(`[hay-host] slow room create (POST) room=${roomId} ${Date.now() - __t0}ms`);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, room: room.getSummary() }));

@@ -245,6 +245,72 @@ let PASSWORD_FILE_PATH = DEFAULT_PASSWORD_FILE;
 const WORKSPACES_DIR = path.join(HOME_DIR, 'workspaces');
 const RUNTIME_DATA_DIR = path.join(HOME_DIR, 'runtime');
 const HAY_HOST_STATE_FILE = path.join(HOME_DIR, '.hay-host-state');
+
+// ── Lifecycle lock ────────────────────────────────────────────────────────
+// Restarting the daemon while a restore is mid-flight cost a live fleet 17
+// sessions: the host was cycled underneath sessions that were still being
+// relaunched. Any operation that starts, stops, or rebuilds the fleet takes
+// this lock first, so those operations serialize instead of racing. The lock
+// is a file holding {pid, op, at}; a holder whose pid is gone (or that has
+// held it absurdly long) is considered stale and taken over, so a crash can
+// never wedge hop permanently.
+const LIFECYCLE_LOCK_FILE = path.join(HOME_DIR, '.lifecycle.lock');
+const LIFECYCLE_LOCK_STALE_MS = 10 * 60_000;
+
+function readLifecycleLock() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(LIFECYCLE_LOCK_FILE, 'utf8'));
+        if (!raw || !Number.isInteger(raw.pid)) return null;
+        if (!isProcessAlive(raw.pid)) return null;
+        if (Date.now() - Number(raw.at || 0) > LIFECYCLE_LOCK_STALE_MS) return null;
+        return raw;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Returns a release function, or null when someone else holds it.
+function acquireLifecycleLock(op) {
+    const held = readLifecycleLock();
+    if (held && held.pid !== process.pid) return null;
+    try {
+        fs.mkdirSync(HOME_DIR, { recursive: true });
+        fs.writeFileSync(LIFECYCLE_LOCK_FILE, JSON.stringify({ pid: process.pid, op, at: Date.now() }), { mode: 0o600 });
+    } catch (e) {
+        return () => {}; // unwritable home — never block the operation itself
+    }
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        try {
+            const cur = JSON.parse(fs.readFileSync(LIFECYCLE_LOCK_FILE, 'utf8'));
+            if (cur && cur.pid === process.pid) fs.unlinkSync(LIFECYCLE_LOCK_FILE);
+        } catch (e) { /* already gone */ }
+    };
+}
+
+// Wait for a conflicting operation to finish, then run `fn` under the lock.
+async function withLifecycleLock(op, fn, { waitMs = 120_000, onWait } = {}) {
+    const startedAt = Date.now();
+    let notified = false;
+    for (;;) {
+        const release = acquireLifecycleLock(op);
+        if (release) {
+            try { return await fn(); }
+            finally { release(); }
+        }
+        const held = readLifecycleLock();
+        if (Date.now() - startedAt > waitMs) {
+            throw new Error(`another hop operation (${held?.op || 'unknown'}) is still running; try again shortly`);
+        }
+        if (!notified) {
+            notified = true;
+            if (onWait) onWait(held?.op || 'unknown');
+        }
+        await new Promise((r) => setTimeout(r, 500));
+    }
+}
 // Marker so the authenticator setup QR is only shown on first run (UX only; no auth logic).
 const AUTH_QR_SHOWN_FILE = path.join(HOME_DIR, '.auth_qr_shown');
 const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 5000);
@@ -3466,7 +3532,8 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         workspaceName: opts.workspaceName,
         folderId: opts.folderId,
         saveDefinition: opts.saveDefinition === true,
-        seedOutput: opts.seedOutput
+        seedOutput: opts.seedOutput,
+        command: opts.command
     });
 
     const cols = Number.isInteger(opts.cols) ? opts.cols : 80;
@@ -3965,7 +4032,16 @@ function restorePlanForSession(entry) {
     return { command: null, cwd: entry.cwd }; // plain shell — just reopen in its cwd
 }
 
-async function restoreSavedSessions({ dryRun = false, includeAgents = false } = {}) {
+async function restoreSavedSessions(opts = {}) {
+    // A dry run only reads; everything else rebuilds the fleet and must not
+    // overlap a daemon/host restart (that race cost 17 live sessions).
+    if (opts.dryRun) return restoreSavedSessionsUnlocked(opts);
+    return withLifecycleLock('restore', () => restoreSavedSessionsUnlocked(opts), {
+        onWait: (op) => log(`Waiting for ${op} to finish before restoring…`, YELLOW)
+    });
+}
+
+async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = false } = {}) {
     const snapshot = await listAllSessionEntriesRuntimeFirst();
     const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
     const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !live.has(e.internalName));
@@ -4068,13 +4144,17 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
             entry = await attachTerminalApiClient(p.internalName, p.displayName, {
                 actor: 'user', cwd: p.cwd, cols: p.cols, rows: p.rows, shell: p.shell, env: p.env,
                 createdBy: p.createdBy, agentPermitted: p.agentPermitted, folderId: p.folderId,
-                saveDefinition: true, seedOutput
+                // The relaunch is the room's OWN command (argv), not keystrokes
+                // typed at a prompt that may not exist yet.
+                saveDefinition: true, seedOutput, command: p.command || undefined
             });
         } catch (e) {
             continue;
         }
         if (p.command && entry) {
-            pending.push({ plan: p, entry, state: 'wait-ready', attempts: 0, since: Date.now() });
+            // Launched with the command as argv: nothing to type — just
+            // confirm it actually came up.
+            pending.push({ plan: p, entry, state: 'verify', attempts: 1, since: Date.now() });
         } else if (entry) {
             setTimeout(() => { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }, 600);
         }
@@ -4135,6 +4215,9 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
                 // Claude takes a beat to exec; only retry after a real wait,
                 // and only once — a retry storm is what we are fixing.
                 if (Date.now() - job.since < 12_000) continue;
+                // Fallback for a host that predates argv launching: type the
+                // command once, then verify again. A host that DID launch it
+                // has nothing left to try.
                 if (job.attempts < 2) { job.state = 'wait-ready'; job.since = Date.now(); continue; }
                 finish('never-started');
             }
@@ -6290,6 +6373,11 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
     // previous session's tail buffer so it reopens on its last screen.
     if (typeof opts.seedOutput === 'string' && opts.seedOutput) {
         roomBody.seedOutput = opts.seedOutput;
+    }
+    // Launch the room ON the relaunch command instead of typing it after the
+    // shell is up: no prompt to race, nothing half-typed, no command echo.
+    if (typeof opts.command === 'string' && opts.command) {
+        roomBody.command = opts.command;
     }
     const response = await callExternalHayHostApi('/rooms', 'POST', roomBody, 2500);
     if (!response || response.status < 200 || response.status >= 300 || !response.data?.ok) {
@@ -11264,6 +11352,10 @@ async function main() {
 
     // Handle `hop start` command - start daemon and print QR codes
     if (process.argv[2] === 'start') {
+        const releaseStart = await withLifecycleLock('start', async () => acquireLifecycleLock('start'), {
+            onWait: (op) => log(`Waiting for ${op} to finish…`, YELLOW)
+        }).catch((e) => { log(e.message, RED); process.exit(1); });
+        process.on('exit', () => { try { releaseStart && releaseStart(); } catch (e) { /* ignore */ } });
         const existing = isServerRunning();
         if (!existing) {
             loadAuthSecret();
@@ -11311,6 +11403,12 @@ async function main() {
 
     // Handle `hop stop [--all]` command - stop daemon (and hay-host + sessions with --all)
     if (process.argv[2] === 'stop') {
+        // Serialize against restore/start: stopping mid-restore is exactly
+        // how a fleet gets cut in half.
+        const releaseStop = await withLifecycleLock('stop', async () => acquireLifecycleLock('stop'), {
+            onWait: (op) => log(`Waiting for ${op} to finish…`, YELLOW)
+        }).catch((e) => { log(e.message, RED); process.exit(1); });
+        process.on('exit', () => { try { releaseStop && releaseStop(); } catch (e) { /* ignore */ } });
         const stopAll = process.argv.includes('--all');
         const state = isServerRunning();
         const hayHost = readHayHostStateFile();

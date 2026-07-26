@@ -653,7 +653,12 @@ function isDisplayNameInUse(displayName) {
     return !!(internalName && hopSessionExists(internalName));
 }
 
-function renameSessionDisplayName(oldDisplayName, newDisplayName) {
+// `explicitInternalName` addresses the session unambiguously. Display names
+// are supposed to be unique, but they can collide (a session renamed to a
+// name a LATER session then took as its own internal name) — and then
+// renaming by display name picks an arbitrary one of the two. The UI passes
+// the internal name so it always renames the session the user clicked.
+function renameSessionDisplayName(oldDisplayName, newDisplayName, explicitInternalName) {
     const resolvedOldDisplayName = resolveDisplayNameAlias(oldDisplayName);
     if (!SESSION_NAME_RE.test(resolvedOldDisplayName)) {
         const err = new Error('Invalid old name');
@@ -670,7 +675,10 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName) {
     }
 
     const fallbackInternalName = toInternalSessionName(resolvedOldDisplayName);
-    const internalName = findInternalSessionName(resolvedOldDisplayName)
+    const internalName = (explicitInternalName && SESSION_NAME_RE.test(explicitInternalName)
+            && (hopSessionExists(explicitInternalName) || !!getEffectiveSessionConfig(explicitInternalName))
+            ? explicitInternalName : null)
+        || findInternalSessionName(resolvedOldDisplayName)
         || (fallbackInternalName && hopSessionExists(fallbackInternalName) ? fallbackInternalName : null);
     if (!internalName) {
         const err = new Error('Session not found');
@@ -6273,8 +6281,21 @@ async function reconcileExternalRuntimeSessions() {
             // The durable meta carries the rename: the workspace store only
             // persists when a workspace exists, so without this a renamed
             // session reverted to its internal name on every daemon restart.
-            displayName: savedConfig?.displayName || runtimeConfig?.displayName || durableMeta?.displayName
-                || toDisplaySessionName(room.id) || room.id,
+            // Collision guard: a rename can leave a session displaying a name
+            // that a LATER session owns as its internal name (rename Altair →
+            // "Accessibility", then a real Accessibility room appears). Two
+            // identically-named sessions are indistinguishable in the UI and
+            // ambiguous to address, so the room that OWNS the name keeps it
+            // and the borrower falls back to its own — self-healing, and it
+            // never touches a running process.
+            displayName: (() => {
+                const claimed = savedConfig?.displayName || runtimeConfig?.displayName || durableMeta?.displayName;
+                if (claimed && claimed !== room.id && runtimeIds.has(toInternalSessionName(claimed) || claimed)) {
+                    log(`[rename] "${claimed}" is another live session's name — ${room.id} keeps its own`, YELLOW);
+                    return toDisplaySessionName(room.id) || room.id;
+                }
+                return claimed || toDisplaySessionName(room.id) || room.id;
+            })(),
             // Same for the AI tagline — written by `hop ai tagline`, it must
             // outlive the daemon that generated it.
             tagline: savedConfig?.tagline || runtimeConfig?.tagline || durableMeta?.tagline,
@@ -7987,8 +8008,8 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
-                    const { oldName, newName } = JSON.parse(body);
-                    renameSessionDisplayName(oldName, newName);
+                    const { oldName, newName, internalName } = JSON.parse(body);
+                    renameSessionDisplayName(oldName, newName, internalName);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true }));
                 } catch (e) {

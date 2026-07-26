@@ -1207,7 +1207,9 @@ export const SessionSwitcher = ({
       const res = await fetch("/api/sessions/rename", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ oldName, newName: next })
+        // Address by internal name: display names can collide, and then
+        // renaming by display name picks an arbitrary one of the two.
+        body: JSON.stringify({ oldName, newName: next, internalName: sessionKey(sheet.session) })
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({} as { error?: string }));

@@ -101,22 +101,33 @@ cycled the host; PTYs died mid-restore.
 
 ---
 
-## C. What is still open
+## C. What was open — now closed
 
-1. **A restart lock.** Nothing prevents a daemon restart, a host restart, and
-   a salvage run from overlapping. A single lock file under `~/.hop2` held for
-   the duration of any lifecycle operation, with a stale-PID check, would make
-   B5 impossible rather than unlikely.
-2. **The resume-choice prompt.** Large conversations open with Claude's own
-   "resume from summary / full session" question, so a restored session sits
-   waiting for a keypress. hop cannot answer it safely (the full-session
-   choice can consume a large share of a weekly limit), but it *should*
-   surface it: mark such sessions in the switcher as "waiting for you" rather
-   than letting them look resumed.
-3. **Restore is still keystrokes.** Even verified, the relaunch is typed into
-   a shell. Spawning the PTY with the command as its argv would remove the
-   class entirely — no prompt-readiness question, no partial typing, no
-   scrollback pollution. This is the last structural weakness.
+1. **Restart races (B5).** A pid-stamped lifecycle lock
+   (`~/.hop2/.lifecycle.lock`) serializes `hop start`, `hop stop`,
+   `hop restore` and the salvage script. Stale holders (dead pid, or held
+   >10min) are taken over, so a crash cannot wedge restarts.
+2. **The resume-choice prompt.** Sessions parked on claude's
+   "resume from summary / full session" question are marked **NEEDS YOU** on
+   the wall, detected from preview text already fetched. hop still never
+   answers it — that choice can consume a large share of a usage limit.
+3. **Restore is no longer keystrokes.** The relaunch is the room's own argv:
+   `shell -lc "<cmd>; exec shell -l"`, threaded from the daemon through
+   `POST /rooms` to `createPty`. No prompt to race, nothing half-typed, no
+   command echo in the scrollback; the session still drops to an interactive
+   shell when the app exits. Typing survives only as the fallback for a host
+   that predates this.
+
+## Remaining risk
+
+The failure classes above are structurally closed, but two things still
+depend on the environment rather than on hop:
+
+- A conversation whose transcript is missing on this host (A4) can only ever
+  become a plain shell in the right directory.
+- Restore cannot tell whether the app itself will succeed once launched (a
+  bad API key, an exhausted usage limit). Verification confirms the process
+  started, not that it is happy.
 
 ## The invariant to hold on to
 

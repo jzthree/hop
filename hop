@@ -4053,6 +4053,8 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
             dryRun: true
         };
     }
+    // Sessions whose relaunch still has to be typed and verified.
+    const pending = [];
     for (const p of planned) {
         // Plain-shell restore: replay the saved buffer + a separator ahead of the
         // fresh shell's prompt. Reading consumes (deletes) the buffer file.
@@ -4072,18 +4074,84 @@ async function restoreSavedSessions({ dryRun = false, includeAgents = false } = 
             continue;
         }
         if (p.command && entry) {
-            const cmd = p.command.endsWith('\n') ? p.command : `${p.command}\n`;
-            // Give the fresh shell a moment to reach its prompt before typing, then
-            // detach our virtual client (the room persists with no clients).
-            setTimeout(() => {
-                try { sendTerminalInput(entry, cmd); } catch (e) { /* ignore */ }
-                setTimeout(() => { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }, 1500);
-            }, 800);
+            pending.push({ plan: p, entry, state: 'wait-ready', attempts: 0, since: Date.now() });
         } else if (entry) {
             setTimeout(() => { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }, 600);
         }
     }
+    // Verified relaunch. The old loop typed the command after a fixed 800ms and
+    // walked away: if the shell hadn't reached its prompt yet the keystrokes
+    // were swallowed, nothing noticed, and the next restore typed it AGAIN —
+    // sessions accumulated dozens of identical un-run command lines and came
+    // back as bare shells while restore reported success. Each session now
+    // runs a small state machine against the host's own view of the room:
+    //   wait-ready → (already running? done) → type → verify → retry once → fail
+    // Everything is driven by ONE /rooms poll shared by all sessions, so the
+    // cost is a request every 700ms for the length of the restore, not per
+    // session.
+    const SHELL_NAMES = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'login', 'nu', 'xonsh']);
+    const isShellProc = (proc) => {
+        const p = String(proc || '').replace(/^-/, '').trim();
+        return !p || SHELL_NAMES.has(p.toLowerCase());
+    };
+    const outcomes = new Map();
+    const DEADLINE_MS = 90_000;
+    const startedAt = Date.now();
+    while (pending.length && Date.now() - startedAt < DEADLINE_MS) {
+        await new Promise((r) => setTimeout(r, 700));
+        let rooms = [];
+        try {
+            const listed = await callExternalHayHostApi('/rooms');
+            rooms = Array.isArray(listed?.data?.rooms) ? listed.data.rooms : [];
+        } catch (e) { continue; }
+        const byId = new Map(rooms.map((r) => [String(r.id), r]));
+        for (let i = pending.length - 1; i >= 0; i--) {
+            const job = pending[i];
+            const room = byId.get(job.plan.internalName);
+            const finish = (status) => {
+                outcomes.set(job.plan.internalName, status);
+                try { closeTerminalApiEntry(job.entry.id); } catch (e) { /* ignore */ }
+                pending.splice(i, 1);
+            };
+            if (!room) { finish('room-missing'); continue; }
+            const running = !isShellProc(room.foregroundProcess);
+            if (job.state === 'wait-ready') {
+                // Already running something? The session is alive — never type
+                // a second copy on top of it (that is how command lines piled
+                // up in a shell that was busy booting).
+                if (running) { finish('already-running'); continue; }
+                // A fresh shell reports its own name once it has execed; that
+                // is our prompt-ready signal, and it beats guessing with a timer.
+                if (Date.now() - job.since < 400) continue;
+                const cmd = job.plan.command.endsWith('\n') ? job.plan.command : `${job.plan.command}\n`;
+                try { sendTerminalInput(job.entry, cmd); } catch (e) { finish('write-failed'); continue; }
+                job.attempts += 1;
+                job.state = 'verify';
+                job.since = Date.now();
+                continue;
+            }
+            if (job.state === 'verify') {
+                if (running) { finish('resumed'); continue; }
+                // Claude takes a beat to exec; only retry after a real wait,
+                // and only once — a retry storm is what we are fixing.
+                if (Date.now() - job.since < 12_000) continue;
+                if (job.attempts < 2) { job.state = 'wait-ready'; job.since = Date.now(); continue; }
+                finish('never-started');
+            }
+        }
+    }
+    for (const job of pending) {
+        outcomes.set(job.plan.internalName, 'timeout');
+        try { closeTerminalApiEntry(job.entry.id); } catch (e) { /* ignore */ }
+    }
+    const failed = [...outcomes.entries()].filter(([, s]) => s === 'never-started' || s === 'timeout' || s === 'write-failed');
+    if (failed.length) {
+        log(`${failed.length} session(s) did not come back up:`, YELLOW);
+        for (const [name, status] of failed) log(`  ${getSessionDisplayName(name) || name} (${status})`, YELLOW);
+        log(`Open one and run its command by hand, or re-run ${CYAN}hop restore${RESET}.`, RESET);
+    }
     return {
+        outcomes: Object.fromEntries(outcomes),
         restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay, warning: p.warning })),
         count: planned.length,
         skippedAgents,

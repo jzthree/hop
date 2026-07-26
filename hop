@@ -3848,11 +3848,15 @@ function rebuildClaudeLaunch(launchCmd) {
         }
         if (t === '-p' || t === '--print') return null; // headless run — not restorable
         if (t.startsWith('-')) {
+            // Dedupe valueless flags. The hook records the argv claude ACTUALLY
+            // ran with, which already includes the flags the previous restore
+            // added — so each restore appended another copy and commands grew
+            // `--dangerously-skip-permissions` five times over a few cycles.
+            const valued = !t.includes('=') && CLAUDE_VALUE_FLAGS.has(t.toLowerCase())
+                && tokens[i + 1] !== undefined && !tokens[i + 1].startsWith('-');
+            if (!valued && out.includes(t)) continue;
             out.push(t);
-            if (!t.includes('=') && CLAUDE_VALUE_FLAGS.has(t.toLowerCase())
-                && tokens[i + 1] !== undefined && !tokens[i + 1].startsWith('-')) {
-                out.push(tokens[++i]);
-            }
+            if (valued) out.push(tokens[++i]);
         }
         // bare positional (initial prompt) — dropped
     }

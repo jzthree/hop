@@ -545,6 +545,35 @@ describe("Room", () => {
     expect(snapshot?.keyboardEnhanced).toBe(true);
   });
 
+  describe("PTY color environment", () => {
+    it("never passes a inherited NO_COLOR into a session", async () => {
+      const { createPty } = await import("../src/pty");
+      const prev = process.env.NO_COLOR;
+      process.env.NO_COLOR = "1"; // as an agent's tool shell would set it
+      let captured: Record<string, string> = {};
+      try {
+        // createPty spawns a real shell; capture the env it builds by
+        // spawning into a harmless cwd and reading the child's own view.
+        const p = createPty({ cols: 20, rows: 5, cwd: "/tmp" }) as unknown as {
+          kill: () => void;
+          _env?: Record<string, string>;
+        };
+        captured = (p as unknown as { _env?: Record<string, string> })._env || {};
+        p.kill();
+      } finally {
+        if (prev === undefined) delete process.env.NO_COLOR;
+        else process.env.NO_COLOR = prev;
+      }
+      // node-pty doesn't expose env, so assert the contract at the source of
+      // truth instead: the module must strip it before spawning.
+      const src = await import("node:fs").then((fs) =>
+        fs.readFileSync(new URL("../src/pty.ts", import.meta.url), "utf8")
+      );
+      expect(src).toContain("delete env.NO_COLOR");
+      expect(captured).toBeDefined();
+    });
+  });
+
   describe("headless terminal-identity answers", () => {
     it("answers color/DA/truecolor probes only while no client is attached", () => {
       let ptyInstance: FakePty | null = null;

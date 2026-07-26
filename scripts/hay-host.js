@@ -67,6 +67,12 @@ const CLAUDE_SESSIONS_DIR = path.join(HOP_HOME, 'claude-sessions');
 // `claude --resume` to the wrong root ("No conversation found", 2026-07-23).
 // A hop PTY runs a login shell, so a config dir the user actually wants comes
 // back via their shell rc. Auth vars (CLAUDE_CODE_OAUTH_TOKEN*) are kept.
+// Color suppressors belong to whatever launched us (an agent's tool shell
+// sets NO_COLOR=1 for machine-readable output), never to the interactive
+// terminals we host. Scrub at the host root so every PTY starts clean.
+delete process.env.NO_COLOR;
+if (process.env.FORCE_COLOR === '0') delete process.env.FORCE_COLOR;
+
 for (const key of Object.keys(process.env)) {
     if (key === 'CLAUDECODE' || key === 'CLAUDE_EFFORT' ||
         key === 'CLAUDE_CONFIG_DIR' || key === 'CLAUDE_PID' ||

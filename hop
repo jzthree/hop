@@ -677,10 +677,18 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName) {
         err.status = 404;
         throw err;
     }
+    // "In use" must mean in use BY ANOTHER session. After A→B, the alias
+    // A→B makes A resolve to this very session — which made renaming BACK to
+    // A (or to any name the session ever had) 409 as a false collision:
+    // rename → change your mind → rename back was broken.
     if (isDisplayNameInUse(newDisplayName)) {
-        const err = new Error('Session name already in use');
-        err.status = 409;
-        throw err;
+        const holder = findInternalSessionName(newDisplayName)
+            || toInternalSessionName(resolveDisplayNameAlias(newDisplayName));
+        if (holder !== internalName) {
+            const err = new Error('Session name already in use');
+            err.status = 409;
+            throw err;
+        }
     }
 
     const newInternalName = toInternalSessionName(newDisplayName);

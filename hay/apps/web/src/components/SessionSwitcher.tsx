@@ -100,7 +100,7 @@ type Sheet = {
 // text input holds it (stealOk below), and editing the filter drops any live
 // tile back to watch — so re-renders, remounts, reconnects, and polls can
 // never move the cursor. Everything else in this file must stay focus-inert.
-const terminalMayTakeFocus = () => {
+export const terminalMayTakeFocus = () => {
   const ae = document.activeElement as HTMLElement | null;
   if (!ae || ae === document.body) return true;
   if (ae.closest?.(".switcher-live-tile, .switcher-focus-tile")) return true;

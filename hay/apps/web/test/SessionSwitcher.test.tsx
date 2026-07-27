@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionSwitcher } from "../src/components/SessionSwitcher";
+import { SessionSwitcher, terminalMayTakeFocus } from "../src/components/SessionSwitcher";
 import type { SwitcherSession } from "../src/utils/switcherModel";
 
 const sessions: SwitcherSession[] = [
@@ -223,5 +223,51 @@ describe("SessionSwitcher origin scope", () => {
 
     expect(screen.getByText("research")).toBeTruthy();
     expect(screen.queryByText("worker-review")).toBeNull();
+  });
+});
+
+// The focus rules, pinned. Focus stealing has been the single most-repeated
+// regression in this UI, and every previous fix blocked one KNOWN thief —
+// an open set, so each rewrite minted a new one. The rule under test is the
+// closed version: a terminal may not take focus away from a text input, no
+// matter which code path asks (mount, remount, reconnect, poll, repaint).
+describe("focus rules", () => {
+  afterEach(() => { document.body.innerHTML = ""; });
+
+  it("refuses to steal focus from the filter box or any text input", () => {
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.focus();
+    expect(terminalMayTakeFocus()).toBe(false);
+
+    const area = document.createElement("textarea");
+    document.body.appendChild(area);
+    area.focus();
+    expect(terminalMayTakeFocus()).toBe(false);
+  });
+
+  it("allows focus when nothing owns the keyboard", () => {
+    expect(terminalMayTakeFocus()).toBe(true);
+  });
+
+  it("allows a live tile to keep focus while it already has it", () => {
+    const tile = document.createElement("div");
+    tile.className = "switcher-live-tile";
+    const inner = document.createElement("div");
+    inner.tabIndex = 0;
+    tile.appendChild(inner);
+    document.body.appendChild(tile);
+    inner.focus();
+    expect(terminalMayTakeFocus()).toBe(true);
+  });
+
+  it("typing in the filter drops the live tile so a remount cannot grab the cursor", () => {
+    render(<SessionSwitcher {...props} open tileWsBase="ws://x" />);
+    const filter = document.querySelector(".switcher-filter input") as HTMLInputElement
+      || document.querySelector("input") as HTMLInputElement;
+    filter.focus();
+    fireEvent.change(filter, { target: { value: "res" } });
+    expect(document.activeElement).toBe(filter);
+    expect(document.querySelectorAll(".switcher-live-tile.is-live").length).toBe(0);
   });
 });

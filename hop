@@ -9212,6 +9212,11 @@ function startAuthProxy(authEmitter) {
         }
 
         if (!sessionName) {
+            // Log the refusal: this is where a phantom session used to be
+            // born, so if a client is ever wedged asking for a name nothing
+            // owns, one grep says so instead of a mystery shell appearing.
+            const asked = parsedUrl.pathname === '/ws' ? parsedUrl.query.room : parsedUrl.pathname;
+            log(`[ws] refused attach to unknown session "${asked}"`, YELLOW);
             socket.write('HTTP/1.1 404 Session Not Found\r\n\r\n');
             socket.destroy();
             return;

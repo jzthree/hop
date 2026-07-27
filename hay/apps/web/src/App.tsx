@@ -253,6 +253,10 @@ type SessionInfo = {
   // this client last viewed the session.
   unread?: boolean;
   bellUnseen?: boolean;
+  // Server-provided display metadata (see SwitcherSession).
+  tagline?: string;
+  parked?: boolean;
+  archived?: boolean;
 };
 
 // Check if embedded in Hop
@@ -2341,7 +2345,14 @@ const App = () => {
           agentPermitted: s.agentPermitted === true,
           createdBy: s.createdBy === "agent" ? "agent" : "user",
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
-          rows: Number.isInteger(s.rows) ? s.rows : undefined
+          rows: Number.isInteger(s.rows) ? s.rows : undefined,
+          // These three were silently dropped here, so the switcher never saw
+          // them in the real app even though the API sent them all along —
+          // the tagline/parked features looked dead while their component
+          // tests (which inject sessions directly) stayed green.
+          tagline: typeof s.tagline === "string" ? s.tagline : undefined,
+          parked: s.parked === true,
+          archived: s.archived === true
         });
       }
 

@@ -109,7 +109,7 @@ type PreviewFrame = { text: string; color?: PreviewRun[][] | null };
 
 const renderPreviewRuns = (lines: PreviewRun[][]) =>
   lines.map((runs, y) => (
-    <span key={y}>
+    <div key={y} className="switcher-preview-row">
       {runs.map((r, i) => (
         <span
           key={i}
@@ -125,8 +125,7 @@ const renderPreviewRuns = (lines: PreviewRun[][]) =>
           {r.t}
         </span>
       ))}
-      {y < lines.length - 1 ? "\n" : null}
-    </span>
+    </div>
   ));
 
 const shortDir = (p?: string) => {
@@ -1462,9 +1461,17 @@ export const SessionSwitcher = ({
         onDragEnter={draggable ? () => { if (dragKey && dragKey !== key) moveManual(dragKey, key); } : undefined}
         onDragOver={draggable ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } : undefined}
         // Order was already applied live during the drag — drop/end just clean up.
-        onDrop={draggable ? (e) => { e.preventDefault(); setDragKey(null); } : undefined}
-        onDragEnd={draggable ? () => setDragKey(null) : undefined}
+        // The release click after a drag must NEVER act — reordering ending
+        // with "you are now inside a terminal" is a drag that went off a
+        // cliff. Same suppression the long-press sheet uses.
+        onDrop={draggable ? (e) => { e.preventDefault(); suppressTapRef.current = true; setDragKey(null); } : undefined}
+        onDragEnd={draggable ? () => { suppressTapRef.current = true; setDragKey(null); window.setTimeout(() => { suppressTapRef.current = false; }, 250); } : undefined}
         onClick={(e) => {
+          // Post-drag / post-long-press release: not a click.
+          if (suppressTapRef.current) {
+            suppressTapRef.current = false;
+            return;
+          }
           // Only a click on the TERMINAL AREA focuses the tile — clicking
           // the header/name/meta switches. A whole-card focus target meant
           // any stray click at interactive zoom silently rerouted the

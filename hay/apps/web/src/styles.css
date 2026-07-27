@@ -3428,3 +3428,22 @@ button.primary {
   background: var(--warn);
   color: #1a1200;
 }
+
+/* Colour-preview rows. Inline spans paint their background only over the
+   glyph box, and at line-height 1.3 the half-leading above and below stayed
+   the tile's background — code blocks rendered as horizontal stripes with a
+   gap between every line, which the real terminal (painting full cells)
+   never shows. Fixed-height rows + full-height inline-block spans make the
+   background cover the whole cell, and the row height (fs × 1.3) keeps the
+   same vertical rhythm as the plain-text preview and the terminal. */
+.switcher-preview-row {
+  height: calc(var(--tile-fs, 6px) * 1.3);
+  line-height: calc(var(--tile-fs, 6px) * 1.3);
+  white-space: pre;
+  overflow: hidden;
+}
+.switcher-preview-row span {
+  display: inline-block;
+  height: 100%;
+  vertical-align: top;
+}

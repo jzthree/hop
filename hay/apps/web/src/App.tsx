@@ -2576,7 +2576,8 @@ const App = () => {
   }, [isMobile, terminalReady, keyboardVisible, keyboardHeight]);
 
   const switchSession = (nextSession: SessionInfo) => {
-    const nextPath = buildSessionPath(nextSession.name);
+    const targetRoom = nextSession.internalName || nextSession.name;
+    const nextPath = buildSessionPath(targetRoom);
     const currentRoom = session?.room ?? sessionLabel;
     const canSwitchInPlace = sessionSwitchMode === "instant" && nextSession.type !== "port";
     // A switch is a deliberate human act — its attach claim wins the size
@@ -2596,7 +2597,7 @@ const App = () => {
       return;
     }
 
-    if (currentRoom === nextSession.name) {
+    if (currentRoom === targetRoom) {
       setDrawerOpen(false);
       return;
     }
@@ -2608,11 +2609,11 @@ const App = () => {
     setClientId(null);
     setLiveCwd(null);
     setStatus("connecting");
-    setRoom(nextSession.name);
+    setRoom(targetRoom);
     setSessionLabel(nextSession.displayName || nextSession.name);
     setSession((current) => ({
       name: current?.name ?? name.trim() ?? "User",
-      room: nextSession.name
+      room: targetRoom
     }));
     window.history.pushState({}, "", nextPath);
     setDrawerOpen(false);

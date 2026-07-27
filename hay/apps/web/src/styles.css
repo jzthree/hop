@@ -3470,21 +3470,3 @@ button.primary {
   line-height: 1.3em;
 }
 
-/* Grid-shaped tiles: when a preview knows its session's cols × rows, the box
-   takes exactly that aspect ratio — the tile IS the screen, just smaller.
-   The ladder's --tile-h remains the height for text-only fallbacks. */
-.switcher-preview:has(.switcher-preview-scalebox) {
-  height: auto;
-}
-.switcher-preview .switcher-preview-scalebox {
-  width: 100%;
-  height: auto;
-}
-.switcher-focus-tile.fitted {
-  height: auto;
-}
-.switcher-focus-tile.fitted .switcher-focus-term {
-  flex: none;
-  width: 100%;
-  height: auto;
-}

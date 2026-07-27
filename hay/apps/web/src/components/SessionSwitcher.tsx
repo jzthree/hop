@@ -162,11 +162,7 @@ const ScaledScreen = ({ frame }: { frame: PreviewFrame }) => {
   const lines = frame.color || [];
   const padded = lines.length < rows ? [...lines, ...Array.from({ length: rows - lines.length }, () => [] as PreviewRun[])] : lines;
   return (
-    <div
-      className="switcher-preview-scalebox"
-      ref={boxRef}
-      style={{ aspectRatio: `${naturalW} / ${naturalH}` }}
-    >
+    <div className="switcher-preview-scalebox" ref={boxRef}>
       <div
         className="switcher-preview-screen"
         data-w={naturalW}
@@ -569,10 +565,8 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
       term.dispose();
     };
   }, [wsBase, room, userName, theme, fontSize]);
-  const naturalW = activeCols && activeRows ? Math.round(activeCols * measurePreviewCharW()) : 0;
-  const naturalH = activeCols && activeRows ? Math.round(activeRows * PREVIEW_BASE_LH) : 0;
   return (
-    <div className={`switcher-focus-tile${naturalW ? " fitted" : ""}`} onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+    <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
       <div className="switcher-focus-bar">
         <span className={`switcher-focus-label${conn === "down" ? " down" : ""}`}>
           {conn === "down" ? "connection lost — reconnecting…" : "interactive — ⌘⏎ full screen · ⌘. release"}
@@ -580,12 +574,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
         <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
         <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
       </div>
-      <div
-        className="switcher-focus-term"
-        ref={boxRef}
-        style={naturalW ? { aspectRatio: `${naturalW} / ${naturalH}` } : undefined}
-        data-fallback={fallbackFrame?.text ? "" : "empty"}
-      >
+      <div className="switcher-focus-term" ref={boxRef} data-fallback={fallbackFrame?.text ? "" : "empty"}>
         {veiled && (
           <pre className="switcher-focus-veil" aria-hidden="true">
             {fallbackFrame?.color?.length && fallbackFrame.cols && fallbackFrame.rows
@@ -1627,9 +1616,11 @@ export const SessionSwitcher = ({
           />
         ) : (
           <pre className="switcher-preview" aria-hidden="true">
-            {preview?.color?.length && preview.cols && preview.rows
+            {preview?.color?.length && preview.cols && preview.rows && effectiveZoom >= INTERACTIVE_ZOOM
               ? <ScaledScreen frame={preview} />
-              : (preview?.text || " ")}
+              : preview?.color?.length
+                ? renderPreviewRuns(preview.color)
+                : (preview?.text || " ")}
           </pre>
         )}
         {snippet && <div className="switcher-card-snippet" title={snippet}>{snippet}</div>}

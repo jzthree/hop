@@ -2620,22 +2620,34 @@ const App = () => {
   // Keep the keyboard layer's ref current (it's defined earlier in the file).
   switchSessionRef.current = switchSession;
 
+  // ONE interactive client per tab. The wall and the full-screen terminal are
+  // mutually exclusive surfaces, so the socket follows whichever is visible.
+  // A hidden full-screen client is not harmless: it stays in the room's size
+  // election at full-screen dimensions, which is why the CURRENT session's
+  // tile rendered at the wrong size until you clicked it.
+  //
+  // Three ways the wall closes, all of which must end with exactly one
+  // connect: ESC back to the same session (socket is gone → reconnect via the
+  // token), tapping a DIFFERENT session (the session-change effect is already
+  // connecting → stay out of its way), and re-picking the SAME session (that
+  // also runs the session-change effect, so a token bump would connect twice).
+  // Checking the socket's live state distinguishes all three.
   const wallClosedRoomRef = useRef<string | null>(null);
   useEffect(() => {
     if (!session || !isEmbeddedInHop()) return;
+    const ws = wsRef.current;
+    const busy = !!ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
     if (switcherOpen) {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      if (busy) {
         wallClosedRoomRef.current = activeSessionRoomRef.current;
         shouldReconnectRef.current = false;
-        try { wsRef.current.close(); } catch { /* closing */ }
+        try { ws.close(); } catch { /* already closing */ }
       }
     } else if (wallClosedRoomRef.current) {
       const closedRoom = wallClosedRoomRef.current;
       wallClosedRoomRef.current = null;
       shouldReconnectRef.current = true;
-      // Same session: bump the token to reconnect. Different session: the
-      // session-change effect is already connecting — don't race it.
-      if (activeSessionRoomRef.current === closedRoom) setReconnectToken((v) => v + 1);
+      if (!busy && activeSessionRoomRef.current === closedRoom) setReconnectToken((v) => v + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [switcherOpen]);

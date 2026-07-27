@@ -287,9 +287,16 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
     fitRef.current = fit;
     const inner = box.querySelector(".xterm") as HTMLElement | null;
     const rescale = () => {
-      if (!inner) return;
-      const w = inner.offsetWidth;
-      const h = inner.offsetHeight;
+      // Measure .xterm-screen, never .xterm: the wrapper is a block div whose
+      // layout width is ALWAYS the tile's width (blocks fill their container),
+      // so a width ratio computed from it is always 1 and only height would
+      // ever scale — wide grids render cropped at the tile edge. The screen
+      // element carries the explicit cols×cellwidth pixel size the renderer
+      // sets, i.e. the terminal's true natural size.
+      const screen = box.querySelector(".xterm-screen") as HTMLElement | null;
+      if (!inner || !screen) return;
+      const w = screen.offsetWidth;
+      const h = screen.offsetHeight;
       if (w > 0 && h > 0 && box.clientWidth > 0 && box.clientHeight > 0) {
         const scale = Math.min(1, box.clientWidth / w, box.clientHeight / h);
         inner.style.transform = "scale(" + scale + ")";
@@ -299,9 +306,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
     rescaleRef.current = rescale;
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(rescale) : null;
     ro?.observe(box);
-    // The xterm element resizes when it first measures its font and on every
-    // cols/rows change — each needs a refit, and the box itself never moves.
-    if (inner) ro?.observe(inner);
+    // The screen element resizes on font measure and every cols/rows change —
+    // each needs a refit, and the box itself never moves while the wall is up.
+    const screenEl = box.querySelector(".xterm-screen") as HTMLElement | null;
+    if (screenEl) ro?.observe(screenEl);
+    else if (inner) ro?.observe(inner);
     window.setTimeout(rescale, 30);
     document.fonts?.ready?.then(() => rescale()).catch(() => { /* no Font API */ });
     // Keys route through refs so the handler survives mode flips untouched.

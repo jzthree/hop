@@ -158,18 +158,26 @@ const groupByProject = (sessions: SwitcherSession[], stable = false): SwitcherGr
 
 /**
  * Order sessions by a saved list of keys (the user's manual drag order),
- * appending any session not yet in the saved order at the end by recency —
- * so a brand-new session shows up predictably rather than vanishing.
+ * appending any session not yet in the saved order at the end.
+ *
+ * Manual means MANUAL: nothing here may reorder on activity. Sessions the
+ * user has placed keep their saved index, and unplaced ones (brand new, or
+ * never dragged) sort by name at the tail — stable, findable, and immune to
+ * chatter. Ranking the tail by recency made a manual wall shuffle itself
+ * every time a session printed a line, which defeats the point of arranging
+ * it by hand.
  */
 const orderManually = (sessions: SwitcherSession[], manualOrder: string[]): SwitcherSession[] => {
   const rank = new Map(manualOrder.map((key, i) => [key, i]));
+  const byName = (a: SwitcherSession, b: SwitcherSession) =>
+    (a.displayName || a.name).localeCompare(b.displayName || b.name);
   return [...sessions].sort((a, b) => {
     const ra = rank.get(sessionKey(a));
     const rb = rank.get(sessionKey(b));
     if (ra !== undefined && rb !== undefined) return ra - rb;
-    if (ra !== undefined) return -1; // saved sessions before unsaved
+    if (ra !== undefined) return -1; // placed sessions before unplaced
     if (rb !== undefined) return 1;
-    return byAttentionThenRecency(a, b); // both new → recency
+    return byName(a, b); // both unplaced → stable, not recency
   });
 };
 

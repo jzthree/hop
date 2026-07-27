@@ -285,3 +285,26 @@ describe("project mode stability", () => {
     expect(g?.rows.map((x) => x.name)).toEqual(["old-fast", "old-slow"]); // recency, not alphabet
   });
 });
+describe("manual mode stability", () => {
+  it("unplaced sessions sit at the tail in a stable order, not by recency", () => {
+    const sessions = [
+      mk({ name: "placed", lastActivityAt: 1 }),
+      mk({ name: "zeta", lastActivityAt: 9000, bellUnseen: true }),
+      mk({ name: "alpha", lastActivityAt: 10 })
+    ];
+    const model = buildSwitcherModel(sessions, null, "", "manual", ["placed"]);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.rows.map((r) => r.name)).toEqual(["placed", "alpha", "zeta"]);
+  });
+
+  it("a session going loud never moves in manual order", () => {
+    const quiet = [mk({ name: "a" }), mk({ name: "b" }), mk({ name: "c" })];
+    const order = ["c", "a", "b"];
+    const before = buildSwitcherModel(quiet, null, "", "manual", order);
+    const loud = [mk({ name: "a" }), mk({ name: "b", lastActivityAt: 99999, bellUnseen: true }), mk({ name: "c" })];
+    const after = buildSwitcherModel(loud, null, "", "manual", order);
+    if (before.mode !== "manual" || after.mode !== "manual") throw new Error("expected manual");
+    expect(after.rows.map((r) => r.name)).toEqual(before.rows.map((r) => r.name));
+    expect(after.rows.map((r) => r.name)).toEqual(["c", "a", "b"]);
+  });
+});

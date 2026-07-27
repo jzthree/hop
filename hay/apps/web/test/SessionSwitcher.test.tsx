@@ -179,16 +179,19 @@ describe("SessionSwitcher manual drag", () => {
     fireEvent.click(screen.getByRole("button", { name: "Manual" }));
     const names = () =>
       Array.from(document.querySelectorAll(".switcher-card-name")).map((n) => n.textContent);
-    expect(names()).toEqual(["one", "two", "three"]);
+    // Nothing dragged yet, so all three are "unplaced" and sit in the stable
+    // alphabetical tail — manual order never ranks by activity.
+    expect(names()).toEqual(["one", "three", "two"]);
 
     const source = screen.getByText("one").closest(".switcher-card")!;
     const target = screen.getByText("three").closest(".switcher-card")!;
     fireEvent.dragStart(source, { dataTransfer: { effectAllowed: "" } });
     fireEvent.dragEnter(target);
 
-    // The grid reflowed during the drag — no drop needed.
-    expect(names()).toEqual(["two", "three", "one"]);
-    expect(JSON.parse(localStorage.getItem("hay_manual_order_v1")!)).toEqual(["two", "three", "one"]);
+    // The grid reflowed during the drag — no drop needed. "one" lands where
+    // "three" sat in the pre-drag order (one, three, two).
+    expect(names()).toEqual(["three", "one", "two"]);
+    expect(JSON.parse(localStorage.getItem("hay_manual_order_v1")!)).toEqual(["three", "one", "two"]);
   });
 });
 

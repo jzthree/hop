@@ -613,6 +613,9 @@ const initialWorkspaceState = initializeWorkspaceState();
 let currentWorkspaceName = initialWorkspaceState.workspaceName;
 let sessionStore = initialWorkspaceState.store;
 const runtimeSessionMetadata = new Map();
+// internalName -> the display-name claim we last rejected for it, so the
+// collision guard reports each rejection once instead of every reconcile.
+const reportedNameCollisions = new Map();
 
 function getSessionConfig(name) {
     return sessionStore.sessions[name] || null;
@@ -6503,9 +6506,17 @@ async function reconcileExternalRuntimeSessions() {
                 // rename on the very next tick.
                 const claimed = durableMeta?.displayName || savedConfig?.displayName || runtimeConfig?.displayName;
                 if (claimed && claimed !== room.id && runtimeIds.has(toInternalSessionName(claimed) || claimed)) {
-                    log(`[rename] "${claimed}" is another live session's name — ${room.id} keeps its own`, YELLOW);
+                    // Log the rejection once per claim, not once per tick: an
+                    // unresolvable claim (the user renamed to a name another
+                    // live session owns) repeats forever otherwise, and 30+
+                    // identical lines an hour bury everything else.
+                    if (reportedNameCollisions.get(room.id) !== claimed) {
+                        reportedNameCollisions.set(room.id, claimed);
+                        log(`[rename] "${claimed}" is another live session's name — ${room.id} keeps its own`, YELLOW);
+                    }
                     return toDisplaySessionName(room.id) || room.id;
                 }
+                reportedNameCollisions.delete(room.id);
                 return claimed || toDisplaySessionName(room.id) || room.id;
             })(),
             // Same for the AI tagline — written by `hop ai tagline`, it must

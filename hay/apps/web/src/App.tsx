@@ -2648,6 +2648,12 @@ const App = () => {
       const closedRoom = wallClosedRoomRef.current;
       wallClosedRoomRef.current = null;
       shouldReconnectRef.current = true;
+      // Closing the wall INTO a session is as deliberate as switching to it:
+      // the full-screen view re-asserts its size on attach. This is also the
+      // healing path for a session whose PTY was shrunk by any other client
+      // while the wall was up — without it, the terminal letterboxes the
+      // small size forever ("does not autofit").
+      deliberateAttachRef.current = true;
       if (!busy && activeSessionRoomRef.current === closedRoom) setReconnectToken((v) => v + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

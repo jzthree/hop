@@ -377,15 +377,19 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
     return () => { cancelled = true; window.clearInterval(id); };
   }, [live, room]);
 
-  // Live mode: the same terminal, now fed by the room's websocket. Observe-
-  // first — the PTY is never resized by focusing; ownership starts with the
-  // first keystroke (fit + deliberate claim, then per-burst reasserts).
+  // Live mode: the same terminal, now fed by the room's websocket. A tile is
+  // a WINDOW onto the session, never its size authority: input flows, size
+  // does not. The one live-tested version that claimed (fit + resize on first
+  // keystroke) resized the real PTY to ~tile dimensions, silently shrinking
+  // the session under every other surface — full-screen views letterboxed a
+  // 79-column terminal and full-screen apps drew their prompt at a row the
+  // viewer wasn't looking at. The PTY's size belongs to full-screen clients;
+  // the tile renders whatever the session truly is, scaled to fit.
   useEffect(() => {
     if (!live) return;
     const term = termRef.current;
     const box = boxRef.current;
-    const fitAddon = fitRef.current;
-    if (!term || !box || !fitAddon) return;
+    if (!term || !box) return;
     term.options.disableStdin = false;
     term.options.cursorBlink = true;
     setConn("live");
@@ -398,47 +402,6 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
     let reconnectTimer = 0;
     let reconnectAttempt = 0;
     const pendingInput: Array<{ data: string; at: number }> = [];
-    let claimed = { cols: term.cols, rows: term.rows };
-    let claimPending = false;
-    let remoteEcho: { cols: number; rows: number } | null = null;
-    let claimTimer = 0;
-    let hasTyped = false;
-    const applyClaimed = () => {
-      if (term.cols !== claimed.cols || term.rows !== claimed.rows) {
-        term.resize(claimed.cols, claimed.rows);
-      }
-      window.setTimeout(() => rescaleRef.current(), 30);
-    };
-    const resolveClaim = () => {
-      if (!claimPending) return;
-      claimPending = false;
-      if (remoteEcho && (remoteEcho.cols !== claimed.cols || remoteEcho.rows !== claimed.rows)) {
-        if (remoteEcho.cols !== term.cols || remoteEcho.rows !== term.rows) {
-          term.resize(remoteEcho.cols, remoteEcho.rows);
-          window.setTimeout(() => rescaleRef.current(), 30);
-        }
-      } else {
-        applyClaimed();
-      }
-      remoteEcho = null;
-    };
-    const sendClaim = (claim?: "attach", deliberate = false) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const dims = box.clientWidth > 0 && box.clientHeight > 0 ? fitAddon.proposeDimensions() : undefined;
-      if (!dims?.cols || !dims?.rows) return;
-      claimed = { cols: dims.cols, rows: dims.rows };
-      claimPending = true;
-      remoteEcho = null;
-      window.clearTimeout(claimTimer);
-      claimTimer = window.setTimeout(resolveClaim, 250);
-      ws.send(JSON.stringify({
-        type: "resize", cols: claimed.cols, rows: claimed.rows,
-        ...(claim ? { claim } : {}), ...(deliberate ? { user: true } : {})
-      }));
-    };
-    const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
-    let interactedAt = Date.now();
-    const noteInteraction = () => { interactedAt = Date.now(); };
     const scheduleReconnect = () => {
       if (disposed) return;
       setConn("down");
@@ -451,8 +414,6 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
       if (disposed) return;
       window.clearTimeout(reconnectTimer);
       if (ws) { try { ws.close(); } catch { /* replacing */ } }
-      claimPending = false;
-      remoteEcho = null;
       const sock = new WebSocket(wsUrl());
       ws = sock;
       sock.onopen = () => {
@@ -479,15 +440,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
             term.write(m.data);
             kbdEnhancedRef.current = scanKeyboardProtocol(String(m.data || ""), kbdEnhancedRef.current);
           } else if (m.type === "active_size") {
-            if (claimPending) {
-              if (m.cols === claimed.cols && m.rows === claimed.rows) {
-                claimPending = false;
-                window.clearTimeout(claimTimer);
-                applyClaimed();
-              } else {
-                remoteEcho = { cols: m.cols, rows: m.rows };
-              }
-            } else if (m.cols !== term.cols || m.rows !== term.rows) {
+            // Follow the room's elected size — the tile mirrors reality.
+            if (m.cols !== term.cols || m.rows !== term.rows) {
               term.resize(m.cols, m.rows);
               window.setTimeout(() => rescaleRef.current(), 30);
             }
@@ -503,9 +457,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
       };
     };
     connect();
-    let lastTypeClaimAt = 0;
     sendInputRef.current = (data: string) => {
-      noteInteraction();
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         pendingInput.push({ data, at: Date.now() });
         if (pendingInput.length > 200) pendingInput.shift();
@@ -517,15 +469,6 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
         return;
       }
       ws.send(JSON.stringify({ type: "input", data }));
-      const now = Date.now();
-      if (!hasTyped) {
-        hasTyped = true;
-        if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
-        sendClaim("attach", true);
-      } else if (!ownsSize() && now - lastTypeClaimAt > 500) {
-        lastTypeClaimAt = now;
-        sendClaim();
-      }
     };
     const hiddenReconnect = { hiddenAt: 0 };
     const onVisibility = () => {
@@ -545,27 +488,13 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
       }
     };
     window.addEventListener("focus", onWindowFocus);
-    const onBoxPointerDown = () => {
-      noteInteraction();
-      if (hasTyped && !ownsSize() && !claimPending) sendClaim("attach", true);
-    };
-    box.addEventListener("pointerdown", onBoxPointerDown);
-    const retryTimer = window.setInterval(() => {
-      if (hasTyped && !claimPending && !ownsSize() && ws && ws.readyState === WebSocket.OPEN
-          && Date.now() - interactedAt < 10_000) {
-        sendClaim("attach");
-      }
-    }, 1000);
     const focusTimer = window.setTimeout(() => { if (terminalMayTakeFocus()) term.focus(); }, 50);
     return () => {
       disposed = true;
       window.clearTimeout(focusTimer);
-      window.clearTimeout(claimTimer);
       window.clearTimeout(reconnectTimer);
-      window.clearInterval(retryTimer);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onWindowFocus);
-      box.removeEventListener("pointerdown", onBoxPointerDown);
       try { ws?.close(); } catch { /* closing */ }
       sendInputRef.current = null;
       term.options.disableStdin = true;

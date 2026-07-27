@@ -66,6 +66,10 @@ the session's life. The **display name** is a label, and the alias map
 
 ## Covered by
 
+`npm run test:identity` — CI runs unit suites only (the integration tests
+need a real daemon and PTYs), so these guards do NOT run on push. Run them
+locally before shipping anything that touches naming, aliases, or attach.
+
 `tests/terminal-api.integration.test.cjs`:
 - *websocket attach to an unknown session refuses instead of creating one*
   (fails without rule 3)

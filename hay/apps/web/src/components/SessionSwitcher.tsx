@@ -90,6 +90,23 @@ type Sheet = {
   anchor: { x: number; y: number };
 };
 
+// ── FOCUS RULES ───────────────────────────────────────────────────────────
+// Focus moves only on these explicit actions, and nothing else:
+//   → a tile's terminal:  clicking its terminal area, or ⌘⏎ (which blurs the
+//                         filter first — the command legitimizes the steal)
+//   → the filter box:     clicking it, ⌘K (open), ⌘F, or ↑ from the top row
+//   → the full screen:    opening a session (the wall closes)
+// Enforcement, not convention: a terminal REFUSES to take focus while any
+// text input holds it (stealOk below), and editing the filter drops any live
+// tile back to watch — so re-renders, remounts, reconnects, and polls can
+// never move the cursor. Everything else in this file must stay focus-inert.
+const terminalMayTakeFocus = () => {
+  const ae = document.activeElement as HTMLElement | null;
+  if (!ae || ae === document.body) return true;
+  if (ae.closest?.(".switcher-live-tile, .switcher-focus-tile")) return true;
+  return !ae.matches?.("input, textarea, [contenteditable]");
+};
+
 const sessionKey = (s: SwitcherSession) => s.internalName || s.name;
 
 // A restored session can come back sitting on Claude's own "resume from
@@ -530,7 +547,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
         sendClaim("attach");
       }
     }, 1000);
-    const focusTimer = window.setTimeout(() => term.focus(), 50);
+    const focusTimer = window.setTimeout(() => { if (terminalMayTakeFocus()) term.focus(); }, 50);
     return () => {
       disposed = true;
       window.clearTimeout(focusTimer);
@@ -1122,6 +1139,7 @@ export const SessionSwitcher = ({
         const target = flatNav[kbdIndex];
         if (target && interactiveTiles && target.active && target.type !== "port") {
           event.preventDefault();
+          filterInputRef.current?.blur();
           setFocusedKey(sessionKey(target));
         }
         return;
@@ -1234,6 +1252,7 @@ export const SessionSwitcher = ({
       const inputFocused = document.activeElement === filterInputRef.current;
       if (!inputFocused && (event.key.length === 1 || event.key === "Backspace")) {
         event.preventDefault();
+        setFocusedKey(null);
         filterInputRef.current?.focus();
         setFilter((f) => (event.key === "Backspace" ? f.slice(0, -1) : f + event.key));
       }
@@ -1801,7 +1820,7 @@ export const SessionSwitcher = ({
             className={`switcher-filter${finePointer || visibleSessions.length > FILTER_THRESHOLD || filter ? "" : " compact"}`}
             placeholder="Filter…"
             value={filter}
-            onChange={(e) => setFilter(e.target.value)}
+            onChange={(e) => { setFocusedKey(null); setFilter(e.target.value); }}
             aria-label="Filter sessions"
           />
         </div>

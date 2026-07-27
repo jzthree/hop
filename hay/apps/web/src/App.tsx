@@ -11,6 +11,7 @@ import {
 } from "hay-shared";
 import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
+import { attachScrollFlywheel } from "./utils/scrollFlywheel";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -1537,6 +1538,20 @@ const App = () => {
 
     fitAddon.fit();
 
+    // Desktop mouse wheels get momentum (trackpads already glide natively;
+    // mobile has its own touch inertia below). Same cleanup convention as
+    // __touchCleanup.
+    if (!isMobile) {
+      (terminal as any).__wheelCleanup = attachScrollFlywheel(
+        containerRef.current,
+        () => termRef.current,
+        {
+          linesPerNotch: 4, // mirrors scrollSensitivity above
+          lineHeightPx: () => Math.max(1, ((terminal as any)._core?._renderService?.dimensions?.css?.cell?.height) || fontSize * 1.3)
+        }
+      );
+    }
+
     termRef.current = terminal;
     fitRef.current = fitAddon;
     fitWhenReady();
@@ -2253,6 +2268,10 @@ const App = () => {
           (terminal as any).__touchCleanup();
           (terminal as any).__touchCleanup = null;
         }
+        if ((terminal as any).__wheelCleanup) {
+          (terminal as any).__wheelCleanup();
+          (terminal as any).__wheelCleanup = null;
+        }
         terminal.dispose();
         termRef.current = null;
         fitRef.current = null;
@@ -2600,6 +2619,26 @@ const App = () => {
   };
   // Keep the keyboard layer's ref current (it's defined earlier in the file).
   switchSessionRef.current = switchSession;
+
+  const wallClosedRoomRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!session || !isEmbeddedInHop()) return;
+    if (switcherOpen) {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wallClosedRoomRef.current = activeSessionRoomRef.current;
+        shouldReconnectRef.current = false;
+        try { wsRef.current.close(); } catch { /* closing */ }
+      }
+    } else if (wallClosedRoomRef.current) {
+      const closedRoom = wallClosedRoomRef.current;
+      wallClosedRoomRef.current = null;
+      shouldReconnectRef.current = true;
+      // Same session: bump the token to reconnect. Different session: the
+      // session-change effect is already connecting — don't race it.
+      if (activeSessionRoomRef.current === closedRoom) setReconnectToken((v) => v + 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [switcherOpen]);
 
   // Keyboard-first focus: whenever every overlay is closed (palette, drawer,
   // help, find) and a session is up, the terminal gets focus back — switching

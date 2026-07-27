@@ -1223,7 +1223,7 @@ const App = () => {
             && (termRef.current.cols !== cols || termRef.current.rows !== rows)) {
           try { termRef.current.resize(cols, rows); } catch { /* keep local size */ }
         }
-        termRef.current.write(screen.data);
+        termRef.current.write(screen.data, () => termRef.current?.refresh(0, (termRef.current?.rows ?? 1) - 1));
       })
       .catch(() => { /* fast paint is best-effort */ });
 
@@ -1359,7 +1359,15 @@ const App = () => {
           // the clear and the repaint one parse pass: no intermediate paint,
           // same clean slate (cursor, SGR attrs, alt-screen and mouse modes
           // all cleared) that reset() gave us.
-          writeToTerminal(termRef.current ? `\x1bc${message.data}` : message.data);
+          if (termRef.current) {
+            const t = termRef.current;
+            t.write(`\x1bc${message.data}`, () => {
+              t.scrollToBottom();
+              t.refresh(0, t.rows - 1);
+            });
+          } else {
+            writeToTerminal(message.data);
+          }
           // Seed alt-screen state from the snapshot: reset() above cleared xterm's
           // modes, and the rendered snapshot doesn't re-emit the DECSET that the
           // live ?h/?l handlers would catch, so the server's flag is the only signal.

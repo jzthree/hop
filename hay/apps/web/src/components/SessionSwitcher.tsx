@@ -332,7 +332,10 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
           term.resize(data.cols, data.rows);
           window.setTimeout(() => rescaleRef.current(), 30);
         }
-        term.write("\x1bc" + data.data);
+        term.write("\x1bc" + data.data, () => {
+          const t = termRef.current;
+          if (t) t.refresh(0, t.rows - 1);
+        });
       } catch { /* keep the last frame */ }
     };
     paint();

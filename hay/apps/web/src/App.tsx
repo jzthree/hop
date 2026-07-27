@@ -3456,7 +3456,7 @@ const App = () => {
             // evaluated on the hub page (session can be null there), and the
             // pane renderer places it wherever the tree's primary leaf sits.
             const renderPrimarySection = (): ReactElement => (
-              <section inert={switcherOpen} className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
+              <section inert={switcherOpen} style={switcherOpen ? { visibility: "hidden" } : undefined} className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
                 <div
                   className="terminal-frame"
                   onClick={() => {
@@ -3694,7 +3694,7 @@ const App = () => {
             // so adding/removing panes never re-parents the live terminal.
             const rootSplit = paneTree.kind === "split" ? paneTree : null;
             return (
-              <div className="pane-root" inert={switcherOpen}>
+              <div className="pane-root" inert={switcherOpen} style={switcherOpen ? { visibility: "hidden" } : undefined}>
                 <div key="rootsplit" className={`pane-split ${rootSplit?.dir === "col" ? "dir-col" : "dir-row"}`}>
                   <div key="cell-a" className="pane-cell" style={{ flexGrow: rootSplit ? rootSplit.ratio : 1, flexBasis: 0 }}>
                     {rootSplit && rootSplit.a.kind !== "leaf" ? renderPaneNode(rootSplit.a) : primaryWrap}

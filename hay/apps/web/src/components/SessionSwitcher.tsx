@@ -114,6 +114,9 @@ const PREVIEW_BASE_LH = PREVIEW_BASE_FS * 1.3;
 // Measured advance width of one monospace cell at the base font — resolved
 // lazily because the terminal font stack loads with the page.
 let previewCharW = 0;
+if (typeof document !== "undefined") {
+  document.fonts?.ready?.then(() => { previewCharW = 0; }).catch(() => { /* no Font API */ });
+}
 const measurePreviewCharW = () => {
   if (previewCharW) return previewCharW;
   const el = document.createElement("span");
@@ -279,7 +282,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
     rescaleRef.current = rescale;
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(rescale) : null;
     ro?.observe(box);
+    // The xterm element resizes when it first measures its font and on every
+    // cols/rows change — each needs a refit, and the box itself never moves.
+    if (inner) ro?.observe(inner);
     window.setTimeout(rescale, 30);
+    document.fonts?.ready?.then(() => rescale()).catch(() => { /* no Font API */ });
     // Keys route through refs so the handler survives mode flips untouched.
     term.attachCustomKeyEventHandler((ev) => {
       if (!liveRef.current) return false; // watching: the terminal takes no keys
@@ -335,6 +342,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
         term.write("\x1bc" + data.data, () => {
           const t = termRef.current;
           if (t) t.refresh(0, t.rows - 1);
+          rescaleRef.current();
         });
       } catch { /* keep the last frame */ }
     };
@@ -718,15 +726,6 @@ export const SessionSwitcher = ({
     base.splice(fromIdx, 1);
     base.splice(toIdx, 0, from);
     persistManualOrder(base);
-  };
-  // Fullscreen: the in-session palette can expand to the whole viewport for a
-  // workspace feel, or stay compact for quick switching. Persisted.
-  const [fullscreen, setFullscreen] = useState(() => localStorage.getItem("hay_switcher_fullscreen") === "1");
-  const toggleFullscreen = () => {
-    setFullscreen((v) => {
-      localStorage.setItem("hay_switcher_fullscreen", v ? "0" : "1");
-      return !v;
-    });
   };
   const [sheet, setSheet] = useState<Sheet | null>(null);
   // The wall's single interactive tile. Cleared on close / zooming below the
@@ -1653,16 +1652,12 @@ export const SessionSwitcher = ({
       // tile-dense: too narrow for inline actions. tile-micro: too short for
       // a second text line at all — the tagline shows from the DEFAULT zoom
       // up (hiding it there meant nobody ever saw one).
-      className={`switcher-overlay${zoomLevel.min < 300 ? " tile-dense" : ""}${zoomLevel.min < 150 ? " tile-micro" : ""}${dismissable ? "" : " switcher-hub"}${dismissable && fullscreen ? " switcher-fullscreen" : ""}`}
+      className={`switcher-overlay${zoomLevel.min < 300 ? " tile-dense" : ""}${zoomLevel.min < 150 ? " tile-micro" : ""}${dismissable ? "" : " switcher-hub"}${dismissable ? " switcher-fullscreen" : ""}`}
       style={{ "--tile-min": `${zoomLevel.min}px`, "--tile-h": zoomLevel.h, "--tile-fs": zoomLevel.fs } as CSSProperties}
       role="dialog"
       aria-label="Sessions"
-      onClick={(e) => {
-        // Desktop shows the switcher as a centered panel over a backdrop;
-        // clicking the backdrop (not the panel) dismisses it. On mobile the
-        // panel is full-bleed, so this never fires.
-        if (dismissable && e.target === e.currentTarget) onClose();
-      }}
+      // Always fullscreen: there is no backdrop, and a stray click must not
+      // dismiss the wall and flash the terminal behind it. Escape/✕ close.
     >
       <div className="switcher-top">
         <header className="switcher-header">
@@ -1711,19 +1706,6 @@ export const SessionSwitcher = ({
             </span>
           )}
           <span className="switcher-header-spacer" />
-          {dismissable && (
-            <button type="button" className="switcher-action" aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"} title={fullscreen ? "Exit fullscreen" : "Fullscreen"} onClick={toggleFullscreen}>
-              {fullscreen ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M9 3v6H3M21 9h-6V3M3 15h6v6M15 21v-6h6"/>
-                </svg>
-              ) : (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6"/>
-                </svg>
-              )}
-            </button>
-          )}
           {onToggleKeyboard && (
             <button type="button" className="switcher-action" aria-label="Toggle keyboard" title="Toggle keyboard" onClick={onToggleKeyboard}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

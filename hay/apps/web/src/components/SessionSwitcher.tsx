@@ -212,50 +212,59 @@ const runningApp = (s: SwitcherSession) => {
 // full input, auto-fit to its box, instant rendering, connected as the user
 // (it participates in presence like any client). Every other tile stays a
 // cheap polled text preview, so the XL wall costs one websocket, not nine.
-const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, claudeApp, activeCols, activeRows, onFullscreen, onUnfocus }: {
+// ── One terminal per tile ─────────────────────────────────────────────────
+// A tile at interactive zoom IS a terminal for its whole life on the wall.
+// In "watch" mode it repaints from the daemon's serialized grid on the poll
+// cadence; going live (a click) attaches the room's websocket and enables
+// input ON THE SAME xterm instance. Nothing is created or destroyed at the
+// boundary, so entering and leaving interaction changes exactly two things:
+// responsiveness and whether keystrokes are accepted. The old design — an
+// HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
+const LIVETILE_POLL_MS = 5000;
+const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, activeRows, onFullscreen, onUnfocus }: {
   wsBase: string; room: string; userName: string; theme: object | undefined;
-  fallbackFrame: PreviewFrame | undefined; fontSize: number; claudeApp: boolean;
-  activeCols?: number; activeRows?: number;
+  live: boolean; claudeApp: boolean; activeCols?: number; activeRows?: number;
   onFullscreen: () => void; onUnfocus: () => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
-  // The last preview frame stays painted OVER the terminal until the claimed
-  // resize has round-tripped and the app repainted — the first snapshot
-  // contains old-size bytes and looks mangled for a beat. Matching font
-  // metrics (below) make the veil-to-terminal swap nearly invisible.
-  const [veiled, setVeiled] = useState(true);
-  // Connection state surfaced in the focus bar: a dead socket must LOOK dead.
-  const [conn, setConn] = useState<"live" | "down">("live");
-  // Read at key time via a ref — the foreground process changes as commands
-  // run, and a prop-dep here would tear down the whole connection each time.
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const rescaleRef = useRef<() => void>(() => {});
+  // Wired by the live effect; watch mode leaves them null so keys go nowhere.
+  const sendInputRef = useRef<((data: string) => void) | null>(null);
+  const kbdEnhancedRef = useRef(false);
+  // null = watching; "live"/"down" = connected state for the chrome.
+  const [conn, setConn] = useState<"live" | "down" | null>(null);
   const claudeAppRef = useRef(claudeApp);
   claudeAppRef.current = claudeApp;
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const onFullscreenRef = useRef(onFullscreen);
+  onFullscreenRef.current = onFullscreen;
+  const onUnfocusRef = useRef(onUnfocus);
+  onUnfocusRef.current = onUnfocus;
+
+  // The terminal itself: created once per room, never per mode.
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
-    // Clicking a tile is an act of attention: the tile claims the shared PTY
-    // and autofits it to the tile box, exactly like attaching a window. Size
-    // conflicts resolve through the normal server election — whoever typed
-    // last owns the size — so typing in the big background terminal snaps the
-    // session back, and the tile falls back to observing at active_size,
-    // scaled down to fit.
-    // Same font metrics as .switcher-preview at the current zoom (shared
-    // --font-terminal stack, 1.3 line height) so preview → tile → the real
-    // session are one continuous font, not three.
     const monoStack = getComputedStyle(document.documentElement).getPropertyValue("--font-terminal").trim() || "monospace";
     const term = new Terminal({
-      cols: activeCols && activeCols > 1 ? activeCols : undefined,
-      rows: activeRows && activeRows > 1 ? activeRows : undefined,
+      cols: activeCols && activeCols > 1 ? activeCols : 80,
+      rows: activeRows && activeRows > 1 ? activeRows : 24,
       scrollback: 2000,
-      fontSize,
+      fontSize: PREVIEW_BASE_FS,
       lineHeight: 1.3,
       fontFamily: monoStack,
-      cursorBlink: true,
+      cursorBlink: false,
+      disableStdin: true,
       theme: theme as never
     });
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
+    const fit = new FitAddon();
+    term.loadAddon(fit);
     term.open(box);
+    termRef.current = term;
+    fitRef.current = fit;
     const inner = box.querySelector(".xterm") as HTMLElement | null;
     const rescale = () => {
       if (!inner) return;
@@ -263,68 +272,119 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
       const h = inner.offsetHeight;
       if (w > 0 && h > 0 && box.clientWidth > 0 && box.clientHeight > 0) {
         const scale = Math.min(1, box.clientWidth / w, box.clientHeight / h);
-        inner.style.transform = `scale(${scale})`;
+        inner.style.transform = "scale(" + scale + ")";
         inner.style.transformOrigin = "top left";
       }
     };
-    // Observe-first: the terminal is born at the session's CURRENT size and
-    // simply scaled into the box — the same geometry as the preview it
-    // replaces, so focusing changes nothing on screen for anyone. The fit
-    // addon is used only when the user takes ownership by typing.
-    let claimed = { cols: term.cols, rows: term.rows };
+    rescaleRef.current = rescale;
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(rescale) : null;
+    ro?.observe(box);
+    window.setTimeout(rescale, 30);
+    // Keys route through refs so the handler survives mode flips untouched.
+    term.attachCustomKeyEventHandler((ev) => {
+      if (!liveRef.current) return false; // watching: the terminal takes no keys
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "f") {
+        if (ev.type === "keydown") onUnfocusRef.current();
+        return false; // window handler focuses the filter
+      }
+      if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey
+          && (kbdEnhancedRef.current || claudeAppRef.current)) {
+        if (ev.type === "keydown") sendInputRef.current?.("\x1b[13;2u");
+        return false;
+      }
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === "Enter") {
+        if (ev.type === "keydown") onFullscreenRef.current();
+        return false;
+      }
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === ".") {
+        if (ev.type === "keydown") onUnfocusRef.current();
+        return false;
+      }
+      return true;
+    });
+    const sub = term.onData((data) => sendInputRef.current?.(data));
+    return () => {
+      ro?.disconnect();
+      sub.dispose();
+      term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room, theme]);
+
+  // Watch mode: full-screen repaints from the daemon grid. One request, one
+  // parse pass (RIS + serialized screen), no flicker — the same bytes the
+  // live socket would eventually deliver.
+  useEffect(() => {
+    if (live) return;
+    let cancelled = false;
+    const paint = async () => {
+      if (cancelled || document.hidden) return;
+      try {
+        const res = await fetch("/api/sessions/screen?name=" + encodeURIComponent(room));
+        if (!res.ok) return;
+        const data = await res.json();
+        const term = termRef.current;
+        if (cancelled || !term || typeof data.data !== "string") return;
+        if (Number.isInteger(data.cols) && Number.isInteger(data.rows)
+            && (term.cols !== data.cols || term.rows !== data.rows)) {
+          term.resize(data.cols, data.rows);
+          window.setTimeout(() => rescaleRef.current(), 30);
+        }
+        term.write("\x1bc" + data.data);
+      } catch { /* keep the last frame */ }
+    };
+    paint();
+    const id = window.setInterval(paint, LIVETILE_POLL_MS);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [live, room]);
+
+  // Live mode: the same terminal, now fed by the room's websocket. Observe-
+  // first — the PTY is never resized by focusing; ownership starts with the
+  // first keystroke (fit + deliberate claim, then per-burst reasserts).
+  useEffect(() => {
+    if (!live) return;
+    const term = termRef.current;
+    const box = boxRef.current;
+    const fitAddon = fitRef.current;
+    if (!term || !box || !fitAddon) return;
+    term.options.disableStdin = false;
+    term.options.cursorBlink = true;
+    setConn("live");
     const sep = wsBase.includes("?") ? "&" : "?";
-    // 64KB replay: enough tail for a wall tile, and the snapshot parses ~4x
-    // faster than the full-scrollback replay — focus latency is dominated by
-    // connect + snapshot + repaint.
     const wsUrl = () =>
-      `${wsBase}${sep}room=${encodeURIComponent(room)}&name=${encodeURIComponent(userName || "user")}&replay=65536&cols=${term.cols}&rows=${term.rows}`;
-    // The socket is a mutable slot with a real lifecycle. An idle tile's
-    // connection dies silently (laptop sleep, tunnel idle timeout); without
-    // onclose handling the tile kept rendering its last frame, kept blinking
-    // its cursor, and swallowed every keystroke at the readyState guard — a
-    // zombie only unfocus/refocus could revive. Mirror the main terminal:
-    // onclose → backoff reconnect, wake/refocus → immediate reconnect, and
-    // input typed while down is briefly buffered, never silently dropped.
+      wsBase + sep + "room=" + encodeURIComponent(room) + "&name=" + encodeURIComponent(userName || "user")
+      + "&replay=65536&cols=" + term.cols + "&rows=" + term.rows;
     let ws: WebSocket | null = null;
     let disposed = false;
     let reconnectTimer = 0;
     let reconnectAttempt = 0;
     const pendingInput: Array<{ data: string; at: number }> = [];
-    // Claim lifecycle. The server sends the session's CURRENT active_size on
-    // attach, which races our claim — resizing the local grid to it produced
-    // a zoomed-out old-size view until the claim round-tripped (two reflows).
-    // While a claim is pending we swallow non-matching echoes. A rejection
-    // arrives as a corrective echo within one RTT; hearing nothing for 250ms
-    // means accepted (newer hosts also confirm the winner explicitly).
+    let claimed = { cols: term.cols, rows: term.rows };
     let claimPending = false;
     let remoteEcho: { cols: number; rows: number } | null = null;
     let claimTimer = 0;
+    let hasTyped = false;
     const applyClaimed = () => {
       if (term.cols !== claimed.cols || term.rows !== claimed.rows) {
         term.resize(claimed.cols, claimed.rows);
       }
-      setTimeout(rescale, 30);
+      window.setTimeout(() => rescaleRef.current(), 30);
     };
     const resolveClaim = () => {
       if (!claimPending) return;
       claimPending = false;
       if (remoteEcho && (remoteEcho.cols !== claimed.cols || remoteEcho.rows !== claimed.rows)) {
-        // Rejected — observe the winner's size, scaled.
         if (remoteEcho.cols !== term.cols || remoteEcho.rows !== term.rows) {
           term.resize(remoteEcho.cols, remoteEcho.rows);
-          setTimeout(rescale, 30);
+          window.setTimeout(() => rescaleRef.current(), 30);
         }
       } else {
-        // Silence = accepted (newer hosts also confirm explicitly).
         applyClaimed();
       }
       remoteEcho = null;
     };
-    // The local grid is NEVER resized optimistically on a claim — only on
-    // acceptance. A rejected claim (someone active elsewhere) must cause
-    // zero visual churn, or periodic re-claims flap the tile between sizes.
-    // `deliberate` marks a human click: the server (new hosts) lets it win
-    // the election outright; old hosts strip the flag and apply attach rules.
     const sendClaim = (claim?: "attach", deliberate = false) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const dims = box.clientWidth > 0 && box.clientHeight > 0 ? fitAddon.proposeDimensions() : undefined;
@@ -340,21 +400,8 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
       }));
     };
     const ownsSize = () => term.cols === claimed.cols && term.rows === claimed.rows;
-    setVeiled(true);
-    // Unveil on the first output AFTER the claim resolves — that burst is the
-    // repaint at the fitted size, so the veil lifts straight onto the final
-    // layout (never the zoomed-out intermediate). Timers are fallbacks only.
-    let unveilTimer = 0;
-    const unveilSoon = (ms: number) => {
-      window.clearTimeout(unveilTimer);
-      unveilTimer = window.setTimeout(() => setVeiled(false), ms);
-    };
-    unveilSoon(2500);
-    let sawSnapshot = false;
-    let sawRepaint = false;
-    // Enhanced-keyboard state, tracked from the tile's own stream (snapshot
-    // flag + live protocol toggles) — gates the Shift+Enter CSI-u encoding.
-    let kbdEnhanced = false;
+    let interactedAt = Date.now();
+    const noteInteraction = () => { interactedAt = Date.now(); };
     const scheduleReconnect = () => {
       if (disposed) return;
       setConn("down");
@@ -371,19 +418,14 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
       remoteEcho = null;
       const sock = new WebSocket(wsUrl());
       ws = sock;
-      // The mount IS the user's click on this tile — a deliberate claim.
-      // (On reconnect the fresh snapshot repaints the grid, so no re-veil.)
       sock.onopen = () => {
         if (disposed || ws !== sock) return;
         reconnectAttempt = 0;
         setConn("live");
-        setTimeout(rescale, 30);
-        // Replay keystrokes typed while down — fresh ones only: firing stale
-        // input into a shell long after it was typed is worse than losing it
-        // (the user has usually retyped by then).
+        window.setTimeout(() => rescaleRef.current(), 30);
         const cutoff = Date.now() - 15000;
-        for (const p of pendingInput) {
-          if (p.at >= cutoff) sock.send(JSON.stringify({ type: "input", data: p.data }));
+        for (const pend of pendingInput) {
+          if (pend.at >= cutoff) sock.send(JSON.stringify({ type: "input", data: pend.data }));
         }
         pendingInput.length = 0;
       };
@@ -392,22 +434,16 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
           const m = JSON.parse(String(ev.data));
           if (m.type === "snapshot") {
             term.reset();
-            term.write(m.data, rescale);
-            sawSnapshot = true;
-            kbdEnhanced = typeof m.keyboardEnhanced === "boolean"
+            term.write(m.data, () => rescaleRef.current());
+            kbdEnhancedRef.current = typeof m.keyboardEnhanced === "boolean"
               ? m.keyboardEnhanced
               : scanKeyboardProtocol(String(m.data || ""), false);
-            unveilSoon(600);
-          }
-          else if (m.type === "output") {
+          } else if (m.type === "output") {
             term.write(m.data);
-            kbdEnhanced = scanKeyboardProtocol(String(m.data || ""), kbdEnhanced);
-            if (sawSnapshot && !sawRepaint && !claimPending) { sawRepaint = true; unveilSoon(120); }
-          }
-          else if (m.type === "active_size") {
+            kbdEnhancedRef.current = scanKeyboardProtocol(String(m.data || ""), kbdEnhancedRef.current);
+          } else if (m.type === "active_size") {
             if (claimPending) {
               if (m.cols === claimed.cols && m.rows === claimed.rows) {
-                // Claim confirmed — apply and let the repaint land on it.
                 claimPending = false;
                 window.clearTimeout(claimTimer);
                 applyClaimed();
@@ -415,9 +451,8 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
                 remoteEcho = { cols: m.cols, rows: m.rows };
               }
             } else if (m.cols !== term.cols || m.rows !== term.rows) {
-              // Another client won the election — observe at its size, scaled.
               term.resize(m.cols, m.rows);
-              setTimeout(rescale, 30);
+              window.setTimeout(() => rescaleRef.current(), 30);
             }
           }
         } catch { /* non-JSON frame */ }
@@ -431,16 +466,35 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
       };
     };
     connect();
-    // Wake/refocus recovery. A socket that died while the tab was hidden
-    // reconnects the moment the user returns; after a LONG absence (system
-    // sleep) even a socket claiming OPEN may be half-dead — the OS hasn't
-    // noticed the peer vanish, so sends black-hole. Reconnect proactively;
-    // the snapshot repaint makes it visually free.
-    let hiddenAt = 0;
+    let lastTypeClaimAt = 0;
+    sendInputRef.current = (data: string) => {
+      noteInteraction();
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        pendingInput.push({ data, at: Date.now() });
+        if (pendingInput.length > 200) pendingInput.shift();
+        setConn("down");
+        if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+          reconnectAttempt = 0;
+          connect();
+        }
+        return;
+      }
+      ws.send(JSON.stringify({ type: "input", data }));
+      const now = Date.now();
+      if (!hasTyped) {
+        hasTyped = true;
+        if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
+        sendClaim("attach", true);
+      } else if (!ownsSize() && now - lastTypeClaimAt > 500) {
+        lastTypeClaimAt = now;
+        sendClaim();
+      }
+    };
+    const hiddenReconnect = { hiddenAt: 0 };
     const onVisibility = () => {
-      if (document.hidden) { hiddenAt = Date.now(); return; }
-      const away = hiddenAt ? Date.now() - hiddenAt : 0;
-      hiddenAt = 0;
+      if (document.hidden) { hiddenReconnect.hiddenAt = Date.now(); return; }
+      const away = hiddenReconnect.hiddenAt ? Date.now() - hiddenReconnect.hiddenAt : 0;
+      hiddenReconnect.hiddenAt = 0;
       if (!ws || ws.readyState !== WebSocket.OPEN || away > 60000) {
         reconnectAttempt = 0;
         connect();
@@ -454,91 +508,8 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
       }
     };
     window.addEventListener("focus", onWindowFocus);
-    // One path for typed data AND synthesized key encodings: buffer +
-    // kick a reconnect when the socket is down — never silently drop.
-    let lastTypeClaimAt = 0;
-    const sendInput = (data: string) => {
-      noteInteraction();
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        pendingInput.push({ data, at: Date.now() });
-        if (pendingInput.length > 200) pendingInput.shift();
-        setConn("down");
-        if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
-          reconnectAttempt = 0;
-          connect();
-        }
-        return;
-      }
-      ws.send(JSON.stringify({ type: "input", data }));
-      // First keystroke = taking ownership: fit the PTY to this tile and
-      // keep reasserting per burst while typing (typing recency wins the
-      // election). Until then the tile only observes.
-      const now = Date.now();
-      if (!hasTyped) {
-        hasTyped = true;
-        if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
-        sendClaim("attach", true);
-      } else if (!ownsSize() && now - lastTypeClaimAt > 500) {
-        lastTypeClaimAt = now;
-        sendClaim();
-      }
-    };
-    // Reserved chords — everything else (Enter, Escape, arrows…) belongs
-    // to the remote app: ⌘⏎/Ctrl⏎ opens the session full screen, ⌘./Ctrl+.
-    // releases focus back to the wall.
-    term.attachCustomKeyEventHandler((ev) => {
-      // ⌘F leaves the tile: find belongs to the switcher's filter, and this
-      // is the escape hatch when the tile holds the keyboard. The event
-      // still bubbles to the window handler, which focuses the filter.
-      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "f") {
-        if (ev.type === "keydown") onUnfocus();
-        return false;
-      }
-      // Shift+Enter must reach the app as a distinct key (Claude Code:
-      // newline, not submit). xterm.js would emit a plain \r — synthesize
-      // the kitty CSI-u encoding under the same gate as the main terminal:
-      // the app negotiated enhanced keyboard reporting, or it's Claude Code
-      // (parses CSI-u unconditionally but no longer advertises the
-      // protocol at boot). A plain shell renders raw CSI-u as junk, hence
-      // the gate.
-      if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey
-          && (kbdEnhanced || claudeAppRef.current)) {
-        if (ev.type === "keydown") sendInput("\x1b[13;2u");
-        return false;
-      }
-      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === "Enter") {
-        if (ev.type === "keydown") onFullscreen();
-        return false;
-      }
-      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === ".") {
-        if (ev.type === "keydown") onUnfocus();
-        return false;
-      }
-      return true;
-    });
-    const sub = term.onData(sendInput);
-    const ro = new ResizeObserver(() => {
-      // Box changed (viewport/tile-size): refit our claim if we hold the
-      // size; otherwise just rescale the observed grid.
-      if (ownsSize()) sendClaim();
-      else rescale();
-    });
-    ro.observe(box);
-    // A rejected focus-claim (someone typed in that session <5s ago — often
-    // an agent) left the tile zoomed-out until the user typed. Re-claim
-    // quietly while the user has RECENTLY ENGAGED the tile (clicked or
-    // typed within 10s) so the view converges once the peer goes idle. Not
-    // gated on DOM focus: a tile left focused while the user works in
-    // another window must never steal the size.
-    let interactedAt = Date.now();
-    const noteInteraction = () => { interactedAt = Date.now(); };
-    // Clicking INTO a tile that lost the size takes it back — the click is
-    // as deliberate as the one that focused it.
-    let hasTyped = false;
     const onBoxPointerDown = () => {
       noteInteraction();
-      // Clicking positions the cursor / selects — it is not a request to
-      // resize the shared session. Only typing takes the size.
       if (hasTyped && !ownsSize() && !claimPending) sendClaim("attach", true);
     };
     box.addEventListener("pointerdown", onBoxPointerDown);
@@ -548,44 +519,46 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, c
         sendClaim("attach");
       }
     }, 1000);
-    const focusTimer = window.setTimeout(() => { term.focus(); rescale(); }, 50);
+    const focusTimer = window.setTimeout(() => term.focus(), 50);
     return () => {
       disposed = true;
       window.clearTimeout(focusTimer);
-      window.clearTimeout(unveilTimer);
       window.clearTimeout(claimTimer);
       window.clearTimeout(reconnectTimer);
       window.clearInterval(retryTimer);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onWindowFocus);
       box.removeEventListener("pointerdown", onBoxPointerDown);
-      ro.disconnect();
-      sub.dispose();
       try { ws?.close(); } catch { /* closing */ }
-      term.dispose();
+      sendInputRef.current = null;
+      term.options.disableStdin = true;
+      term.options.cursorBlink = false;
+      setConn(null);
+      term.blur();
     };
-  }, [wsBase, room, userName, theme, fontSize]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, wsBase, room, userName]);
+
   return (
-    <div className="switcher-focus-tile" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-      <div className="switcher-focus-bar">
-        <span className={`switcher-focus-label${conn === "down" ? " down" : ""}`}>
-          {conn === "down" ? "connection lost — reconnecting…" : "interactive — ⌘⏎ full screen · ⌘. release"}
-        </span>
-        <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
-        <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
-      </div>
-      <div className="switcher-focus-term" ref={boxRef} data-fallback={fallbackFrame?.text ? "" : "empty"}>
-        {veiled && (
-          <pre className="switcher-focus-veil" aria-hidden="true">
-            {fallbackFrame?.color?.length && fallbackFrame.cols && fallbackFrame.rows
-              ? <ScaledScreen frame={fallbackFrame} />
-              : (fallbackFrame?.text || " ")}
-          </pre>
-        )}
-      </div>
+    <div
+      className="switcher-live-tile"
+      onClick={live ? (e) => e.stopPropagation() : undefined}
+      onPointerDown={live ? (e) => e.stopPropagation() : undefined}
+    >
+      <div className="switcher-focus-term" ref={boxRef} />
+      {live && (
+        <div className="switcher-live-chrome" onClick={(e) => e.stopPropagation()}>
+          <span className={"switcher-focus-label" + (conn === "down" ? " down" : "")}>
+            {conn === "down" ? "reconnecting…" : "live"}
+          </span>
+          <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
+          <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
+        </div>
+      )}
     </div>
   );
 };
+
 
 export const SessionSwitcher = ({
   open,
@@ -1565,7 +1538,7 @@ export const SessionSwitcher = ({
           // any stray click at interactive zoom silently rerouted the
           // keyboard into that session ("typing goes to a terminal").
           const el = e.target as HTMLElement | null;
-          const onTerminalArea = !!el?.closest?.(".switcher-preview, .switcher-focus-tile");
+          const onTerminalArea = !!el?.closest?.(".switcher-preview, .switcher-live-tile");
           if (interactiveTiles && s.active && s.type !== "port" && onTerminalArea) setFocusedKey(key);
           else handleTap(s);
         }}
@@ -1600,20 +1573,21 @@ export const SessionSwitcher = ({
             way the name can't. Hidden at dense zooms where the card has no
             room for a second text line. */}
         {s.tagline && <div className="switcher-card-tagline" title={s.tagline}>{s.tagline}</div>}
-        {interactiveTiles && tileWsBase && s.active && s.type !== "port" && focusedKey === key ? (
-          <FocusedTile
-            wsBase={tileWsBase}
-            room={key}
-            userName={userName || "user"}
-            theme={terminalTheme}
-            fallbackFrame={preview}
-            activeCols={preview?.cols}
-            activeRows={preview?.rows}
-            fontSize={parseInt(zoomLevel.fs, 10) || 11}
-            claudeApp={appLabel(s) === "claude"}
-            onFullscreen={() => onSwitch(s)}
-            onUnfocus={() => setFocusedKey(null)}
-          />
+        {interactiveTiles && tileWsBase && s.active && s.type !== "port" ? (
+          <div className="switcher-preview switcher-preview-live">
+            <LiveTile
+              wsBase={tileWsBase}
+              room={key}
+              userName={userName || "user"}
+              theme={terminalTheme}
+              live={focusedKey === key}
+              claudeApp={appLabel(s) === "claude"}
+              activeCols={preview?.cols}
+              activeRows={preview?.rows}
+              onFullscreen={() => onSwitch(s)}
+              onUnfocus={() => setFocusedKey(null)}
+            />
+          </div>
         ) : (
           <pre className="switcher-preview" aria-hidden="true">
             {preview?.color?.length && preview.cols && preview.rows && effectiveZoom >= INTERACTIVE_ZOOM

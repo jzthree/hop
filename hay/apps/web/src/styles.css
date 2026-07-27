@@ -3470,3 +3470,46 @@ button.primary {
   line-height: 1.3em;
 }
 
+
+/* LiveTile: the one terminal a tile owns for its whole life on the wall.
+   The chrome overlays a corner when live instead of participating in layout,
+   so going live moves nothing. */
+.switcher-preview-live {
+  padding: 0;
+  overflow: hidden;
+}
+.switcher-live-tile {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+.switcher-live-tile .switcher-focus-term {
+  position: absolute;
+  inset: 4px 5px;
+  overflow: hidden;
+  padding: 0;
+}
+.switcher-live-chrome {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-muted);
+}
+.switcher-live-chrome button {
+  padding: 0 3px;
+  border: none;
+  background: none;
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+.switcher-live-chrome button:hover { color: var(--ink); }

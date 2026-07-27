@@ -170,10 +170,14 @@ describe("buildSwitcherModel", () => {
     expect(model.rows.map((s) => s.name)).toEqual(["second", "first", "brandnew"]);
   });
 
-  it("a filter query overrides project/manual sort modes", () => {
+  it("a filter query overrides PROJECT grouping, but manual keeps the user's order", () => {
     const sessions = [mk({ name: "alpha" }), mk({ name: "beta" })];
-    const model = buildSwitcherModel(sessions, null, "alph", "manual", ["beta", "alpha"]);
-    expect(model.mode).toBe("filter");
+    // Project mode: a query flattens the groups into a ranked list.
+    expect(buildSwitcherModel(sessions, null, "alph", "project").mode).toBe("filter");
+    // Manual mode: filtering narrows the wall but must NOT re-rank it, or
+    // the arrangement shifts under the user exactly when they are dragging.
+    const manual = buildSwitcherModel(sessions, null, "alph", "manual", ["beta", "alpha"]);
+    expect(manual.mode).toBe("manual");
   });
 });
 
@@ -225,5 +229,30 @@ describe("relativeTime", () => {
     const now = 1_000_000_000;
     expect(relativeTime(now - 60_000, now)).toBe("1m ago");
     expect(relativeTime(now - 86_400_000, now)).toBe("1d ago");
+  });
+});
+
+describe("manual mode + filter", () => {
+  const sessions = [
+    mk({ name: "alpha" }),
+    mk({ name: "beta" }),
+    mk({ name: "gamma" }),
+    mk({ name: "alpine" })
+  ];
+  // The user's arrangement, deliberately NOT alphabetical or by score.
+  const order = ["gamma", "alpine", "beta", "alpha"];
+
+  it("filters without re-ranking, so the wall stays in the user's order", () => {
+    const model = buildSwitcherModel(sessions, null, "alp", "manual", order);
+    if (model.mode !== "manual") throw new Error("expected manual mode under filter");
+    // Both "alp" matches, in MANUAL order (alpine before alpha) — a score
+    // ranking would put the exact-prefix match first and shuffle the wall.
+    expect(model.rows.map((s) => s.name)).toEqual(["alpine", "alpha"]);
+  });
+
+  it("still score-ranks when the user has not chosen manual order", () => {
+    const model = buildSwitcherModel(sessions, null, "alp", "recent");
+    if (model.mode !== "filter") throw new Error("expected filter mode");
+    expect(model.rows.map((s) => s.name)).toContain("alpha");
   });
 });

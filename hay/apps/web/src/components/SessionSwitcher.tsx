@@ -643,9 +643,13 @@ export const SessionSwitcher = ({
   // current visual sequence on first drag so untouched sessions keep place.
   const moveManual = (from: string | null, to: string) => {
     if (!from || from === to) return;
-    const current = flatNavRef.current.map(sessionKey);
-    const base = manualOrder.length ? manualOrder.slice() : current;
-    // Ensure every visible session is represented before moving.
+    // Seed and extend from EVERY session, never from what is on screen: a
+    // first drag while a filter was active used to seed the order from the
+    // visible matches alone, which silently banished every hidden session to
+    // the end of the wall. The move itself is then computed in the full
+    // order, so "put this next to that" survives clearing the filter.
+    const current = orderedAllKeysRef.current;
+    const base = manualOrder.length ? manualOrder.slice() : current.slice();
     for (const k of current) if (!base.includes(k)) base.push(k);
     const fromIdx = base.indexOf(from);
     const toIdx = base.indexOf(to);
@@ -832,6 +836,13 @@ export const SessionSwitcher = ({
     return m;
   }, [flatNav]);
   // Latest visual order, for reorderManual (defined earlier in the component).
+  // Every session in the current scope, in manual order — the canonical list
+  // reordering works against, regardless of what the filter is showing.
+  const orderedAllKeysRef = useRef<string[]>([]);
+  {
+    const full = buildSwitcherModel(wallSessions, currentRoom, "", "manual", manualOrder);
+    orderedAllKeysRef.current = full.mode === "manual" ? full.rows.map(sessionKey) : [];
+  }
   const flatNavRef = useRef(flatNav);
   flatNavRef.current = flatNav;
 
@@ -1050,6 +1061,22 @@ export const SessionSwitcher = ({
         if (target && interactiveTiles && target.active && target.type !== "port") {
           event.preventDefault();
           setFocusedKey(sessionKey(target));
+        }
+        return;
+      }
+      // ⌥↑/⌥↓ move the selected session in manual order — the keyboard (and
+      // touch-friendly) counterpart to dragging, and the only way to reorder
+      // precisely while a filter hides the neighbours you'd drag past. The
+      // move lands relative to the previous/next VISIBLE match, so it means
+      // the same thing as dropping there.
+      if (event.altKey && !event.metaKey && !event.ctrlKey
+          && (event.key === "ArrowUp" || event.key === "ArrowDown") && sortMode === "manual") {
+        const target = flatNav[kbdIndex];
+        const neighbour = flatNav[kbdIndex + (event.key === "ArrowUp" ? -1 : 1)];
+        if (target && neighbour) {
+          event.preventDefault();
+          moveManual(sessionKey(target), sessionKey(neighbour));
+          setKbdIndex((i) => i + (event.key === "ArrowUp" ? -1 : 1));
         }
         return;
       }
@@ -1782,7 +1809,11 @@ export const SessionSwitcher = ({
               <div className="switcher-empty">No sessions</div>
             ) : (
               <>
-                <p className="switcher-hint">Drag tiles to reorder</p>
+                <p className="switcher-hint">
+                  {filter.trim()
+                    ? "Showing matches in your order — drag one next to another (or ⌥↑/⌥↓); the move applies to the full list"
+                    : "Drag tiles to reorder, or ⌥↑/⌥↓ to move the selected one"}
+                </p>
                 <div className="switcher-grid">{model.rows.map((s) => renderCard(s))}</div>
               </>
             )}

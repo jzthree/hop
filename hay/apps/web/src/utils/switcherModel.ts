@@ -173,9 +173,19 @@ export const buildSwitcherModel = (
   const query = filter.trim();
   if (query) {
     const q = query.toLowerCase();
-    const rows = sessions
+    const matches = sessions.filter((s) => filterScore(s, q) > 0);
+    // Manual mode: filtering NARROWS the wall, it never re-ranks it. Keeping
+    // the user's own order in the filtered view is what makes "find it, then
+    // drag it" work — you can see where a card sits relative to the other
+    // matches, and a drop means "put this one next to that one", which stays
+    // well-defined in the full order even though the sessions between them
+    // are hidden. Score-ranking here would reorder the wall under the user's
+    // hands at the exact moment they were trying to arrange it.
+    if (sortMode === "manual") {
+      return { mode: "manual", rows: orderManually(matches, manualOrder) };
+    }
+    const rows = matches
       .map((s) => ({ s, score: filterScore(s, q) }))
-      .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score || byAttentionThenRecency(a.s, b.s))
       .map((x) => x.s);
     return { mode: "filter", rows };

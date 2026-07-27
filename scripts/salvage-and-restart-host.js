@@ -191,7 +191,23 @@ const releaseLock = () => {
     try { probeResult = fs.readFileSync(probeEnvFile, 'utf8'); } catch (e) {}
     const dirty = /CLAUDECODE=|CLAUDE_CODE_CHILD_SESSION|CLAUDE_CODE_SESSION_ID/.test(probeResult);
     log(`probe env markers present: ${dirty ? 'DIRTY — SCRUB FAILED' : 'clean ✓'}`);
-    log('probe env content:\n' + probeResult);
+    // The probe dumps every CLAUDE* variable, which includes OAuth tokens.
+    // The log is a plain file that gets read, pasted and shared, so print
+    // NAMES and value lengths only — enough to tell a leaked marker from a
+    // scrubbed one without writing a credential to disk in the clear.
+    const redacted = probeResult
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const eq = line.indexOf('=');
+        if (eq < 0) return line;
+        const key = line.slice(0, eq);
+        const len = line.length - eq - 1;
+        return `${key}=<redacted ${len} chars>`;
+      })
+      .join('\n');
+    log('probe env content (values redacted):\n' + redacted);
+    try { fs.unlinkSync(probeEnvFile); } catch (e) { /* best effort */ }
     await api('POST', '/api/sessions/delete', { name: 'EnvProbe' });
 
     log('=== done — reattach with: hop attach <name> ===');

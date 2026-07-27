@@ -772,8 +772,17 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName, explicitIntern
         throw err;
     }
 
-    const savedConfig = getSavedSessionConfig(internalName);
-    const config = savedConfig || getRuntimeSessionMetadata(internalName) || {
+    // Write through EVERY layer a reader can consult. The old code chose one
+    // layer via getSavedSessionConfig (which is workspace-GATED) while every
+    // reader — getEffectiveSessionConfig, reconcile, getSessionDisplayName —
+    // consults the UNGATED store first. A session with a store entry and no
+    // workspace (any session an attach re-registered) therefore kept its
+    // stale name: the rename landed in runtime metadata, the next reconcile
+    // tick copied the stale store name back over it, and the session silently
+    // reverted seconds later. That is the whole recurring rename bug.
+    const storeConfig = getSessionConfig(internalName);
+    const runtimeConfig = getRuntimeSessionMetadata(internalName);
+    const config = storeConfig || runtimeConfig || {
         type: 'terminal',
         createdAt: new Date().toISOString()
     };
@@ -782,11 +791,8 @@ function renameSessionDisplayName(oldDisplayName, newDisplayName, explicitIntern
         displayName: newDisplayName,
         updatedAt: new Date().toISOString()
     };
-    if (savedConfig) {
-        setSessionConfig(internalName, next);
-    } else {
-        rememberRuntimeSessionMetadata(internalName, next);
-    }
+    if (storeConfig) setSessionConfig(internalName, next);
+    rememberRuntimeSessionMetadata(internalName, { ...(runtimeConfig || {}), ...next });
     // Durable copy: the workspace store no-ops without an active workspace
     // (the common case), so the meta file is what actually carries a rename
     // across a daemon restart. Mirrors how createdBy is persisted.
@@ -4823,15 +4829,22 @@ function buildSessionPath(displayName) {
     return `/s/${encodeURIComponent(displayName)}/`;
 }
 
+// Resolve a display name to the session it names. `internalName` is null
+// when NOTHING by that name exists — callers must refuse rather than invent.
+// The old fallback returned the requested name either way (both ternary
+// branches were identical), so an unresolvable name silently became a BRAND
+// NEW empty session: rename a session, connect by its new name before the
+// rename was visible, and you got a phantom shell wearing the new name while
+// the real session kept running unreachable behind the old one.
 function resolveSessionDisplayName(displayName) {
     const resolvedDisplayName = resolveDisplayNameAlias(displayName);
     const internalFromConfig = findInternalSessionName(resolvedDisplayName);
     const fallbackInternalName = toInternalSessionName(resolvedDisplayName);
-    const internalName = internalFromConfig
-        || (fallbackInternalName && hopSessionExists(fallbackInternalName) ? fallbackInternalName : fallbackInternalName);
+    const fallbackExists = !!fallbackInternalName
+        && (hopSessionExists(fallbackInternalName) || !!getEffectiveSessionConfig(fallbackInternalName));
     return {
         displayName: resolvedDisplayName,
-        internalName,
+        internalName: internalFromConfig || (fallbackExists ? fallbackInternalName : null),
         aliasRedirect: resolvedDisplayName !== displayName
     };
 }
@@ -6484,7 +6497,11 @@ async function reconcileExternalRuntimeSessions() {
             // and the borrower falls back to its own — self-healing, and it
             // never touches a running process.
             displayName: (() => {
-                const claimed = savedConfig?.displayName || runtimeConfig?.displayName || durableMeta?.displayName;
+                // Durable meta first: every rename writes it, and it is the
+                // only layer that survives a daemon restart. Preferring a
+                // store/runtime entry here let a stale in-memory name undo a
+                // rename on the very next tick.
+                const claimed = durableMeta?.displayName || savedConfig?.displayName || runtimeConfig?.displayName;
                 if (claimed && claimed !== room.id && runtimeIds.has(toInternalSessionName(claimed) || claimed)) {
                     log(`[rename] "${claimed}" is another live session's name — ${room.id} keeps its own`, YELLOW);
                     return toDisplaySessionName(room.id) || room.id;

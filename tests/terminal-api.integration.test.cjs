@@ -465,3 +465,82 @@ test('incremental output endpoint + grid-backed preview', async () => {
     `/api/terminals/${create.data.id}?killSession=true`, null, userHeaders);
   assert.equal(del.status, 200);
 });
+
+// Regression: the recurring "rename is broken" bug, in both of its halves.
+//
+// Half one — the rename silently reverted. renameSessionDisplayName chose ONE
+// layer to write via the workspace-GATED getSavedSessionConfig, while every
+// reader (getEffectiveSessionConfig, reconcileRuntimeSessions,
+// getSessionDisplayName) consults the UNGATED store first. A session with a
+// store entry and no workspace therefore kept its stale name: the new name
+// landed only in runtime metadata and the next reconcile tick copied the old
+// one back over it, seconds later.
+//
+// Half two — the revert then MANUFACTURED a second session. The UI connects
+// by display name; resolveSessionDisplayName's fallback returned the
+// requested name whether or not anything by that name existed (both ternary
+// branches were identical), so /ws?room=<new name> created a brand new empty
+// session wearing the new name while the real one kept running, unreachable,
+// behind the old one. Both names then resolved to the phantom.
+test('rename sticks across reconcile ticks and never manufactures a session', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions', {
+    name: 'RenameOrigin', type: 'terminal', cwd: tempDir, startRuntime: true
+  });
+  assert.equal(create.status, 200);
+
+  const renamed = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename', {
+    oldName: 'RenameOrigin', newName: 'RenameTarget', internalName: 'RenameOrigin'
+  });
+  assert.equal(renamed.status, 200);
+
+  // Survive several reconcile ticks — the old bug reverted on the first one.
+  const seen = [];
+  for (let i = 0; i < 4; i++) {
+    await delay(1200);
+    const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+    const entry = list.data.sessions.find(s => s.internalName === 'RenameOrigin');
+    seen.push(entry ? entry.displayName : '(missing)');
+  }
+  assert.deepEqual(seen, ['RenameTarget', 'RenameTarget', 'RenameTarget', 'RenameTarget'],
+    `rename must not revert on a reconcile tick, saw: ${seen.join(' → ')}`);
+
+  // The rename must be addressable by its new name, and must NOT have spawned
+  // a second session anywhere.
+  const after = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const byTarget = after.data.sessions.filter(s => s.displayName === 'RenameTarget');
+  assert.equal(byTarget.length, 1, 'exactly one session may hold the new name');
+  assert.equal(byTarget[0].internalName, 'RenameOrigin', 'the ORIGINAL session must be the one wearing it');
+  assert.ok(!after.data.sessions.some(s => s.internalName === 'RenameTarget'),
+    'no phantom session may be created under the new name');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+    { name: 'RenameTarget', internalName: 'RenameOrigin' });
+});
+
+// Regression: connecting by a name nothing owns must REFUSE, not create.
+// This is the mechanism that turned a stale rename into a phantom session —
+// and it is a hazard on its own: any typo'd or stale room name in a client
+// URL silently manufactured an empty shell wearing that name.
+test('websocket attach to an unknown session refuses instead of creating one', async () => {
+  const WebSocket = require('ws');
+  const before = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const beforeCount = before.data.sessions.length;
+
+  const outcome = await new Promise((resolve) => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${state.port}/ws?room=NoSuchSessionHere&name=probe`
+      + `&token=${state.sessionSecret}&cols=80&rows=24`
+    );
+    const done = (v) => { try { ws.close(); } catch (e) { /* already closing */ } resolve(v); };
+    ws.on('open', () => setTimeout(() => done('opened'), 800));
+    ws.on('error', () => done('refused'));
+    ws.on('unexpected-response', () => done('refused'));
+  });
+  assert.equal(outcome, 'refused', 'an unknown room name must not open a session');
+
+  await delay(500);
+  const after = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  assert.ok(!after.data.sessions.some(s => s.internalName === 'NoSuchSessionHere'
+    || s.displayName === 'NoSuchSessionHere'), 'no session may be manufactured by attaching');
+  assert.equal(after.data.sessions.length, beforeCount, 'session count must be unchanged');
+});

@@ -127,8 +127,15 @@ export const filterSessionsByOrigin = (
   return sessions.filter((session) => session.createdBy !== "agent");
 };
 
-/** Group every session by workdir (ports last), each group recency-sorted. */
-const groupByProject = (sessions: SwitcherSession[]): SwitcherGroup[] => {
+/**
+ * Group every session by workdir (ports last). Two orderings:
+ * - stable (Project MODE): groups alphabetical, rows alphabetical — a map of
+ *   your projects that never reshuffles as sessions chatter. Attention shows
+ *   as dots/glow, not as position.
+ * - recency (the Recent mode's tail): groups by latest activity, rows
+ *   attention-first — there, movement IS the signal.
+ */
+const groupByProject = (sessions: SwitcherSession[], stable = false): SwitcherGroup[] => {
   const groupMap = new Map<string, SwitcherSession[]>();
   for (const s of sessions) {
     const label = s.type === "port" ? "Ports" : projectKey(s.cwd);
@@ -136,12 +143,15 @@ const groupByProject = (sessions: SwitcherSession[]): SwitcherGroup[] => {
     if (bucket) bucket.push(s);
     else groupMap.set(label, [s]);
   }
+  const byName = (a: SwitcherSession, b: SwitcherSession) =>
+    (a.displayName || a.name).localeCompare(b.displayName || b.name);
   return Array.from(groupMap.entries())
-    .map(([label, rows]) => ({ label, rows: rows.sort(byAttentionThenRecency) }))
+    .map(([label, rows]) => ({ label, rows: rows.sort(stable ? byName : byAttentionThenRecency) }))
     .sort((a, b) => {
-      // Ports sink to the bottom; other groups by most recent activity.
+      // Ports sink to the bottom in both orderings.
       if (a.label === "Ports") return 1;
       if (b.label === "Ports") return -1;
+      if (stable) return a.label.localeCompare(b.label);
       return Math.max(...b.rows.map(activity)) - Math.max(...a.rows.map(activity));
     });
 };
@@ -193,7 +203,7 @@ export const buildSwitcherModel = (
 
   // Search overrides sort mode; otherwise honor the chosen organization.
   if (sortMode === "project") {
-    return { mode: "project", groups: groupByProject(sessions) };
+    return { mode: "project", groups: groupByProject(sessions, true) };
   }
   if (sortMode === "manual") {
     return { mode: "manual", rows: orderManually(sessions, manualOrder) };

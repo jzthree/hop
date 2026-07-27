@@ -256,3 +256,32 @@ describe("manual mode + filter", () => {
     expect(model.rows.map((s) => s.name)).toContain("alpha");
   });
 });
+
+describe("project mode stability", () => {
+  it("orders groups and rows alphabetically, immune to recency and attention", () => {
+    const sessions = [
+      mk({ name: "zeta", cwd: "/Users/x/Code/bbb", lastActivityAt: 9000, bellUnseen: true }),
+      mk({ name: "alpha", cwd: "/Users/x/Code/bbb", lastActivityAt: 10 }),
+      mk({ name: "mid", cwd: "/Users/x/Code/aaa", lastActivityAt: 5000 })
+    ];
+    const model = buildSwitcherModel(sessions, null, "", "project");
+    if (model.mode !== "project") throw new Error("expected project");
+    // Groups alphabetical — NOT by which project was touched last.
+    expect(model.groups.map((g) => g.label)).toEqual(["~/Code/aaa", "~/Code/bbb"]);
+    // Rows alphabetical — a ringing bell shows as a dot, not as a jump to the top.
+    expect(model.groups[1].rows.map((x) => x.name)).toEqual(["alpha", "zeta"]);
+  });
+
+  it("keeps the Recent mode's tail recency-driven (movement is the signal there)", () => {
+    const sessions = [
+      mk({ name: "me", lastActivityAt: 99999 }),
+      mk({ name: "a1", lastActivityAt: 9000 }), mk({ name: "a2", lastActivityAt: 8000 }), mk({ name: "a3", lastActivityAt: 7000 }),
+      mk({ name: "old-slow", cwd: "/Users/x/Code/p", lastActivityAt: 100 }),
+      mk({ name: "old-fast", cwd: "/Users/x/Code/p", lastActivityAt: 200 })
+    ];
+    const model = buildSwitcherModel(sessions, "me", "");
+    if (model.mode !== "tiers") throw new Error("expected tiers");
+    const g = model.groups.find((x) => x.label === "~/Code/p");
+    expect(g?.rows.map((x) => x.name)).toEqual(["old-fast", "old-slow"]); // recency, not alphabet
+  });
+});

@@ -956,7 +956,7 @@ export const SessionSwitcher = ({
     const onKey = (event: KeyboardEvent) => {
       // While the focused tile owns the keyboard, Escape belongs to the
       // remote app (vim, claude) — unfocus is the ✕ or a click outside.
-      if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
+      if (document.activeElement?.closest?.(".switcher-live-tile, .switcher-focus-tile")) return;
       if (event.key === "Escape") {
         event.preventDefault();
         if (sheet) setSheet(null);
@@ -1115,7 +1115,7 @@ export const SessionSwitcher = ({
         setKbdIndex(-1);
         return;
       }
-      if (document.activeElement?.closest?.(".switcher-focus-tile")) return;
+      if (document.activeElement?.closest?.(".switcher-live-tile, .switcher-focus-tile")) return;
       // ⌘⏎ (Ctrl⏎): focus the selected tile for in-place interaction.
       // Plain Enter stays "switch to session" — the muscle-memory action.
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {

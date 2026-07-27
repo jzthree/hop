@@ -105,7 +105,75 @@ const waitingOnUser = (frame?: PreviewFrame) => !!frame && RESUME_PROMPT_RE.test
 // room's grid (a real terminal), so a tile shows the session's ACTUAL colors
 // instead of the flattened text previews used before.
 type PreviewRun = { t: string; f?: string; b?: string; d?: 1; o?: 1; i?: 1 };
-type PreviewFrame = { text: string; color?: PreviewRun[][] | null };
+type PreviewFrame = { text: string; color?: PreviewRun[][] | null; cols?: number; rows?: number };
+
+// Base font previews render at before scaling. The scale factor normalizes
+// the on-screen size, so this only affects crispness of the downscale.
+const PREVIEW_BASE_FS = 12;
+const PREVIEW_BASE_LH = PREVIEW_BASE_FS * 1.3;
+// Measured advance width of one monospace cell at the base font — resolved
+// lazily because the terminal font stack loads with the page.
+let previewCharW = 0;
+const measurePreviewCharW = () => {
+  if (previewCharW) return previewCharW;
+  const el = document.createElement("span");
+  el.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-size:${PREVIEW_BASE_FS}px;line-height:1`;
+  el.style.fontFamily = "var(--font-terminal)";
+  el.textContent = "0".repeat(100);
+  document.body.appendChild(el);
+  previewCharW = el.getBoundingClientRect().width / 100 || PREVIEW_BASE_FS * 0.6;
+  el.remove();
+  return previewCharW;
+};
+
+// One observer scales every preview box; per-tile observers would be waste.
+const previewScaleObserver = typeof ResizeObserver !== "undefined"
+  ? new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const box = entry.target as HTMLElement;
+        const inner = box.firstElementChild as HTMLElement | null;
+        if (!inner) continue;
+        const w = Number(inner.dataset.w);
+        const h = Number(inner.dataset.h);
+        if (!w || !h) continue;
+        const scale = Math.min(box.clientWidth / w, box.clientHeight / h);
+        inner.style.transform = `scale(${scale})`;
+      }
+    })
+  : null;
+
+// The WHOLE screen, scaled to fit the tile — the same geometry the focused
+// terminal uses (observe-at-active-size, scaled), which is what makes the
+// preview → terminal swap land on the same pixels instead of jumping from a
+// clipped corner to a fitted screen. Rows are padded to the grid height so
+// blank bottom rows keep the aspect honest.
+const ScaledScreen = ({ frame }: { frame: PreviewFrame }) => {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const cols = frame.cols || 80;
+  const rows = frame.rows || 24;
+  const naturalW = Math.round(cols * measurePreviewCharW());
+  const naturalH = Math.round(rows * PREVIEW_BASE_LH);
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box || !previewScaleObserver) return;
+    previewScaleObserver.observe(box);
+    return () => previewScaleObserver.unobserve(box);
+  }, []);
+  const lines = frame.color || [];
+  const padded = lines.length < rows ? [...lines, ...Array.from({ length: rows - lines.length }, () => [] as PreviewRun[])] : lines;
+  return (
+    <div className="switcher-preview-scalebox" ref={boxRef}>
+      <div
+        className="switcher-preview-screen"
+        data-w={naturalW}
+        data-h={naturalH}
+        style={{ width: naturalW, height: naturalH, fontSize: PREVIEW_BASE_FS, lineHeight: `${PREVIEW_BASE_LH}px` }}
+      >
+        {renderPreviewRuns(padded)}
+      </div>
+    </div>
+  );
+};
 
 const renderPreviewRuns = (lines: PreviewRun[][]) =>
   lines.map((runs, y) => (
@@ -144,9 +212,10 @@ const runningApp = (s: SwitcherSession) => {
 // full input, auto-fit to its box, instant rendering, connected as the user
 // (it participates in presence like any client). Every other tile stays a
 // cheap polled text preview, so the XL wall costs one websocket, not nine.
-const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claudeApp, onFullscreen, onUnfocus }: {
+const FocusedTile = ({ wsBase, room, userName, theme, fallbackFrame, fontSize, claudeApp, activeCols, activeRows, onFullscreen, onUnfocus }: {
   wsBase: string; room: string; userName: string; theme: object | undefined;
-  fallback: string; fontSize: number; claudeApp: boolean;
+  fallbackFrame: PreviewFrame | undefined; fontSize: number; claudeApp: boolean;
+  activeCols?: number; activeRows?: number;
   onFullscreen: () => void; onUnfocus: () => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -175,6 +244,8 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claude
     // session are one continuous font, not three.
     const monoStack = getComputedStyle(document.documentElement).getPropertyValue("--font-terminal").trim() || "monospace";
     const term = new Terminal({
+      cols: activeCols && activeCols > 1 ? activeCols : undefined,
+      rows: activeRows && activeRows > 1 ? activeRows : undefined,
       scrollback: 2000,
       fontSize,
       lineHeight: 1.3,
@@ -196,9 +267,10 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claude
         inner.style.transformOrigin = "top left";
       }
     };
-    // Size the local grid to the box before connecting so the attach itself
-    // carries the tile's dimensions.
-    if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
+    // Observe-first: the terminal is born at the session's CURRENT size and
+    // simply scaled into the box — the same geometry as the preview it
+    // replaces, so focusing changes nothing on screen for anyone. The fit
+    // addon is used only when the user takes ownership by typing.
     let claimed = { cols: term.cols, rows: term.rows };
     const sep = wsBase.includes("?") ? "&" : "?";
     // 64KB replay: enough tail for a wall tile, and the snapshot parses ~4x
@@ -305,7 +377,7 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claude
         if (disposed || ws !== sock) return;
         reconnectAttempt = 0;
         setConn("live");
-        sendClaim("attach", true);
+        setTimeout(rescale, 30);
         // Replay keystrokes typed while down — fresh ones only: firing stale
         // input into a shell long after it was typed is worse than losing it
         // (the user has usually retyped by then).
@@ -398,10 +470,15 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claude
         return;
       }
       ws.send(JSON.stringify({ type: "input", data }));
-      // Typing in the tile reasserts its size (typing recency wins the
-      // election). One claim per burst, not per keystroke.
+      // First keystroke = taking ownership: fit the PTY to this tile and
+      // keep reasserting per burst while typing (typing recency wins the
+      // election). Until then the tile only observes.
       const now = Date.now();
-      if (!ownsSize() && now - lastTypeClaimAt > 500) {
+      if (!hasTyped) {
+        hasTyped = true;
+        if (box.clientWidth > 0 && box.clientHeight > 0) fitAddon.fit();
+        sendClaim("attach", true);
+      } else if (!ownsSize() && now - lastTypeClaimAt > 500) {
         lastTypeClaimAt = now;
         sendClaim();
       }
@@ -457,13 +534,16 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claude
     const noteInteraction = () => { interactedAt = Date.now(); };
     // Clicking INTO a tile that lost the size takes it back — the click is
     // as deliberate as the one that focused it.
+    let hasTyped = false;
     const onBoxPointerDown = () => {
       noteInteraction();
-      if (!ownsSize() && !claimPending) sendClaim("attach", true);
+      // Clicking positions the cursor / selects — it is not a request to
+      // resize the shared session. Only typing takes the size.
+      if (hasTyped && !ownsSize() && !claimPending) sendClaim("attach", true);
     };
     box.addEventListener("pointerdown", onBoxPointerDown);
     const retryTimer = window.setInterval(() => {
-      if (!claimPending && !ownsSize() && ws && ws.readyState === WebSocket.OPEN
+      if (hasTyped && !claimPending && !ownsSize() && ws && ws.readyState === WebSocket.OPEN
           && Date.now() - interactedAt < 10_000) {
         sendClaim("attach");
       }
@@ -494,8 +574,14 @@ const FocusedTile = ({ wsBase, room, userName, theme, fallback, fontSize, claude
         <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
         <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
       </div>
-      <div className="switcher-focus-term" ref={boxRef} data-fallback={fallback ? "" : "empty"}>
-        {veiled && <pre className="switcher-focus-veil" aria-hidden="true">{fallback || " "}</pre>}
+      <div className="switcher-focus-term" ref={boxRef} data-fallback={fallbackFrame?.text ? "" : "empty"}>
+        {veiled && (
+          <pre className="switcher-focus-veil" aria-hidden="true">
+            {fallbackFrame?.color?.length && fallbackFrame.cols && fallbackFrame.rows
+              ? <ScaledScreen frame={fallbackFrame} />
+              : (fallbackFrame?.text || " ")}
+          </pre>
+        )}
       </div>
     </div>
   );
@@ -961,7 +1047,9 @@ export const SessionSwitcher = ({
             if (!cancelled && text.trim().length > 0) {
               previewCacheRef.current!.set(key, {
                 text,
-                color: Array.isArray(data.color) ? (data.color as PreviewRun[][]) : null
+                color: Array.isArray(data.color) ? (data.color as PreviewRun[][]) : null,
+                cols: Number.isInteger(data.cols) ? data.cols : undefined,
+                rows: Number.isInteger(data.rows) ? data.rows : undefined
               });
             }
           } catch {
@@ -1518,7 +1606,9 @@ export const SessionSwitcher = ({
             room={key}
             userName={userName || "user"}
             theme={terminalTheme}
-            fallback={preview?.text || " "}
+            fallbackFrame={preview}
+            activeCols={preview?.cols}
+            activeRows={preview?.rows}
             fontSize={parseInt(zoomLevel.fs, 10) || 11}
             claudeApp={appLabel(s) === "claude"}
             onFullscreen={() => onSwitch(s)}
@@ -1526,7 +1616,9 @@ export const SessionSwitcher = ({
           />
         ) : (
           <pre className="switcher-preview" aria-hidden="true">
-            {preview?.color?.length ? renderPreviewRuns(preview.color) : (preview?.text || " ")}
+            {preview?.color?.length && preview.cols && preview.rows
+              ? <ScaledScreen frame={preview} />
+              : (preview?.text || " ")}
           </pre>
         )}
         {snippet && <div className="switcher-card-snippet" title={snippet}>{snippet}</div>}

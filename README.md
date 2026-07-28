@@ -35,6 +35,9 @@ Most users only need the npm install. Source install is mainly for development o
 npm install -g hop2
 ```
 
+npm carries the latest **release**; `main` moves faster. For the newest code,
+use the source install below.
+
 This installs:
 - `hop` — main CLI / daemon / browser terminal entrypoint
 - `hop-mcp` — MCP server exposing Hop terminals and sessions

@@ -35,11 +35,12 @@ Most users only need the npm install. Source install is mainly for development o
 npm install -g hop2
 ```
 
-That installs the last release. Most commits here are fixes, so if you want
-the newest working code:
+That installs the **nightly** — a build from the latest green `main`, which
+is usually what you want here since almost every commit is a fix. To hold
+still on a version that was deliberately cut and used:
 
 ```bash
-npm install -g hop2@next    # nightly build from the latest green main
+npm install -g hop2@stable
 ```
 
 This installs:

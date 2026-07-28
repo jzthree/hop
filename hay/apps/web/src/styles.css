@@ -3604,3 +3604,12 @@ button.primary {
   text-overflow: ellipsis;
 }
 .voice-text.muted { color: var(--ink-muted, #888); }
+
+/* Live-tile viewer/agent presence (full-screen footer parity). */
+.switcher-live-chrome .switcher-live-viewers {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  padding: 0 4px;
+  white-space: nowrap;
+}

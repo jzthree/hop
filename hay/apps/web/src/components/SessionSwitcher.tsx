@@ -260,6 +260,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const kbdEnhancedRef = useRef(false);
   // null = watching; "live"/"down" = connected state for the chrome.
   const [conn, setConn] = useState<"live" | "down" | null>(null);
+  // Who else is attached (full-screen parity: the viewers/agent display).
+  const [viewers, setViewers] = useState<Array<{ name: string }>>([]);
   const claudeAppRef = useRef(claudeApp);
   claudeAppRef.current = claudeApp;
   const liveRef = useRef(live);
@@ -585,6 +587,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
               term.resize(m.cols, m.rows);
               window.setTimeout(() => rescaleRef.current(), 30);
             }
+          } else if (m.type === "presence" && Array.isArray(m.clients)) {
+            setViewers(m.clients.map((c: { name?: string }) => ({ name: String(c.name || "viewer") })));
           }
         } catch { /* non-JSON frame */ }
       };
@@ -642,6 +646,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       term.options.disableStdin = true;
       term.options.cursorBlink = false;
       setConn(null);
+      setViewers([]);
       term.blur();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -659,6 +664,15 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
           <span className={"switcher-focus-label" + (conn === "down" ? " down" : "")}>
             {conn === "down" ? "reconnecting…" : "live"}
           </span>
+          {viewers.length > 0 && (
+            <span
+              className="switcher-live-viewers"
+              title={viewers.map((v) => v.name).join(", ")}
+            >
+              {viewers.some((v) => /agent|hopa|\(pane\)/i.test(v.name)) ? "🤖 " : ""}
+              {viewers.length} 👁
+            </span>
+          )}
           <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
           <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
         </div>

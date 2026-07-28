@@ -402,6 +402,9 @@ const App = () => {
     // /sessions here so the switcher grid is the first paint on EVERY device,
     // with the freshest session already connecting underneath.
     if (new URLSearchParams(window.location.search).has("home")) return true;
+    // The URL remembers the window state: refreshing while the wall was open
+    // comes back to the wall, not to a surprise full screen.
+    if (new URLSearchParams(window.location.search).get("view") === "wall") return true;
     return isMobileDevice() && !window.location.pathname.startsWith("/s/");
   });
   const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
@@ -2469,8 +2472,32 @@ const App = () => {
     };
   }, []);
 
+  // Wall state ⇄ URL. Opening the wall PUSHES ?view=wall (so the browser
+  // back button closes it — the native gesture on mobile); closing strips
+  // the param in place. Session-path pushes made while the wall is open
+  // (tile focus moving "current") preserve the param via buildStatePath.
+  useEffect(() => {
+    // Only when the wall overlays a session: on the hub the wall IS the page
+    // and needs no marker (and must not grow history entries at load).
+    if (!isEmbeddedInHop() || !session) return;
+    const params = new URLSearchParams(window.location.search);
+    const inUrl = params.get("view") === "wall";
+    if (switcherOpen && !inUrl) {
+      params.set("view", "wall");
+      window.history.pushState({}, "", window.location.pathname + "?" + params.toString());
+    } else if (!switcherOpen && inUrl) {
+      params.delete("view");
+      const qs = params.toString();
+      window.history.replaceState({}, "", window.location.pathname + (qs ? "?" + qs : ""));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [switcherOpen]);
+
   useEffect(() => {
     const handlePopState = () => {
+      // Back/forward move wall state with the URL they restore.
+      const wallInUrl = new URLSearchParams(window.location.search).get("view") === "wall";
+      setSwitcherOpen(wallInUrl);
       const nextRoom = getLocationRoom();
       const nextName =
         new URLSearchParams(window.location.search).get("name") ??
@@ -2780,7 +2807,7 @@ const App = () => {
     setRoom(targetRoom);
     setSessionLabel(nextSession.displayName || nextSession.name);
     setSession((current) => ({ name: current?.name ?? name.trim() ?? "User", room: targetRoom }));
-    window.history.pushState({}, "", buildSessionPath(targetRoom));
+    window.history.pushState({}, "", buildSessionPath(targetRoom) + "?view=wall");
   };
 
   const switchSession = (nextSession: SessionInfo) => {

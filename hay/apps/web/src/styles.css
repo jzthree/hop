@@ -918,34 +918,48 @@ button.primary {
   overflow: hidden !important;
 }
 
-/* Desktop: the viewport is xterm's real scroll container, so un-hiding its
-   overflow gives a native, draggable scrollbar over the scrollback for free.
-   Styled thin + translucent so it reads as a handle, not chrome. Mobile keeps
-   overflow hidden — touch scrolling is handled by the momentum code. */
+/* Desktop scrollback indicator: a CUSTOM overlay scrollbar. Native overlay
+   bars can't be styled, and styling ::-webkit-scrollbar switches Chrome to
+   classic bars that reserve layout width — so the viewport keeps its native
+   bar hidden and a floating semi-transparent thumb overlays the text
+   instead: zero layout impact, always draggable, visible whenever
+   scrollback exists. */
 @media (hover: hover) and (pointer: fine) {
   .terminal-frame .xterm-viewport {
     overflow-y: auto !important;
-    scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--terminal-fg, #888) 30%, transparent) transparent;
+    scrollbar-width: none;
   }
   .terminal-frame .xterm-viewport::-webkit-scrollbar {
-    width: 10px;
+    width: 0;
+    height: 0;
   }
-  .terminal-frame .xterm-viewport::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .terminal-frame .xterm-viewport::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, var(--terminal-fg, #888) 28%, transparent);
-    border-radius: 5px;
-    border: 2px solid transparent;
-    background-clip: content-box;
-  }
-  .terminal-frame .xterm-viewport::-webkit-scrollbar-thumb:hover {
-    background: color-mix(in srgb, var(--terminal-fg, #888) 50%, transparent);
-    border-radius: 5px;
-    border: 2px solid transparent;
-    background-clip: content-box;
-  }
+}
+.term-scrollbar {
+  position: absolute;
+  top: 6px;
+  right: 3px;
+  bottom: 6px;
+  width: 12px;
+  z-index: 30;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.term-scrollbar.visible {
+  opacity: 1;
+}
+.term-scrollbar-thumb {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  border-radius: 5px;
+  min-height: 24px;
+  background: color-mix(in srgb, var(--terminal-fg, #888) 30%, transparent);
+  pointer-events: auto;
+}
+.term-scrollbar-thumb:hover,
+.term-scrollbar.dragging .term-scrollbar-thumb {
+  background: color-mix(in srgb, var(--terminal-fg, #888) 55%, transparent);
 }
 
 .terminal-frame .xterm-screen {
@@ -2194,10 +2208,12 @@ button.primary {
 }
 
 /* The wall's order freezes while open — a session producing output RIGHT NOW
-   signals in place with a tinted ring instead of jumping to the top. */
+   signals in place with a tinted ring instead of jumping to the top. GREEN,
+   deliberately: purple always means "current/focused", green means "alive".
+   Three purple-ish rings (current, focused, active-now) were unreadable. */
 .switcher-card.active-now {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+  border-color: color-mix(in srgb, #22a06b 60%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, #22a06b 30%, transparent);
 }
 
 .switcher-card.new {

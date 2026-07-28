@@ -511,6 +511,10 @@ const App = () => {
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
   const userScrolledUpRef = useRef(false);
+  // Custom overlay scrollbar (native overlay bars can't be styled, and styled
+  // webkit bars reserve layout width): a floating semi-transparent thumb.
+  const termScrollbarRef = useRef<HTMLDivElement | null>(null);
+  const termScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
   // Whether the remote app is on the alternate screen (vim/less/Claude fullscreen).
   // Seeded from the server snapshot (message.alternateScreen) and kept live via the
   // xterm ?h/?l CSI handlers below. The alt-screen buffer has no scrollback, so a
@@ -1708,11 +1712,63 @@ const App = () => {
     // Track user scroll to implement follow-mode:
     // Auto-scroll stays on until the user scrolls up, and resumes when they scroll back to bottom.
     const xtermViewport = containerRef.current.querySelector('.xterm-viewport');
+    // Overlay scrollbar sync: thumb geometry from the viewport's scroll
+    // metrics. Shown only when scrollback exists; content growth doesn't fire
+    // 'scroll', so a light interval catches buffer growth too.
+    const syncOverlayScrollbar = () => {
+      const el = xtermViewport as HTMLElement | null;
+      const track = termScrollbarRef.current;
+      const thumb = termScrollbarThumbRef.current;
+      if (!el || !track || !thumb) return;
+      const h = el.scrollHeight;
+      const ch = el.clientHeight;
+      if (h <= ch + 4) {
+        track.classList.remove("visible");
+        return;
+      }
+      track.classList.add("visible");
+      const trackH = track.clientHeight;
+      const thumbH = Math.max(24, Math.round((ch / h) * trackH));
+      const top = Math.round((el.scrollTop / (h - ch)) * (trackH - thumbH));
+      thumb.style.height = thumbH + "px";
+      thumb.style.transform = "translateY(" + top + "px)";
+    };
+    const overlayInterval = window.setInterval(syncOverlayScrollbar, 700);
+    (terminal as any).__overlayScrollbarCleanup = () => window.clearInterval(overlayInterval);
+    // Dragging the thumb scrolls the viewport 1:1 in track space.
+    const thumbEl = termScrollbarThumbRef.current;
+    if (thumbEl && xtermViewport) {
+      thumbEl.addEventListener("pointerdown", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const el = xtermViewport as HTMLElement;
+        const track = termScrollbarRef.current;
+        if (!track) return;
+        track.classList.add("dragging");
+        const startY = (ev as PointerEvent).clientY;
+        const startTop = el.scrollTop;
+        const onMove = (mv: PointerEvent) => {
+          const trackH = track.clientHeight;
+          const h = el.scrollHeight;
+          const ch = el.clientHeight;
+          const thumbH = Math.max(24, Math.round((ch / h) * trackH));
+          el.scrollTop = startTop + ((mv.clientY - startY) / Math.max(1, trackH - thumbH)) * (h - ch);
+        };
+        const onUp = () => {
+          track.classList.remove("dragging");
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+      });
+    }
     if (xtermViewport) {
       xtermViewport.addEventListener('scroll', () => {
         const el = xtermViewport as HTMLElement;
         const atBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 5;
         userScrolledUpRef.current = !atBottom;
+        syncOverlayScrollbar();
         // Hitting the very TOP of a bounded-replay buffer means the user
         // wants more history than the fast snapshot carried — offer the
         // full-depth reload.
@@ -2280,6 +2336,10 @@ const App = () => {
         if ((terminal as any).__wheelCleanup) {
           (terminal as any).__wheelCleanup();
           (terminal as any).__wheelCleanup = null;
+        }
+        if ((terminal as any).__overlayScrollbarCleanup) {
+          (terminal as any).__overlayScrollbarCleanup();
+          (terminal as any).__overlayScrollbarCleanup = null;
         }
         terminal.dispose();
         termRef.current = null;
@@ -3583,6 +3643,11 @@ const App = () => {
                   <div className="terminal-scroll">
                     <div className="terminal-inner" ref={containerRef} />
                   </div>
+                  {!isMobile && (
+                    <div className="term-scrollbar" ref={termScrollbarRef} aria-hidden="true">
+                      <div className="term-scrollbar-thumb" ref={termScrollbarThumbRef} />
+                    </div>
+                  )}
                   {dropActive && (
                     <div className="terminal-drop-overlay" aria-hidden="true">
                       <span>{originalPathHint(platformString)}</span>

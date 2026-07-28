@@ -1709,50 +1709,61 @@ const App = () => {
       resizeObserver.observe(scrollContainer);
     }
 
-    // Track user scroll to implement follow-mode:
-    // Auto-scroll stays on until the user scrolls up, and resumes when they scroll back to bottom.
-    const xtermViewport = containerRef.current.querySelector('.xterm-viewport');
-    // Overlay scrollbar sync: thumb geometry from the viewport's scroll
-    // metrics. Shown only when scrollback exists; content growth doesn't fire
-    // 'scroll', so a light interval catches buffer growth too.
+    // Follow-mode + overlay scrollbar, driven by the BUFFER, not the DOM.
+    // Under the WebGL renderer xterm's .xterm-viewport never actually
+    // scrolls (scrollHeight stays equal to clientHeight — verified in a live
+    // probe), so anything keyed to DOM scroll events silently dies whenever
+    // WebGL is on: follow-mode detection, the history pill, and any native
+    // scrollbar. viewportY/baseY are the truth on every renderer.
+    const scrollState = () => {
+      const buf = terminal.buffer.active;
+      return { len: buf.length, rows: terminal.rows, y: buf.viewportY, base: buf.baseY };
+    };
     const syncOverlayScrollbar = () => {
-      const el = xtermViewport as HTMLElement | null;
       const track = termScrollbarRef.current;
       const thumb = termScrollbarThumbRef.current;
-      if (!el || !track || !thumb) return;
-      const h = el.scrollHeight;
-      const ch = el.clientHeight;
-      if (h <= ch + 4) {
+      if (!track || !thumb) return;
+      const { len, rows, y } = scrollState();
+      if (len <= rows + 1) {
         track.classList.remove("visible");
         return;
       }
       track.classList.add("visible");
       const trackH = track.clientHeight;
-      const thumbH = Math.max(24, Math.round((ch / h) * trackH));
-      const top = Math.round((el.scrollTop / (h - ch)) * (trackH - thumbH));
+      const thumbH = Math.max(24, Math.round((rows / len) * trackH));
+      const top = Math.round((y / Math.max(1, len - rows)) * (trackH - thumbH));
       thumb.style.height = thumbH + "px";
       thumb.style.transform = "translateY(" + top + "px)";
     };
+    const onBufferScroll = () => {
+      const { y, base } = scrollState();
+      userScrolledUpRef.current = y < base;
+      // Hitting the very TOP of a bounded-replay buffer means the user wants
+      // more history than the fast snapshot carried — offer the full reload.
+      setHistoryPillVisible(y === 0 && snapshotWasCappedRef.current);
+      syncOverlayScrollbar();
+    };
+    terminal.onScroll(onBufferScroll);
+    // Buffer growth while following doesn't always fire onScroll — a light
+    // interval keeps the thumb honest.
     const overlayInterval = window.setInterval(syncOverlayScrollbar, 700);
     (terminal as any).__overlayScrollbarCleanup = () => window.clearInterval(overlayInterval);
-    // Dragging the thumb scrolls the viewport 1:1 in track space.
     const thumbEl = termScrollbarThumbRef.current;
-    if (thumbEl && xtermViewport) {
+    if (thumbEl) {
       thumbEl.addEventListener("pointerdown", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        const el = xtermViewport as HTMLElement;
         const track = termScrollbarRef.current;
         if (!track) return;
         track.classList.add("dragging");
         const startY = (ev as PointerEvent).clientY;
-        const startTop = el.scrollTop;
+        const startLine = scrollState().y;
         const onMove = (mv: PointerEvent) => {
+          const { len, rows } = scrollState();
           const trackH = track.clientHeight;
-          const h = el.scrollHeight;
-          const ch = el.clientHeight;
-          const thumbH = Math.max(24, Math.round((ch / h) * trackH));
-          el.scrollTop = startTop + ((mv.clientY - startY) / Math.max(1, trackH - thumbH)) * (h - ch);
+          const thumbH = Math.max(24, Math.round((rows / len) * trackH));
+          const line = startLine + ((mv.clientY - startY) / Math.max(1, trackH - thumbH)) * (len - rows);
+          terminal.scrollToLine(Math.max(0, Math.min(len - rows, Math.round(line))));
         };
         const onUp = () => {
           track.classList.remove("dragging");
@@ -1761,18 +1772,6 @@ const App = () => {
         };
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);
-      });
-    }
-    if (xtermViewport) {
-      xtermViewport.addEventListener('scroll', () => {
-        const el = xtermViewport as HTMLElement;
-        const atBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 5;
-        userScrolledUpRef.current = !atBottom;
-        syncOverlayScrollbar();
-        // Hitting the very TOP of a bounded-replay buffer means the user
-        // wants more history than the fast snapshot carried — offer the
-        // full-depth reload.
-        setHistoryPillVisible(el.scrollTop <= 2 && snapshotWasCappedRef.current);
       });
     }
 

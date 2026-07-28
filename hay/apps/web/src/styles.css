@@ -3564,3 +3564,43 @@ button.primary {
   font-size: 11px;
 }
 .switcher-live-chrome button:hover { color: var(--ink); }
+
+/* Voice input (hold Space in a Claude session): floating listen indicator. */
+.voice-overlay {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 70%;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel, #1b1b1f) 88%, transparent);
+  border: 1px solid var(--line, #333);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+.voice-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e5484d;
+  animation: voice-pulse 1.1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.75); }
+}
+.voice-text {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink, #ddd);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.voice-text.muted { color: var(--ink-muted, #888); }

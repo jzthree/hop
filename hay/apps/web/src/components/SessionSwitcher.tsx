@@ -132,6 +132,10 @@ type PreviewFrame = { text: string; color?: PreviewRun[][] | null; cols?: number
 // Base font previews render at before scaling. The scale factor normalizes
 // the on-screen size, so this only affects crispness of the downscale.
 const PREVIEW_BASE_FS = 12;
+// Fewest columns a tile will reflow a session to. Below this a Claude
+// composer and code blocks start wrapping into noise, so the font shrinks
+// instead of the session getting narrower.
+const MIN_TILE_COLS = 76;
 const PREVIEW_BASE_LH = PREVIEW_BASE_FS * 1.3;
 // Measured advance width of one monospace cell at the base font — resolved
 // lazily because the terminal font stack loads with the page.
@@ -319,22 +323,31 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       let w = screen.offsetWidth;
       let h = screen.offsetHeight;
       if (w <= 0 || h <= 0) return;
-      // The font that fills the width, computed WITHOUT feedback: from the
-      // column count and the face's measured width-per-font-px ratio. The
-      // previous form (newFont = currentFont x measuredScale) fed lagging
-      // renderer metrics back into themselves - a wall opened on a wide
-      // full-screen session shrank the font before autofit brought the cols
-      // down, and the loop could settle at the tiny font instead of
-      // recovering. This form has one fixed point and no oscillation.
+      // FONT IS A PROPERTY OF THE TILE, NOT OF THE SESSION. Deriving it from
+      // the session's column count (the previous attempt) made the wall a
+      // patchwork: a narrow session rendered giant, and one fresh from full
+      // screen at ~180 columns rendered microscopic. Every tile at a given
+      // zoom is the SAME SIZE, so a font derived from the box is uniform
+      // across the wall by construction — and it feeds nothing back, since
+      // the box doesn't depend on the font.
+      //
+      // The font is the largest that still gives the session a workable
+      // width (MIN_TILE_COLS), capped so text never becomes cartoonish.
+      // Autofit then claims cols to match this font, so the rendered screen
+      // lands at ~exactly the tile width and the transform is ~1.
       const ratio = measurePreviewCharW() / PREVIEW_BASE_FS;
       const font = term.options.fontSize || PREVIEW_BASE_FS;
-      const wanted = Math.max(5, Math.min(30, boxW / term.cols / ratio));
+      const wanted = Math.max(6.5, Math.min(13, boxW / (MIN_TILE_COLS * ratio)));
       if (Math.abs(wanted - font) >= 0.5) {
         term.options.fontSize = wanted;
         requestAnimationFrame(() => rescaleRef.current());
         return;
       }
-      const scale = boxW / w;
+      // Fill the width, but bounded: a session the wall hasn't (or can't)
+      // resized — exempt, or a claim still in flight — is corrected toward
+      // the tile width without letting one odd session render at a wildly
+      // different apparent size than its neighbours.
+      const scale = Math.max(0.45, Math.min(1.25, boxW / w));
       inner.style.transformOrigin = "bottom left";
       inner.style.transform = "scale(" + scale + ")";
     };
@@ -394,7 +407,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   // user flag; entering a session full-screen re-asserts that surface's size
   // on the way back (the wall-close deliberate attach). Local-CLI sessions
   // are exempt: a real terminal window's size is physical truth.
-  const lastClaimRef = useRef<{ cols: number; rows: number } | null>(null);
+  const lastClaimRef = useRef<{ cols: number; rows: number; at: number } | null>(null);
   const claimTileSize = (onDone?: () => void) => {
     if (!claimSize) return;
     const fitAddon = fitRef.current;
@@ -402,8 +415,16 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     if (!fitAddon || !boxEl || boxEl.clientWidth < 60 || boxEl.clientHeight < 40) return;
     const dims = fitAddon.proposeDimensions();
     if (!dims?.cols || !dims?.rows || dims.cols < 20 || dims.rows < 5) return;
+    // Dedupe on the SESSION's size, never on what we last sent. Keying the
+    // skip to the last claim meant: visit the wall (claim 85 cols), leave to
+    // full screen (which re-asserts ~180), come back — the tile proposes 85
+    // again, matches the remembered claim, and returns without claiming. The
+    // session stayed at full-screen width and the tile rendered it as a wall
+    // of microscopic text, permanently, no matter what you typed.
     const prev = lastClaimRef.current;
-    if (prev && prev.cols === dims.cols && prev.rows === dims.rows) return;
+    const repeatSoon = prev && prev.cols === dims.cols && prev.rows === dims.rows
+      && performance.now() - prev.at < 1500;
+    if (repeatSoon) return;
     // CLOSE ENOUGH is the right size. Requiring exact dims made every wall
     // fight every other wall: two browsers whose tile grids differ by a few
     // cells (laptop vs phone, or layout jitter between opens) re-claimed the
@@ -417,11 +438,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       const closeCols = Math.abs(cur.cols - dims.cols) <= Math.max(3, Math.round(dims.cols * 0.15));
       const closeRows = Math.abs(cur.rows - dims.rows) <= Math.max(2, Math.round(dims.rows * 0.15));
       if (closeCols && closeRows) {
-        lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
+        lastClaimRef.current = { cols: dims.cols, rows: dims.rows, at: performance.now() };
         return;
       }
     }
-    lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
+    lastClaimRef.current = { cols: dims.cols, rows: dims.rows, at: performance.now() };
     const sep = wsBase.includes("?") ? "&" : "?";
     // Claim-only socket: no replay, closed as soon as the claim is sent. The
     // watch poll then repaints at the new size.

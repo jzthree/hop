@@ -734,7 +734,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
 
   return (
     <div
-      className="switcher-live-tile"
+      className={"switcher-live-tile" + (live ? " is-live" : "")}
+      // The terminal's own background: the partial-row remainder above the
+      // bottom-anchored screen otherwise shows the CARD's background as a
+      // pale strip — the "space on top".
+      style={{ background: (theme as { background?: string } | undefined)?.background }}
       onClick={live ? (e) => e.stopPropagation() : undefined}
       onPointerDown={live ? (e) => e.stopPropagation() : undefined}
     >

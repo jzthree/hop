@@ -3683,3 +3683,28 @@ button.primary {
   min-width: 26px;
   text-align: center;
 }
+
+/* Tile terminals reserve NO native scrollbar space: FitAddon subtracts the
+   viewport's scrollbar width before proposing columns, so a visible native
+   bar made tiles claim fewer columns than the box truly fits — the session
+   then rendered narrower than its tile (a right-hand gap exactly one
+   scrollbar wide), and entering full screen (which has no such reservation)
+   visibly re-flowed. Hidden bar → width-true fits on both surfaces. */
+.switcher-live-tile .xterm-viewport {
+  overflow-y: auto !important;
+  scrollbar-width: none;
+}
+.switcher-live-tile .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Wheel follows focus, like keys do: only the LIVE tile owns scrolling.
+   Over any other tile the terminal internals are inert to the pointer, so
+   the wheel lands on the wall and scrolls the page — no more dead zones
+   where the page only moved if the cursor found a gap between tiles.
+   Clicks still land on the tile root (which keeps pointer-events), so
+   click-to-focus is untouched. */
+.switcher-live-tile:not(.is-live) .switcher-focus-term {
+  pointer-events: none;
+}

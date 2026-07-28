@@ -1723,8 +1723,16 @@ const App = () => {
       const track = termScrollbarRef.current;
       const thumb = termScrollbarThumbRef.current;
       if (!track || !thumb) return;
+      // When the APP owns scrolling (mouse tracking on — claude, vim — or the
+      // alternate screen), the terminal-level scrollback is not a truthful
+      // view of anything: full-screen apps overwrite in place and their
+      // history in scrollback is torn partial redraws. Dragging into it
+      // "breaks formatting". The scrollbar only exists where it tells the
+      // truth: plain scrollback with the app not intercepting the wheel.
+      const appOwnsScrolling = terminal.modes.mouseTrackingMode !== "none"
+        || terminal.buffer.active.type === "alternate";
       const { len, rows, y } = scrollState();
-      if (len <= rows + 1) {
+      if (appOwnsScrolling || len <= rows + 1) {
         track.classList.remove("visible");
         return;
       }

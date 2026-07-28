@@ -21,7 +21,15 @@
 type TerminalLike = {
   scrollLines: (n: number) => void;
   buffer: { active: { type: string; viewportY: number } };
+  modes?: { mouseTrackingMode?: string };
 };
+
+// Momentum (and scrollback UI generally) is only honest when the TERMINAL
+// owns scrolling. With mouse tracking on, xterm forwards wheel events to the
+// app (claude scrolls its own transcript) — synthetic glide would scroll the
+// terminal viewport into torn scrollback underneath the app.
+const terminalOwnsScrolling = (term: TerminalLike) =>
+  term.buffer.active.type === "normal" && (term.modes?.mouseTrackingMode ?? "none") === "none";
 
 /**
  * Classify a wheel event as a discrete mouse wheel (vs trackpad/magic mouse).
@@ -72,7 +80,7 @@ export const attachScrollFlywheel = (
   const glide = (t: number) => {
     raf = 0;
     const term = getTerm();
-    if (!term || term.buffer.active.type !== "normal" || Math.abs(vel) < 8) return stop();
+    if (!term || !terminalOwnsScrolling(term) || Math.abs(vel) < 8) return stop();
     const dt = lastFrameAt ? Math.min(0.05, (t - lastFrameAt) / 1000) : 0.016;
     lastFrameAt = t;
     carry += vel * dt;
@@ -92,7 +100,7 @@ export const attachScrollFlywheel = (
     if (!term) return;
     // Alt screen or trackpad: no synthetic inertia, and kill any active glide
     // (mode may have flipped mid-glide).
-    if (term.buffer.active.type !== "normal" || !isDiscreteWheel(e)) return stop();
+    if (!terminalOwnsScrolling(term) || !isDiscreteWheel(e)) return stop();
     if (raf) { cancelAnimationFrame(raf); raf = 0; } // wheel resumes: rebuild, don't glide yet
 
     const now = e.timeStamp || performance.now();

@@ -39,7 +39,7 @@ That installs the last release. Most commits here are fixes, so if you want
 the newest working code:
 
 ```bash
-npm install -g hop2@next    # every green commit to main, published automatically
+npm install -g hop2@next    # nightly build from the latest green main
 ```
 
 This installs:

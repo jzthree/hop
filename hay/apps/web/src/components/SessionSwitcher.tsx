@@ -388,7 +388,17 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       try {
         sock.send(JSON.stringify({ type: "resize", cols: dims.cols, rows: dims.rows, claim: "attach", user: true }));
       } catch { /* closing */ }
-      window.setTimeout(() => { try { sock.close(); } catch { /* closed */ } onDone?.(); }, 250);
+      // The election confirms to the winner (active_size) — close on that,
+      // with a timeout fallback, so the repaint chase starts immediately.
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try { sock.close(); } catch { /* closed */ }
+        onDone?.();
+      };
+      sock.onmessage = finish;
+      window.setTimeout(finish, 300);
     };
     sock.onerror = () => { try { sock.close(); } catch { /* closed */ } };
   };
@@ -426,10 +436,20 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
         });
       } catch { /* keep the last frame */ }
     };
-    // Claim first so the very first paint arrives already tile-sized; the
-    // paint 400ms after the claim closes shows the reflowed screen without
-    // waiting a full poll interval.
-    claimRef.current(() => { window.setTimeout(paint, 400); });
+    // Claim first, then CHASE it: poll the grid on a fast schedule until it
+    // reports the claimed dims (the PTY resize → app redraw → grid ingest
+    // pipeline takes a few hundred ms). One straggling 5s poll slot per tile
+    // is what made refits look one-by-one.
+    const settle = (attempt: number) => {
+      if (cancelled) return;
+      const claimed = lastClaimRef.current;
+      const term = termRef.current;
+      if (!claimed || !term) return;
+      if (term.cols === claimed.cols && term.rows === claimed.rows) return;
+      paint();
+      if (attempt < 5) window.setTimeout(() => settle(attempt + 1), 200 + attempt * 250);
+    };
+    claimRef.current(() => { settle(0); });
     paint();
     const id = window.setInterval(paint, LIVETILE_POLL_MS);
     // Tile geometry changes (zoom step, window resize) re-claim, debounced —
@@ -440,7 +460,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       ? new ResizeObserver(() => {
           window.clearTimeout(resizeDebounce);
           resizeDebounce = window.setTimeout(() => {
-            if (!cancelled) claimRef.current(() => { window.setTimeout(paint, 400); });
+            if (!cancelled) claimRef.current(() => { settle(0); });
           }, 350);
         })
       : null;

@@ -11,6 +11,8 @@ import {
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
+import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -276,6 +278,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       cols: activeCols && activeCols > 1 ? activeCols : 80,
       rows: activeRows && activeRows > 1 ? activeRows : 24,
       scrollback: 2000,
+      // Same scroll feel as the full-screen terminal: one wheel notch moves
+      // 4 lines (xterm's default of 1 is the "tiles feel sluggish" report),
+      // Shift+wheel blasts. Momentum is attached below.
+      scrollSensitivity: 4,
+      fastScrollSensitivity: 12,
       fontSize: PREVIEW_BASE_FS,
       lineHeight: 1.3,
       fontFamily: monoStack,
@@ -310,14 +317,18 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       let w = screen.offsetWidth;
       let h = screen.offsetHeight;
       if (w <= 0 || h <= 0) return;
-      const widthScale = boxW / w;
+      // The font that fills the width, computed WITHOUT feedback: from the
+      // column count and the face's measured width-per-font-px ratio. The
+      // previous form (newFont = currentFont x measuredScale) fed lagging
+      // renderer metrics back into themselves - a wall opened on a wide
+      // full-screen session shrank the font before autofit brought the cols
+      // down, and the loop could settle at the tiny font instead of
+      // recovering. This form has one fixed point and no oscillation.
+      const ratio = measurePreviewCharW() / PREVIEW_BASE_FS;
       const font = term.options.fontSize || PREVIEW_BASE_FS;
-      const wanted = Math.max(5, Math.min(30, font * widthScale));
-      if (Math.abs(wanted - font) >= 0.75) {
+      const wanted = Math.max(5, Math.min(30, boxW / term.cols / ratio));
+      if (Math.abs(wanted - font) >= 0.5) {
         term.options.fontSize = wanted;
-        // The renderer re-lays out asynchronously, so measuring now would use
-        // stale cell metrics and leave the tile a few percent oversized (its
-        // right edge clipped). Let the next frame do the fitting.
         requestAnimationFrame(() => rescaleRef.current());
         return;
       }
@@ -358,7 +369,13 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       return true;
     });
     const sub = term.onData((data) => sendInputRef.current?.(data));
+    const detachFlywheel = attachScrollFlywheel(box, () => termRef.current as never, {
+      linesPerNotch: 4,
+      lineHeightPx: () => Math.max(1, ((term as never as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { height?: number } } } } } })._core
+        ?._renderService?.dimensions?.css?.cell?.height) || PREVIEW_BASE_FS * 1.3)
+    });
     return () => {
+      detachFlywheel();
       ro?.disconnect();
       sub.dispose();
       term.dispose();
@@ -502,6 +519,19 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     if (!term || !box) return;
     term.options.disableStdin = false;
     term.options.cursorBlink = true;
+    // GPU rendering for the tile you are actually using — the full-screen
+    // terminal has had it all along, which is most of why a live tile felt
+    // less responsive than full screen. Only the live tile: browsers cap
+    // concurrent WebGL contexts (~16) and a wall can hold more tiles.
+    let webgl: WebglAddon | null = null;
+    try {
+      webgl = new WebglAddon();
+      webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; });
+      term.loadAddon(webgl);
+    } catch {
+      webgl?.dispose();
+      webgl = null;
+    }
     setConn("live");
     const sep = wsBase.includes("?") ? "&" : "?";
     const wsUrl = () =>
@@ -601,6 +631,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     const focusTimer = window.setTimeout(() => { if (terminalMayTakeFocus()) term.focus(); }, 50);
     return () => {
       disposed = true;
+      try { webgl?.dispose(); } catch { /* already gone */ }
+      webgl = null;
       window.clearTimeout(focusTimer);
       window.clearTimeout(reconnectTimer);
       document.removeEventListener("visibilitychange", onVisibility);

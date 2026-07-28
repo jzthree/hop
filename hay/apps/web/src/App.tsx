@@ -1058,7 +1058,10 @@ const App = () => {
   // server maximum instead of the fast bounded snapshot.
   const deepReplayRoomsRef = useRef(new Set<string>());
   const snapshotWasCappedRef = useRef(false);
-  const [historyPillVisible, setHistoryPillVisible] = useState(false);
+  // Set while an automatic deep-history reload is in flight: carries the old
+  // buffer length so the post-reload snapshot can restore the reading
+  // position (old line 0 sits at newLength - oldLength in the new buffer).
+  const deepRestoreRef = useRef<{ room: string; oldLen: number } | null>(null);
   // The ws handler needs the latest fetchSessions (declared later); assigned
   // each render, same pattern as switchSessionRef.
   const fetchSessionsRef = useRef<((o?: { showLoading?: boolean }) => void) | null>(null);
@@ -1256,7 +1259,6 @@ const App = () => {
 
     wsRef.current?.close();
     setStatus("connecting");
-    setHistoryPillVisible(false);
     shouldReconnectRef.current = true;
 
     const ws = new WebSocket(url);
@@ -1367,9 +1369,21 @@ const App = () => {
           // the clear and the repaint one parse pass: no intermediate paint,
           // same clean slate (cursor, SGR attrs, alt-screen and mouse modes
           // all cleared) that reset() gave us.
+          const pendingRestore = deepRestoreRef.current
+            && deepRestoreRef.current.room === activeSessionRoomRef.current
+            ? deepRestoreRef.current : null;
+          deepRestoreRef.current = null;
           if (termRef.current) {
             const t = termRef.current;
             t.write(`\x1bc${message.data}`, () => {
+              if (pendingRestore) {
+                // The user was reading at the top of the OLD buffer; that
+                // content now sits newLen - oldLen lines down. Land there,
+                // not at the bottom — the reload should be invisible.
+                const line = Math.max(0, t.buffer.active.length - pendingRestore.oldLen);
+                t.scrollToLine(line);
+                userScrolledUpRef.current = true;
+              }
               t.scrollToBottom();
               t.refresh(0, t.rows - 1);
             });
@@ -1748,7 +1762,18 @@ const App = () => {
       userScrolledUpRef.current = y < base;
       // Hitting the very TOP of a bounded-replay buffer means the user wants
       // more history than the fast snapshot carried — offer the full reload.
-      setHistoryPillVisible(y === 0 && snapshotWasCappedRef.current);
+      // Top of a capped snapshot: the user wants more history than the fast
+      // snapshot carried. Load it AUTOMATICALLY — a "load full history"
+      // button was chrome for something the scroll gesture already said.
+      if (y === 0 && snapshotWasCappedRef.current) {
+        const room = activeSessionRoomRef.current;
+        if (room && !deepReplayRoomsRef.current.has(room)) {
+          deepReplayRoomsRef.current.add(room);
+          deepRestoreRef.current = { room, oldLen: terminal.buffer.active.length };
+          snapshotWasCappedRef.current = false;
+          setReconnectToken((value) => value + 1);
+        }
+      }
       syncOverlayScrollbar();
     };
     terminal.onScroll(onBufferScroll);
@@ -3666,23 +3691,7 @@ const App = () => {
                       <span className="terminal-loading-label">Loading session…</span>
                     </div>
                   )}
-                  {historyPillVisible && status === "connected" && (
-                    <button
-                      type="button"
-                      className="history-pill"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const room = activeSessionRoomRef.current;
-                        if (!room) return;
-                        deepReplayRoomsRef.current.add(room);
-                        setHistoryPillVisible(false);
-                        pushNotice("Loading full history…");
-                        setReconnectToken((value) => value + 1);
-                      }}
-                    >
-                      ↑ top of fast snapshot — load full history
-                    </button>
-                  )}
+
                   {searchActive && (
                     <div className="terminal-find" onClick={(e) => e.stopPropagation()}>
                       <input

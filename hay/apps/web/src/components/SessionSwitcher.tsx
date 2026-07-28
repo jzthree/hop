@@ -1625,6 +1625,11 @@ export const SessionSwitcher = ({
           if (interactiveTiles && s.active && s.type !== "port" && onTerminalArea) {
             setFocusedKey(key);
             onFocusSession?.(s);
+            // The keyboard selection (accent outline + tinted background)
+            // follows explicit interaction — otherwise it lingers on the
+            // previous current card, reading as a stale current-marker.
+            const idx = flatNav.findIndex((x) => sessionKey(x) === key);
+            if (idx >= 0) setKbdIndex(idx);
           } else handleTap(s);
         }}
         onKeyDown={(e) => {
@@ -1633,6 +1638,8 @@ export const SessionSwitcher = ({
             if ((e.metaKey || e.ctrlKey) && interactiveTiles && s.active && s.type !== "port") {
               setFocusedKey(key);
               onFocusSession?.(s);
+              const idx = flatNav.findIndex((x) => sessionKey(x) === key);
+              if (idx >= 0) setKbdIndex(idx);
             } else handleTap(s);
           }
         }}

@@ -2596,9 +2596,18 @@ const App = () => {
         });
       }
 
-      // Add active sessions that might not be in sessions list
+      // Safety net for an active room the list somehow missed. Match on BOTH
+      // names: keyed only by display name, a rename made this fabricate a
+      // duplicate card under the old name — which is what "the rename didn't
+      // take effect" looked like, while the real card had already updated.
+      const known = new Set<string>();
+      for (const s of data.sessions || []) {
+        if (s.name) known.add(String(s.name));
+        if (s.internalName) known.add(String(s.internalName));
+        if (s.displayName) known.add(String(s.displayName));
+      }
       for (const name of data.active || []) {
-        if (!sessionMap.has(name)) {
+        if (!known.has(name) && !sessionMap.has(name)) {
           sessionMap.set(name, {
             name,
             displayName: name,

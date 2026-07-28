@@ -3284,12 +3284,20 @@ async function listAllSessionEntriesRuntimeFirst() {
     const entries = buildSessionEntries(runtime.sessions, { includeStoredTerminalSessions: true });
     const __t2 = Date.now();
     if (__t2 - __t0 > 200) log(`[perf] sessions: runtime=${__t1-__t0}ms build=${__t2-__t1}ms`, YELLOW);
-    const activeDisplayNames = (Array.isArray(runtime.sessions) ? runtime.sessions : [])
-        .map((entry) => {
-            if (!entry || entry.type === 'port') return null;
-            const config = getEffectiveSessionConfig(entry.name);
-            return config?.displayName || getSessionDisplayName(entry.name) || entry.name;
-        })
+    // Derive the active list from the ENTRIES we just built, so a session's
+    // name is answered by exactly one rule. This used to resolve names
+    // independently via getEffectiveSessionConfig (saved-config-first) while
+    // entries resolve via reconcile (durable-meta-first). The two disagreed
+    // for a moment after a rename, and the client — which merges the active
+    // list by NAME — then invented a second card still wearing the old name.
+    const activeNames = new Set(
+        (Array.isArray(runtime.sessions) ? runtime.sessions : [])
+            .filter((entry) => entry && entry.type !== 'port')
+            .map((entry) => entry.name)
+    );
+    const activeDisplayNames = entries
+        .filter((entry) => entry && entry.type !== 'port' && activeNames.has(entry.internalName))
+        .map((entry) => entry.displayName || entry.internalName)
         .filter(Boolean);
     return { entries, runtimeAvailable: runtime.runtimeAvailable, activeDisplayNames };
 }

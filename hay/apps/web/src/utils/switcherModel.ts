@@ -31,6 +31,9 @@ export type SwitcherSession = {
   parked?: boolean;
   // Archived: process stopped, but reopening resumes the conversation.
   archived?: boolean;
+  // A hop CLI is attached in a real terminal window on the host. The wall
+  // must never resize such a session — that window's size is physical truth.
+  hasLocalCli?: boolean;
 };
 
 export type SessionOriginScope = "user" | "agent" | "all";

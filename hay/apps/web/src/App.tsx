@@ -1047,6 +1047,9 @@ const App = () => {
   // Set by an explicit session switch; the next attach claim carries
   // user:true (deliberate — wins the size election outright on new hosts).
   const deliberateAttachRef = useRef(false);
+  // Mirror of the switcher-open state for callbacks that outlive a render.
+  const switcherOpenRef = useRef(false);
+  switcherOpenRef.current = switcherOpen;
   // Rooms the user asked full history for: their next connect replays the
   // server maximum instead of the fast bounded snapshot.
   const deepReplayRoomsRef = useRef(new Set<string>());
@@ -1474,6 +1477,12 @@ const App = () => {
 
   useEffect(() => {
     if (!session || !terminalReady) {
+      return;
+    }
+    // While the wall is up the full-screen surface has no socket (one client
+    // per tab); the wall-close effect reconnects to whatever session is
+    // current by then — which tile-focus may have changed.
+    if (switcherOpenRef.current) {
       return;
     }
     connect(session);
@@ -2379,7 +2388,8 @@ const App = () => {
           // tests (which inject sessions directly) stayed green.
           tagline: typeof s.tagline === "string" ? s.tagline : undefined,
           parked: s.parked === true,
-          archived: s.archived === true
+          archived: s.archived === true,
+          hasLocalCli: s.hasLocalCli === true
         });
       }
 
@@ -2575,6 +2585,29 @@ const App = () => {
     };
   }, [isMobile, terminalReady, keyboardVisible, keyboardHeight]);
 
+  // The wall's in-place focus: interacting with a tile makes THAT session
+  // current — the CURRENT chip follows, the URL updates, and closing the wall
+  // lands full-screen in the terminal you were just typing in. State-only:
+  // while the wall is open the full-screen socket stays down (one client per
+  // tab); the wall-close deliberate attach performs the actual connect.
+  const focusSessionInPlace = (nextSession: SessionInfo) => {
+    const targetRoom = nextSession.internalName || nextSession.name;
+    if ((session?.room ?? null) === targetRoom) return;
+    const markers = loadSeenMarkers();
+    markers[targetRoom] = { out: nextSession.lastActivityAt || 0, bell: nextSession.bellSeq || 0 };
+    saveSeenMarkers(markers);
+    pendingInputRef.current = [];
+    setPresence([]);
+    setControllerId(null);
+    setClientId(null);
+    setLiveCwd(null);
+    setStatus("connecting");
+    setRoom(targetRoom);
+    setSessionLabel(nextSession.displayName || nextSession.name);
+    setSession((current) => ({ name: current?.name ?? name.trim() ?? "User", room: targetRoom }));
+    window.history.pushState({}, "", buildSessionPath(targetRoom));
+  };
+
   const switchSession = (nextSession: SessionInfo) => {
     const targetRoom = nextSession.internalName || nextSession.name;
     const nextPath = buildSessionPath(targetRoom);
@@ -2633,28 +2666,24 @@ const App = () => {
   // connecting → stay out of its way), and re-picking the SAME session (that
   // also runs the session-change effect, so a token bump would connect twice).
   // Checking the socket's live state distinguishes all three.
-  const wallClosedRoomRef = useRef<string | null>(null);
   useEffect(() => {
     if (!session || !isEmbeddedInHop()) return;
     const ws = wsRef.current;
     const busy = !!ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
     if (switcherOpen) {
       if (busy) {
-        wallClosedRoomRef.current = activeSessionRoomRef.current;
         shouldReconnectRef.current = false;
         try { ws.close(); } catch { /* already closing */ }
       }
-    } else if (wallClosedRoomRef.current) {
-      const closedRoom = wallClosedRoomRef.current;
-      wallClosedRoomRef.current = null;
+    } else {
       shouldReconnectRef.current = true;
       // Closing the wall INTO a session is as deliberate as switching to it:
-      // the full-screen view re-asserts its size on attach. This is also the
-      // healing path for a session whose PTY was shrunk by any other client
-      // while the wall was up — without it, the terminal letterboxes the
-      // small size forever ("does not autofit").
+      // the full-screen view re-asserts its size on attach — the healing path
+      // for a session the wall autofit shrank while it was up. Reconnect to
+      // whatever session is CURRENT now (tile focus may have moved it; the
+      // connect effect was gated while the wall was open).
       deliberateAttachRef.current = true;
-      if (!busy && activeSessionRoomRef.current === closedRoom) setReconnectToken((v) => v + 1);
+      if (!busy) setReconnectToken((v) => v + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [switcherOpen]);
@@ -3146,6 +3175,7 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
+            
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
           />
@@ -3787,6 +3817,7 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
+            onFocusSession={focusSessionInPlace}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {

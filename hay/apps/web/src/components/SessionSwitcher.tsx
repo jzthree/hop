@@ -73,6 +73,9 @@ type Props = {
   // its header. Omitted callbacks render no button.
   // WebSocket base + identity/theme for the XL focused tile (the one
   // interactive terminal in the wall). Absent => XL stays previews-only.
+  // Interacting with a tile makes THAT session current: the chip moves, and
+  // closing the wall lands full-screen in the terminal you were typing in.
+  onFocusSession?: (session: SwitcherSession) => void;
   tileWsBase?: string;
   userName?: string;
   terminalTheme?: object;
@@ -241,9 +244,9 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, activeRows, onFullscreen, onUnfocus }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus }: {
   wsBase: string; room: string; userName: string; theme: object | undefined;
-  live: boolean; claudeApp: boolean; activeCols?: number; activeRows?: number;
+  live: boolean; claudeApp: boolean; claimSize: boolean; activeCols?: number; activeRows?: number;
   onFullscreen: () => void; onUnfocus: () => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -346,6 +349,43 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, theme]);
 
+  // Autofit: while the wall is visible, each tile SIZES its session to the
+  // tile grid — a real reflow, so tile content is readable and fills the
+  // tile, not a scaled postage stamp. Opening the wall (and resizing it) is
+  // a deliberate act, so the claim rides the room's normal election with the
+  // user flag; entering a session full-screen re-asserts that surface's size
+  // on the way back (the wall-close deliberate attach). Local-CLI sessions
+  // are exempt: a real terminal window's size is physical truth.
+  const lastClaimRef = useRef<{ cols: number; rows: number } | null>(null);
+  const claimTileSize = (onDone?: () => void) => {
+    if (!claimSize) return;
+    const fitAddon = fitRef.current;
+    const boxEl = boxRef.current;
+    if (!fitAddon || !boxEl || boxEl.clientWidth < 60 || boxEl.clientHeight < 40) return;
+    const dims = fitAddon.proposeDimensions();
+    if (!dims?.cols || !dims?.rows || dims.cols < 20 || dims.rows < 5) return;
+    const prev = lastClaimRef.current;
+    if (prev && prev.cols === dims.cols && prev.rows === dims.rows) return;
+    lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
+    const sep = wsBase.includes("?") ? "&" : "?";
+    // Claim-only socket: no replay, closed as soon as the claim is sent. The
+    // watch poll then repaints at the new size.
+    const sock = new WebSocket(
+      wsBase + sep + "room=" + encodeURIComponent(room)
+      + "&name=" + encodeURIComponent((userName || "user") + " (wall)")
+      + "&replay=0&cols=" + dims.cols + "&rows=" + dims.rows
+    );
+    sock.onopen = () => {
+      try {
+        sock.send(JSON.stringify({ type: "resize", cols: dims.cols, rows: dims.rows, claim: "attach", user: true }));
+      } catch { /* closing */ }
+      window.setTimeout(() => { try { sock.close(); } catch { /* closed */ } onDone?.(); }, 250);
+    };
+    sock.onerror = () => { try { sock.close(); } catch { /* closed */ } };
+  };
+  const claimRef = useRef(claimTileSize);
+  claimRef.current = claimTileSize;
+
   // Watch mode: full-screen repaints from the daemon grid. One request, one
   // parse pass (RIS + serialized screen), no flicker — the same bytes the
   // live socket would eventually deliver.
@@ -372,19 +412,33 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, activeCols, 
         });
       } catch { /* keep the last frame */ }
     };
+    // Claim first so the very first paint arrives already tile-sized; the
+    // paint 400ms after the claim closes shows the reflowed screen without
+    // waiting a full poll interval.
+    claimRef.current(() => { window.setTimeout(paint, 400); });
     paint();
     const id = window.setInterval(paint, LIVETILE_POLL_MS);
-    return () => { cancelled = true; window.clearInterval(id); };
+    // Tile geometry changes (zoom step, window resize) re-claim, debounced —
+    // "all session tiles autofit when the session view comes up and when
+    // resize happens".
+    let resizeDebounce = 0;
+    const ro = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => {
+          window.clearTimeout(resizeDebounce);
+          resizeDebounce = window.setTimeout(() => {
+            if (!cancelled) claimRef.current(() => { window.setTimeout(paint, 400); });
+          }, 350);
+        })
+      : null;
+    if (boxRef.current) ro?.observe(boxRef.current);
+    return () => { cancelled = true; window.clearInterval(id); window.clearTimeout(resizeDebounce); ro?.disconnect(); };
   }, [live, room]);
 
-  // Live mode: the same terminal, now fed by the room's websocket. A tile is
-  // a WINDOW onto the session, never its size authority: input flows, size
-  // does not. The one live-tested version that claimed (fit + resize on first
-  // keystroke) resized the real PTY to ~tile dimensions, silently shrinking
-  // the session under every other surface — full-screen views letterboxed a
-  // 79-column terminal and full-screen apps drew their prompt at a row the
-  // viewer wasn't looking at. The PTY's size belongs to full-screen clients;
-  // the tile renders whatever the session truly is, scaled to fit.
+  // Live mode: the same terminal, now fed by the room's websocket. Size is
+  // handled by the wall-level autofit claim above (never per-keystroke — an
+  // earlier version that claimed on typing shrank sessions under their other
+  // surfaces with no re-assert path); here input flows and the tile follows
+  // the room's elected size.
   useEffect(() => {
     if (!live) return;
     const term = termRef.current;
@@ -536,6 +590,7 @@ export const SessionSwitcher = ({
   onRefresh,
   onNotice,
   tileWsBase,
+  onFocusSession,
   userName,
   terminalTheme,
   onOpenSettings,
@@ -1079,6 +1134,7 @@ export const SessionSwitcher = ({
           event.preventDefault();
           filterInputRef.current?.blur();
           setFocusedKey(sessionKey(target));
+          onFocusSession?.(target);
         }
         return;
       }
@@ -1498,14 +1554,18 @@ export const SessionSwitcher = ({
           // keyboard into that session ("typing goes to a terminal").
           const el = e.target as HTMLElement | null;
           const onTerminalArea = !!el?.closest?.(".switcher-preview, .switcher-live-tile");
-          if (interactiveTiles && s.active && s.type !== "port" && onTerminalArea) setFocusedKey(key);
-          else handleTap(s);
+          if (interactiveTiles && s.active && s.type !== "port" && onTerminalArea) {
+            setFocusedKey(key);
+            onFocusSession?.(s);
+          } else handleTap(s);
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             // ⌘⏎ focuses the tile; plain Enter switches (mirrors onNavKey).
-            if ((e.metaKey || e.ctrlKey) && interactiveTiles && s.active && s.type !== "port") setFocusedKey(key);
-            else handleTap(s);
+            if ((e.metaKey || e.ctrlKey) && interactiveTiles && s.active && s.type !== "port") {
+              setFocusedKey(key);
+              onFocusSession?.(s);
+            } else handleTap(s);
           }
         }}
         {...pressHandlers(s)}
@@ -1541,6 +1601,7 @@ export const SessionSwitcher = ({
               theme={terminalTheme}
               live={focusedKey === key}
               claudeApp={appLabel(s) === "claude"}
+              claimSize={s.hasLocalCli !== true}
               activeCols={preview?.cols}
               activeRows={preview?.rows}
               onFullscreen={() => onSwitch(s)}

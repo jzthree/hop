@@ -3708,3 +3708,10 @@ button.primary {
 .switcher-live-tile:not(.is-live) .switcher-focus-term {
   pointer-events: none;
 }
+
+/* An inferred agent label reads softer than a decisive one: MCP/hopa origins
+   are facts, a CLAUDECODE guess is a guess. */
+.switcher-chip.agent.inferred {
+  opacity: 0.72;
+  border-style: dashed;
+}

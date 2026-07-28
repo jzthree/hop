@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
+// Announce the interface to the shared MCP core, which stamps it on every
+// request (x-hop-via). A session created here is decisively agent-origin —
+// no environment sniffing involved.
+process.env.HOP_VIA = 'hopa';
+
 // hopa — the agent-facing CLI for hop.
 //
 // Same core as the MCP server: every verb dispatches through

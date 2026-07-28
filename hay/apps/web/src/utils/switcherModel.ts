@@ -24,6 +24,10 @@ export type SwitcherSession = {
   cols?: number;
   rows?: number;
   createdBy?: "user" | "agent";
+  // How the origin was determined: "mcp"/"hopa" are decisive agent
+  // interfaces; "cli-agent-env" was inferred from the environment and can be
+  // wrong in both directions.
+  createdVia?: string | null;
   // Short human-readable line describing the session's work, written by
   // `hop ai tagline`. Absent unless the user has run it.
   tagline?: string;

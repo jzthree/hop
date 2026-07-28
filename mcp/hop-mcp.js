@@ -157,6 +157,11 @@ const SUPPORTED_PROTOCOLS = ['2025-06-18', '2024-11-05'];
 const DEFAULT_PROTOCOL = '2024-11-05';
 const DEFAULT_ACTOR_HEADER = 'x-hop-actor';
 const DEFAULT_ACTOR = 'agent';
+// Which agent interface this is. hopa sets HOP_VIA=hopa at startup; anything
+// else running this core is the MCP server. Both are DECISIVE agent origins
+// (a human never reaches them), unlike the hop CLI's environment guess.
+const VIA_HEADER = 'x-hop-via';
+const DEFAULT_VIA = () => (process.env.HOP_VIA === 'hopa' ? 'hopa' : 'mcp');
 const SERVER_VERSION = '0.2.2';
 const READ_TERMINAL_MODES = ['raw', 'ui', 'readable_raw'];
 const HOPX_TURN_MODES = ['auto', 'raw', 'ui', 'readable_raw'];
@@ -1929,7 +1934,8 @@ function requestJson(method, baseUrl, endpoint, token, actor, body) {
     const payload = body ? JSON.stringify(body) : null;
     const headers = {
       'Accept': 'application/json',
-      [DEFAULT_ACTOR_HEADER]: actor || DEFAULT_ACTOR
+      [DEFAULT_ACTOR_HEADER]: actor || DEFAULT_ACTOR,
+      [VIA_HEADER]: DEFAULT_VIA()
     };
     if (token) {
       headers.Authorization = `Bearer ${token}`;
@@ -2490,7 +2496,8 @@ class TerminalStreamManager {
     const isHttps = url.protocol === 'https:';
     const headers = {
       'Accept': 'text/event-stream',
-      [DEFAULT_ACTOR_HEADER]: actor || DEFAULT_ACTOR
+      [DEFAULT_ACTOR_HEADER]: actor || DEFAULT_ACTOR,
+      [VIA_HEADER]: DEFAULT_VIA()
     };
     if (token) headers.Authorization = `Bearer ${token}`;
 

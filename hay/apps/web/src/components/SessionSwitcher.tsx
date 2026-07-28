@@ -1817,7 +1817,17 @@ export const SessionSwitcher = ({
           <span className="switcher-card-name">{s.displayName}</span>
           {current && <span className="switcher-chip current">CURRENT</span>}
           {originScope === "all" && s.createdBy === "agent" && (
-            <span className="switcher-chip agent">AGENT</span>
+            <span
+              className={"switcher-chip agent" + (s.createdVia === "cli-agent-env" ? " inferred" : "")}
+              title={
+                s.createdVia === "mcp" ? "Started by an agent over MCP"
+                  : s.createdVia === "hopa" ? "Started by an agent via the hopa CLI"
+                  : s.createdVia === "cli-agent-env" ? "Guessed from the hop CLI's environment (CLAUDECODE) — not a dedicated agent interface, so this label can be wrong"
+                  : "Marked as an agent session"
+              }
+            >
+              AGENT{s.createdVia === "cli-agent-env" ? "?" : ""}
+            </span>
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
           {waitingOnUser(preview) && (

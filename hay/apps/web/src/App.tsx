@@ -2582,6 +2582,7 @@ const App = () => {
           foregroundProcess: s.foregroundProcess,
           agentPermitted: s.agentPermitted === true,
           createdBy: s.createdBy === "agent" ? "agent" : "user",
+          createdVia: typeof s.createdVia === "string" ? s.createdVia : null,
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
           rows: Number.isInteger(s.rows) ? s.rows : undefined,
           // These three were silently dropped here, so the switcher never saw

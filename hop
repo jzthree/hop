@@ -4927,6 +4927,17 @@ function getClientIp(req) {
 }
 
 const ACTOR_HEADER = 'x-hop-actor';
+// Provenance of the actor decision. "agent" is decisive when it came from a
+// dedicated agent interface (MCP, hopa) and INFERRED when the plain hop CLI
+// guessed from CLAUDECODE — which is wrong in both directions: a non-Claude
+// agent shelling out to hop reads as human, and a human typing hop inside a
+// Claude session reads as agent. Recording the path makes a wrong label
+// diagnosable instead of mysterious, and lets the UI say how it knows.
+const VIA_HEADER = 'x-hop-via';
+const resolveVia = (req) => {
+    const raw = String(req?.headers?.[VIA_HEADER] || '').toLowerCase();
+    return ['mcp', 'hopa', 'cli-agent-env', 'cli', 'web'].includes(raw) ? raw : null;
+};
 
 function resolveActor(req) {
     return resolveActorFromHeaders(req?.headers || {}, ACTOR_HEADER);
@@ -6391,6 +6402,7 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
             ? opts.autoStart
             : existingConfig?.autoStart,
         createdBy,
+        createdVia: opts.createdVia || existingConfig?.createdVia,
         agentPermitted,
         displayName: displayName || existingConfig?.displayName || toDisplaySessionName(sessionName),
         folderId: opts.folderId !== undefined
@@ -6533,6 +6545,7 @@ async function reconcileExternalRuntimeSessions() {
             startup: savedConfig?.startup || runtimeConfig?.startup,
             autoStart: typeof savedConfig?.autoStart === 'boolean' ? savedConfig.autoStart : runtimeConfig?.autoStart,
             createdBy,
+            createdVia: savedConfig?.createdVia || runtimeConfig?.createdVia || durableMeta?.createdVia,
             agentPermitted: typeof savedConfig?.agentPermitted === 'boolean'
                 ? savedConfig.agentPermitted
                 : (typeof runtimeConfig?.agentPermitted === 'boolean'
@@ -7610,6 +7623,10 @@ function startAuthProxy(authEmitter) {
                 autoStart: s.autoStart,
                 createdAt: s.createdAt,
                 createdBy: s.createdBy || 'user',
+                // How that was decided — see VIA_HEADER. Lets the UI show a
+                // decisive agent origin ("created via MCP") differently from
+                // an inferred one ("guessed from the CLI's environment").
+                createdVia: s.createdVia || null,
                 // Display tagline (hop ai tagline); absent for most sessions.
                 // taglineAt drives the freshness check that skips re-tagging
                 // sessions nothing has happened to.
@@ -7946,6 +7963,7 @@ function startAuthProxy(authEmitter) {
                     // set by MCP/hopa and by the CLI under a claude env) land
                     // in the agent bucket instead of impersonating the human.
                     const actorCreatedBy = resolveActor(req) === 'agent' ? 'agent' : 'user';
+                    const createdVia = resolveVia(req) || (actorCreatedBy === 'agent' ? 'agent-api' : 'web');
                     const displayName = name;
                     const internalName = toInternalSessionName(displayName);
                     if (!internalName || !displayName) {
@@ -7998,6 +8016,7 @@ function startAuthProxy(authEmitter) {
                                 createdAt: new Date().toISOString(),
                                 updatedAt: new Date().toISOString(),
                                 createdBy: actorCreatedBy,
+                                createdVia,
                                 agentPermitted: actorCreatedBy === 'agent',
                                 workspaceName: targetWorkspaceName
                             });
@@ -8026,6 +8045,7 @@ function startAuthProxy(authEmitter) {
                                     createdAt: new Date().toISOString(),
                                     updatedAt: new Date().toISOString(),
                                     createdBy: actorCreatedBy,
+                                createdVia,
                                     agentPermitted: actorCreatedBy === 'agent',
                                     workspaceName: targetWorkspaceName
                                 });
@@ -8043,7 +8063,8 @@ function startAuthProxy(authEmitter) {
                             await ensureExternalRuntimeSession(internalName, cwd, displayName, {
                                 folderId: targetFolderId,
                                 saveDefinition: false,
-                                createdBy: actorCreatedBy
+                                createdBy: actorCreatedBy,
+                                createdVia
                             });
                         } else {
                             getOrCreateSession(internalName, cwd, displayName);
@@ -10477,6 +10498,10 @@ async function callLocalApi(existingTunnel, apiPath, method = 'GET', body = null
         // the agent bucket, not impersonate the human (Mybot/Stella confusion).
         if (process.env.CLAUDECODE === '1' || process.env.CLAUDE_CODE_SESSION_ID) {
             headers['X-Hop-Actor'] = 'agent';
+            // Say WHERE this came from: an env guess, not an agent interface.
+            headers['X-Hop-Via'] = 'cli-agent-env';
+        } else {
+            headers['X-Hop-Via'] = 'cli';
         }
         let payload = null;
         if (body) {

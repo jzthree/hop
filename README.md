@@ -35,8 +35,9 @@ Most users only need the npm install. Source install is mainly for development o
 npm install -g hop2
 ```
 
-npm carries the latest **release**; `main` moves faster. For the newest code,
-use the source install below.
+npm tracks `main`: every commit that passes CI is published automatically, so
+this is the newest working code, not a periodic snapshot. Pin a version with
+`npm install -g hop2@0.12.0` if you need to hold still.
 
 This installs:
 - `hop` — main CLI / daemon / browser terminal entrypoint

@@ -366,14 +366,22 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     if (!dims?.cols || !dims?.rows || dims.cols < 20 || dims.rows < 5) return;
     const prev = lastClaimRef.current;
     if (prev && prev.cols === dims.cols && prev.rows === dims.rows) return;
-    // Already the right size (the common case on wall re-open): send nothing.
-    // A same-size attach still triggers the server's repaint wiggle (a −1/+1
-    // column nudge → two SIGWINCHes into the app), so the smartest resize is
-    // the socket never opened.
+    // CLOSE ENOUGH is the right size. Requiring exact dims made every wall
+    // fight every other wall: two browsers whose tile grids differ by a few
+    // cells (laptop vs phone, or layout jitter between opens) re-claimed the
+    // same sessions back and forth on every open — "the tile shows at
+    // terminal shape, then resizes" forever. Within tolerance the tile just
+    // renders the session scaled (~0.9), which is visually free; a claim is
+    // for sizes that are genuinely foreign (full-screen leftovers), not for
+    // disagreements about rounding.
     const cur = termRef.current;
-    if (cur && cur.cols === dims.cols && cur.rows === dims.rows) {
-      lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
-      return;
+    if (cur) {
+      const closeCols = Math.abs(cur.cols - dims.cols) <= Math.max(3, Math.round(dims.cols * 0.15));
+      const closeRows = Math.abs(cur.rows - dims.rows) <= Math.max(2, Math.round(dims.rows * 0.15));
+      if (closeCols && closeRows) {
+        lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
+        return;
+      }
     }
     lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
     const sep = wsBase.includes("?") ? "&" : "?";
@@ -423,11 +431,6 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
             && (term.cols !== data.cols || term.rows !== data.rows)) {
           term.resize(data.cols, data.rows);
           window.setTimeout(() => rescaleRef.current(), 30);
-          const claimed = lastClaimRef.current;
-          if (claimed && (data.cols !== claimed.cols || data.rows !== claimed.rows)) {
-            lastClaimRef.current = null;
-            claimRef.current(() => { window.setTimeout(paint, 400); });
-          }
         }
         term.write("\x1bc" + data.data, () => {
           const t = termRef.current;

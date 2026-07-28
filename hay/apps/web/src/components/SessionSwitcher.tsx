@@ -167,18 +167,24 @@ const measurePreviewCharW = () => {
   return previewCharW;
 };
 
-// One observer scales every preview box; per-tile observers would be waste.
+// ONE font for the whole wall at a given zoom, derived from the box width —
+// never from any session's geometry. Both live tiles and static previews use
+// this, which is what makes the wall read as one surface instead of a
+// patchwork of magnifications. Sessions wider than the tile crop on the
+// right; narrower ones leave margin. Apparent glyph size never varies.
+const tileFontFor = (boxW: number) =>
+  Math.max(6.5, Math.min(13, boxW / (MIN_TILE_COLS * (measurePreviewCharW() / PREVIEW_BASE_FS))));
+
+// One observer sizes every preview box; per-tile observers would be waste.
 const previewScaleObserver = typeof ResizeObserver !== "undefined"
   ? new ResizeObserver((entries) => {
       for (const entry of entries) {
         const box = entry.target as HTMLElement;
         const inner = box.firstElementChild as HTMLElement | null;
         if (!inner) continue;
-        const w = Number(inner.dataset.w);
-        const h = Number(inner.dataset.h);
-        if (!w || !h) continue;
-        const scale = Math.min(box.clientWidth / w, box.clientHeight / h);
-        inner.style.transform = `scale(${scale})`;
+        const fs2 = tileFontFor(box.clientWidth);
+        inner.style.fontSize = fs2 + "px";
+        inner.style.lineHeight = Math.round(fs2 * 1.3) + "px";
       }
     })
   : null;
@@ -190,10 +196,7 @@ const previewScaleObserver = typeof ResizeObserver !== "undefined"
 // blank bottom rows keep the aspect honest.
 const ScaledScreen = ({ frame }: { frame: PreviewFrame }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
-  const cols = frame.cols || 80;
   const rows = frame.rows || 24;
-  const naturalW = Math.round(cols * measurePreviewCharW());
-  const naturalH = Math.round(rows * PREVIEW_BASE_LH);
   useLayoutEffect(() => {
     const box = boxRef.current;
     if (!box || !previewScaleObserver) return;
@@ -206,9 +209,7 @@ const ScaledScreen = ({ frame }: { frame: PreviewFrame }) => {
     <div className="switcher-preview-scalebox" ref={boxRef}>
       <div
         className="switcher-preview-screen"
-        data-w={naturalW}
-        data-h={naturalH}
-        style={{ width: naturalW, height: naturalH, fontSize: PREVIEW_BASE_FS, lineHeight: `${PREVIEW_BASE_LH}px` }}
+        style={{ fontSize: PREVIEW_BASE_FS, lineHeight: `${PREVIEW_BASE_LH}px` }}
       >
         {renderPreviewRuns(padded)}
       </div>
@@ -368,33 +369,23 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       let w = screen.offsetWidth;
       let h = screen.offsetHeight;
       if (w <= 0 || h <= 0) return;
-      // FONT IS A PROPERTY OF THE TILE, NOT OF THE SESSION. Deriving it from
-      // the session's column count (the previous attempt) made the wall a
-      // patchwork: a narrow session rendered giant, and one fresh from full
-      // screen at ~180 columns rendered microscopic. Every tile at a given
-      // zoom is the SAME SIZE, so a font derived from the box is uniform
-      // across the wall by construction — and it feeds nothing back, since
-      // the box doesn't depend on the font.
-      //
-      // The font is the largest that still gives the session a workable
-      // width (MIN_TILE_COLS), capped so text never becomes cartoonish.
-      // Autofit then claims cols to match this font, so the rendered screen
-      // lands at ~exactly the tile width and the transform is ~1.
-      const ratio = measurePreviewCharW() / PREVIEW_BASE_FS;
+      // ONE font per zoom, from the box alone (tileFontFor) — and NO
+      // per-session transform. The transform was the last variance source:
+      // it rescaled each session by its column count (within the claim
+      // tolerance, far more for foreign sizes), so tiles still showed
+      // different apparent glyph sizes. Now: uniform font, width overflow
+      // crops on the right, underfill leaves margin, bottom stays anchored.
+      void w;
+      void h;
       const font = term.options.fontSize || PREVIEW_BASE_FS;
-      const wanted = Math.max(6.5, Math.min(13, boxW / (MIN_TILE_COLS * ratio)));
-      if (Math.abs(wanted - font) >= 0.5) {
+      const wanted = tileFontFor(boxW);
+      if (Math.abs(wanted - font) >= 0.25) {
         term.options.fontSize = wanted;
         requestAnimationFrame(() => rescaleRef.current());
         return;
       }
-      // Fill the width, but bounded: a session the wall hasn't (or can't)
-      // resized — exempt, or a claim still in flight — is corrected toward
-      // the tile width without letting one odd session render at a wildly
-      // different apparent size than its neighbours.
-      const scale = Math.max(0.45, Math.min(1.25, boxW / w));
       inner.style.transformOrigin = "bottom left";
-      inner.style.transform = "scale(" + scale + ")";
+      inner.style.transform = "";
     };
     rescaleRef.current = rescale;
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(rescale) : null;

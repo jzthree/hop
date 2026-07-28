@@ -732,6 +732,37 @@ export const SessionSwitcher = ({
     }
   };
   const [dragKey, setDragKey] = useState<string | null>(null);
+
+  // Drag auto-scroll: a manual reorder often has to travel past a screenful
+  // of tiles, and HTML5 drag blocks normal scrolling — so while a drag is
+  // near the top/bottom edge, glide the wall's scroll container. Speed ramps
+  // with edge proximity; dragEnter on newly revealed cards keeps reordering
+  // live as the page moves under the drag.
+  useEffect(() => {
+    if (!dragKey) return;
+    let pointerY = -1;
+    let raf = 0;
+    const EDGE = 110;
+    const onDragOver = (e: DragEvent) => { pointerY = e.clientY; };
+    const step = () => {
+      const sc = scrollRef.current;
+      if (sc && pointerY >= 0) {
+        const rect = sc.getBoundingClientRect();
+        if (pointerY < rect.top + EDGE) {
+          sc.scrollTop -= Math.ceil(((rect.top + EDGE - pointerY) / EDGE) * 22);
+        } else if (pointerY > rect.bottom - EDGE) {
+          sc.scrollTop += Math.ceil(((pointerY - (rect.bottom - EDGE)) / EDGE) * 22);
+        }
+      }
+      raf = requestAnimationFrame(step);
+    };
+    window.addEventListener("dragover", onDragOver);
+    raf = requestAnimationFrame(step);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      cancelAnimationFrame(raf);
+    };
+  }, [dragKey]);
   // A focused tile is a live terminal: making the whole card draggable would
   // hijack text selection inside it. So it becomes draggable only while the
   // pointer is down on its HEADER — grab the title bar to move it, drag

@@ -366,6 +366,15 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     if (!dims?.cols || !dims?.rows || dims.cols < 20 || dims.rows < 5) return;
     const prev = lastClaimRef.current;
     if (prev && prev.cols === dims.cols && prev.rows === dims.rows) return;
+    // Already the right size (the common case on wall re-open): send nothing.
+    // A same-size attach still triggers the server's repaint wiggle (a −1/+1
+    // column nudge → two SIGWINCHes into the app), so the smartest resize is
+    // the socket never opened.
+    const cur = termRef.current;
+    if (cur && cur.cols === dims.cols && cur.rows === dims.rows) {
+      lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
+      return;
+    }
     lastClaimRef.current = { cols: dims.cols, rows: dims.rows };
     const sep = wsBase.includes("?") ? "&" : "?";
     // Claim-only socket: no replay, closed as soon as the claim is sent. The
@@ -404,6 +413,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
             && (term.cols !== data.cols || term.rows !== data.rows)) {
           term.resize(data.cols, data.rows);
           window.setTimeout(() => rescaleRef.current(), 30);
+          const claimed = lastClaimRef.current;
+          if (claimed && (data.cols !== claimed.cols || data.rows !== claimed.rows)) {
+            lastClaimRef.current = null;
+            claimRef.current(() => { window.setTimeout(paint, 400); });
+          }
         }
         term.write("\x1bc" + data.data, () => {
           const t = termRef.current;

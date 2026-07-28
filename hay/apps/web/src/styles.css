@@ -3613,3 +3613,44 @@ button.primary {
   padding: 0 4px;
   white-space: nowrap;
 }
+
+/* Live-tile: who else is here, and who is driving. */
+.switcher-live-chrome .switcher-live-viewers {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  padding: 0 4px;
+}
+.switcher-live-chrome .viewer-agent {
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--ink);
+}
+.switcher-live-chrome .switcher-live-driver {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink);
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.switcher-live-chrome .driver-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: voice-pulse 1.2s ease-in-out infinite;
+}

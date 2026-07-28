@@ -3845,8 +3845,15 @@ const App = () => {
                           {isMacPlatform ? "⌘/" : "Ctrl+Shift+/"} keys
                         </button>
                       )}
-                      <span>
-                        {sortedPresence.length} viewer{sortedPresence.length === 1 ? "" : "s"}
+                      <span title={sortedPresence.map((c) => c.name).join(", ")}>
+                        {(() => {
+                          // Someone else typing is the fact worth surfacing —
+                          // a bare viewer count never told you the terminal
+                          // was being driven by another person.
+                          const other = sortedPresence.find((c) => c.id !== clientId && c.typing);
+                          if (other) return `${other.name} is typing…`;
+                          return `${sortedPresence.length} viewer${sortedPresence.length === 1 ? "" : "s"}`;
+                        })()}
                       </span>
                     </>
                   ) : status === "idle" ? (

@@ -136,6 +136,15 @@ const PREVIEW_BASE_FS = 12;
 // composer and code blocks start wrapping into noise, so the font shrinks
 // instead of the session getting narrower.
 const MIN_TILE_COLS = 76;
+
+// A person, drawn — not an eye. A viewer is someone who is HERE, and the
+// emoji eye read as surveillance rather than company.
+const PersonGlyph = () => (
+  <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true" focusable="false">
+    <circle cx="6" cy="3.4" r="2.4" fill="currentColor" />
+    <path d="M1.4 11.2c0-2.6 2.1-4.2 4.6-4.2s4.6 1.6 4.6 4.2z" fill="currentColor" />
+  </svg>
+);
 const PREVIEW_BASE_LH = PREVIEW_BASE_FS * 1.3;
 // Measured advance width of one monospace cell at the base font — resolved
 // lazily because the terminal font stack loads with the page.
@@ -264,8 +273,10 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const kbdEnhancedRef = useRef(false);
   // null = watching; "live"/"down" = connected state for the chrome.
   const [conn, setConn] = useState<"live" | "down" | null>(null);
-  // Who else is attached (full-screen parity: the viewers/agent display).
+  // Who else is attached, and who is currently driving the terminal.
+  const myIdRef = useRef<string | null>(null);
   const [viewers, setViewers] = useState<Array<{ name: string }>>([]);
+  const [driver, setDriver] = useState<{ name: string; color: string } | null>(null);
   const claudeAppRef = useRef(claudeApp);
   claudeAppRef.current = claudeApp;
   const liveRef = useRef(live);
@@ -608,8 +619,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
               term.resize(m.cols, m.rows);
               window.setTimeout(() => rescaleRef.current(), 30);
             }
+          } else if (m.type === "hello") {
+            myIdRef.current = String(m.clientId || "");
           } else if (m.type === "presence" && Array.isArray(m.clients)) {
-            setViewers(m.clients.map((c: { name?: string }) => ({ name: String(c.name || "viewer") })));
+            const others = (m.clients as Array<{ id?: string; name?: string; color?: string; typing?: boolean }>)
+              .filter((c) => String(c.id || "") !== myIdRef.current);
+            setViewers(others.map((c) => ({ name: String(c.name || "viewer") })));
+            const active = others.find((c) => c.typing);
+            setDriver(active ? { name: String(active.name || "someone"), color: String(active.color || "#8b5cf6") } : null);
           }
         } catch { /* non-JSON frame */ }
       };
@@ -668,6 +685,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       term.options.cursorBlink = false;
       setConn(null);
       setViewers([]);
+      setDriver(null);
       term.blur();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -685,13 +703,20 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
           <span className={"switcher-focus-label" + (conn === "down" ? " down" : "")}>
             {conn === "down" ? "reconnecting…" : "live"}
           </span>
+          {driver && (
+            <span className="switcher-live-driver" title={driver.name + " is typing in this session"}>
+              <span className="driver-dot" style={{ background: driver.color }} />
+              {driver.name}
+            </span>
+          )}
           {viewers.length > 0 && (
             <span
               className="switcher-live-viewers"
-              title={viewers.map((v) => v.name).join(", ")}
+              title={viewers.map((v) => v.name).join(", ") + " also connected"}
             >
-              {viewers.some((v) => /agent|hopa|\(pane\)/i.test(v.name)) ? "🤖 " : ""}
-              {viewers.length} 👁
+              <PersonGlyph />
+              {viewers.length}
+              {viewers.some((v) => /agent|hopa|\(pane\)/i.test(v.name)) && <b className="viewer-agent">AI</b>}
             </span>
           )}
           <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>

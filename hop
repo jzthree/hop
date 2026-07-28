@@ -716,9 +716,16 @@ function findInternalSessionName(displayName) {
     return null;
 }
 
+// "In use" means a session ACTUALLY WEARS this name right now, or the name is
+// a live room's id. It must NOT be decided by resolving the alias map: an
+// alias records where an old name USED TO point, and following it here made
+// every name a session ever had permanently unusable. Rename A→B then B→C,
+// and "B" could never be given to anything again — the alias B→C still
+// resolved to a live session, so the name read as taken while nothing
+// displayed it. (Real case: "hop" was unusable for exactly this reason.)
 function isDisplayNameInUse(displayName) {
     if (findInternalSessionName(displayName)) return true;
-    const internalName = toInternalSessionName(resolveDisplayNameAlias(displayName));
+    const internalName = toInternalSessionName(displayName);
     return !!(internalName && hopSessionExists(internalName));
 }
 

@@ -544,3 +544,43 @@ test('websocket attach to an unknown session refuses instead of creating one', a
     || s.displayName === 'NoSuchSessionHere'), 'no session may be manufactured by attaching');
   assert.equal(after.data.sessions.length, beforeCount, 'session count must be unchanged');
 });
+
+// Regression: a name a session USED to have must be reusable.
+//
+// isDisplayNameInUse resolved the candidate through the alias map, so after
+// rename A→B→C the alias B→C still pointed at a live session and "B" read as
+// taken forever — while nothing displayed it. Renaming anything to B failed
+// with 409 "Session name already in use", with no way to free the name short
+// of restarting the daemon.
+test('a display name freed by a later rename can be reused', async () => {
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'AliasOne', type: 'terminal', cwd: tempDir, startRuntime: true });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'AliasTwo', type: 'terminal', cwd: tempDir, startRuntime: true });
+  await delay(600);
+
+  // AliasOne: Freed → Final, leaving the alias "Freed" behind.
+  for (const [from, to] of [['AliasOne', 'Freed'], ['Freed', 'Final']]) {
+    const r = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
+      { oldName: from, newName: to, internalName: 'AliasOne' });
+    assert.equal(r.status, 200, `rename ${from}→${to} failed: ${JSON.stringify(r.data)}`);
+  }
+
+  // "Freed" is now worn by nobody, so another session may take it.
+  const reuse = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
+    { oldName: 'AliasTwo', newName: 'Freed', internalName: 'AliasTwo' });
+  assert.equal(reuse.status, 200, `a freed name must be reusable, got: ${JSON.stringify(reuse.data)}`);
+
+  const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const freed = list.data.sessions.filter(s => s.displayName === 'Freed');
+  assert.equal(freed.length, 1, 'exactly one session may wear the reused name');
+  assert.equal(freed[0].internalName, 'AliasTwo');
+
+  // A name a LIVE session still wears stays protected.
+  const collide = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
+    { oldName: 'Final', newName: 'Freed', internalName: 'AliasOne' });
+  assert.equal(collide.status, 409, 'a name in active use must still be refused');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Final', internalName: 'AliasOne' });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Freed', internalName: 'AliasTwo' });
+});

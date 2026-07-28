@@ -3654,3 +3654,32 @@ button.primary {
   flex-shrink: 0;
   animation: voice-pulse 1.2s ease-in-out infinite;
 }
+
+/* In-tile find bar (⌘F while a live tile owns the keyboard). */
+.switcher-live-chrome .switcher-tile-find {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.switcher-live-chrome .switcher-tile-find input {
+  width: 130px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  outline: none;
+}
+.switcher-live-chrome .switcher-tile-find input:focus {
+  border-color: var(--accent);
+}
+.switcher-live-chrome .switcher-tile-find em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-muted);
+  min-width: 26px;
+  text-align: center;
+}

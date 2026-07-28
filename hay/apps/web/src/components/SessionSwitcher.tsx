@@ -13,6 +13,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
+import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -99,7 +100,9 @@ type Sheet = {
 // Focus moves only on these explicit actions, and nothing else:
 //   → a tile's terminal:  clicking its terminal area, or ⌘⏎ (which blurs the
 //                         filter first — the command legitimizes the steal)
-//   → the filter box:     clicking it, ⌘K (open), ⌘F, or ↑ from the top row
+//   → the filter box:     clicking it, ⌘K (open), ⌘F (unless a live tile
+//                         owns the keyboard — then ⌘F is find-in-that-tile,
+//                         scope follows focus), or ↑ from the top row
 //   → the full screen:    opening a session (the wall closes)
 // Enforcement, not convention: a terminal REFUSES to take focus while any
 // text input holds it (stealOk below), and editing the filter drops any live
@@ -273,6 +276,37 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const kbdEnhancedRef = useRef(false);
   // null = watching; "live"/"down" = connected state for the chrome.
   const [conn, setConn] = useState<"live" | "down" | null>(null);
+  // In-tile find (⌘F while the tile is live): same engine as the full-screen
+  // find bar. Scope follows focus — ⌘F in a live tile searches THIS session;
+  // ⌘F anywhere else is the wall filter, which finds sessions.
+  const [find, setFind] = useState<{ query: string; index: number; total: number } | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findIndexRef = useRef(-1);
+  const runTileFind = (query: string, step = 0) => {
+    const term = termRef.current;
+    if (!term) return;
+    if (!query) {
+      term.clearSelection();
+      findIndexRef.current = -1;
+      setFind((f) => (f ? { ...f, query, index: 0, total: 0 } : f));
+      return;
+    }
+    const matches = collectTerminalMatches(term as never, query);
+    // Fresh query starts at the newest match; steps walk from the last one.
+    const target = step === 0 ? matches.length - 1 : findIndexRef.current + step;
+    const i = selectTerminalMatch(term as never, matches, target, query.length);
+    findIndexRef.current = i;
+    setFind({ query, index: i + 1, total: matches.length });
+  };
+  const closeTileFind = () => {
+    setFind(null);
+    findIndexRef.current = -1;
+    termRef.current?.clearSelection();
+    // Deliberate close returns the keyboard to the tile's terminal.
+    findInputRef.current?.blur();
+    window.setTimeout(() => { if (terminalMayTakeFocus()) termRef.current?.focus(); }, 0);
+  };
+
   // Who else is attached, and who is currently driving the terminal.
   const myIdRef = useRef<string | null>(null);
   const [viewers, setViewers] = useState<Array<{ name: string }>>([]);
@@ -376,8 +410,13 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     term.attachCustomKeyEventHandler((ev) => {
       if (!liveRef.current) return false; // watching: the terminal takes no keys
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "f") {
-        if (ev.type === "keydown") onUnfocusRef.current();
-        return false; // window handler focuses the filter
+        // Scope follows focus: find in THIS terminal. (The wall filter stays
+        // one ⌘K away; ⌘. still unfocuses the tile.)
+        if (ev.type === "keydown") {
+          setFind((f) => f ?? { query: "", index: 0, total: 0 });
+          window.setTimeout(() => findInputRef.current?.focus(), 0);
+        }
+        return false;
       }
       if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey
           && (kbdEnhancedRef.current || claudeAppRef.current)) {
@@ -686,6 +725,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       setConn(null);
       setViewers([]);
       setDriver(null);
+      setFind(null);
+      findIndexRef.current = -1;
       term.blur();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -717,6 +758,23 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
               <PersonGlyph />
               {viewers.length}
               {viewers.some((v) => /agent|hopa|\(pane\)/i.test(v.name)) && <b className="viewer-agent">AI</b>}
+            </span>
+          )}
+          {find && (
+            <span className="switcher-tile-find" onClick={(e) => e.stopPropagation()}>
+              <input
+                ref={findInputRef}
+                value={find.query}
+                placeholder="Find…"
+                onChange={(e) => runTileFind(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Escape") { e.preventDefault(); closeTileFind(); }
+                  else if (e.key === "Enter") { e.preventDefault(); runTileFind(find.query, e.shiftKey ? -1 : 1); }
+                }}
+              />
+              <em>{find.total > 0 ? find.index + "/" + find.total : find.query ? "0" : ""}</em>
+              <button type="button" aria-label="Close find" onClick={closeTileFind}>✕</button>
             </span>
           )}
           <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>

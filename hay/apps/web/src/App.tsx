@@ -12,6 +12,7 @@ import {
 import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
 import { attachScrollFlywheel } from "./utils/scrollFlywheel";
+import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSearch";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -771,43 +772,24 @@ const App = () => {
   };
 
   // ── Scrollback search ──
+  // Shared engine with the live-tile find bar (utils/terminalSearch) — one
+  // search behavior everywhere a terminal is.
   const jumpToSearchMatch = (idx: number, len: number) => {
     const terminal = termRef.current;
     const matches = searchMatchesRef.current;
     if (!terminal || matches.length === 0) return;
-    const i = ((idx % matches.length) + matches.length) % matches.length;
+    const i = selectTerminalMatch(terminal as never, matches, idx, len);
+    if (i < 0) return;
     searchIndexRef.current = i;
-    const m = matches[i];
-    lastMatchPosRef.current = { row: m.row, col: m.col };
-    terminal.select(m.col, m.row, len);
-    const target = Math.max(0, m.row - Math.floor(terminal.rows / 2));
-    const scrollable = terminal as unknown as { scrollToLine?: (line: number) => void };
-    scrollable.scrollToLine?.(target);
+    lastMatchPosRef.current = { row: matches[i].row, col: matches[i].col };
     userScrolledUpRef.current = true; // keep the match in view; don't snap to bottom on output
     setSearchInfo({ index: i + 1, total: matches.length });
   };
 
-  // Scan the whole buffer (scrollback included) for the query. Positions are
-  // absolute buffer rows, valid only until the next output/trim — callers
-  // recompute before navigating.
   const collectMatches = (query: string) => {
     const terminal = termRef.current;
     if (!terminal || !query) return [];
-    const buffer = terminal.buffer.active;
-    const needle = query.toLowerCase();
-    const matches: Array<{ row: number; col: number }> = [];
-    const MAX = 2000;
-    for (let row = 0; row < buffer.length && matches.length < MAX; row++) {
-      const text = (buffer.getLine(row)?.translateToString(true) ?? "").toLowerCase();
-      let from = 0;
-      while (matches.length < MAX) {
-        const idx = text.indexOf(needle, from);
-        if (idx === -1) break;
-        matches.push({ row, col: idx });
-        from = idx + needle.length;
-      }
-    }
-    return matches;
+    return collectTerminalMatches(terminal as never, query);
   };
 
   const runSearch = (query: string) => {

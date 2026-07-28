@@ -3499,7 +3499,12 @@ button.primary {
    terminal renders, which is what makes preview → terminal a swap in place
    rather than a jump from a clipped corner to a fitted screen. */
 .switcher-preview-scalebox {
+  /* Bottom-anchored: the newest terminal lines are the ones worth seeing, so
+     content that overflows the tile is cropped from the TOP. Paired with
+     transform-origin: bottom left in the tile's rescale. */
   position: relative;
+  display: flex;
+  align-items: flex-end;
   width: 100%;
   height: 100%;
   overflow: hidden;

@@ -290,21 +290,40 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     fitRef.current = fit;
     const inner = box.querySelector(".xterm") as HTMLElement | null;
     const rescale = () => {
-      // Measure .xterm-screen, never .xterm: the wrapper is a block div whose
-      // layout width is ALWAYS the tile's width (blocks fill their container),
-      // so a width ratio computed from it is always 1 and only height would
-      // ever scale — wide grids render cropped at the tile edge. The screen
-      // element carries the explicit cols×cellwidth pixel size the renderer
-      // sets, i.e. the terminal's true natural size.
+      // FILL THE WIDTH, SHOW THE BOTTOM. A terminal preview has a strong
+      // reading order: the newest lines are at the bottom and the width is
+      // what makes text legible. The old policy (fit entirely, never magnify,
+      // anchor top-left) got both backwards — a session smaller than its tile
+      // rendered as a postage stamp in a sea of white, and a session taller
+      // than its tile had its NEWEST lines cropped away.
+      //
+      // Magnification changes the FONT, not a transform: upscaling a canvas
+      // blurs, while re-rendering at a larger font is crisp. The transform is
+      // then only the sub-font-size remainder. Hysteresis (0.75px) keeps the
+      // font from oscillating against the resize observer it triggers.
       const screen = box.querySelector(".xterm-screen") as HTMLElement | null;
-      if (!inner || !screen) return;
-      const w = screen.offsetWidth;
-      const h = screen.offsetHeight;
-      if (w > 0 && h > 0 && box.clientWidth > 0 && box.clientHeight > 0) {
-        const scale = Math.min(1, box.clientWidth / w, box.clientHeight / h);
-        inner.style.transform = "scale(" + scale + ")";
-        inner.style.transformOrigin = "top left";
+      const term = termRef.current;
+      if (!inner || !screen || !term) return;
+      const boxW = box.clientWidth;
+      const boxH = box.clientHeight;
+      if (boxW <= 0 || boxH <= 0) return;
+      let w = screen.offsetWidth;
+      let h = screen.offsetHeight;
+      if (w <= 0 || h <= 0) return;
+      const widthScale = boxW / w;
+      const font = term.options.fontSize || PREVIEW_BASE_FS;
+      const wanted = Math.max(5, Math.min(30, font * widthScale));
+      if (Math.abs(wanted - font) >= 0.75) {
+        term.options.fontSize = wanted;
+        // The renderer re-lays out asynchronously, so measuring now would use
+        // stale cell metrics and leave the tile a few percent oversized (its
+        // right edge clipped). Let the next frame do the fitting.
+        requestAnimationFrame(() => rescaleRef.current());
+        return;
       }
+      const scale = boxW / w;
+      inner.style.transformOrigin = "bottom left";
+      inner.style.transform = "scale(" + scale + ")";
     };
     rescaleRef.current = rescale;
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(rescale) : null;

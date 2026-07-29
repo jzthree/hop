@@ -534,7 +534,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
         }
         term.write("\x1bc" + data.data, () => {
           const t = termRef.current;
-          if (t) t.refresh(0, t.rows - 1);
+          if (!t) return;
+          // Pin to the newest line. A repaint can leave the viewport parked
+          // where it was, so the tile showed older rows and the live part of
+          // the session — a Claude composer, a running command — sat below
+          // the fold with nothing indicating it. A preview is a window on
+          // NOW; scrollback belongs to the focused terminal.
+          t.scrollToBottom();
+          t.refresh(0, t.rows - 1);
           rescaleRef.current();
         });
       } catch { /* keep the last frame */ }
@@ -636,7 +643,10 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
           const m = JSON.parse(String(ev.data));
           if (m.type === "snapshot") {
             term.reset();
-            term.write(m.data, () => rescaleRef.current());
+            term.write(m.data, () => {
+              term.scrollToBottom();
+              rescaleRef.current();
+            });
             kbdEnhancedRef.current = typeof m.keyboardEnhanced === "boolean"
               ? m.keyboardEnhanced
               : scanKeyboardProtocol(String(m.data || ""), false);

@@ -3691,8 +3691,16 @@ button.primary {
    scrollbar wide), and entering full screen (which has no such reservation)
    visibly re-flowed. Hidden bar → width-true fits on both surfaces. */
 .switcher-live-tile .xterm-viewport {
-  overflow-y: auto !important;
+  /* A WATCH tile is a snapshot of the live screen — there is nothing to
+     scroll through, and letting it scroll produced a bar that moved the view
+     off the newest output with no way to tell you were adrift. Only the tile
+     you have clicked into (is-live) scrolls, because only that one has a
+     real session's scrollback behind it. */
+  overflow: hidden !important;
   scrollbar-width: none;
+}
+.switcher-live-tile.is-live .xterm-viewport {
+  overflow-y: auto !important;
 }
 .switcher-live-tile .xterm-viewport::-webkit-scrollbar {
   width: 0;

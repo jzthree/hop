@@ -1221,10 +1221,24 @@ export const SessionSwitcher = ({
 
   // Content matches the name filter didn't already surface.
   const extraContentMatches = useMemo(() => {
-    if (model.mode !== "filter") return [];
-    const seen = new Set(model.rows.map(sessionKey));
+    // Content hits surface in EVERY mode under a query. They were rendered
+    // only by the score-ranked filter branch — which Manual mode never uses
+    // (its filter narrows in place) — so anyone living in Manual simply
+    // never saw the terminal-output search they were promised.
+    if (!filter.trim()) return [];
+    const seen = new Set<string>();
+    if (model.mode === "filter") model.rows.forEach((r) => seen.add(sessionKey(r)));
+    else if (model.mode === "manual") {
+      model.rows.forEach((r) => seen.add(sessionKey(r)));
+      model.folders.forEach((f) => f.rows.forEach((r) => seen.add(sessionKey(r))));
+    } else if (model.mode === "project") {
+      model.groups.forEach((g) => g.rows.forEach((r) => seen.add(sessionKey(r))));
+    } else {
+      model.hero.forEach((r) => seen.add(sessionKey(r)));
+      model.groups.forEach((g) => g.rows.forEach((r) => seen.add(sessionKey(r))));
+    }
     return contentMatches.filter((m) => !seen.has(sessionKey(m.session)));
-  }, [model, contentMatches]);
+  }, [model, contentMatches, filter]);
 
   // Flat navigation order = exactly the visual order: heroes, then group rows
   // (and under a filter: name matches, then on-screen content matches).
@@ -1233,7 +1247,7 @@ export const SessionSwitcher = ({
       if (model.mode === "filter") return [...model.rows, ...extraContentMatches.map((m) => m.session)];
       // Folder rows come first because that is their visual order; keyboard
       // ↑/↓ and Enter must traverse what the eye sees, foldered included.
-      if (model.mode === "manual") return [...model.folders.flatMap((f) => f.rows), ...model.rows];
+      if (model.mode === "manual") return [...model.folders.flatMap((f) => f.rows), ...model.rows, ...extraContentMatches.map((m) => m.session)];
       if (model.mode === "project") return model.groups.flatMap((g) => g.rows);
       return [...model.hero, ...model.groups.flatMap((g) => g.rows)];
     },
@@ -2392,6 +2406,35 @@ export const SessionSwitcher = ({
                 {!isCurrentSession(sheetSession) && (
                   <button type="button" onClick={() => handleTap(sheetSession)}>Switch to</button>
                 )}
+                <button
+                  type="button"
+                  onClick={async () => {
+                      setSheet(null);
+                      onNotice("Forking…");
+                      try {
+                        const res = await fetch("/api/sessions/fork", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ internalName: sessionKey(sheetSession) })
+                        });
+                        const data = await res.json().catch(() => ({} as { error?: string; name?: string; kind?: string }));
+                        if (!res.ok) {
+                          onNotice(data.error || "Fork failed");
+                          return;
+                        }
+                        onNotice(
+                          data.kind === "claude" ? `Forked conversation → ${data.name}`
+                            : data.kind === "codex" ? `${data.name} opened — pick the conversation to resume`
+                            : `Forked → ${data.name} (new shell, same directory)`
+                        );
+                        onRefresh();
+                    } catch {
+                      onNotice("Fork failed");
+                    }
+                  }}
+                >
+                  Fork session
+                </button>
                 <button
                   type="button"
                   onClick={() => {

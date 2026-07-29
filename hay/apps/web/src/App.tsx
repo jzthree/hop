@@ -1135,6 +1135,16 @@ const App = () => {
   // Rooms the user asked full history for: their next connect replays the
   // server maximum instead of the fast bounded snapshot.
   const deepReplayRoomsRef = useRef(new Set<string>());
+  // Guards for the automatic deep-history load. The buffer sits at viewport
+  // 0 during every attach write (the terminal is reset before the snapshot
+  // lands), so "y === 0" alone misfired the reload DURING attach on any
+  // session busy enough to have a capped snapshot — which then restored the
+  // viewport to old-top with follow-mode off: terminal parked above the
+  // bottom, new output invisible until a manual scroll. The trigger now
+  // requires a real gesture: a transition from scrolled-up to top, after the
+  // snapshot has settled.
+  const lastViewportYRef = useRef(0);
+  const snapshotSettledAtRef = useRef(0);
   const snapshotWasCappedRef = useRef(false);
   // Set while an automatic deep-history reload is in flight: carries the old
   // buffer length so the post-reload snapshot can restore the reading
@@ -1312,7 +1322,14 @@ const App = () => {
             && (termRef.current.cols !== cols || termRef.current.rows !== rows)) {
           try { termRef.current.resize(cols, rows); } catch { /* keep local size */ }
         }
-        termRef.current.write(screen.data, () => termRef.current?.refresh(0, (termRef.current?.rows ?? 1) - 1));
+        termRef.current.write(screen.data, () => {
+          const t = termRef.current;
+          if (!t) return;
+          // Pin to the newest line — the fast paint is a stand-in for the
+          // snapshot and must land where the snapshot would.
+          t.scrollToBottom();
+          t.refresh(0, t.rows - 1);
+        });
       })
       .catch(() => { /* fast paint is best-effort */ });
 
@@ -1457,13 +1474,21 @@ const App = () => {
               if (pendingRestore) {
                 // The user was reading at the top of the OLD buffer; that
                 // content now sits newLen - oldLen lines down. Land there,
-                // not at the bottom — the reload should be invisible.
+                // not at the bottom — the reload should be invisible. (This
+                // used to fall through to scrollToBottom anyway, yanking the
+                // view away from the spot it had just restored.)
                 const line = Math.max(0, t.buffer.active.length - pendingRestore.oldLen);
                 t.scrollToLine(line);
-                userScrolledUpRef.current = true;
+                userScrolledUpRef.current = line < Math.max(0, t.buffer.active.length - t.rows);
+              } else {
+                t.scrollToBottom();
+                userScrolledUpRef.current = false;
               }
-              t.scrollToBottom();
               t.refresh(0, t.rows - 1);
+              // The snapshot has fully landed: only from here on can a
+              // viewport-top event mean a user gesture.
+              lastViewportYRef.current = t.buffer.active.viewportY;
+              snapshotSettledAtRef.current = performance.now();
             });
           } else {
             writeToTerminal(message.data);
@@ -1868,12 +1893,14 @@ const App = () => {
     const onBufferScroll = () => {
       const { y, base } = scrollState();
       userScrolledUpRef.current = y < base;
-      // Hitting the very TOP of a bounded-replay buffer means the user wants
-      // more history than the fast snapshot carried — offer the full reload.
       // Top of a capped snapshot: the user wants more history than the fast
-      // snapshot carried. Load it AUTOMATICALLY — a "load full history"
-      // button was chrome for something the scroll gesture already said.
-      if (y === 0 && snapshotWasCappedRef.current) {
+      // snapshot carried — load it automatically. "The user wants" must mean
+      // a real gesture: arriving at 0 FROM above, on a settled snapshot.
+      const cameFromAbove = lastViewportYRef.current > 0;
+      const settled = snapshotSettledAtRef.current > 0
+        && performance.now() - snapshotSettledAtRef.current > 600;
+      lastViewportYRef.current = y;
+      if (y === 0 && cameFromAbove && settled && snapshotWasCappedRef.current) {
         const room = activeSessionRoomRef.current;
         if (room && !deepReplayRoomsRef.current.has(room)) {
           deepReplayRoomsRef.current.add(room);
@@ -2340,7 +2367,7 @@ const App = () => {
           const row = Math.floor(((tapStartY - rect.top) / rect.height) * term.rows);
           if (col >= 0 && col < term.cols && row >= 0 && row < term.rows) {
             const url = extractUrlAtCell(term.buffer.active.viewportY + row, col);
-            if (url) setLinkPrompt(url);
+            if (url) setLinkPrompt({ url, x: tapStartX, y: tapStartY });
           }
         }
       }
@@ -3160,7 +3187,7 @@ const App = () => {
   // layer disables native pointer events on terminal text, and remote apps
   // can't open the phone's browser — claude login prints a URL that was
   // otherwise un-tappable.)
-  const [linkPrompt, setLinkPrompt] = useState<string | null>(null);
+  const [linkPrompt, setLinkPrompt] = useState<{ url: string; x: number; y: number } | null>(null);
   // Passkey nudge: biometric sign-in works but is invisible — the login page
   // only offers Touch ID / Face ID once a credential exists for this
   // hostname, so a user who never opened the settings drawer never learns it
@@ -4156,23 +4183,34 @@ const App = () => {
             </div>
           )}
           {linkPrompt && (
-            <div className="link-prompt" role="dialog" aria-label="Open link">
-              <span className="link-prompt-url">{linkPrompt}</span>
+            <div
+              className="context-menu link-menu"
+              role="menu"
+              aria-label="Open link"
+              style={{
+                left: Math.max(8, Math.min(linkPrompt.x, window.innerWidth - 268)),
+                top: Math.max(8, Math.min(linkPrompt.y + 10, window.innerHeight - 150))
+              }}
+            >
+              <span className="context-menu-title">{linkPrompt.url}</span>
               <button
                 type="button"
-                className="link-prompt-open"
+                role="menuitem"
+                className="context-menu-item"
                 onClick={() => {
-                  window.open(linkPrompt, "_blank", "noopener");
+                  window.open(linkPrompt.url, "_blank", "noopener");
                   setLinkPrompt(null);
                 }}
               >
-                Open
+                <span>Open link</span>
               </button>
               <button
                 type="button"
+                role="menuitem"
+                className="context-menu-item"
                 onClick={async () => {
                   try {
-                    await navigator.clipboard.writeText(linkPrompt);
+                    await navigator.clipboard.writeText(linkPrompt.url);
                     showToast("Link copied");
                   } catch {
                     showToast("Clipboard denied — long-press the URL text instead");
@@ -4180,9 +4218,18 @@ const App = () => {
                   setLinkPrompt(null);
                 }}
               >
-                Copy
+                <span>Copy link</span>
               </button>
-              <button type="button" aria-label="Dismiss" onClick={() => setLinkPrompt(null)}>✕</button>
+              <div className="context-menu-separator" role="separator" />
+              <button
+                type="button"
+                role="menuitem"
+                className="context-menu-item"
+                onClick={() => setLinkPrompt(null)}
+              >
+                <span>Cancel</span>
+                <kbd>esc</kbd>
+              </button>
             </div>
           )}
           {isMobile && (

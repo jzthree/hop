@@ -3809,3 +3809,10 @@ button.primary {
   margin: 4px 6px;
   background: var(--line);
 }
+
+/* Folder-header +: create a session directly into this folder. */
+.switcher-folder .switcher-group-label .switcher-folder-add {
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 4px;
+}

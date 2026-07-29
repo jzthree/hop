@@ -1083,6 +1083,8 @@ export const SessionSwitcher = ({
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState("");
+  // When set, the next created session is filed here (the folder header's +).
+  const [createInFolder, setCreateInFolder] = useState<SwitcherFolder | null>(null);
   const [, setTick] = useState(0);
   // Preview cache survives page reloads via sessionStorage: a freshly loaded
   // page paints last-known screens instantly instead of a wall of blanks.
@@ -1443,6 +1445,9 @@ export const SessionSwitcher = ({
   };
 
   const handleTap = (session: SwitcherSession) => {
+    // Same immediacy when the tap switches sessions: focus leaves the filter
+    // at the moment of intent, not when the terminal finishes connecting.
+    filterInputRef.current?.blur();
     cancelLongPress();
     if (suppressTapRef.current) {
       suppressTapRef.current = false;
@@ -1804,6 +1809,16 @@ export const SessionSwitcher = ({
       }
       setCreating(false);
       setCreateDraft("");
+      if (createInFolder) {
+        // File it before switching: reuses the move endpoint, which is the
+        // one place membership is persisted durably.
+        await fetch("/api/sessions/move", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ internalName: data.name, folderId: createInFolder.id })
+        }).catch(() => { /* filing is best-effort; the session exists */ });
+        setCreateInFolder(null);
+      }
       onSwitch({ name: data.name, displayName: data.name, active: false, starting: true, internalName: data.name });
     } catch {
       onNotice("Failed to create session");
@@ -1910,6 +1925,11 @@ export const SessionSwitcher = ({
           const el = e.target as HTMLElement | null;
           const onTerminalArea = !!el?.closest?.(".switcher-preview, .switcher-live-tile");
           if (interactiveTiles && s.active && s.type !== "port" && onTerminalArea) {
+            // Blur the filter NOW — the tile may take a beat to go live, but
+            // the user's intent transferred at the click, and the focus rule
+            // (terminals never steal from a text input) would otherwise hold
+            // the keyboard hostage in the filter until it happened to blur.
+            filterInputRef.current?.blur();
             setFocusedKey(key);
             onFocusSession?.(s);
             // The keyboard selection (accent outline + tinted background)
@@ -2200,7 +2220,7 @@ export const SessionSwitcher = ({
         {creating && (
           <form className="switcher-create-row inline-edit" onSubmit={submitCreate}>
             <input
-              placeholder="session-name"
+              placeholder={createInFolder ? "new session in " + createInFolder.name : "session-name"}
               value={createDraft}
               onChange={(e) => setCreateDraft(e.target.value)}
               maxLength={64}
@@ -2208,7 +2228,7 @@ export const SessionSwitcher = ({
               aria-label="New session name"
             />
             <button type="submit">Create</button>
-            <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); }}>✕</button>
+            <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); setCreateInFolder(null); }}>✕</button>
           </form>
         )}
       </div>
@@ -2282,6 +2302,14 @@ export const SessionSwitcher = ({
                     <h3 className="switcher-group-label" onContextMenu={(e) => openFolderMenu(e, folder)}>
                       {folder.name}
                       <span className="switcher-folder-count">{rows.length}</span>
+                      <button
+                        type="button"
+                        className="switcher-folder-add"
+                        title={"New session in " + folder.name}
+                        onClick={() => { setCreateInFolder(folder); setCreating(true); }}
+                      >
+                        +
+                      </button>
                       <button type="button" onClick={() => renameFolder(folder)} title="Rename folder">✎</button>
                       <button type="button" onClick={() => deleteFolder(folder)} title="Delete folder">🗑</button>
                     </h3>

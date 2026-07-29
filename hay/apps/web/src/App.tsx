@@ -562,12 +562,42 @@ const App = () => {
   // Claude Code titles its process with a bare version number; hop's session
   // poll surfaces it as foregroundProcess. Used to unlock claude-specific key
   // encodings (Shift+Enter) without protocol negotiation.
+  // Is Claude Code the thing on screen? The foreground PROCESS cannot answer
+  // alone: a session relaunched by `hop restore` runs
+  // `shell -lc "claude ...; exec shell -l"`, so the room reports the WRAPPER
+  // SHELL for claude's whole life. Everything gated on this — Shift+Enter as
+  // a newline, hold-space voice — silently stopped working in exactly the
+  // sessions a restore brought back, which is why voice "does not always
+  // work". The screen is the honest witness, so fall back to claude's own
+  // chrome in the buffer (cached ~1s, since key handlers ask per keystroke).
+  const claudeScreenRef = useRef<{ at: number; value: boolean }>({ at: 0, value: false });
+  const screenLooksLikeClaude = () => {
+    const now = performance.now();
+    if (now - claudeScreenRef.current.at < 1000) return claudeScreenRef.current.value;
+    let value = false;
+    const t = termRef.current;
+    if (t) {
+      try {
+        const buf = t.buffer.active;
+        const end = buf.baseY + t.rows;
+        let text = "";
+        for (let i = Math.max(0, end - 30); i < end; i++) {
+          text += (buf.getLine(i)?.translateToString(true) ?? "") + "\n";
+        }
+        value = /bypass permissions on|shift\+tab to cycle|esc to interrupt|\? for shortcuts/i.test(text);
+      } catch { /* disposed mid-read */ }
+    }
+    claudeScreenRef.current = { at: now, value };
+    return value;
+  };
   const foregroundIsClaude = () => {
     const room = activeSessionRoomRef.current;
-    if (!room) return false;
-    const s = sessionsRef.current.find((x) => (x.internalName || x.name) === room);
-    const proc = (s?.foregroundProcess || "").trim();
-    return proc === "claude" || /^\d+\.\d+\.\d+$/.test(proc);
+    if (room) {
+      const s = sessionsRef.current.find((x) => (x.internalName || x.name) === room);
+      const proc = (s?.foregroundProcess || "").trim();
+      if (proc === "claude" || /^\d+\.\d+\.\d+$/.test(proc)) return true;
+    }
+    return screenLooksLikeClaude();
   };
   const drawerOpenRef = useRef(drawerOpen);
   drawerOpenRef.current = drawerOpen;
@@ -960,6 +990,8 @@ const App = () => {
   // edit before Enter. Auto-repeat spaces are swallowed while held, which in
   // a Claude composer is noise nobody wants anyway.
   const voiceTimerRef = useRef(0);
+  // Spaces that actually reached the app during the current hold.
+  const spacesTypedRef = useRef(0);
   const voiceActiveRef = useRef(false);
   const voiceRecRef = useRef<{ stop: () => void } | null>(null);
   const voiceFinalRef = useRef("");
@@ -995,7 +1027,11 @@ const App = () => {
     voiceActiveRef.current = true;
     voiceFinalRef.current = "";
     voiceInterimRef.current = "";
-    handleUserInput(""); // erase the space the initial press typed
+    // One DEL per space that actually reached the app: a fixed single
+    // erase left the extras behind whenever OS auto-repeat outran the
+    // swallow, so the composer kept the spaces voice promised to remove.
+    for (let i = 0; i < Math.max(1, spacesTypedRef.current); i++) handleUserInput("");
+    spacesTypedRef.current = 0;
     r.lang = navigator.language || "en-US";
     r.continuous = true;
     r.interimResults = true;
@@ -1778,8 +1814,10 @@ const App = () => {
       if (event.code === 'Space' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
           && foregroundIsClaude() && !!speechRecognitionCtor()) {
         if (event.type === 'keydown') {
+          if (voiceActiveRef.current) return false; // listening: eat every space
           if (!event.repeat) {
             window.clearTimeout(voiceTimerRef.current);
+            spacesTypedRef.current = 1; // this one goes through, for zero latency
             voiceTimerRef.current = window.setTimeout(startVoiceInput, 550);
             return true;
           }
@@ -1787,6 +1825,7 @@ const App = () => {
         }
         if (event.type === 'keyup') {
           window.clearTimeout(voiceTimerRef.current);
+          spacesTypedRef.current = 0;
           if (voiceActiveRef.current) {
             stopVoiceInput();
             return false;

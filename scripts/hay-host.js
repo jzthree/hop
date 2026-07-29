@@ -378,6 +378,17 @@ async function main() {
         );
     });
 
+    // Periodic notekeeping: the shutdown handler only runs on a GRACEFUL
+    // exit, so a crash (thermal sleep, power cut, SIGKILL) used to leave no
+    // buffers at all — `hop restore` had screens to replay only when the
+    // stop was polite. Flush the same bounded tails every few minutes; a
+    // crash now costs at most the last interval of scrollback.
+    const bufferFlushTimer = setInterval(() => {
+        if (shuttingDown) return;
+        try { persistRoomBuffers(rooms); } catch (e) { /* next tick */ }
+    }, 4 * 60 * 1000);
+    bufferFlushTimer.unref?.();
+
     const shutdown = () => {
         shuttingDown = true; // keep restore records for rooms killed by this shutdown
         // Persist tail buffers BEFORE closeAll() kills the PTYs, so a graceful

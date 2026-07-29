@@ -3889,7 +3889,9 @@ function writeClaudeSessionRecord(internalName, rec) {
     if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
     try { fs.mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true }); } catch (e) { /* best effort */ }
     try {
-        fs.writeFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.json`), JSON.stringify(rec), { mode: 0o600 });
+        // Same crash-safety as the metas: records are what lets a claude
+        // conversation resume at all.
+        writePrivateFile(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.json`), JSON.stringify(rec), 0o600);
     } catch (e) { /* best effort */ }
 }
 
@@ -3931,7 +3933,14 @@ function writeClaudeSessionMeta(internalName, meta) {
     if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
     try { fs.mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true }); } catch (e) { /* best effort */ }
     try {
-        fs.writeFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.meta`), JSON.stringify(meta), { mode: 0o600 });
+        // ATOMIC + FSYNCED, not writeFileSync. The thermal-sleep crash proved
+        // the difference with a natural experiment: folders.json (written via
+        // writePrivateFile the same night) SURVIVED, while every meta
+        // rewritten in the prior three days — every rename, every folder
+        // filing — vanished with the un-fsynced page cache. These files are
+        // the restore inventory; they are exactly the data that must outlive
+        // a power cut.
+        writePrivateFile(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.meta`), JSON.stringify(meta), 0o600);
     } catch (e) { /* best effort */ }
 }
 

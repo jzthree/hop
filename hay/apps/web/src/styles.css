@@ -3892,3 +3892,10 @@ button.primary {
     opacity: 1;
   }
 }
+
+/* Create-in-folder: the input appears INSIDE the folder, where the session
+   will land — not up in the header bar two scrolls away from the + that
+   asked for it. */
+.switcher-folder .switcher-create-infolder {
+  margin: 4px 0 8px;
+}

@@ -1495,6 +1495,30 @@ export const SessionSwitcher = ({
         body: JSON.stringify({ internalName: sessionKey(session), parked: false })
       }).catch(() => { /* daemon will still show it parked; harmless */ });
     }
+    // A DEAD terminal session starts IN PLACE instead of falling through to
+    // full screen — the last accidental door into the mode. Attaching is what
+    // starts a known session, so a claim-free throwaway socket kicks it
+    // alive; the tile is pre-focused and goes live the moment the session
+    // reports active. Ports still open full screen (they are web pages), and
+    // without live tiles (no wsBase / small zoom) the old switch stands.
+    if (session.type !== "port" && !session.active && interactiveTiles && tileWsBase) {
+      const key = sessionKey(session);
+      try {
+        const sep = tileWsBase.includes("?") ? "&" : "?";
+        const kick = new WebSocket(
+          tileWsBase + sep + "room=" + encodeURIComponent(key)
+          + "&name=" + encodeURIComponent((userName || "user") + " (start)")
+          + "&replay=0&nudge=0&cols=80&rows=24"
+        );
+        kick.onopen = () => { window.setTimeout(() => { try { kick.close(); } catch { /* done */ } }, 400); };
+        kick.onerror = () => { try { kick.close(); } catch { /* refused */ } };
+      } catch { /* daemon will surface it as starting on the next poll */ }
+      onNotice("Starting " + (session.displayName || session.name) + "…");
+      setFocusedKey(key);
+      onFocusSession?.(session);
+      onRefresh();
+      return;
+    }
     onSwitch(session);
   };
 
@@ -1840,8 +1864,8 @@ export const SessionSwitcher = ({
       setCreating(false);
       setCreateDraft("");
       if (createInFolder) {
-        // File it before switching: reuses the move endpoint, which is the
-        // one place membership is persisted durably.
+        // File it first: the move endpoint is the one place membership is
+        // persisted durably.
         await fetch("/api/sessions/move", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1849,7 +1873,13 @@ export const SessionSwitcher = ({
         }).catch(() => { /* filing is best-effort; the session exists */ });
         setCreateInFolder(null);
       }
-      onSwitch({ name: data.name, displayName: data.name, active: false, starting: true, internalName: data.name });
+      // Stay on the wall. Creating used to jump straight to full screen —
+      // the exact accidental mode-entry the hotkey inversion removed from
+      // clicks. The new tile becomes current and goes live in place as soon
+      // as the session reports active.
+      onFocusSession?.({ name: data.name, displayName: data.name, active: false, starting: true, internalName: data.name });
+      setFocusedKey(data.name);
+      onRefresh();
     } catch {
       onNotice("Failed to create session");
     }
@@ -2235,10 +2265,10 @@ export const SessionSwitcher = ({
         </div>
         {/* Create form lives in the top bar so the header ＋ works from EVERY
             mode — the dashed grid card only exists in recent mode. */}
-        {creating && (
+        {creating && !createInFolder && (
           <form className="switcher-create-row inline-edit" onSubmit={submitCreate}>
             <input
-              placeholder={createInFolder ? "new session in " + createInFolder.name : "session-name"}
+              placeholder="session-name"
               value={createDraft}
               onChange={(e) => setCreateDraft(e.target.value)}
               maxLength={64}
@@ -2331,8 +2361,22 @@ export const SessionSwitcher = ({
                       <button type="button" onClick={() => renameFolder(folder)} title="Rename folder">✎</button>
                       <button type="button" onClick={() => deleteFolder(folder)} title="Delete folder">🗑</button>
                     </h3>
+                    {creating && createInFolder?.id === folder.id && (
+                      <form className="switcher-create-row inline-edit switcher-create-infolder" onSubmit={submitCreate}>
+                        <input
+                          placeholder={"new session in " + folder.name}
+                          value={createDraft}
+                          onChange={(e) => setCreateDraft(e.target.value)}
+                          maxLength={64}
+                          autoFocus
+                          aria-label={"New session name in " + folder.name}
+                        />
+                        <button type="submit">Create</button>
+                        <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); setCreateInFolder(null); }}>✕</button>
+                      </form>
+                    )}
                     {rows.length === 0 ? (
-                      <p className="switcher-folder-empty">Drag a session here</p>
+                      creating && createInFolder?.id === folder.id ? null : <p className="switcher-folder-empty">Drag a session here, or ＋ to create one</p>
                     ) : (
                       <div className="switcher-grid">{rows.map((s) => renderCard(s))}</div>
                     )}

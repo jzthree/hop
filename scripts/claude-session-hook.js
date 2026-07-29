@@ -18,6 +18,27 @@
 
 const fs = require("node:fs");
 const os = require("node:os");
+
+// Crash-safe write: temp + fsync + atomic rename. Records are the restore
+// inventory — an un-fsynced page cache at power loss must not be able to
+// take a conversation's identity with it (the 07-29 thermal-sleep crash
+// erased three days of plainly-written files while fsynced ones survived).
+function writeDurable(file, data) {
+  try {
+    const tmp = `${file}.tmp-${process.pid}`;
+    const fd = fs.openSync(tmp, "w", 0o600);
+    try {
+      fs.writeSync(fd, data);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  } catch {
+    try { fs.writeFileSync(file, data, { mode: 0o600 }); } catch { /* never disrupt claude */ }
+  }
+}
+
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
@@ -86,13 +107,13 @@ function recordSession(dir, hopSession, payload) {
     const prev = JSON.parse(prevRaw);
     if (prev && prev.sessionId && prev.sessionId !== sessionId && prev.cwd && prev.cwd !== cwd) {
       try {
-        fs.writeFileSync(path.join(dir, `${hopSession}.other.json`), record, { mode: 0o600 });
+        writeDurable(path.join(dir, `${hopSession}.other.json`), record);
       } catch { /* ignore */ }
       return;
     }
   } catch { /* no incumbent (or unreadable) — record normally */ }
   try {
-    fs.writeFileSync(file, record, { mode: 0o600 });
+    writeDurable(file, record);
   } catch { /* ignore */ }
 }
 
@@ -109,7 +130,7 @@ function bumpTurn(dir, hopSession, payload) {
     at: new Date().toISOString()
   });
   try {
-    fs.writeFileSync(file, record, { mode: 0o600 });
+    writeDurable(file, record);
   } catch { /* ignore */ }
 }
 

@@ -658,13 +658,60 @@ function getRuntimeSessionMetadata(name) {
     return runtimeSessionMetadata.get(name) || null;
 }
 
+// Durable meta is read on every effective-config lookup, so a tiny cache
+// keeps it off the hot path. Invalidated by mtime, so an external write
+// (the hook, another process) is picked up without a restart.
+const durableIdentityCache = new Map();
+function readDurableIdentity(name) {
+    if (!name || !SESSION_NAME_RE.test(name)) return null;
+    let mtimeMs = 0;
+    try {
+        mtimeMs = fs.statSync(path.join(CLAUDE_SESSIONS_DIR, `${name}.meta`)).mtimeMs;
+    } catch (e) {
+        durableIdentityCache.delete(name);
+        return null;
+    }
+    const hit = durableIdentityCache.get(name);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.value;
+    const value = readClaudeSessionMeta(name);
+    durableIdentityCache.set(name, { mtimeMs, value });
+    return value;
+}
+
+// THE identity accessor. Everything that asks "what is this session called,
+// where is it filed, who made it" comes through here.
+//
+// The layers are not peers. saved/runtime configs are CACHES that any code
+// path may recreate with defaults — `hop restore` writes one per session
+// with the INTERNAL name — while durable meta is where a user's own answers
+// are recorded and the only layer that survives the daemon. Merging
+// saved-over-runtime and stopping there meant a crash + restore silently
+// reverted every rename and un-filed every folder, because restore's freshly
+// written cache outranked the file that knew better. Meta wins for the
+// user-authored fields; everything else keeps the old precedence.
 function getEffectiveSessionConfig(name) {
     const saved = getSessionConfig(name);
     const runtime = getRuntimeSessionMetadata(name);
-    if (saved && runtime) {
-        return { ...runtime, ...saved };
+    const base = saved && runtime ? { ...runtime, ...saved } : (saved || runtime || null);
+    const durable = readDurableIdentity(name);
+    if (!durable) return base;
+    if (!base) {
+        return {
+            type: 'terminal',
+            displayName: durable.displayName,
+            folderId: durable.folderId,
+            createdBy: durable.createdBy,
+            cwd: durable.cwd
+        };
     }
-    return saved || runtime || null;
+    const merged = { ...base };
+    if (durable.displayName) merged.displayName = durable.displayName;
+    if (durable.folderId !== undefined) merged.folderId = durable.folderId || null;
+    if (durable.createdBy) merged.createdBy = durable.createdBy;
+    if (durable.tagline) merged.tagline = durable.tagline;
+    if (durable.parked !== undefined) merged.parked = durable.parked;
+    if (durable.archived !== undefined) merged.archived = durable.archived;
+    return merged;
 }
 
 function hasSavedSessionConfig(name) {
@@ -1994,6 +2041,9 @@ function saveHopConfig(config) {
 // session should be the session you left, not a summary of it. Set
 // resume_mode to "summary" (cheaper) or "ask" (leave the prompt alone).
 const RESUME_PROMPT_RE = /Resuming the full session|Resume from summary|Resume full session as-is/i;
+// Claude Code's own chrome — proof the app is up even when the room reports
+// the wrapper shell as its foreground process (argv launch).
+const CLAUDE_UI_RE = /bypass permissions on|shift\+tab to cycle|Welcome back|esc to interrupt|\? for shortcuts/i;
 function getResumeMode() {
     const mode = String(getHopConfig().resume_mode || '').toLowerCase();
     return mode === 'summary' || mode === 'ask' ? mode : 'full';
@@ -4276,6 +4326,19 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 // a second copy on top of it (that is how command lines piled
                 // up in a shell that was busy booting).
                 if (running) { finish('already-running'); continue; }
+                // Same blindness applies before typing: a session whose
+                // command was launched as argv shows a shell here while
+                // claude runs beneath it. Typing again would land keystrokes
+                // in claude's own prompt.
+                try {
+                    const grid = await getRoomGridPreviewShared(job.plan.internalName);
+                    const text = String(grid?.text || '');
+                    if (RESUME_PROMPT_RE.test(text) || CLAUDE_UI_RE.test(text)) {
+                        job.state = 'verify';
+                        job.since = Date.now();
+                        continue;
+                    }
+                } catch (e) { /* fall through to typing */ }
                 // A fresh shell reports its own name once it has execed; that
                 // is our prompt-ready signal, and it beats guessing with a timer.
                 if (Date.now() - job.since < 400) continue;
@@ -4287,7 +4350,25 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 continue;
             }
             if (job.state === 'verify') {
-                if (running) {
+                // "Is it running?" cannot be answered by the foreground
+                // process alone. Argv launch runs `shell -lc "<cmd>; exec
+                // shell -l"`, so the foreground process is the WRAPPER SHELL
+                // for the whole life of the command — the very mechanism that
+                // replaced typing made the process check blind. After the
+                // crash restore, claude was sitting at its own resume prompt
+                // while this loop reported "never-started", retyped the
+                // command into that prompt, and gave up without answering it.
+                // The screen is the honest witness: a resume prompt, or
+                // claude's own chrome, means it is up.
+                let screenSaysRunning = false;
+                if (!running) {
+                    try {
+                        const grid = await getRoomGridPreviewShared(job.plan.internalName);
+                        const text = String(grid?.text || '');
+                        screenSaysRunning = RESUME_PROMPT_RE.test(text) || CLAUDE_UI_RE.test(text);
+                    } catch (e) { /* host busy — try again next tick */ }
+                }
+                if (running || screenSaysRunning) {
                     const key = resumeChoiceKey(getResumeMode());
                     if (!key) { finish('resumed'); continue; }
                     job.state = 'answer-prompt';

@@ -363,3 +363,15 @@ describe("manual mode folders", () => {
     expect(project.groups.some((g) => g.label === "Experiments")).toBe(false);
   });
 });
+
+describe("manual mode folders under filter", () => {
+  const folders = [{ id: "f1", name: "Experiments" }];
+
+  it("matches inside folders are found and stay filed", () => {
+    const sessions = [mk({ name: "alpha", folderId: "f1" }), mk({ name: "beta" })];
+    const model = buildSwitcherModel(sessions, null, "alph", "manual", [], folders);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.folders[0].rows.map((r) => r.name)).toEqual(["alpha"]);
+    expect(model.rows).toEqual([]); // loose list empty ≠ no results
+  });
+});

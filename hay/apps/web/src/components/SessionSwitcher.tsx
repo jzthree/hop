@@ -1231,7 +1231,9 @@ export const SessionSwitcher = ({
   const flatNav = useMemo<SwitcherSession[]>(
     () => {
       if (model.mode === "filter") return [...model.rows, ...extraContentMatches.map((m) => m.session)];
-      if (model.mode === "manual") return model.rows;
+      // Folder rows come first because that is their visual order; keyboard
+      // ↑/↓ and Enter must traverse what the eye sees, foldered included.
+      if (model.mode === "manual") return [...model.folders.flatMap((f) => f.rows), ...model.rows];
       if (model.mode === "project") return model.groups.flatMap((g) => g.rows);
       return [...model.hero, ...model.groups.flatMap((g) => g.rows)];
     },
@@ -1248,7 +1250,9 @@ export const SessionSwitcher = ({
   const orderedAllKeysRef = useRef<string[]>([]);
   {
     const full = buildSwitcherModel(wallSessions, currentRoom, "", "manual", manualOrder, folders);
-    orderedAllKeysRef.current = full.mode === "manual" ? full.rows.map(sessionKey) : [];
+    orderedAllKeysRef.current = full.mode === "manual"
+      ? [...full.folders.flatMap((f) => f.rows), ...full.rows].map(sessionKey)
+      : [];
   }
   const flatNavRef = useRef(flatNav);
   flatNavRef.current = flatNav;
@@ -2237,8 +2241,8 @@ export const SessionSwitcher = ({
           </>
         ) : model.mode === "manual" ? (
           <>
-            {model.rows.length === 0 ? (
-              <div className="switcher-empty">No sessions</div>
+            {model.rows.length === 0 && model.folders.every((f) => f.rows.length === 0) ? (
+              <div className="switcher-empty">{filter.trim() ? "No matches" : "No sessions"}</div>
             ) : (
               <>
                 <p className="switcher-hint">

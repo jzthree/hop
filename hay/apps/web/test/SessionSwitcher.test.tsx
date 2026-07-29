@@ -302,3 +302,23 @@ describe("context menus", () => {
     expect(document.querySelector(".context-menu")).toBeNull();
   });
 });
+
+describe("manual folders in the wall", () => {
+  afterEach(() => { document.body.innerHTML = ""; });
+  const folders = [{ id: "f1", name: "Filed" }];
+  const withFolder: SwitcherSession[] = [
+    { name: "inside", displayName: "inside", internalName: "inside", active: true, starting: false, createdBy: "user", folderId: "f1" },
+    { name: "outside", displayName: "outside", internalName: "outside", active: true, starting: false, createdBy: "user" }
+  ];
+
+  it("a filter matching only a foldered session shows it, not an empty wall", () => {
+    render(<SessionSwitcher {...props} sessions={withFolder} folders={folders} open />);
+    fireEvent.click(screen.getByRole("button", { name: "Manual" }));
+    const input = document.querySelector(".switcher-top input") as HTMLInputElement
+      || document.querySelector("input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "insid" } });
+    expect(screen.queryByText("No matches")).toBeNull();
+    expect(screen.getByText("inside")).toBeTruthy();
+    expect(screen.getByText("Filed")).toBeTruthy();
+  });
+});

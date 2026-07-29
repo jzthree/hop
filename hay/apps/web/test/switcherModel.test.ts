@@ -54,7 +54,7 @@ describe("buildSwitcherModel", () => {
     expect(model.hero).toHaveLength(7); // current + all six bells
   });
 
-  it("groups the tail by project and sinks Ports to the bottom", () => {
+  it("continues the tail in recency order — Recent never groups by directory", () => {
     const sessions = [
       mk({ name: "me", lastActivityAt: 1000 }),
       mk({ name: "a1", lastActivityAt: 990 }),
@@ -68,8 +68,11 @@ describe("buildSwitcherModel", () => {
     const model = buildSwitcherModel(sessions, "me", "");
     if (model.mode !== "tiers") throw new Error("expected tiers");
     expect(model.hero.map((s) => s.name)).toEqual(["me", "a1", "a2", "a3"]);
-    expect(model.groups.map((g) => g.label)).toEqual(["~/Notes", "~/Code/hop2", "Ports"]);
-    expect(model.groups[1].rows.map((s) => s.name)).toEqual(["hop-old", "hop-older"]);
+    // One unlabeled continuation, not per-directory sections: grouping by
+    // workdir is what Project mode is for, and mixing it into Recent made a
+    // card's position mean two different things in one view.
+    expect(model.groups.map((g) => g.label)).toEqual([""]);
+    expect(model.groups[0].rows.map((s) => s.name)).toEqual(["web", "misc", "hop-old", "hop-older"]);
   });
 
   it("filter mode flattens and ranks attention first", () => {
@@ -281,8 +284,7 @@ describe("project mode stability", () => {
     ];
     const model = buildSwitcherModel(sessions, "me", "");
     if (model.mode !== "tiers") throw new Error("expected tiers");
-    const g = model.groups.find((x) => x.label === "~/Code/p");
-    expect(g?.rows.map((x) => x.name)).toEqual(["old-fast", "old-slow"]); // recency, not alphabet
+    expect(model.groups[0].rows.map((x) => x.name)).toEqual(["old-fast", "old-slow"]); // recency, not alphabet
   });
 });
 describe("manual mode stability", () => {

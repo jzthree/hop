@@ -250,8 +250,15 @@ export const buildSwitcherModel = (
       if (hero.length < HERO_MIN) pushHero(s);
     });
 
-  const tail = sessions.filter((s) => !heroKeys.has(sessionKey(s)));
-  const groups = groupByProject(tail);
+  // The tail continues the SAME ordering as the hero cards: recency. It used
+  // to be grouped by workdir, which quietly turned the bottom half of Recent
+  // into a directory view — answering a question the mode had not been asked,
+  // and duplicating what Project mode exists to do. Recent is now recency all
+  // the way down, and a session's position means one thing everywhere in it.
+  const tail = sessions
+    .filter((s) => !heroKeys.has(sessionKey(s)))
+    .sort(byAttentionThenRecency);
+  const groups = tail.length > 0 ? [{ label: "", rows: tail }] : [];
 
   return { mode: "tiers", hero, groups, currentInHero: current !== null };
 };

@@ -2166,8 +2166,8 @@ export const SessionSwitcher = ({
               )}
             </div>
             {model.groups.map((group) => (
-              <section key={group.label} className="switcher-group">
-                <h3 className="switcher-group-label">{group.label}</h3>
+              <section key={group.label || "tail"} className="switcher-group">
+                {group.label && <h3 className="switcher-group-label">{group.label}</h3>}
                 <div className="switcher-grid">{group.rows.map((s) => renderCard(s))}</div>
               </section>
             ))}

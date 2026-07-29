@@ -13,6 +13,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
+import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
 import {
   buildSwitcherModel,
@@ -921,6 +922,46 @@ export const SessionSwitcher = ({
   };
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
+  const [menu, setMenu] = useState<MenuRequest>(null);
+
+  // The wall's own background: the actions that create things, plus the view
+  // controls that otherwise live only in the header. Same words as the
+  // buttons — right-click is a shortcut, never a second vocabulary.
+  const openWallMenu = (e: ReactMouseEvent) => {
+    // Only the empty wall — a right-click on a card belongs to that card.
+    if ((e.target as HTMLElement)?.closest?.(".switcher-card, .switcher-group-label, .switcher-top")) return;
+    e.preventDefault();
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        { label: "New session", onSelect: () => setCreating(true) },
+        ...(sortMode === "manual" ? [{ label: "New folder", onSelect: () => { void createFolder(); } }] : []),
+        { kind: "separator" as const },
+        { label: "Sort by recent", onSelect: () => changeSortMode("recent"), disabled: sortMode === "recent" },
+        { label: "Group by project", onSelect: () => changeSortMode("project"), disabled: sortMode === "project" },
+        { label: "Manual order", onSelect: () => changeSortMode("manual"), disabled: sortMode === "manual" },
+        { kind: "separator" as const },
+        { label: "Zoom in", onSelect: () => changeZoom(effectiveZoom + 1), hint: "+", disabled: effectiveZoom >= maxZoom },
+        { label: "Zoom out", onSelect: () => changeZoom(effectiveZoom - 1), hint: "−", disabled: effectiveZoom <= 0 }
+      ]
+    });
+  };
+
+  const openFolderMenu = (e: ReactMouseEvent, folder: SwitcherFolder) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        { label: "Rename folder…", onSelect: () => { void renameFolder(folder); } },
+        { label: "Delete folder", danger: true, onSelect: () => { void deleteFolder(folder); } },
+        { kind: "separator" as const },
+        { label: "New folder", onSelect: () => { void createFolder(); } }
+      ]
+    });
+  };
 
   // Folder mutations go straight to the daemon: folders are shared structure,
   // not client preference, so they must not live in localStorage the way the
@@ -2153,7 +2194,7 @@ export const SessionSwitcher = ({
           </form>
         )}
       </div>
-      <div className="switcher-scroll" ref={scrollRef}>
+      <div className="switcher-scroll" ref={scrollRef} onContextMenu={openWallMenu}>
         {model.mode === "filter" ? (
           // Matches keep their terminal previews: search results are preview
           // cards at the current zoom, same as the wall — the screen content
@@ -2220,7 +2261,7 @@ export const SessionSwitcher = ({
                       setDragKey(null);
                     }}
                   >
-                    <h3 className="switcher-group-label">
+                    <h3 className="switcher-group-label" onContextMenu={(e) => openFolderMenu(e, folder)}>
                       {folder.name}
                       <span className="switcher-folder-count">{rows.length}</span>
                       <button type="button" onClick={() => renameFolder(folder)} title="Rename folder">✎</button>
@@ -2385,6 +2426,7 @@ export const SessionSwitcher = ({
           </div>
         </>
       )}
+      <ContextMenu request={menu} onClose={() => setMenu(null)} />
     </div>
   );
 };

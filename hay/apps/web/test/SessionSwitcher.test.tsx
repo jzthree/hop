@@ -271,3 +271,34 @@ describe("focus rules", () => {
     expect(document.querySelectorAll(".switcher-live-tile.is-live").length).toBe(0);
   });
 });
+
+describe("context menus", () => {
+  afterEach(() => { document.body.innerHTML = ""; });
+
+  it("right-clicking the wall offers create + view actions, not session actions", () => {
+    render(<SessionSwitcher {...props} open />);
+    const scroll = document.querySelector(".switcher-scroll")!;
+    fireEvent.contextMenu(scroll, { clientX: 40, clientY: 40 });
+    const labels = Array.from(document.querySelectorAll(".context-menu-item")).map((b) => b.textContent);
+    expect(labels.some((l) => l?.includes("New session"))).toBe(true);
+    expect(labels.some((l) => l?.includes("Group by project"))).toBe(true);
+    // Session-specific verbs belong to a card's menu, never the background.
+    expect(labels.some((l) => l?.includes("Rename"))).toBe(false);
+  });
+
+  it("a right-click on a card does not open the wall menu", () => {
+    render(<SessionSwitcher {...props} open />);
+    const card = document.querySelector(".switcher-card")!;
+    fireEvent.contextMenu(card, { clientX: 10, clientY: 10 });
+    const labels = Array.from(document.querySelectorAll(".context-menu-item")).map((b) => b.textContent);
+    expect(labels.some((l) => l?.includes("New session"))).toBe(false);
+  });
+
+  it("Escape closes the menu", () => {
+    render(<SessionSwitcher {...props} open />);
+    fireEvent.contextMenu(document.querySelector(".switcher-scroll")!, { clientX: 30, clientY: 30 });
+    expect(document.querySelector(".context-menu")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector(".context-menu")).toBeNull();
+  });
+});

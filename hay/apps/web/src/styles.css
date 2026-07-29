@@ -3782,3 +3782,58 @@ button.primary {
   border-radius: 10px;
   padding: 2px 6px;
 }
+
+/* Context menus. One look everywhere: same panel, line, and radius as the
+   session sheet, so a right-click never feels like a different application. */
+.context-menu {
+  position: fixed;
+  z-index: 120;
+  min-width: 190px;
+  padding: 5px;
+  border-radius: 11px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-ui, inherit);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.context-menu-item.active:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.context-menu-item:disabled {
+  color: var(--ink-muted);
+  cursor: default;
+}
+.context-menu-item.danger {
+  color: #e5484d;
+}
+.context-menu-item.danger.active {
+  background: color-mix(in srgb, #e5484d 14%, transparent);
+}
+.context-menu-item kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+.context-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}

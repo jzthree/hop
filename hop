@@ -6045,9 +6045,14 @@ function syncSessionMetaFromRooms(rooms) {
         if (!cwd) continue;
         const existing = readClaudeSessionMeta(room.id);
         if (existing && existing.cwd === cwd) continue;
+        // Carry an origin we already know; never invent one. This pass exists
+        // to backfill cwd, and defaulting createdBy to 'user' here silently
+        // stamped "human" onto every agent session whose origin lived only in
+        // runtime config — which is why agent workers reappeared in the User
+        // tab after a restart.
         writeClaudeSessionMeta(room.id, {
             ...(existing || {}),
-            createdBy: existing?.createdBy === 'agent' ? 'agent' : 'user',
+            ...(existing?.createdBy ? { createdBy: existing.createdBy } : {}),
             cwd,
             updatedAt: new Date().toISOString()
         });
@@ -6512,7 +6517,15 @@ async function reconcileExternalRuntimeSessions() {
         const savedConfig = getSessionConfig(room.id);
         const runtimeConfig = getRuntimeSessionMetadata(room.id);
         const durableMeta = readClaudeSessionMeta(room.id);
-        const createdBy = savedConfig?.createdBy || runtimeConfig?.createdBy || durableMeta?.createdBy || 'user';
+        // Durable meta FIRST, for the same reason displayName resolves that
+        // way: it is the layer every origin writer persists and the only one
+        // that survives a restart. Reading the store first meant a config
+        // that merely DEFAULTED to 'user' (ensureTerminalSessionConfig stamps
+        // that on any entry missing an origin) outranked a meta file that
+        // knew the session was agent-started — so after a daemon restart the
+        // whole fleet read as user-created and agent sessions surfaced in the
+        // User tab.
+        const createdBy = durableMeta?.createdBy || savedConfig?.createdBy || runtimeConfig?.createdBy || 'user';
         rememberRuntimeSessionMetadata(room.id, {
             type: 'terminal',
             cwd: room.cwd || savedConfig?.cwd || runtimeConfig?.cwd,
@@ -7986,6 +7999,20 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
                         return;
                     }
+                    // Durable origin marker, mirroring the terminal-API path:
+                    // runtime config dies with the daemon, so without this an
+                    // agent session reads as human after the next restart.
+                    if (actorCreatedBy === 'agent') {
+                        const durableOrigin = readClaudeSessionMeta(internalName) || {};
+                        writeClaudeSessionMeta(internalName, {
+                            ...durableOrigin,
+                            internalName,
+                            createdBy: 'agent',
+                            createdVia,
+                            createdAt: durableOrigin.createdAt || new Date().toISOString()
+                        });
+                    }
+
                     if (isDisplayNameInUse(displayName)) {
                         res.writeHead(409, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Session name already in use' }));

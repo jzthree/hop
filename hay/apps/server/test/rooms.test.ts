@@ -100,6 +100,27 @@ describe("Room", () => {
     expect(capturedOptions?.shell).toBe("/bin/zsh");
   });
 
+  it("an equal-size attach nudges a repaint unless the client declines", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("wiggle", { cols: 80, rows: 24 }, "/tmp");
+
+    // Default attach at the PTY's exact size: the −1 wiggle fires (the
+    // bounce-back half is on a timer; the first resize is the evidence).
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, new FakeSocket());
+    expect(ptyInstance!.resizes.some((r: { cols: number }) => r.cols === 79)).toBe(true);
+
+    // A wall tile declines (nudge: false): it already shows the current
+    // grid, and the wiggle's SIGWINCH reflow is the click-twitch. No resize.
+    const before = ptyInstance!.resizes.length;
+    room.attachClient({ id: "b", name: "Tile", colorIndex: 1, cols: 80, rows: 24, nudge: false }, new FakeSocket());
+    expect(ptyInstance!.resizes.length).toBe(before);
+  });
+
   it("broadcasts pty output to all clients", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {

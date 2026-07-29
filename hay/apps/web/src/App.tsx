@@ -2551,6 +2551,32 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [switcherOpen]);
 
+  // THE RENDER INVARIANT, enforced continuously instead of per-transition.
+  // Three rounds of patching individual transitions (wall close, tab
+  // visibility, context loss, attach paths) each fixed the reproduced case
+  // and missed a sibling — the class kept coming back as "renders only
+  // after I scroll". Scrolling "fixed" it because a viewport move repaints
+  // everything; so enforce what scrolling incidentally provides:
+  //   while following, the newest line is on screen — and the screen is
+  //   repainted from the buffer every tick, no matter which code path
+  //   forgot to.
+  // A full refresh of ~50 rows at 0.7Hz is microseconds on the GPU renderer
+  // and cheap on the DOM one; correctness beats elegance here.
+  useEffect(() => {
+    if (!session) return;
+    const id = window.setInterval(() => {
+      if (document.hidden || switcherOpenRef.current) return;
+      const t = termRef.current;
+      if (!t) return;
+      try {
+        const buf = t.buffer.active;
+        if (!userScrolledUpRef.current && buf.viewportY < buf.baseY) t.scrollToBottom();
+        t.refresh(0, t.rows - 1);
+      } catch { /* disposed mid-tick */ }
+    }, 1400);
+    return () => window.clearInterval(id);
+  }, [session]);
+
   // Tab or window coming back to the foreground: same stale-frame risk as
   // the wall closing, from browser throttling rather than our own hiding.
   useEffect(() => {

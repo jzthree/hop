@@ -623,7 +623,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     const sep = wsBase.includes("?") ? "&" : "?";
     const wsUrl = () =>
       wsBase + sep + "room=" + encodeURIComponent(room) + "&name=" + encodeURIComponent(userName || "user")
-      + "&replay=65536&cols=" + term.cols + "&rows=" + term.rows;
+      + "&replay=65536&nudge=0&cols=" + term.cols + "&rows=" + term.rows;
     let ws: WebSocket | null = null;
     let disposed = false;
     let reconnectTimer = 0;

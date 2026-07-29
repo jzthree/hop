@@ -28,6 +28,12 @@ export type ClientInfo = {
   // Optional per-connection cap for the join snapshot (clamped to the
   // room-level bound). Monitors request ~64KB.
   replayBytes?: number;
+  // False = skip the equal-size attach "wiggle" (the −1/+1 column repaint
+  // nudge). Wall tiles decline it: they arrive already showing the current
+  // grid (the daemon's headless screen, complete — not a raw byte tail), so
+  // the nudge's two SIGWINCHes only produce a visible reflow of the running
+  // app at the exact moment the tile goes live — the "twitch".
+  nudge?: boolean;
 };
 
 export type RoomCreateOptions = {
@@ -371,6 +377,7 @@ export class Room extends EventEmitter {
     // anyway; when sizes are EQUAL nothing would repaint, so nudge: a one-
     // column wiggle (tmux's redraw trick) makes full-screen apps repaint.
     if (
+      info.nudge !== false &&
       client.cols === this.activeCols &&
       client.rows === this.activeRows &&
       this.activeCols > 4 &&

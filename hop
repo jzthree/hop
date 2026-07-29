@@ -6158,9 +6158,25 @@ function syncSessionMetaFromRooms(rooms) {
     for (const room of rooms) {
         if (!room || typeof room.id !== 'string' || !SESSION_NAME_RE.test(room.id)) continue;
         const cwd = typeof room.cwd === 'string' ? room.cwd : '';
-        if (!cwd) continue;
         const existing = readClaudeSessionMeta(room.id);
-        if (existing && existing.cwd === cwd) continue;
+        // A room with no cwd used to be skipped entirely — so it never got a
+        // durable meta, and a session that only ever lived in the host's
+        // memory was UNRECOVERABLE the moment the host died: `hop restore`
+        // reads this directory, and a session absent from it cannot even be
+        // named, let alone relaunched. That is how a thermal-sleep crash took
+        // ten sessions with no trace. Every live room now leaves a record;
+        // cwd is filled in when it becomes known.
+        if (!existing) {
+            writeClaudeSessionMeta(room.id, {
+                internalName: room.id,
+                ...(cwd ? { cwd } : {}),
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            });
+            continue;
+        }
+        if (!cwd) continue;
+        if (existing.cwd === cwd) continue;
         // Carry an origin we already know; never invent one. This pass exists
         // to backfill cwd, and defaulting createdBy to 'user' here silently
         // stamped "human" onto every agent session whose origin lived only in
@@ -6379,6 +6395,28 @@ async function ensureExternalHayHostReady() {
         } catch (e2) { spawnLockFd = null; /* proceed unlocked rather than fail */ }
     }
     try {
+
+    // Last look before spawning: an already-running, healthy host for THIS hop
+    // home means we must adopt it, not add a rival. Two hosts split the fleet —
+    // the daemon canonicalizes one, so every room on the loser goes invisible
+    // and dies unrecorded when it is reaped — and both thrash the same state
+    // files. The spawn lock above only serializes racing spawners; a host that
+    // survived a crash (or was started by hand) is outside its scope, which is
+    // how two hosts came to exist across the thermal-sleep crash.
+    try {
+        const survivors = (await inspectExternalHayHosts(true))
+            .filter((entry) => entry.healthy && hostBelongsToCurrentHome(entry, null));
+        const adoptable = survivors
+            .map((entry) => entry.host)
+            .filter((host) => host && Number.isInteger(host.pid) && isProcessAlive(host.pid))
+            .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0];
+        if (adoptable) {
+            log(`[host] adopting the running host (pid ${adoptable.pid}, port ${adoptable.port}) instead of spawning a rival`, DIM);
+            writeHayHostStateFile(adoptable);
+            hayHostState = adoptable;
+            return adoptable;
+        }
+    } catch (e) { /* inspection failed — spawning is still the right move */ }
 
     const hostScript = path.join(__dirname, 'scripts', 'hay-host.js');
     if (!fs.existsSync(hostScript)) {

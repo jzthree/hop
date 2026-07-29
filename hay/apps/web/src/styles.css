@@ -3824,3 +3824,71 @@ button.primary {
   background: var(--line);
 }
 
+
+/* ── Mobile switcher: a phone toolbar, not a desktop toolbar squeezed. The
+   top bar had NO narrow-screen rules — ten header items and seven tab
+   buttons on two nowrap rows shoved the right-edge actions (keyboard!)
+   against the bezel and overflowed the tab row. ── */
+@media (max-width: 767px) {
+  .switcher-header {
+    gap: 6px;
+    padding: calc(env(safe-area-inset-top, 0px) + 8px)
+      calc(env(safe-area-inset-right, 0px) + 10px)
+      8px
+      calc(env(safe-area-inset-left, 0px) + 10px);
+  }
+  .switcher-header h2 {
+    font-size: 15px;
+  }
+  /* ＋ alone — the word is desktop chrome. */
+  .switcher-new-label {
+    display: none;
+  }
+  /* Explained by a tooltip, and touch has no tooltips: the chip is noise
+     here. Interactivity is discovered by tapping a tile, which is the
+     gesture anyway. */
+  .switcher-chip.live {
+    display: none;
+  }
+  .switcher-zoom-readout {
+    display: none;
+  }
+  .switcher-tilesize button {
+    padding: 5px 10px; /* finger-sized, was mouse-sized */
+  }
+  /* Real tap targets for the header actions, clear of the screen edge
+     (the ✕ keeps them off the bezel on notched phones via header padding). */
+  .switcher-action,
+  .switcher-close {
+    width: 38px;
+    height: 38px;
+  }
+  /* Tabs wrap onto tidy lines; the filter takes a full row of its own —
+     a text input sharing a squeezed line with seven buttons helped nobody. */
+  .switcher-filter-row {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 0 calc(env(safe-area-inset-right, 0px) + 10px) 10px
+      calc(env(safe-area-inset-left, 0px) + 10px);
+  }
+  .switcher-filter,
+  .switcher-filter.compact {
+    flex: 1 1 100%;
+    order: 2;
+    opacity: 1;
+    min-height: 38px;
+  }
+  .switcher-origin button {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+}
+
+/* Touch devices: hover-revealed controls do not exist. Folder rename/delete
+   were literally unreachable on a phone. */
+@media (hover: none) {
+  .switcher-folder .switcher-group-label button,
+  .switcher-unfiled button {
+    opacity: 1;
+  }
+}

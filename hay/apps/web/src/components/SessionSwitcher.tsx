@@ -2099,7 +2099,7 @@ export const SessionSwitcher = ({
               aria-label="New session"
               onClick={() => setCreating(true)}
             >
-              ＋ New
+              ＋<span className="switcher-new-label"> New</span>
             </button>
           )}
           <div className="switcher-tilesize" role="group" aria-label="Tile zoom">

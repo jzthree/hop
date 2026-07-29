@@ -1763,6 +1763,15 @@ const App = () => {
 
     // Prevent browser from intercepting common terminal shortcuts
     terminal.attachCustomKeyEventHandler((event) => {
+      // ⌘⏎ leaves full screen for the wall — the mirror of ⌘⏎ on a wall
+      // tile entering it. One chord toggles the mode from either side.
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
+        if (event.type === 'keydown') {
+          event.preventDefault();
+          setSwitcherOpen(true);
+        }
+        return false;
+      }
       // Long-press SPACE = voice input (Claude sessions, when the browser has
       // SpeechRecognition). First press types its space with zero latency;
       // holding past the threshold erases it and dictates until release.

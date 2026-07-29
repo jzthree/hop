@@ -3731,14 +3731,28 @@ button.primary {
 }
 .switcher-folder .switcher-group-label button,
 .switcher-unfiled button {
-  margin-left: 6px;
+  margin-left: 2px;
   border: none;
   background: transparent;
   color: var(--ink-muted);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
   opacity: 0;
   transition: opacity 0.12s ease;
+}
+.switcher-folder .switcher-group-label button:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+/* The + CREATES — primary affordance, always visible; edit/delete are
+   maintenance and stay hover-revealed. */
+.switcher-folder .switcher-group-label .switcher-folder-add {
+  opacity: 1;
+  font-size: 12.5px;
+  margin-left: 6px;
 }
 .switcher-folder:hover .switcher-group-label button {
   opacity: 1;
@@ -3810,9 +3824,3 @@ button.primary {
   background: var(--line);
 }
 
-/* Folder-header +: create a session directly into this folder. */
-.switcher-folder .switcher-group-label .switcher-folder-add {
-  font-size: 13px;
-  line-height: 1;
-  padding: 0 4px;
-}

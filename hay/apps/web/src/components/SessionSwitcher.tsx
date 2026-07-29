@@ -108,7 +108,9 @@ type Sheet = {
 //   → the filter box:     clicking it, ⌘K (open), ⌘F (unless a live tile
 //                         owns the keyboard — then ⌘F is find-in-that-tile,
 //                         scope follows focus), or ↑ from the top row
-//   → the full screen:    opening a session (the wall closes)
+//   → the full screen:    ⌘⏎, the tile's ⛶, or the sheet's "Open full
+//                         screen" — DELIBERATE only. Bare clicks and Enter
+//                         engage the tile in place; full screen is a mode.
 // Enforcement, not convention: a terminal REFUSES to take focus while any
 // text input holds it (stealOk below), and editing the filter drops any live
 // tile back to watch — so re-renders, remounts, reconnects, and polls can
@@ -600,14 +602,23 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     // less responsive than full screen. Only the live tile: browsers cap
     // concurrent WebGL contexts (~16) and a wall can hold more tiles.
     let webgl: WebglAddon | null = null;
-    try {
-      webgl = new WebglAddon();
-      webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; });
-      term.loadAddon(webgl);
-    } catch {
-      webgl?.dispose();
-      webgl = null;
-    }
+    let webglWanted = true;
+    const loadGpu = () => {
+      // Deferred until the first live snapshot has painted: the renderer
+      // swap is itself a visible flash, so it happens once the tile already
+      // shows the same pixels it will re-render — invisible in practice.
+      if (!webglWanted || webgl) return;
+      try {
+        webgl = new WebglAddon();
+        webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; });
+        term.loadAddon(webgl);
+        term.refresh(0, term.rows - 1);
+      } catch {
+        try { webgl?.dispose(); } catch { /* half-constructed */ }
+        webgl = null;
+        webglWanted = false;
+      }
+    };
     setConn("live");
     const sep = wsBase.includes("?") ? "&" : "?";
     const wsUrl = () =>
@@ -647,10 +658,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
         try {
           const m = JSON.parse(String(ev.data));
           if (m.type === "snapshot") {
-            term.reset();
-            term.write(m.data, () => {
+            // In-band RIS: clear and repaint in one parse pass. A separate
+            // reset() painted an empty frame before the snapshot landed —
+            // the blink that made preview → terminal feel like a switch.
+            term.write("\x1bc" + m.data, () => {
               term.scrollToBottom();
+              term.refresh(0, term.rows - 1);
               rescaleRef.current();
+              requestAnimationFrame(loadGpu);
             });
             kbdEnhancedRef.current = typeof m.keyboardEnhanced === "boolean"
               ? m.keyboardEnhanced
@@ -793,7 +808,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
               <button type="button" aria-label="Close find" onClick={closeTileFind}>✕</button>
             </span>
           )}
-          <button type="button" title="Open full screen" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
+          <button type="button" title="Full screen (⌘⏎)" aria-label="Open session full screen" onClick={onFullscreen}>⛶</button>
           <button type="button" title="Unfocus" aria-label="Unfocus tile" onClick={onUnfocus}>✕</button>
         </div>
       )}
@@ -1444,6 +1459,20 @@ export const SessionSwitcher = ({
     }
   };
 
+  // Engage a session IN PLACE — the wall's default action. Full screen is a
+  // mode you enter on purpose (⌘⏎, the ⛶ button, or the sheet), never a side
+  // effect of clicking around or pressing Enter.
+  const focusInPlace = (session: SwitcherSession) => {
+    const key = sessionKey(session);
+    filterInputRef.current?.blur();
+    setFocusedKey(key);
+    onFocusSession?.(session);
+    const idx = flatNav.findIndex((x) => sessionKey(x) === key);
+    if (idx >= 0) setKbdIndex(idx);
+  };
+  const canFocusInPlace = (session: SwitcherSession) =>
+    interactiveTiles && session.active && session.type !== "port";
+
   const handleTap = (session: SwitcherSession) => {
     // Same immediacy when the tap switches sessions: focus leaves the filter
     // at the moment of intent, not when the terminal finishes connecting.
@@ -1486,15 +1515,15 @@ export const SessionSwitcher = ({
         return;
       }
       if (document.activeElement?.closest?.(".switcher-live-tile, .switcher-focus-tile")) return;
-      // ⌘⏎ (Ctrl⏎): focus the selected tile for in-place interaction.
-      // Plain Enter stays "switch to session" — the muscle-memory action.
+      // ⌘⏎ (Ctrl⏎): enter FULL SCREEN on the selected session — the one
+      // deliberate keyboard route into the mode. Plain Enter engages the
+      // tile in place; full screen never happens by accident.
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
         const target = flatNav[kbdIndex];
-        if (target && interactiveTiles && target.active && target.type !== "port") {
+        if (target) {
           event.preventDefault();
           filterInputRef.current?.blur();
-          setFocusedKey(sessionKey(target));
-          onFocusSession?.(target);
+          onSwitch(target);
         }
         return;
       }
@@ -1598,7 +1627,8 @@ export const SessionSwitcher = ({
         const target = flatNav[kbdIndex];
         if (target) {
           event.preventDefault();
-          handleTap(target);
+          if (canFocusInPlace(target)) focusInPlace(target);
+          else handleTap(target); // ports, dead sessions, non-interactive zoom
         }
         return;
       }
@@ -1923,31 +1953,19 @@ export const SessionSwitcher = ({
           // any stray click at interactive zoom silently rerouted the
           // keyboard into that session ("typing goes to a terminal").
           const el = e.target as HTMLElement | null;
-          const onTerminalArea = !!el?.closest?.(".switcher-preview, .switcher-live-tile");
-          if (interactiveTiles && s.active && s.type !== "port" && onTerminalArea) {
-            // Blur the filter NOW — the tile may take a beat to go live, but
-            // the user's intent transferred at the click, and the focus rule
-            // (terminals never steal from a text input) would otherwise hold
-            // the keyboard hostage in the filter until it happened to blur.
-            filterInputRef.current?.blur();
-            setFocusedKey(key);
-            onFocusSession?.(s);
-            // The keyboard selection (accent outline + tinted background)
-            // follows explicit interaction — otherwise it lingers on the
-            // previous current card, reading as a stale current-marker.
-            const idx = flatNav.findIndex((x) => sessionKey(x) === key);
-            if (idx >= 0) setKbdIndex(idx);
-          } else handleTap(s);
+          if (el?.closest?.("button, a, input")) return; // controls own their clicks
+          // The WHOLE card engages in place — clicking the header used to
+          // switch to full screen, which made the mode trivially easy to
+          // enter by accident. Full screen is ⌘⏎ / ⛶ / the sheet, only.
+          if (canFocusInPlace(s)) focusInPlace(s);
+          else handleTap(s);
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
-            // ⌘⏎ focuses the tile; plain Enter switches (mirrors onNavKey).
-            if ((e.metaKey || e.ctrlKey) && interactiveTiles && s.active && s.type !== "port") {
-              setFocusedKey(key);
-              onFocusSession?.(s);
-              const idx = flatNav.findIndex((x) => sessionKey(x) === key);
-              if (idx >= 0) setKbdIndex(idx);
-            } else handleTap(s);
+            // ⌘⏎ = full screen (deliberate); plain Enter engages in place.
+            if (e.metaKey || e.ctrlKey) { onSwitch(s); return; }
+            if (canFocusInPlace(s)) focusInPlace(s);
+            else handleTap(s);
           }
         }}
         {...pressHandlers(s)}
@@ -2432,7 +2450,7 @@ export const SessionSwitcher = ({
             ) : (
               <>
                 {!isCurrentSession(sheetSession) && (
-                  <button type="button" onClick={() => handleTap(sheetSession)}>Switch to</button>
+                  <button type="button" onClick={() => { setSheet(null); onSwitch(sheetSession); }}>Open full screen</button>
                 )}
                 <button
                   type="button"

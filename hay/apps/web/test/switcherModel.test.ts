@@ -310,3 +310,56 @@ describe("manual mode stability", () => {
     expect(after.rows.map((r) => r.name)).toEqual(["c", "a", "b"]);
   });
 });
+
+describe("manual mode folders", () => {
+  const folders = [{ id: "f1", name: "Experiments" }, { id: "f2", name: "Infra" }];
+
+  it("files sessions into their folders and leaves the rest loose", () => {
+    const sessions = [
+      mk({ name: "alpha", folderId: "f1" }),
+      mk({ name: "beta" }),
+      mk({ name: "gamma", folderId: "f2" })
+    ];
+    const model = buildSwitcherModel(sessions, null, "", "manual", [], folders);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.folders.map((f) => f.folder.name)).toEqual(["Experiments", "Infra"]);
+    expect(model.folders[0].rows.map((r) => r.name)).toEqual(["alpha"]);
+    expect(model.rows.map((r) => r.name)).toEqual(["beta"]);
+  });
+
+  it("keeps an empty folder visible — a folder is a place you intend to fill", () => {
+    const model = buildSwitcherModel([mk({ name: "solo" })], null, "", "manual", [], folders);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.folders.map((f) => f.rows.length)).toEqual([0, 0]);
+    expect(model.rows.map((r) => r.name)).toEqual(["solo"]);
+  });
+
+  it("a session in a deleted folder falls back to loose rather than vanishing", () => {
+    const sessions = [mk({ name: "orphan", folderId: "f_gone" })];
+    const model = buildSwitcherModel(sessions, null, "", "manual", [], folders);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.rows.map((r) => r.name)).toEqual(["orphan"]);
+  });
+
+  it("filtering narrows inside folders instead of pulling sessions out of them", () => {
+    const sessions = [
+      mk({ name: "alpha", folderId: "f1" }),
+      mk({ name: "alpine", folderId: "f1" }),
+      mk({ name: "beta" })
+    ];
+    const model = buildSwitcherModel(sessions, null, "alp", "manual", [], folders);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.folders[0].rows.map((r) => r.name)).toEqual(["alpha", "alpine"]);
+    expect(model.rows).toEqual([]);
+  });
+
+  it("folders do not leak into Recent or Project", () => {
+    const sessions = [mk({ name: "alpha", folderId: "f1" }), mk({ name: "beta" })];
+    const recent = buildSwitcherModel(sessions, null, "", "recent", [], folders);
+    const project = buildSwitcherModel(sessions, null, "", "project", [], folders);
+    expect(recent.mode).toBe("tiers");
+    expect(project.mode).toBe("project");
+    if (project.mode !== "project") throw new Error("expected project");
+    expect(project.groups.some((g) => g.label === "Experiments")).toBe(false);
+  });
+});

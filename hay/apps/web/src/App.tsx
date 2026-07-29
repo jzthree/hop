@@ -375,6 +375,9 @@ const App = () => {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [sessionsError, setSessionsError] = useState(false);
+  // Server-owned folders (Manual mode). Kept in App because the sessions
+  // fetch already carries them.
+  const [folders, setFolders] = useState<Array<{ id: string; name: string }>>([]);
   // Attention plumbing: tab-title alert for a bell in the attached session
   // while the tab is hidden; inline editors for display name / rename / create.
   const [titleAlert, setTitleAlert] = useState(false);
@@ -2629,7 +2632,8 @@ const App = () => {
           tagline: typeof s.tagline === "string" ? s.tagline : undefined,
           parked: s.parked === true,
           archived: s.archived === true,
-          hasLocalCli: s.hasLocalCli === true
+          hasLocalCli: s.hasLocalCli === true,
+          folderId: typeof s.folderId === "string" ? s.folderId : null
         });
       }
 
@@ -2701,6 +2705,11 @@ const App = () => {
       // Drop a response superseded by a newer fetch started while this was
       // in flight (see the sequence-guard note above).
       if (seq !== fetchSeqRef.current) return;
+      setFolders(Array.isArray(data.folders)
+        ? data.folders
+            .filter((f: { id?: string; name?: string }) => f && f.id && f.name)
+            .map((f: { id: string; name: string }) => ({ id: String(f.id), name: String(f.name) }))
+        : []);
       setSessions(list);
       setSessionsError(false);
       sessionListLoadedRef.current = true;
@@ -3421,6 +3430,7 @@ const App = () => {
             sessions={sessions}
             currentRoom={null}
             dismissable={false}
+            folders={folders}
             onClose={() => {}}
             onSwitch={(next) => {
               window.location.href = buildSessionPath(next.displayName || next.name);
@@ -4075,6 +4085,7 @@ const App = () => {
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
             onFocusSession={focusSessionInPlace}
+            folders={folders}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {

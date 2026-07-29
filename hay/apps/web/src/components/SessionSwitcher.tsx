@@ -20,6 +20,7 @@ import {
   projectKey,
   relativeTime,
   type SessionOriginScope,
+  type SwitcherFolder,
   type SwitcherSession,
   type SwitcherSortMode
 } from "../utils/switcherModel";
@@ -79,6 +80,9 @@ type Props = {
   // Interacting with a tile makes THAT session current: the chip moves, and
   // closing the wall lands full-screen in the terminal you were typing in.
   onFocusSession?: (session: SwitcherSession) => void;
+  // User-authored folders (Manual mode only). Server-owned, so they follow
+  // you across devices — unlike the drag ORDER, which is per-client taste.
+  folders?: SwitcherFolder[];
   tileWsBase?: string;
   userName?: string;
   terminalTheme?: object;
@@ -808,6 +812,7 @@ export const SessionSwitcher = ({
   onNotice,
   tileWsBase,
   onFocusSession,
+  folders = [],
   userName,
   terminalTheme,
   onOpenSettings,
@@ -915,6 +920,49 @@ export const SessionSwitcher = ({
     }
   };
   const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dropFolder, setDropFolder] = useState<string | null>(null);
+
+  // Folder mutations go straight to the daemon: folders are shared structure,
+  // not client preference, so they must not live in localStorage the way the
+  // manual ORDER does.
+  const folderApi = async (path: string, body: unknown, failure: string) => {
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({} as { error?: string }));
+        onNotice(data.error || failure);
+        return false;
+      }
+      onRefresh();
+      return true;
+    } catch {
+      onNotice(failure);
+      return false;
+    }
+  };
+  const createFolder = async () => {
+    const name = window.prompt("Folder name")?.trim();
+    if (!name) return;
+    if (await folderApi("/api/folders", { name }, "Could not create folder")) onNotice(`Created ${name}`);
+  };
+  const renameFolder = async (folder: SwitcherFolder) => {
+    const name = window.prompt("Rename folder", folder.name)?.trim();
+    if (!name || name === folder.name) return;
+    await folderApi("/api/folders/rename", { id: folder.id, name }, "Could not rename folder");
+  };
+  const deleteFolder = async (folder: SwitcherFolder) => {
+    // Deleting a folder releases its sessions; it never kills them, so this
+    // needs no scarier confirmation than the sentence itself.
+    if (!window.confirm(`Delete folder "${folder.name}"? Its sessions move back to unfiled.`)) return;
+    await folderApi("/api/folders/delete", { id: folder.id }, "Could not delete folder");
+  };
+  const fileSession = async (key: string, folderId: string | null) => {
+    await folderApi("/api/sessions/move", { internalName: key, folderId }, "Could not move session");
+  };
 
   // Drag auto-scroll: a manual reorder often has to travel past a screenful
   // of tiles, and HTML5 drag blocks normal scrolling — so while a drag is
@@ -1045,7 +1093,7 @@ export const SessionSwitcher = ({
     // A filter query searches EVERYTHING (parked included); the browsing
     // wall shows only unparked sessions.
     const pool = filter.trim() ? visibleSessions : wallSessions;
-    const live = buildSwitcherModel(pool, currentRoom, filter, sortMode, manualOrder);
+    const live = buildSwitcherModel(pool, currentRoom, filter, sortMode, manualOrder, folders);
     if (!open || (live.mode !== "tiers" && live.mode !== "project")) return live;
     let frozen = frozenOrderRef.current;
     if (!frozen || frozen.mode !== live.mode) {
@@ -1158,7 +1206,7 @@ export const SessionSwitcher = ({
   // reordering works against, regardless of what the filter is showing.
   const orderedAllKeysRef = useRef<string[]>([]);
   {
-    const full = buildSwitcherModel(wallSessions, currentRoom, "", "manual", manualOrder);
+    const full = buildSwitcherModel(wallSessions, currentRoom, "", "manual", manualOrder, folders);
     orderedAllKeysRef.current = full.mode === "manual" ? full.rows.map(sessionKey) : [];
   }
   const flatNavRef = useRef(flatNav);
@@ -2155,8 +2203,52 @@ export const SessionSwitcher = ({
                 <p className="switcher-hint">
                   {filter.trim()
                     ? "Showing matches in your order — drag one next to another (or ⌥↑/⌥↓); the move applies to the full list"
-                    : "Drag tiles to reorder, or ⌥↑/⌥↓ to move the selected one"}
+                    : "Drag tiles to reorder, or onto a folder to file them"}
+                  <button type="button" className="switcher-folder-new" onClick={createFolder}>+ New folder</button>
                 </p>
+                {model.folders.map(({ folder, rows }) => (
+                  <section
+                    key={folder.id}
+                    className={"switcher-group switcher-folder" + (dropFolder === folder.id ? " drop-target" : "")}
+                    onDragOver={(e) => { e.preventDefault(); setDropFolder(folder.id); }}
+                    onDragLeave={() => setDropFolder((cur) => (cur === folder.id ? null : cur))}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDropFolder(null);
+                      suppressTapRef.current = true;
+                      if (dragKey) fileSession(dragKey, folder.id);
+                      setDragKey(null);
+                    }}
+                  >
+                    <h3 className="switcher-group-label">
+                      {folder.name}
+                      <span className="switcher-folder-count">{rows.length}</span>
+                      <button type="button" onClick={() => renameFolder(folder)} title="Rename folder">✎</button>
+                      <button type="button" onClick={() => deleteFolder(folder)} title="Delete folder">🗑</button>
+                    </h3>
+                    {rows.length === 0 ? (
+                      <p className="switcher-folder-empty">Drag a session here</p>
+                    ) : (
+                      <div className="switcher-grid">{rows.map((s) => renderCard(s))}</div>
+                    )}
+                  </section>
+                ))}
+                {model.folders.length > 0 && model.rows.length > 0 && (
+                  <h3
+                    className={"switcher-group-label switcher-unfiled" + (dropFolder === "" ? " drop-target" : "")}
+                    onDragOver={(e) => { e.preventDefault(); setDropFolder(""); }}
+                    onDragLeave={() => setDropFolder((cur) => (cur === "" ? null : cur))}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDropFolder(null);
+                      suppressTapRef.current = true;
+                      if (dragKey) fileSession(dragKey, null); // drop here to unfile
+                      setDragKey(null);
+                    }}
+                  >
+                    Unfiled
+                  </h3>
+                )}
                 <div className="switcher-grid">{model.rows.map((s) => renderCard(s))}</div>
               </>
             )}

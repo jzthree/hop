@@ -220,6 +220,11 @@ validateConfigDir();
 
 const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
 const SESSION_SECRET_FILE = path.join(HOME_DIR, '.session_secret');
+// Folders live here, not in the workspace store: saveSessionStore() no-ops
+// without an active workspace (the common case), so folders and their order
+// evaporated on every daemon restart. Session MEMBERSHIP is persisted per
+// session in its durable meta, so a folder and its contents survive together.
+const FOLDERS_FILE = path.join(HOME_DIR, 'folders.json');
 const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
 const HOP_CONFIG_FILE = path.join(HOME_DIR, '.config.json');
@@ -613,6 +618,8 @@ const initialWorkspaceState = initializeWorkspaceState();
 let currentWorkspaceName = initialWorkspaceState.workspaceName;
 let sessionStore = initialWorkspaceState.store;
 const runtimeSessionMetadata = new Map();
+// Folders are organization the user authored; they must be there on boot.
+loadFolders();
 // internalName -> the display-name claim we last rejected for it, so the
 // collision guard reports each rejection once instead of every reconcile.
 const reportedNameCollisions = new Map();
@@ -941,6 +948,30 @@ function setPortSessionConfig(name, port, displayName, folderId, opts = {}) {
     });
 }
 
+function saveFolders() {
+    try {
+        writePrivateFile(FOLDERS_FILE, JSON.stringify({
+            folders: sessionStore.folders,
+            order: sessionStore.order.folders
+        }, null, 2));
+    } catch (e) { /* best effort: folders are organization, not state */ }
+}
+
+function loadFolders() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(FOLDERS_FILE, 'utf8'));
+        for (const [id, folder] of Object.entries(raw.folders || {})) {
+            if (folder && typeof folder.name === 'string') sessionStore.folders[id] = folder;
+        }
+        sessionStore.order.folders = (Array.isArray(raw.order) ? raw.order : [])
+            .filter((id) => sessionStore.folders[id]);
+        for (const id of Object.keys(sessionStore.folders)) {
+            if (!sessionStore.order.folders.includes(id)) sessionStore.order.folders.push(id);
+            if (!sessionStore.order.sessions[id]) sessionStore.order.sessions[id] = [];
+        }
+    } catch (e) { /* no folders yet */ }
+}
+
 function createFolder(name) {
     const trimmed = String(name || '').trim();
     if (!trimmed) return null;
@@ -961,6 +992,7 @@ function createFolder(name) {
         sessionStore.order.sessions[id] = [];
     }
     saveSessionStore();
+    saveFolders();
     return folder;
 }
 
@@ -976,6 +1008,7 @@ function renameFolder(id, name) {
     folder.updatedAt = new Date().toISOString();
     sessionStore.folders[id] = folder;
     saveSessionStore();
+    saveFolders();
     return folder;
 }
 
@@ -995,6 +1028,7 @@ function deleteFolder(id) {
         ensureSessionOrder(name, null);
     }
     saveSessionStore();
+    saveFolders();
     return true;
 }
 
@@ -1054,6 +1088,7 @@ function setFolderOrder(order) {
     const missing = Object.keys(sessionStore.folders).filter((id) => !filtered.includes(id));
     sessionStore.order.folders = filtered.concat(missing);
     saveSessionStore();
+    saveFolders();
     return true;
 }
 
@@ -6565,7 +6600,10 @@ async function reconcileExternalRuntimeSessions() {
             taglineAt: savedConfig?.taglineAt || runtimeConfig?.taglineAt || durableMeta?.taglineAt,
             parked: savedConfig?.parked ?? runtimeConfig?.parked ?? durableMeta?.parked,
             archived: savedConfig?.archived ?? runtimeConfig?.archived ?? durableMeta?.archived,
-            folderId: savedConfig?.folderId || runtimeConfig?.folderId || null,
+            // Durable meta first — the store is memory-only without a
+            // workspace, so reading it first meant every folder assignment
+            // vanished on restart while the folder itself remained.
+            folderId: durableMeta?.folderId || savedConfig?.folderId || runtimeConfig?.folderId || null,
             shell: savedConfig?.shell || runtimeConfig?.shell,
             env: savedConfig?.env || runtimeConfig?.env,
             cols: Number.isInteger(savedConfig?.cols) ? savedConfig.cols : runtimeConfig?.cols,
@@ -7655,6 +7693,7 @@ function startAuthProxy(authEmitter) {
                 // decisive agent origin ("created via MCP") differently from
                 // an inferred one ("guessed from the CLI's environment").
                 createdVia: s.createdVia || null,
+                folderId: s.folderId || null,
                 // Display tagline (hop ai tagline); absent for most sessions.
                 // taglineAt drives the freshness check that skips re-tagging
                 // sessions nothing has happened to.
@@ -8223,24 +8262,42 @@ function startAuthProxy(authEmitter) {
             req.on('end', () => {
                 try {
                     const { name, internalName, folderId, index } = JSON.parse(body);
-                    let targetName = internalName && sessionStore.sessions[internalName] ? internalName : null;
-                    if (!targetName && name) {
-                        const displayName = resolveDisplayNameAlias(name);
-                        targetName = findInternalSessionName(displayName);
-                    }
-                    if (!targetName) {
+                    const persistMembership = (target) => {
+                        if (!target) return;
+                        const durable = readClaudeSessionMeta(target) || {};
+                        writeClaudeSessionMeta(target, {
+                            ...durable,
+                            internalName: target,
+                            folderId: folderId || undefined
+                        });
+                    };
+                    // Resolve like every other session endpoint: a live
+                    // session usually has no store entry at all, so requiring
+                    // one made folders unusable for exactly the sessions a
+                    // user wants to organize.
+                    const targetName = resolveSessionInternalName(name, internalName);
+                    if (!targetName || !(hopSessionExists(targetName) || getEffectiveSessionConfig(targetName))) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
-                    const ok = moveSessionToFolder(targetName, folderId || null, index);
-                    if (!ok) {
-                        res.writeHead(400, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: 'Failed to move session' }));
+                    if (folderId && !sessionStore.folders[folderId]) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Folder not found' }));
                         return;
                     }
+                    // Membership lives in durable meta; the store copy is a
+                    // cache that dies with the daemon.
+                    persistMembership(targetName);
+                    rememberRuntimeSessionMetadata(targetName, {
+                        ...(getRuntimeSessionMetadata(targetName) || {}),
+                        folderId: folderId || undefined
+                    });
+                    if (sessionStore.sessions[targetName]) {
+                        moveSessionToFolder(targetName, folderId || null, index);
+                    }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true }));
+                    res.end(JSON.stringify({ ok: true, folderId: folderId || null }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));

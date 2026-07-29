@@ -35,6 +35,8 @@ export type SwitcherSession = {
   parked?: boolean;
   // Archived: process stopped, but reopening resumes the conversation.
   archived?: boolean;
+  // Folder the user filed this session under (Manual mode). Null = loose.
+  folderId?: string | null;
   // A hop CLI is attached in a real terminal window on the host. The wall
   // must never resize such a session — that window's size is physical truth.
   hasLocalCli?: boolean;
@@ -53,11 +55,13 @@ export type SwitcherGroup = {
   rows: SwitcherSession[];
 };
 
+export type SwitcherFolder = { id: string; name: string };
+
 export type SwitcherModel =
   | { mode: "tiers"; hero: SwitcherSession[]; groups: SwitcherGroup[]; currentInHero: boolean }
   | { mode: "filter"; rows: SwitcherSession[] }
   | { mode: "project"; groups: SwitcherGroup[] }
-  | { mode: "manual"; rows: SwitcherSession[] };
+  | { mode: "manual"; rows: SwitcherSession[]; folders: Array<{ folder: SwitcherFolder; rows: SwitcherSession[] }> };
 
 // Minimum hero-card count (including the current session). All attention
 // sessions are always hero cards — attention must never be buried in the tail.
@@ -188,12 +192,41 @@ const orderManually = (sessions: SwitcherSession[], manualOrder: string[]): Swit
   });
 };
 
+/**
+ * Split sessions into the user's folders plus everything still loose.
+ * Folders belong to MANUAL mode only: Recent is ordered by the machine and
+ * Project by the filesystem, so a hand-authored grouping would contradict
+ * both. Empty folders are kept — a folder you made is a place you intend to
+ * put things, and silently hiding it would make new folders look broken.
+ */
+const splitIntoFolders = (
+  sessions: SwitcherSession[],
+  folders: SwitcherFolder[],
+  manualOrder: string[]
+) => {
+  const byId = new Map(folders.map((f) => [f.id, [] as SwitcherSession[]]));
+  const loose: SwitcherSession[] = [];
+  for (const s of sessions) {
+    const bucket = s.folderId ? byId.get(s.folderId) : undefined;
+    if (bucket) bucket.push(s);
+    else loose.push(s);
+  }
+  return {
+    folders: folders.map((folder) => ({
+      folder,
+      rows: orderManually(byId.get(folder.id) || [], manualOrder)
+    })),
+    loose: orderManually(loose, manualOrder)
+  };
+};
+
 export const buildSwitcherModel = (
   sessions: SwitcherSession[],
   currentRoom: string | null,
   filter: string,
   sortMode: SwitcherSortMode = "recent",
-  manualOrder: string[] = []
+  manualOrder: string[] = [],
+  folders: SwitcherFolder[] = []
 ): SwitcherModel => {
   const query = filter.trim();
   if (query) {
@@ -207,7 +240,10 @@ export const buildSwitcherModel = (
     // are hidden. Score-ranking here would reorder the wall under the user's
     // hands at the exact moment they were trying to arrange it.
     if (sortMode === "manual") {
-      return { mode: "manual", rows: orderManually(matches, manualOrder) };
+      // Filtering narrows within folders too, so a search never pretends a
+      // session left the folder you filed it in.
+      const split = splitIntoFolders(matches, folders, manualOrder);
+      return { mode: "manual", rows: split.loose, folders: split.folders };
     }
     const rows = matches
       .map((s) => ({ s, score: filterScore(s, q) }))
@@ -221,7 +257,8 @@ export const buildSwitcherModel = (
     return { mode: "project", groups: groupByProject(sessions, true) };
   }
   if (sortMode === "manual") {
-    return { mode: "manual", rows: orderManually(sessions, manualOrder) };
+    const split = splitIntoFolders(sessions, folders, manualOrder);
+    return { mode: "manual", rows: split.loose, folders: split.folders };
   }
 
   const current = sessions.find((s) => isCurrent(s, currentRoom)) ?? null;

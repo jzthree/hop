@@ -685,6 +685,12 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     const hiddenReconnect = { hiddenAt: 0 };
     const onVisibility = () => {
       if (document.hidden) { hiddenReconnect.hiddenAt = Date.now(); return; }
+      // Same stale-canvas risk as the full-screen terminal: repaint on the
+      // way back rather than waiting for a scroll to invalidate it.
+      requestAnimationFrame(() => {
+        const t = termRef.current;
+        if (t) { try { t.refresh(0, t.rows - 1); } catch { /* disposed */ } }
+      });
       const away = hiddenReconnect.hiddenAt ? Date.now() - hiddenReconnect.hiddenAt : 0;
       hiddenReconnect.hiddenAt = 0;
       if (!ws || ws.readyState !== WebSocket.OPEN || away > 60000) {

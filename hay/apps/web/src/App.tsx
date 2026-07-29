@@ -1110,6 +1110,22 @@ const App = () => {
   // Set by an explicit session switch; the next attach claim carries
   // user:true (deliberate — wins the size election outright on new hosts).
   const deliberateAttachRef = useRef(false);
+  // A canvas that was HIDDEN can come back showing a stale frame: the wall
+  // covers the terminal with visibility:hidden, browsers throttle or drop
+  // WebGL contexts for hidden canvases, and xterm only repaints rows it
+  // believes are damaged. Nothing marks the whole screen dirty on the way
+  // back, so the terminal looked wrong until a scroll happened to invalidate
+  // it — the persistent "I have to scroll before it renders" report. Every
+  // transition back to visible now forces a full repaint instead.
+  const forceRepaint = () => {
+    const t = termRef.current;
+    if (!t) return;
+    try {
+      t.refresh(0, t.rows - 1);
+    } catch { /* terminal disposed mid-flight */ }
+  };
+  const forceRepaintRef = useRef(forceRepaint);
+  forceRepaintRef.current = forceRepaint;
   // Mirror of the switcher-open state for callbacks that outlive a render.
   const switcherOpenRef = useRef(false);
   switcherOpenRef.current = switcherOpen;
@@ -1613,8 +1629,11 @@ const App = () => {
     try {
       webglAddon = new WebglAddon();
       webglAddon.onContextLoss(() => {
+        // The DOM renderer takes over, but nothing has told it the screen is
+        // dirty — without this the terminal keeps showing the dead canvas.
         webglAddon?.dispose();
         webglAddon = null;
+        requestAnimationFrame(() => forceRepaintRef.current());
       });
       terminal.loadAddon(webglAddon);
     } catch {
@@ -2493,6 +2512,24 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [switcherOpen]);
 
+  // Tab or window coming back to the foreground: same stale-frame risk as
+  // the wall closing, from browser throttling rather than our own hiding.
+  useEffect(() => {
+    if (!session) return;
+    const repaintIfVisible = () => {
+      if (document.hidden || switcherOpenRef.current) return;
+      requestAnimationFrame(() => forceRepaintRef.current());
+    };
+    document.addEventListener("visibilitychange", repaintIfVisible);
+    window.addEventListener("focus", repaintIfVisible);
+    window.addEventListener("pageshow", repaintIfVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", repaintIfVisible);
+      window.removeEventListener("focus", repaintIfVisible);
+      window.removeEventListener("pageshow", repaintIfVisible);
+    };
+  }, [session]);
+
   useEffect(() => {
     const handlePopState = () => {
       // Back/forward move wall state with the URL they restore.
@@ -2895,6 +2932,10 @@ const App = () => {
       // whatever session is CURRENT now (tile focus may have moved it; the
       // connect effect was gated while the wall was open).
       deliberateAttachRef.current = true;
+      // Visible again: repaint on the next frame, after layout restores the
+      // element's size. Cheap (one pass over the rows) and idempotent, so it
+      // is safe even when a reconnect is about to repaint anyway.
+      requestAnimationFrame(() => forceRepaintRef.current());
       if (!busy) setReconnectToken((v) => v + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

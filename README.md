@@ -199,7 +199,13 @@ The attached-terminal UI adapts light/dark themes to your terminal and puts the 
 
 ### Use Hop on Mobile
 
-Hop’s mobile UI includes:
+**Native iOS app**: [hop-ios](https://github.com/jzthree/hop-ios) — a SwiftUI
+client for iPhone with a real terminal (SwiftTerm), optimistic-echo typing,
+bell notifications with lock-screen reply, Siri/Shortcuts/Spotlight/Handoff
+integration, and a fixed-height terminal keyboard. It consumes hop's public
+HTTP + WebSocket API and needs no changes to hop.
+
+Hop’s mobile **web** UI includes:
 
 - a terminal-oriented accessory row with `Esc`, `Tab`, `Ctrl`, `Alt`, and arrows
 - a native keyboard button for dictation, spellcheck, and autocomplete

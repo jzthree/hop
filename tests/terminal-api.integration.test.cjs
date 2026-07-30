@@ -584,3 +584,29 @@ test('a display name freed by a later rename can be reused', async () => {
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Final', internalName: 'AliasOne' });
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Freed', internalName: 'AliasTwo' });
 });
+
+// Regression: an undeclared Bearer-token creation is automation, not a human.
+// Agents' raw scripts rarely remember x-hop-actor, and every one that forgot
+// landed its sessions in the USER tab (SelectProbe). Cookie-auth (the web UI)
+// and the hop CLI's via stamp still default to user; explicit headers win.
+test('bare token API creations default to agent origin', async () => {
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'BareTokenProbe', type: 'terminal', cwd: tempDir, startRuntime: true });
+  await delay(400);
+  const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const s = list.data.sessions.find(x => x.internalName === 'BareTokenProbe');
+  assert.ok(s, 'session exists');
+  assert.equal(s.createdBy, 'agent', `undeclared token caller must be agent, got ${s.createdBy}`);
+
+  // The hop CLI's own via stamp keeps humans human.
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'CliUserProbe', type: 'terminal', cwd: tempDir, startRuntime: true },
+    { 'X-Hop-Via': 'cli' });
+  await delay(400);
+  const list2 = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const s2 = list2.data.sessions.find(x => x.internalName === 'CliUserProbe');
+  assert.equal(s2 && s2.createdBy, 'user', 'CLI-stamped caller stays user');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'BareTokenProbe', internalName: 'BareTokenProbe' });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'CliUserProbe', internalName: 'CliUserProbe' });
+});

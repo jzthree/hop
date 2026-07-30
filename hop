@@ -5080,6 +5080,14 @@ const resolveVia = (req) => {
 };
 
 function resolveActor(req) {
+    const declared = String(req?.headers?.[ACTOR_HEADER] || '').toLowerCase();
+    if (declared === 'agent' || declared === 'user') return declared;
+    // Undeclared: infer from the auth path. Cookie = a human in the web UI.
+    // Bearer token without the hop CLI's via stamp = automation.
+    if (req?.hopAuthVia === 'token') {
+        const via = String(req?.headers?.[VIA_HEADER] || '').toLowerCase();
+        if (via !== 'cli' && via !== 'web') return 'agent';
+    }
     return resolveActorFromHeaders(req?.headers || {}, ACTOR_HEADER);
 }
 
@@ -7068,6 +7076,14 @@ function startAuthProxy(authEmitter) {
             : null;
         const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET
             || tokenFromHeader === SESSION_SECRET;
+        // How this request proved itself decides the DEFAULT actor. Humans
+        // reach the API through the web UI (cookie) or the hop CLI (which
+        // stamps x-hop-via); a raw Bearer-token call with neither is, in
+        // practice, always automation — an agent's script, a probe, a cron.
+        // Those callers rarely remember to declare x-hop-actor, and every
+        // one that forgot used to land its sessions in the USER tab
+        // (SelectProbe et al). Explicit headers still win outright.
+        req.hopAuthVia = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET ? 'cookie' : 'token';
 
         // API: Auth status (used by local CLI to wait for remote login)
         if (parsedUrl.pathname === '/api/auth' && req.method === 'GET') {

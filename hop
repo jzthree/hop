@@ -16,6 +16,11 @@ const net = require('net');
 const WebSocket = require('ws');
 const { resolveActorFromHeaders, canActorAccessSession } = require('./lib/terminal-access');
 const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = require('./lib/naming-themes');
+const {
+    createFailureTracker,
+    createSingleFlight,
+    sameHostIncarnation
+} = require('./lib/hay-host-watchdog');
 
 const os = require('os');
 const DAEMON_FLAG = process.argv.includes('--daemon');
@@ -323,6 +328,8 @@ const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_
 const HAY_HOST_HOME_HASH = crypto.createHash('sha256').update(path.resolve(HOME_DIR)).digest('hex').slice(0, 24);
 const HAY_HOST_HOME_FLAG = `--hop-home-hash=${HAY_HOST_HOME_HASH}`;
 let hayHostState = null;
+const hayHostInspectionFlight = createSingleFlight();
+const hayHostEnsureFlight = createSingleFlight();
 // Session content search: per-room ANSI-stripped tail, cached briefly so a
 // typing burst in the switcher re-greps without re-fetching from the host.
 const sessionSearchTextCache = new Map();
@@ -352,7 +359,25 @@ function stripAnsiForSearch(raw) {
 // only after this many consecutive failed probes spanning at least the window.
 const HAY_HOST_UNRESPONSIVE_PROBES = 3;
 const HAY_HOST_UNRESPONSIVE_WINDOW_MS = 60_000;
-let hayHostProbeFailures = { pid: 0, count: 0, firstAt: 0 };
+const hayHostProbeFailures = createFailureTracker({
+    requiredFailures: HAY_HOST_UNRESPONSIVE_PROBES,
+    windowMs: HAY_HOST_UNRESPONSIVE_WINDOW_MS
+});
+const HAY_HOST_DAEMON_STALL_THRESHOLD_MS = 2000;
+const HAY_HOST_DAEMON_STALL_HOLD_MS = HAY_HOST_UNRESPONSIVE_WINDOW_MS;
+let lastDaemonEventLoopStall = { at: 0, driftMs: 0 };
+if (DAEMON_FLAG) {
+    const intervalMs = 1000;
+    let expectedAt = Date.now() + intervalMs;
+    setInterval(() => {
+        const at = Date.now();
+        const driftMs = Math.max(0, at - expectedAt);
+        expectedAt = at + intervalMs;
+        if (driftMs >= HAY_HOST_DAEMON_STALL_THRESHOLD_MS) {
+            lastDaemonEventLoopStall = { at, driftMs };
+        }
+    }, intervalMs).unref();
+}
 // Serialize host spawning across concurrent ensure calls / processes: without
 // this, N racing `hop` invocations that each see "no host" spawn N hosts
 // (observed: four in one second), scattering sessions across orphans.
@@ -364,6 +389,12 @@ function parsePositiveIntEnv(name, fallback) {
     const parsed = Number.parseInt(raw, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
     return parsed;
+}
+
+function getRecentDaemonEventLoopStall() {
+    if (!lastDaemonEventLoopStall.at) return null;
+    if (Date.now() - lastDaemonEventLoopStall.at > HAY_HOST_DAEMON_STALL_HOLD_MS) return null;
+    return { ...lastDaemonEventLoopStall };
 }
 
 // Password hashing using scrypt (built-in, no external deps)
@@ -3073,12 +3104,13 @@ async function listActiveSessionsRuntimeFirst() {
     if (!isExternalTerminalBackend()) {
         return { sessions: listActiveSessions(), runtimeAvailable: true };
     }
+    let reconciled;
     try {
-        await reconcileExternalRuntimeSessions();
+        reconciled = await reconcileExternalRuntimeSessions();
     } catch (e) {
         return { sessions: [], runtimeAvailable: false };
     }
-    const runtimeRooms = await fetchExternalHayRuntimeRooms();
+    const runtimeRooms = reconciled?.rooms;
     if (!Array.isArray(runtimeRooms)) {
         return { sessions: [], runtimeAvailable: false };
     }
@@ -5189,7 +5221,8 @@ function writeHayHostStateFile(state) {
     const changed = !hayHostState
         || hayHostState.pid !== state.pid
         || hayHostState.port !== state.port;
-    if (!changed) return;
+    const missingStateFile = !fs.existsSync(HAY_HOST_STATE_FILE);
+    if (!changed && !missingStateFile) return;
     hayHostState = {
         pid: state.pid,
         port: state.port,
@@ -5207,7 +5240,11 @@ function writeHayHostStateFile(state) {
     writePrivateFile(HAY_HOST_STATE_FILE, JSON.stringify(hayHostState));
 }
 
-function clearHayHostStateFile() {
+function clearHayHostStateFile(expectedState = null) {
+    if (expectedState) {
+        const registered = readHayHostStateFile();
+        if (!sameHostIncarnation(registered, expectedState)) return false;
+    }
     hayHostState = null;
     hayHostDiscoveryCache = { expiresAt: 0, hosts: [] };
     try {
@@ -5215,6 +5252,7 @@ function clearHayHostStateFile() {
             fs.unlinkSync(HAY_HOST_STATE_FILE);
         }
     } catch (e) { }
+    return true;
 }
 
 function parseListeningPortForPid(pid) {
@@ -6266,7 +6304,7 @@ function choosePreferredHayHost(inspectedHosts, preferredHost = null) {
     return ranked[0]?.host || null;
 }
 
-async function inspectExternalHayHosts(force = false) {
+async function inspectExternalHayHostsOnce(force = false) {
     if (!isExternalTerminalBackend()) return [];
     const candidates = listDiscoveredHayHostCandidates(force);
     if (candidates.length === 0) return [];
@@ -6274,12 +6312,20 @@ async function inspectExternalHayHosts(force = false) {
         const __h0 = Date.now();
         const healthy = await probeExternalHayHostFromHost(host);
         const __h1 = Date.now();
-        const rooms = await fetchExternalHayRuntimeRoomsFromHost(host);
+        // A failed liveness probe must not enqueue an expensive /rooms walk
+        // behind it. The fallback watchdog probe below decides whether a known
+        // host is merely slow; room enumeration never decides whether to kill.
+        const rooms = healthy ? await fetchExternalHayRuntimeRoomsFromHost(host) : null;
         const __h2 = Date.now();
         if (__h2 - __h0 > 150) log(`[perf] inspect host pid=${host.pid} port=${host.port}: probe=${__h1-__h0}ms rooms=${__h2-__h1}ms`, YELLOW);
         return { host, healthy, rooms };
     }));
     return inspected.filter((entry) => entry.healthy === true && Array.isArray(entry.rooms));
+}
+
+async function inspectExternalHayHosts(force = false) {
+    if (force) return await inspectExternalHayHostsOnce(true);
+    return await hayHostInspectionFlight.run(() => inspectExternalHayHostsOnce(false));
 }
 
 function hostBelongsToCurrentHome(entry, preferredHost = null) {
@@ -6301,7 +6347,12 @@ function getExternalHayHostStateOrThrow() {
         hayHostState = readHayHostStateFile();
     }
     if (!hayHostState || !isProcessAlive(hayHostState.pid)) {
-        clearHayHostStateFile();
+        const registered = readHayHostStateFile();
+        if (registered && isProcessAlive(registered.pid)) {
+            hayHostState = registered;
+            return registered;
+        }
+        clearHayHostStateFile(registered || null);
         throw new Error('External hay host is not running');
     }
     return hayHostState;
@@ -6333,18 +6384,25 @@ async function stopExternalHayHostProcess(hostState, timeoutMs = 1500) {
     return !isProcessAlive(pid);
 }
 
-async function ensureExternalHayHostReady() {
-    if (!isExternalTerminalBackend()) return null;
+function markExternalHayHostResponsive(host) {
+    const recovered = hayHostProbeFailures.recordSuccess(Number(host?.pid));
+    if (recovered) {
+        log(`[Hay] Host ${host.pid} responsive again after ${recovered.count} failed probe(s).`, DIM);
+    }
+    writeHayHostStateFile(host);
+    return host;
+}
 
+async function ensureExternalHayHostReadyOnce() {
     const existing = hayHostState || readHayHostStateFile();
     const inspectedExisting = await inspectExternalHayHosts();
     const relevantExisting = inspectedExisting.filter((entry) => hostBelongsToCurrentHome(entry, existing));
     const preferredExisting = choosePreferredHayHost(relevantExisting, existing);
     if (preferredExisting) {
-        writeHayHostStateFile(preferredExisting);
-        return preferredExisting;
+        return markExternalHayHostResponsive(preferredExisting);
     }
 
+    let stateCleared = false;
     if (existing && isProcessAlive(existing.pid)) {
         // Generous timeout: a host mid-GC or briefly saturated is SLOW, not
         // dead — and "restarting" it kills every live PTY. Only a host that
@@ -6353,29 +6411,58 @@ async function ensureExternalHayHostReady() {
         // alive beats dead).
         const healthy = await probeExternalHayHostFromHost(existing, 5000);
         if (healthy) {
-            if (hayHostProbeFailures.pid === existing.pid && hayHostProbeFailures.count > 0) {
-                log(`[Hay] Host ${existing.pid} responsive again after ${hayHostProbeFailures.count} failed probe(s).`, DIM);
+            return markExternalHayHostResponsive(existing);
+        }
+        const failure = hayHostProbeFailures.recordFailure(existing.pid);
+        if (!failure.shouldRestart) {
+            log(`[Hay] Host ${existing.pid} (port ${existing.port}) slow: probe timed out (${failure.count}/${HAY_HOST_UNRESPONSIVE_PROBES} over ${Math.round(failure.failingForMs / 1000)}s). Keeping it alive.`, YELLOW);
+            writeHayHostStateFile(existing);
+            return existing;
+        }
+        const daemonStall = getRecentDaemonEventLoopStall();
+        if (daemonStall) {
+            log(`[Hay] Host ${existing.pid} is slow while the daemon also stalled ~${Math.round(daemonStall.driftMs)}ms. Resetting the watchdog window and keeping the host alive.`, YELLOW);
+            hayHostProbeFailures.reset();
+            writeHayHostStateFile(existing);
+            return existing;
+        }
+
+        // Every await above gives another process a chance to publish a new host.
+        // Never apply a destructive decision to a state generation we no longer
+        // own, even if the old PID is still around.
+        const registeredBeforeStop = readHayHostStateFile();
+        if (!sameHostIncarnation(registeredBeforeStop, existing)) {
+            hayHostProbeFailures.reset();
+            log(`[Hay] Host state changed while probing ${existing.pid}; aborting the stale restart.`, YELLOW);
+            if (registeredBeforeStop && isProcessAlive(registeredBeforeStop.pid)
+                && await probeExternalHayHostFromHost(registeredBeforeStop, 1500)) {
+                return markExternalHayHostResponsive(registeredBeforeStop);
             }
-            hayHostProbeFailures = { pid: 0, count: 0, firstAt: 0 };
-            writeHayHostStateFile(existing);
             return existing;
         }
-        if (hayHostProbeFailures.pid !== existing.pid) {
-            hayHostProbeFailures = { pid: existing.pid, count: 0, firstAt: Date.now() };
+
+        log(`[Hay] Host ${existing.pid} (port ${existing.port}) unresponsive for ${Math.round(failure.failingForMs / 1000)}s (${failure.count} failed probes). Restarting it.`, YELLOW);
+        hayHostProbeFailures.reset();
+        const stopped = await stopExternalHayHostProcess(existing);
+        if (!stopped) {
+            throw new Error(`Hay host ${existing.pid} did not stop; refusing to spawn a rival`);
         }
-        hayHostProbeFailures.count += 1;
-        const failingForMs = Date.now() - hayHostProbeFailures.firstAt;
-        if (hayHostProbeFailures.count < HAY_HOST_UNRESPONSIVE_PROBES || failingForMs < HAY_HOST_UNRESPONSIVE_WINDOW_MS) {
-            log(`[Hay] Host ${existing.pid} (port ${existing.port}) slow: probe timed out (${hayHostProbeFailures.count}/${HAY_HOST_UNRESPONSIVE_PROBES} over ${Math.round(failingForMs / 1000)}s). Keeping it alive.`, YELLOW);
-            writeHayHostStateFile(existing);
-            return existing;
+        stateCleared = clearHayHostStateFile(existing);
+        if (!stateCleared) {
+            throw new Error('Hay host state changed during restart; refusing to clear or replace it');
         }
-        log(`[Hay] Host ${existing.pid} (port ${existing.port}) unresponsive for ${Math.round(failingForMs / 1000)}s (${hayHostProbeFailures.count} failed probes). Restarting it.`, YELLOW);
-        hayHostProbeFailures = { pid: 0, count: 0, firstAt: 0 };
-        await stopExternalHayHostProcess(existing);
     }
 
-    clearHayHostStateFile();
+    if (!stateCleared) {
+        const registered = readHayHostStateFile();
+        if (registered && (!existing || !sameHostIncarnation(registered, existing))) {
+            if (isProcessAlive(registered.pid) && await probeExternalHayHostFromHost(registered, 1500)) {
+                return markExternalHayHostResponsive(registered);
+            }
+            throw new Error('Hay host state changed during recovery; refusing to clear or replace it');
+        }
+        clearHayHostStateFile(registered || null);
+    }
 
     // Spawn lock: concurrent ensure calls (other hop processes, racing web
     // requests) must not each spawn a host. Loser waits for the winner's
@@ -6400,8 +6487,7 @@ async function ensureExternalHayHostReady() {
                 await new Promise((resolve) => setTimeout(resolve, 200));
                 const spawned = readHayHostStateFile();
                 if (spawned && isProcessAlive(spawned.pid) && await probeExternalHayHostFromHost(spawned, 1500)) {
-                    hayHostState = spawned;
-                    return spawned;
+                    return markExternalHayHostResponsive(spawned);
                 }
             }
             // Winner never delivered — fall through and spawn ourselves.
@@ -6409,9 +6495,17 @@ async function ensureExternalHayHostReady() {
         try {
             spawnLockFd = fs.openSync(HAY_HOST_SPAWN_LOCK, 'wx');
             fs.writeSync(spawnLockFd, String(process.pid));
-        } catch (e2) { spawnLockFd = null; /* proceed unlocked rather than fail */ }
+        } catch (e2) {
+            throw new Error('Another Hop process is still spawning the Hay host; refusing to spawn a rival');
+        }
     }
     try {
+
+    const registeredSurvivor = readHayHostStateFile();
+    if (registeredSurvivor && isProcessAlive(registeredSurvivor.pid)
+        && await probeExternalHayHostFromHost(registeredSurvivor, 1500)) {
+        return markExternalHayHostResponsive(registeredSurvivor);
+    }
 
     // Last look before spawning: an already-running, healthy host for THIS hop
     // home means we must adopt it, not add a rival. Two hosts split the fleet —
@@ -6429,9 +6523,7 @@ async function ensureExternalHayHostReady() {
             .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0];
         if (adoptable) {
             log(`[host] adopting the running host (pid ${adoptable.pid}, port ${adoptable.port}) instead of spawning a rival`, DIM);
-            writeHayHostStateFile(adoptable);
-            hayHostState = adoptable;
-            return adoptable;
+            return markExternalHayHostResponsive(adoptable);
         }
     } catch (e) { /* inspection failed — spawning is still the right move */ }
 
@@ -6503,6 +6595,11 @@ async function ensureExternalHayHostReady() {
             try { fs.unlinkSync(HAY_HOST_SPAWN_LOCK); } catch (e) { }
         }
     }
+}
+
+async function ensureExternalHayHostReady() {
+    if (!isExternalTerminalBackend()) return null;
+    return await hayHostEnsureFlight.run(ensureExternalHayHostReadyOnce);
 }
 
 async function callExternalHayHostApi(apiPath, method = 'GET', body = null, timeoutMs = 2000) {

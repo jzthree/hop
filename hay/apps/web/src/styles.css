@@ -3899,3 +3899,9 @@ button.primary {
 .switcher-folder .switcher-create-infolder {
   margin: 4px 0 8px;
 }
+
+/* Voice overlay inside a live tile: same pill, tile-scaled. */
+.switcher-live-tile .voice-overlay {
+  bottom: 30px;
+  max-width: 86%;
+}

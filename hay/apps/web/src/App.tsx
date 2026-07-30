@@ -13,6 +13,7 @@ import { activityLabel, sortPresence } from "./utils/presence";
 import { createOptimisticEcho } from "./utils/optimisticEcho";
 import { attachScrollFlywheel } from "./utils/scrollFlywheel";
 import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSearch";
+import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -518,6 +519,10 @@ const App = () => {
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
   const userScrolledUpRef = useRef(false);
+  // Late-bound hooks for the voice controller (created before these exist).
+  const handleUserInputRef = useRef<((data: string) => void) | null>(null);
+  const pushNoticeRef = useRef<((m: string) => void) | null>(null);
+  const foregroundIsClaudeRef = useRef<(() => boolean) | null>(null);
   // Custom overlay scrollbar (native overlay bars can't be styled, and styled
   // webkit bars reserve layout width): a floating semi-transparent thumb.
   const termScrollbarRef = useRef<HTMLDivElement | null>(null);
@@ -599,6 +604,7 @@ const App = () => {
     }
     return screenLooksLikeClaude();
   };
+  foregroundIsClaudeRef.current = foregroundIsClaude;
   const drawerOpenRef = useRef(drawerOpen);
   drawerOpenRef.current = drawerOpen;
   const shortcutHelpRef = useRef(shortcutHelpOpen);
@@ -753,6 +759,7 @@ const App = () => {
     }, 3000);
   };
 
+  pushNoticeRef.current = pushNotice;
   const showToast = (message: string, durationMs = 2000) => {
     setToast(message);
     if (toastTimeout.current) {
@@ -983,84 +990,18 @@ const App = () => {
   };
 
   // ── Voice input: hold SPACE in a Claude session to dictate. ──
-  // Browser SpeechRecognition (Chrome + Safari; where absent, space behaves
-  // normally). The first press types its space instantly — no latency on the
-  // most common key; crossing the hold threshold erases that space and
-  // listens until release. The transcript is TYPED, not submitted: you can
-  // edit before Enter. Auto-repeat spaces are swallowed while held, which in
-  // a Claude composer is noise nobody wants anyway.
-  const voiceTimerRef = useRef(0);
-  // Spaces that actually reached the app during the current hold.
-  const spacesTypedRef = useRef(0);
-  const voiceActiveRef = useRef(false);
-  const voiceRecRef = useRef<{ stop: () => void } | null>(null);
-  const voiceFinalRef = useRef("");
-  const voiceInterimRef = useRef("");
+  // Shared controller (utils/voiceHold) — the live wall tiles run the same
+  // machine, so dictation exists on every surface a Claude composer does.
   const [voiceOverlay, setVoiceOverlay] = useState<{ interim: string } | null>(null);
-  const speechRecognitionCtor = () =>
-    (window as unknown as { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown }).SpeechRecognition
-    || (window as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
-  const finishVoiceInput = (send: boolean) => {
-    if (!voiceActiveRef.current) return;
-    voiceActiveRef.current = false;
-    voiceRecRef.current = null;
-    setVoiceOverlay(null);
-    // Engines usually finalize pending speech on stop(); if only an interim
-    // result ever arrived, it is still what the user said — use it.
-    const text = (voiceFinalRef.current || voiceInterimRef.current).trim();
-    voiceFinalRef.current = "";
-    voiceInterimRef.current = "";
-    if (send && text) handleUserInput(text);
-  };
-  const startVoiceInput = () => {
-    if (voiceActiveRef.current) return;
-    const Ctor = speechRecognitionCtor() as (new () => never) | undefined;
-    if (!Ctor) return;
-    let rec: never;
-    try { rec = new Ctor(); } catch { return; }
-    const r = rec as {
-      lang: string; continuous: boolean; interimResults: boolean;
-      onresult: (ev: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void;
-      onerror: (ev: { error?: string }) => void; onend: () => void;
-      start: () => void; stop: () => void;
-    };
-    voiceActiveRef.current = true;
-    voiceFinalRef.current = "";
-    voiceInterimRef.current = "";
-    // One DEL per space that actually reached the app: a fixed single
-    // erase left the extras behind whenever OS auto-repeat outran the
-    // swallow, so the composer kept the spaces voice promised to remove.
-    for (let i = 0; i < Math.max(1, spacesTypedRef.current); i++) handleUserInput("");
-    spacesTypedRef.current = 0;
-    r.lang = navigator.language || "en-US";
-    r.continuous = true;
-    r.interimResults = true;
-    r.onresult = (ev) => {
-      let interim = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const res = ev.results[i];
-        if (res.isFinal) voiceFinalRef.current += res[0].transcript;
-        else interim += res[0].transcript;
-      }
-      voiceInterimRef.current = interim;
-      setVoiceOverlay({ interim: (voiceFinalRef.current + interim).trim() });
-    };
-    r.onerror = (ev) => {
-      if (ev?.error === "not-allowed" || ev?.error === "service-not-allowed") {
-        pushNotice("Microphone permission needed for voice input");
-      }
-      finishVoiceInput(false);
-    };
-    r.onend = () => finishVoiceInput(true);
-    voiceRecRef.current = r;
-    setVoiceOverlay({ interim: "" });
-    try { r.start(); } catch { finishVoiceInput(false); }
-  };
-  const stopVoiceInput = () => {
-    const rec = voiceRecRef.current;
-    if (rec) { try { rec.stop(); } catch { finishVoiceInput(true); } }
-    else finishVoiceInput(true);
-  };
+  const voiceHoldRef = useRef<ReturnType<typeof createVoiceHold> | null>(null);
+  if (!voiceHoldRef.current) {
+    voiceHoldRef.current = createVoiceHold({
+      send: (data) => handleUserInputRef.current?.(data),
+      notify: (m) => pushNoticeRef.current?.(m),
+      setOverlay: (interim) => setVoiceOverlay(interim === null ? null : { interim }),
+      eligible: () => foregroundIsClaudeRef.current?.() ?? false
+    });
+  }
 
   const handleUserInput = (data: string) => {
     // Typing is "I am at the prompt": any earlier scroll-up turned
@@ -1141,6 +1082,7 @@ const App = () => {
 
   // One-shot: armed when a snapshot loads (fresh session open/switch), consumed
   // by the next resize so it goes out as an attach claim.
+  handleUserInputRef.current = handleUserInput;
   const attachClaimPendingRef = useRef(false);
   // Throttle gate for fit-on-type (one fit per typing burst, not per key).
   const lastTypeFitAtRef = useRef(0);
@@ -1808,35 +1750,10 @@ const App = () => {
         }
         return false;
       }
-      // Long-press SPACE = voice input (Claude sessions, when the browser has
-      // SpeechRecognition). First press types its space with zero latency;
-      // holding past the threshold erases it and dictates until release.
-      if (event.code === 'Space' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
-          && foregroundIsClaude() && !!speechRecognitionCtor()) {
-        if (event.type === 'keydown') {
-          if (voiceActiveRef.current) return false; // listening: eat every space
-          if (!event.repeat) {
-            window.clearTimeout(voiceTimerRef.current);
-            spacesTypedRef.current = 1; // this one goes through, for zero latency
-            voiceTimerRef.current = window.setTimeout(startVoiceInput, 550);
-            return true;
-          }
-          return false; // swallow auto-repeat while held
-        }
-        if (event.type === 'keyup') {
-          window.clearTimeout(voiceTimerRef.current);
-          spacesTypedRef.current = 0;
-          if (voiceActiveRef.current) {
-            stopVoiceInput();
-            return false;
-          }
-          return true;
-        }
-      }
-      // Any other keydown cancels a pending (not yet active) voice hold —
-      // normal typing must never trip the mic.
-      if (event.type === 'keydown' && event.code !== 'Space') {
-        window.clearTimeout(voiceTimerRef.current);
+      // Long-press SPACE = voice input — shared controller; see voiceHold.ts.
+      {
+        const verdict = voiceHoldRef.current?.handleKey(event);
+        if (verdict !== undefined) return verdict;
       }
       // Shift+Enter: xterm.js would emit a plain \r (indistinguishable from
       // Enter), which apps like Claude Code treat as "submit". Synthesize the

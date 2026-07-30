@@ -15,6 +15,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
+import { bufferLooksLikeClaude, createVoiceHold } from "../utils/voiceHold";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -270,10 +271,10 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice }: {
   wsBase: string; room: string; userName: string; theme: object | undefined;
   live: boolean; claudeApp: boolean; claimSize: boolean; activeCols?: number; activeRows?: number;
-  onFullscreen: () => void; onUnfocus: () => void;
+  onFullscreen: () => void; onUnfocus: () => void; onNotice: (m: string) => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -284,6 +285,24 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const kbdEnhancedRef = useRef(false);
   // null = watching; "live"/"down" = connected state for the chrome.
   const [conn, setConn] = useState<"live" | "down" | null>(null);
+  // Hold-space voice, same controller as the full screen — the tile is where
+  // typing mostly happens now, and dictation not existing here was most of
+  // "voice doesn't always work".
+  const [voiceInterim, setVoiceInterim] = useState<string | null>(null);
+  const voiceHoldRef = useRef<ReturnType<typeof createVoiceHold> | null>(null);
+  if (!voiceHoldRef.current) {
+    voiceHoldRef.current = createVoiceHold({
+      send: (data) => sendInputRef.current?.(data),
+      notify: (m) => onNoticeRef.current?.(m),
+      setOverlay: setVoiceInterim,
+      eligible: () => {
+        if (claudeAppRef.current) return true;
+        const t = termRef.current;
+        return !!t && bufferLooksLikeClaude(t as never);
+      }
+    });
+  }
+
   // In-tile find (⌘F while the tile is live): same engine as the full-screen
   // find bar. Scope follows focus — ⌘F in a live tile searches THIS session;
   // ⌘F anywhere else is the wall filter, which finds sessions.
@@ -319,6 +338,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const myIdRef = useRef<string | null>(null);
   const [viewers, setViewers] = useState<Array<{ name: string }>>([]);
   const [driver, setDriver] = useState<{ name: string; color: string } | null>(null);
+  const onNoticeRef = useRef(onNotice);
+  onNoticeRef.current = onNotice;
   const claudeAppRef = useRef(claudeApp);
   claudeAppRef.current = claudeApp;
   const liveRef = useRef(live);
@@ -407,6 +428,10 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     // Keys route through refs so the handler survives mode flips untouched.
     term.attachCustomKeyEventHandler((ev) => {
       if (!liveRef.current) return false; // watching: the terminal takes no keys
+      {
+        const verdict = voiceHoldRef.current?.handleKey(ev);
+        if (verdict !== undefined) return verdict;
+      }
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "f") {
         // Scope follows focus: find in THIS terminal. (The wall filter stays
         // one ⌘K away; ⌘. still unfocuses the tile.)
@@ -752,6 +777,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       setConn(null);
       setViewers([]);
       setDriver(null);
+      voiceHoldRef.current?.dispose();
       setFind(null);
       findIndexRef.current = -1;
       term.blur();
@@ -770,6 +796,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       onPointerDown={live ? (e) => e.stopPropagation() : undefined}
     >
       <div className="switcher-focus-term" ref={boxRef} />
+      {voiceInterim !== null && (
+        <div className="voice-overlay" aria-hidden="true">
+          <span className="voice-dot" />
+          <span className={voiceInterim ? "voice-text" : "voice-text muted"}>
+            {voiceInterim || "Listening… release Space to insert"}
+          </span>
+        </div>
+      )}
       {live && (
         <div className="switcher-live-chrome" onClick={(e) => e.stopPropagation()}>
           <span className={"switcher-focus-label" + (conn === "down" ? " down" : "")}>
@@ -2046,6 +2080,7 @@ export const SessionSwitcher = ({
               activeRows={preview?.rows}
               onFullscreen={() => onSwitch(s)}
               onUnfocus={() => setFocusedKey(null)}
+              onNotice={onNotice}
             />
           </div>
         ) : (

@@ -789,16 +789,34 @@ function getSessionDisplayName(name) {
     return toDisplaySessionName(name);
 }
 
+// Name lookups are case-insensitive: an exact-case wearer always wins, and
+// otherwise a UNIQUE case-insensitive wearer resolves. Two sessions whose
+// names differ only by case are ambiguous — that falls back to exact-only
+// rather than guessing which one the caller meant.
+function sameNameFold(a, b) {
+    return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+}
+
 function findInternalSessionName(displayName) {
     if (!displayName) return null;
+    let folded = null;
+    let foldedAmbiguous = false;
+    const noteFolded = (name, current) => {
+        if (!sameNameFold(current, displayName)) return;
+        if (folded && folded !== name) foldedAmbiguous = true;
+        else folded = name;
+    };
     for (const [name, config] of Object.entries(sessionStore.sessions)) {
         const current = config?.displayName || toDisplaySessionName(name);
         if (current === displayName) return name;
+        noteFolded(name, current);
     }
     for (const [name, config] of runtimeSessionMetadata.entries()) {
-        if ((config?.displayName || name) === displayName) return name;
+        const current = config?.displayName || name;
+        if (current === displayName) return name;
+        noteFolded(name, current);
     }
-    return null;
+    return foldedAmbiguous ? null : folded;
 }
 
 // "In use" means a session ACTUALLY WEARS this name right now, or the name is
@@ -4624,13 +4642,29 @@ function removeClaudeHook() {
 }
 
 // Resolve display name aliases (follows rename chain)
+// Alias keys resolve case-insensitively too (unique match only), so a
+// remembered old name keeps working however the caller cases it.
+function lookupSessionAliasKey(name) {
+    if (sessionAliases[name] !== undefined) return name;
+    let match = null;
+    for (const key of Object.keys(sessionAliases)) {
+        if (sameNameFold(key, name)) {
+            if (match !== null) return null; // ambiguous — exact only
+            match = key;
+        }
+    }
+    return match;
+}
+
 function resolveDisplayNameAlias(name) {
     if (!name || typeof name !== 'string') return name;
     let current = name;
     const seen = new Set();
-    while (sessionAliases[current] && !seen.has(current)) {
+    while (!seen.has(current)) {
+        const key = lookupSessionAliasKey(current);
+        if (key === null || sessionAliases[key] === undefined) break;
         seen.add(current);
-        current = sessionAliases[current];
+        current = sessionAliases[key];
     }
     return current;
 }
@@ -5017,10 +5051,16 @@ function resolveSessionDisplayName(displayName) {
     const fallbackInternalName = toInternalSessionName(resolvedDisplayName);
     const fallbackExists = !!fallbackInternalName
         && (hopSessionExists(fallbackInternalName) || !!getEffectiveSessionConfig(fallbackInternalName));
+    // A case-insensitive hit canonicalizes to the name the session actually
+    // wears, so /s/titan redirects to /s/Titan instead of serving the same
+    // session under a differently-cased twin URL.
+    const canonicalDisplayName = internalFromConfig
+        ? (getSessionDisplayName(internalFromConfig) || resolvedDisplayName)
+        : resolvedDisplayName;
     return {
-        displayName: resolvedDisplayName,
+        displayName: canonicalDisplayName,
         internalName: internalFromConfig || (fallbackExists ? fallbackInternalName : null),
-        aliasRedirect: resolvedDisplayName !== displayName
+        aliasRedirect: canonicalDisplayName !== displayName
     };
 }
 
@@ -11281,15 +11321,26 @@ async function claimUnnamedLocalCliSession(opts = {}) {
 }
 
 function resolveSessionTargetByDisplay(sessionsRes, displayName) {
-    const sessions = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : [];
-    let target = sessions.find((session) => (
-        session && session.type !== 'port' && session.displayName === displayName
-    ));
-    if (!target && sessionsRes?.aliases && sessionsRes.aliases[displayName]) {
-        const resolvedName = sessionsRes.aliases[displayName];
-        target = sessions.find((session) => (
-            session && session.type !== 'port' && session.displayName === resolvedName
-        ));
+    const sessions = (Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : [])
+        .filter((session) => session && session.type !== 'port');
+    // Exact-case match wins; otherwise a UNIQUE case-insensitive wearer
+    // resolves, so `hop attach titan` finds "Titan".
+    const byName = (name) => {
+        const lower = String(name).toLowerCase();
+        let exact = null;
+        const folded = [];
+        for (const session of sessions) {
+            if (session.displayName === name) { exact = session; break; }
+            if (String(session.displayName).toLowerCase() === lower) folded.push(session);
+        }
+        return exact || (folded.length === 1 ? folded[0] : null);
+    };
+    let target = byName(displayName);
+    if (!target && sessionsRes?.aliases) {
+        const aliasKeys = Object.keys(sessionsRes.aliases);
+        const aliasKey = aliasKeys.find((key) => key === displayName)
+            ?? aliasKeys.find((key) => key.toLowerCase() === String(displayName).toLowerCase());
+        if (aliasKey) target = byName(sessionsRes.aliases[aliasKey]);
     }
     return target || null;
 }
@@ -11406,12 +11457,21 @@ function resolveOrCreateLocalTerminalSession(nameArg, opts = {}) {
             };
         }
 
-        const existingByList = existingSessions.find((session) => {
-            if (!session || session.type === 'port') return false;
-            if (session.displayName === requestedDisplay) return true;
-            if (session.internalName === requestedDisplay || session.internalName === requested) return true;
-            return false;
-        });
+        // Case-insensitive so `hop titan` attaches to "Titan" instead of
+        // minting a lowercase twin. Exact matches take priority; a folded
+        // match only counts when it is unambiguous.
+        const matchesName = (candidate, name) => typeof candidate === 'string' && typeof name === 'string'
+            && candidate.toLowerCase() === name.toLowerCase();
+        const eligibleSessions = existingSessions.filter((session) => session && session.type !== 'port');
+        const exactByList = eligibleSessions.find((session) => (
+            session.displayName === requestedDisplay
+            || session.internalName === requestedDisplay || session.internalName === requested
+        ));
+        const foldedByList = exactByList ? [] : eligibleSessions.filter((session) => (
+            matchesName(session.displayName, requestedDisplay)
+            || matchesName(session.internalName, requestedDisplay) || matchesName(session.internalName, requested)
+        ));
+        const existingByList = exactByList || (foldedByList.length === 1 ? foldedByList[0] : null);
         if (existingByList && existingByList.internalName) {
             return {
                 internalName: existingByList.internalName,
@@ -11656,7 +11716,144 @@ function suggestNearestCommand(input) {
     return best;
 }
 
+// One source of truth for CLI usage: the full `hop --help` output and the
+// per-command `hop <cmd> --help` output both render from this table, so a
+// command can never exist without help (a stray `hop restore --help` once
+// fell through and ran a live restore).
+const HELP_SECTIONS = [
+    { title: 'Usage', lines: [
+        `hop                       Launch the daemon+tunnel if needed and open a NEW terminal session`,
+        `hop new                   Same as hop (always opens a new session)`,
+        `hop attach                Reattach to an existing session (picks an unattached one; lists them if none are free)`,
+        `hop attach <name>         Reattach to an existing session by name`,
+        `hop attach all            Reattach to every existing session in turn`,
+        `hop start                 Start the daemon and tunnel only, then print QR codes (no terminal session)`,
+        `hop local [session]       Open a terminal with no daemon or tunnel — local only, not reachable remotely`,
+        `hop stop                  Stop hop daemon (terminal sessions keep running)`,
+        `hop stop --all            Stop daemon, hay-host, and all terminal sessions`,
+        `hop status                Show daemon, tunnel, and session status`,
+        `hop doctor                Run environment/health checks`,
+        `hop logs [-f] [hay-host]  Show daemon logs (-f to follow)`,
+        `hop --help                Show this help message`,
+    ] },
+    { title: 'URL & QR', lines: [
+        `hop url                   Print current tunnel URL`,
+        `hop qr                    Show tunnel URL as QR code`,
+        `hop qr auth               Show authenticator setup QR code`,
+    ] },
+    { title: 'Config', lines: [
+        `hop config                Show hop config`,
+        `hop config theme [name]   Show or set the session naming theme`,
+    ] },
+    { title: 'Custom Domain', lines: [
+        `hop domain                Show current domain config`,
+        `hop domain <hostname>     Setup custom domain (e.g., hop.example.com)`,
+        `hop domain-clear          Remove custom domain, use random URLs`,
+    ] },
+    { title: 'Security', lines: [
+        `hop password              Show password status`,
+        `hop password set          Set or change password`,
+        `hop password clear        Remove password protection`,
+    ] },
+    { title: 'Multi-user (admin)', lines: [
+        `hop user list             List all users`,
+        `hop user add <name>       Add a user (creates tunnel + DNS)`,
+        `hop user remove <name>    Remove a user`,
+        `hop user export <name>    Export credentials for a user`,
+    ] },
+    { title: 'Sessions', lines: [
+        `hop session list [--all|-a]      List live sessions (--all/-a adds workspace defs across all workspaces)`,
+        `hop session add <name> [--cwd P] --workspace W  Save a terminal definition to a workspace`,
+        `hop session add <name> --port N --workspace W   Save a port definition to a workspace`,
+        `hop session rename <old> <new>   Rename a session`,
+        `hop session remove <name>        Remove a session`,
+        `hop session permit <name>        Allow agent access`,
+        `hop session origin <name> <user|agent>  Move a session between user/agent sides (switcher filter + restore policy)`,
+        `hop session block <name>         Block agent access`,
+    ] },
+    { title: 'Workspaces', lines: [
+        `hop workspace list            List workspaces`,
+        `hop workspace create <name>   Create an empty workspace`,
+        `hop workspace show <name>     Show saved definitions in a workspace`,
+        `hop workspace save <name>     Save selected live sessions into a workspace`,
+        `hop workspace load <name>     Start sessions defined in a workspace`,
+        `hop workspace delete <name> [--yes]  Delete a workspace (asks before deleting a non-empty one)`,
+    ] },
+    { title: 'Restore', lines: [
+        `hop restore [--dry-run] [--agents]  Recreate your saved sessions, resuming claude conversations (--agents includes agent-created ones)`,
+        `hop update [--check|--host] Self-update from GitHub (daemon restart; sessions survive; --host cycles the host too)`,
+        `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
+        `hop claude-hook status|remove   Check or remove the hook`,
+        `hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`,
+        `hop agent-skill status|remove   Check or remove the skills`,
+        `hop claude-skill ...      Backward-compatible Claude-only alias`,
+    ] },
+    { title: 'Client mode (for users)', lines: [
+        `hop client <credentials>  Run tunnel with exported credentials`,
+    ] },
+    { title: 'Math', lines: [
+        `hop math '<latex>'        Render a LaTeX formula (inline image where supported, else Unicode)`,
+    ] },
+    { title: 'Maintenance', lines: [
+        `hop health [--restart]    Check tunnel health (--restart forces a tunnel restart)`,
+        `hop wipe [--all] [--yes]  Remove workspace-defined sessions (--all kills live; --yes skips confirmation)`,
+        `hop wipe --agent          Close all agent-created terminal API sessions`,
+        `hop config resume <mode>  How restores answer claude's resume question (full|summary|ask)`,
+    ] },
+];
+
+function printFullHelp() {
+    log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
+    for (const section of HELP_SECTIONS) {
+        log(`${BOLD}${section.title}:${RESET}`, RESET);
+        for (const line of section.lines) {
+            log(`  ${line}`, RESET);
+        }
+        log('');
+    }
+}
+
+// Print every usage line whose command word matches. Returns false when the
+// table documents nothing for it.
+function printCommandHelp(cmd) {
+    const matched = [];
+    for (const section of HELP_SECTIONS) {
+        for (const line of section.lines) {
+            const word = (line.match(/^hop\s+(\S+)/) || [])[1] || '';
+            if (word === cmd) matched.push(line);
+        }
+    }
+    if (matched.length === 0) return false;
+    log(`\n${BOLD}Usage:${RESET}`, RESET);
+    for (const line of matched) {
+        log(`  ${line}`, RESET);
+    }
+    log('');
+    return true;
+}
+
 async function main() {
+    // Any command followed by --help/-h prints usage instead of running: help
+    // must never execute the real thing. Bare "help" is NOT intercepted here —
+    // positional args (a session name, latex) may legitimately be "help" — and
+    // `hop client` keeps its own richer help text.
+    const argCmd = process.argv[2];
+    if (argCmd && argCmd !== 'client' && !['--help', '-h', 'help'].includes(argCmd)
+        && process.argv.slice(3).some((a) => a === '--help' || a === '-h')) {
+        if (!printCommandHelp(argCmd)) {
+            if (KNOWN_COMMANDS.includes(argCmd)) {
+                printFullHelp();
+            } else {
+                const suggestion = suggestNearestCommand(argCmd);
+                log(`Unknown command: ${argCmd}`, RED);
+                if (suggestion) log(`Did you mean ${CYAN}hop ${suggestion}${RESET}?`, RESET);
+                log(`Run ${CYAN}hop --help${RESET} for the full command list.`, RESET);
+                process.exit(1);
+            }
+        }
+        process.exit(0);
+    }
+
     // Handle `hop client` - run as a user with exported credentials
     if (process.argv[2] === 'client') {
         // Separate flags from positionals so flag order doesn't matter.
@@ -12093,11 +12290,14 @@ async function main() {
 
         const sessionsRes = await fetchSessionList(state);
         const allSessions = (sessionsRes?.sessions || []).filter((s) => s.type !== 'port');
-        let targets = named.length
-            ? allSessions.filter((s) => named.includes(s.displayName) || named.includes(s.internalName))
-            : allSessions;
+        const namedLower = named.map((n) => n.toLowerCase());
+        const wearsAnyName = (s) => namedLower.includes(String(s.displayName || '').toLowerCase())
+            || namedLower.includes(String(s.internalName || '').toLowerCase());
+        let targets = named.length ? allSessions.filter(wearsAnyName) : allSessions;
         if (named.length) {
-            const missing = named.filter((n) => !allSessions.some((s) => s.displayName === n || s.internalName === n));
+            const missing = named.filter((n) => !allSessions.some((s) =>
+                String(s.displayName || '').toLowerCase() === n.toLowerCase()
+                || String(s.internalName || '').toLowerCase() === n.toLowerCase()));
             for (const m of missing) log(`No such session: ${m}`, YELLOW);
         }
         // Freshness: a tagline names the session's DURABLE goal, so it should
@@ -12580,86 +12780,7 @@ async function main() {
     }
 
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
-        log(`\n${BOLD}Hop - Remote Terminal Access${RESET}\n`, CYAN);
-        log(`${BOLD}Usage:${RESET}`, RESET);
-        log(`  hop                       Launch the daemon+tunnel if needed and open a NEW terminal session`, RESET);
-        log(`  hop new                   Same as hop (always opens a new session)`, RESET);
-        log(`  hop attach                Reattach to an existing session (picks an unattached one; lists them if none are free)`, RESET);
-        log(`  hop attach <name>         Reattach to an existing session by name`, RESET);
-        log(`  hop attach all            Reattach to every existing session in turn`, RESET);
-        log(`  hop start                 Start the daemon and tunnel only, then print QR codes (no terminal session)`, RESET);
-        log(`  hop local [session]       Open a terminal with no daemon or tunnel — local only, not reachable remotely`, RESET);
-        log(`  hop stop                  Stop hop daemon (terminal sessions keep running)`, RESET);
-        log(`  hop stop --all            Stop daemon, hay-host, and all terminal sessions`, RESET);
-        log(`  hop status                Show daemon, tunnel, and session status`, RESET);
-        log(`  hop doctor                Run environment/health checks`, RESET);
-        log(`  hop logs [-f] [hay-host]  Show daemon logs (-f to follow)`, RESET);
-        log(`  hop --help                Show this help message`, RESET);
-        log('');
-        log(`${BOLD}URL & QR:${RESET}`, RESET);
-        log(`  hop url                   Print current tunnel URL`, RESET);
-        log(`  hop qr                    Show tunnel URL as QR code`, RESET);
-        log(`  hop qr auth               Show authenticator setup QR code`, RESET);
-        log('');
-        log(`${BOLD}Config:${RESET}`, RESET);
-        log(`  hop config                Show hop config`, RESET);
-        log(`  hop config theme [name]   Show or set the session naming theme`, RESET);
-        log('');
-        log(`${BOLD}Custom Domain:${RESET}`, RESET);
-        log(`  hop domain                Show current domain config`, RESET);
-        log(`  hop domain <hostname>     Setup custom domain (e.g., hop.example.com)`, RESET);
-        log(`  hop domain-clear          Remove custom domain, use random URLs`, RESET);
-        log('');
-        log(`${BOLD}Security:${RESET}`, RESET);
-        log(`  hop password              Show password status`, RESET);
-        log(`  hop password set          Set or change password`, RESET);
-        log(`  hop password clear        Remove password protection`, RESET);
-        log('');
-        log(`${BOLD}Multi-user (admin):${RESET}`, RESET);
-        log(`  hop user list             List all users`, RESET);
-        log(`  hop user add <name>       Add a user (creates tunnel + DNS)`, RESET);
-        log(`  hop user remove <name>    Remove a user`, RESET);
-        log(`  hop user export <name>    Export credentials for a user`, RESET);
-        log('');
-        log(`${BOLD}Sessions:${RESET}`, RESET);
-        log(`  hop session list [--all|-a]      List live sessions (--all/-a adds workspace defs across all workspaces)`, RESET);
-        log(`  hop session add <name> [--cwd P] --workspace W  Save a terminal definition to a workspace`, RESET);
-        log(`  hop session add <name> --port N --workspace W   Save a port definition to a workspace`, RESET);
-        log(`  hop session rename <old> <new>   Rename a session`, RESET);
-        log(`  hop session remove <name>        Remove a session`, RESET);
-        log(`  hop session permit <name>        Allow agent access`, RESET);
-        log(`  hop session origin <name> <user|agent>  Move a session between user/agent sides (switcher filter + restore policy)`, RESET);
-        log(`  hop session block <name>         Block agent access`, RESET);
-        log('');
-        log(`${BOLD}Workspaces:${RESET}`, RESET);
-        log(`  hop workspace list            List workspaces`, RESET);
-        log(`  hop workspace create <name>   Create an empty workspace`, RESET);
-        log(`  hop workspace show <name>     Show saved definitions in a workspace`, RESET);
-        log(`  hop workspace save <name>     Save selected live sessions into a workspace`, RESET);
-        log(`  hop workspace load <name>     Start sessions defined in a workspace`, RESET);
-        log(`  hop workspace delete <name> [--yes]  Delete a workspace (asks before deleting a non-empty one)`, RESET);
-        log('');
-        log(`${BOLD}Restore:${RESET}`, RESET);
-        log(`  hop restore [--dry-run]   Recreate your saved sessions, resuming claude conversations`, RESET);
-        log(`  hop update [--check|--host] Self-update from GitHub (daemon restart; sessions survive; --host cycles the host too)`, RESET);
-        log(`  hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`, RESET);
-        log(`  hop claude-hook status|remove   Check or remove the hook`, RESET);
-        log(`  hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`, RESET);
-        log(`  hop agent-skill status|remove   Check or remove the skills`, RESET);
-        log(`  hop claude-skill ...      Backward-compatible Claude-only alias`, RESET);
-        log('');
-        log(`${BOLD}Client mode (for users):${RESET}`, RESET);
-        log(`  hop client <credentials>  Run tunnel with exported credentials`, RESET);
-        log('');
-        log(`${BOLD}Math:${RESET}`, RESET);
-        log(`  hop math '<latex>'        Render a LaTeX formula (inline image where supported, else Unicode)`, RESET);
-        log('');
-        log(`${BOLD}Maintenance:${RESET}`, RESET);
-        log(`  hop health [--restart]    Check tunnel health (--restart forces a tunnel restart)`, RESET);
-        log(`  hop wipe [--all] [--yes]  Remove workspace-defined sessions (--all kills live; --yes skips confirmation)`, RESET);
-        log(`  hop wipe --agent          Close all agent-created terminal API sessions`, RESET);
-        log(`  hop config resume <mode>  How restores answer claude's resume question (full|summary|ask)`, RESET);
-        log('');
+        printFullHelp();
         process.exit(0);
     }
 

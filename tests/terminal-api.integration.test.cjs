@@ -585,6 +585,41 @@ test('a display name freed by a later rename can be reused', async () => {
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Freed', internalName: 'AliasTwo' });
 });
 
+// Session names resolve case-insensitively everywhere a name addresses a
+// session: exact-case wearers win, a UNIQUE folded match resolves, and two
+// sessions differing only by case stay exact-only rather than guessed at.
+test('session names resolve case-insensitively', async () => {
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'CaseFold', type: 'terminal', cwd: tempDir, startRuntime: true });
+  await delay(600);
+
+  // A by-name API call accepts any casing — no internalName hint given.
+  const renamed = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
+    { oldName: 'casefold', newName: 'CaseKept' });
+  assert.equal(renamed.status, 200, `lowercase lookup must find CaseFold: ${JSON.stringify(renamed.data)}`);
+
+  // Changing ONLY the casing of your own name is not a collision.
+  const caseOnly = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
+    { oldName: 'CaseKept', newName: 'casekept' });
+  assert.equal(caseOnly.status, 200, `case-only rename must be allowed: ${JSON.stringify(caseOnly.data)}`);
+
+  const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const worn = list.data.sessions.filter(s => s.internalName === 'CaseFold');
+  assert.equal(worn.length, 1, 'still exactly one session — folded lookups must never mint twins');
+  assert.equal(worn[0].displayName, 'casekept', 'the case-only rename is the worn spelling');
+
+  // A name another session wears — in ANY casing — is a collision.
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'CaseOther', type: 'terminal', cwd: tempDir, startRuntime: true });
+  await delay(400);
+  const collide = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
+    { oldName: 'CaseOther', newName: 'CASEKEPT', internalName: 'CaseOther' });
+  assert.equal(collide.status, 409, 'a differently-cased spelling of a worn name must be refused');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'casekept', internalName: 'CaseFold' });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'CaseOther', internalName: 'CaseOther' });
+});
+
 // Regression: an undeclared Bearer-token creation is automation, not a human.
 // Agents' raw scripts rarely remember x-hop-actor, and every one that forgot
 // landed its sessions in the USER tab (SelectProbe). Cookie-auth (the web UI)

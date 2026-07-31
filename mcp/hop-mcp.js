@@ -4901,7 +4901,12 @@ class HopMCPServer {
     try {
       const listed = await this.callApi('GET', '/api/sessions');
       if (listed && Array.isArray(listed.sessions)) {
-        const match = listed.sessions.find((s) => s && (s.name === name || s.displayName === name || s.internalName === name));
+        const nameLower = name.toLowerCase();
+        const foldsTo = (v) => typeof v === 'string' && v.toLowerCase() === nameLower;
+        const exact = listed.sessions.find((s) => s && (s.name === name || s.displayName === name || s.internalName === name));
+        // Case-insensitive fallback (unique match only) — same rule as the daemon.
+        const folded = exact ? [] : listed.sessions.filter((s) => s && (foldsTo(s.name) || foldsTo(s.displayName) || foldsTo(s.internalName)));
+        const match = exact || (folded.length === 1 ? folded[0] : null);
         if (match) {
           matched = true;
           internalName = match.internalName || match.name || name;

@@ -286,7 +286,12 @@ async function resolveTerminalRef(server, ref) {
     const parsed = JSON.parse((listed.content || []).map((c) => c.text || '').join(''));
     terminals = Array.isArray(parsed.terminals) ? parsed.terminals : [];
   } catch { return ref; }
-  const matches = terminals.filter((t) => t && (t.sessionName === ref || t.displayName === ref || t.id === ref));
+  const exact = terminals.filter((t) => t && (t.sessionName === ref || t.displayName === ref || t.id === ref));
+  // Name refs fold case (unique match only) — same rule as the daemon's lookup.
+  const refLower = ref.toLowerCase();
+  const foldsTo = (v) => typeof v === 'string' && v.toLowerCase() === refLower;
+  const matches = exact.length ? exact
+    : terminals.filter((t) => t && (foldsTo(t.sessionName) || foldsTo(t.displayName) || foldsTo(t.id)));
   if (matches.length === 1) return matches[0].id;
   if (matches.length > 1) {
     fail(`"${ref}" matches ${matches.length} terminals: ${matches.map((t) => t.id).join(', ')}`, 2);

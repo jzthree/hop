@@ -160,19 +160,38 @@ const PREVIEW_BASE_LH = PREVIEW_BASE_FS * 1.3;
 // Measured advance width of one monospace cell at the base font — resolved
 // lazily because the terminal font stack loads with the page.
 let previewCharW = 0;
+const advanceCache = new Map<number, number>();
 if (typeof document !== "undefined") {
-  document.fonts?.ready?.then(() => { previewCharW = 0; }).catch(() => { /* no Font API */ });
+  document.fonts?.ready?.then(() => { previewCharW = 0; advanceCache.clear(); }).catch(() => { /* no Font API */ });
 }
-const measurePreviewCharW = () => {
-  if (previewCharW) return previewCharW;
+const measureAdvanceAt = (fs: number) => {
+  const hit = advanceCache.get(fs);
+  if (hit) return hit;
   const el = document.createElement("span");
-  el.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-size:${PREVIEW_BASE_FS}px;line-height:1`;
+  el.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-size:${fs}px;line-height:1`;
   el.style.fontFamily = "var(--font-terminal)";
   el.textContent = "0".repeat(100);
   document.body.appendChild(el);
-  previewCharW = el.getBoundingClientRect().width / 100 || PREVIEW_BASE_FS * 0.6;
+  const adv = el.getBoundingClientRect().width / 100 || fs * 0.6;
   el.remove();
+  advanceCache.set(fs, adv);
+  return adv;
+};
+const measurePreviewCharW = () => {
+  if (previewCharW) return previewCharW;
+  previewCharW = measureAdvanceAt(PREVIEW_BASE_FS);
   return previewCharW;
+};
+// xterm quantizes its cell width to HUNDREDTHS of a CSS pixel (measured
+// empirically at five font sizes across dpr 1 and 2: cell = round(adv×100)/100
+// of the font's true advance). The preview's DOM text flows at the true
+// fractional advance, so 76+ columns accumulate ~1px of disagreement at the
+// right edge — the last visible shift in the preview → terminal swap.
+// Fractional letter-spacing closes the gap per character, putting preview
+// glyphs on exactly the grid the terminal will use.
+const tileLetterSpacing = (fs: number) => {
+  const adv = measureAdvanceAt(fs);
+  return Math.round(adv * 100) / 100 - adv;
 };
 
 // ONE font for the whole wall at a given zoom, derived from the box width —
@@ -193,6 +212,7 @@ const previewScaleObserver = typeof ResizeObserver !== "undefined"
         const fs2 = tileFontFor(box.clientWidth);
         inner.style.fontSize = fs2 + "px";
         inner.style.lineHeight = Math.round(fs2 * 1.3) + "px";
+        inner.style.letterSpacing = tileLetterSpacing(fs2) + "px";
       }
     })
   : null;
@@ -217,7 +237,7 @@ const ScaledScreen = ({ frame }: { frame: PreviewFrame }) => {
     <div className="switcher-preview-scalebox" ref={boxRef}>
       <div
         className="switcher-preview-screen"
-        style={{ fontSize: PREVIEW_BASE_FS, lineHeight: `${PREVIEW_BASE_LH}px` }}
+        style={{ fontSize: PREVIEW_BASE_FS, lineHeight: `${PREVIEW_BASE_LH}px`, letterSpacing: `${tileLetterSpacing(PREVIEW_BASE_FS)}px` }}
       >
         {renderPreviewRuns(padded)}
       </div>

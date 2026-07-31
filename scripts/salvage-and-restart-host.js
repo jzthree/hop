@@ -68,6 +68,47 @@ const salvageRoom = (port, id) => new Promise((resolve) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Daemon API (Bearer-token) — used for the pre/post state census: room IDs
+// alone can't tell whether RENAMES and FOLDERS survived, and "restored" must
+// mean the user-visible state came back, not merely that a PTY exists.
+const daemonApi = (method, p, body) => new Promise((resolve) => {
+  const ds = daemonState();
+  const data = body ? JSON.stringify(body) : null;
+  const req = http.request({
+    host: '127.0.0.1', port: ds.port, path: p, method,
+    headers: { Authorization: 'Bearer ' + ds.sessionSecret, ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}) }
+  }, (res) => { let d = ''; res.on('data', (c) => d += c); res.on('end', () => resolve({ status: res.statusCode, data: d })); });
+  req.on('error', () => resolve({ status: 0, data: '' }));
+  req.setTimeout(20000, () => req.destroy());
+  if (data) req.end(data); else req.end();
+});
+
+const sessionCensus = async () => {
+  const res = await daemonApi('GET', '/api/sessions');
+  try {
+    const sessions = JSON.parse(res.data).sessions || [];
+    const map = {};
+    for (const s of sessions) {
+      if (!s || s.type === 'port') continue;
+      map[s.internalName || s.name] = {
+        displayName: s.displayName || s.name,
+        folderId: s.folderId || null,
+        live: !!s.live
+      };
+    }
+    return map;
+  } catch (e) { return null; }
+};
+
+// Same screen-witness the restore machinery trusts: claude's own chrome.
+const CLAUDE_UI_RE = /bypass permissions on|shift\+tab to cycle|Welcome back|esc to interrupt|\? for shortcuts/i;
+const RESUME_PROMPT_RE = /Resuming the full session|Resume from summary|Resume full session as-is/i;
+
+const roomPreviewText = async (id) => {
+  const res = await daemonApi('GET', `/api/sessions/preview?name=${encodeURIComponent(id)}`);
+  try { return String(JSON.parse(res.data).text || ''); } catch (e) { return ''; }
+};
+
 // Same lifecycle lock the hop CLI takes (~/.hop2/.lifecycle.lock): this run
 // cycles the host, and a `hop stop`/`start`/`restore` landing in the middle
 // of it kills sessions mid-relaunch. Stale holders (dead pid, absurdly old)
@@ -128,6 +169,12 @@ const releaseLock = () => {
     const preRooms = (await hostGet('/rooms')).rooms;
     const rooms = preRooms.map((r) => r.id);
     fs.writeFileSync(path.join(OUT, 'pre-rooms.json'), JSON.stringify(preRooms, null, 1), { mode: 0o600 });
+    // Daemon-side census too: display names and folder membership are the
+    // state the user actually sees, and "back to the same state" is judged
+    // against THIS, not against bare room ids.
+    const preSessions = await sessionCensus();
+    if (preSessions) fs.writeFileSync(path.join(OUT, 'pre-sessions.json'), JSON.stringify(preSessions, null, 1), { mode: 0o600 });
+    else log('WARN: pre-restart daemon census unavailable — name/folder verification will be skipped');
     log(`salvaging ${rooms.length} rooms -> ${OUT}`);
     const salvageStats = {};
     for (const id of rooms) {
@@ -173,6 +220,72 @@ const releaseLock = () => {
       fs.writeFileSync(path.join(OUT, 'reconcile.json'),
         JSON.stringify({ preCount: rooms.length, restored, missing, extra, salvageMisses }, null, 1), { mode: 0o600 });
     } catch (e) { log('reconcile err: ' + e.message); }
+
+    // 4b. STATE verification: names, folders, and claude actually resumed.
+    // A room can exist while wearing the wrong name, sitting in no folder,
+    // or stuck at claude's resume question — each of those has happened, and
+    // each reads as "restore worked" to a bare room-id reconcile.
+    try {
+      const preSessions = JSON.parse(fs.readFileSync(path.join(OUT, 'pre-sessions.json'), 'utf8'));
+      const claudeRooms = rooms.filter((id) =>
+        fs.existsSync(path.join(HOME, 'claude-sessions', `${id}.json`)));
+      const problems = [];
+      const post = await sessionCensus() || {};
+      for (const [id, pre] of Object.entries(preSessions)) {
+        if (!pre.live) continue; // dead-at-shutdown sessions owe nothing
+        const cur = post[id];
+        if (!cur || !cur.live) { problems.push(`${id}: not live after restore`); continue; }
+        if (cur.displayName !== pre.displayName) problems.push(`${id}: name "${pre.displayName}" → "${cur.displayName}"`);
+        if ((cur.folderId || null) !== (pre.folderId || null)) problems.push(`${id}: folder ${pre.folderId || '(none)'} → ${cur.folderId || '(none)'}`);
+      }
+      // Claude resume witness: poll each claude room's screen for claude's
+      // own chrome; a lingering resume question gets answered by the same
+      // command a human would use, then re-checked.
+      let pendingClaude = new Set(claudeRooms);
+      let resumeNudged = false;
+      for (let i = 0; i < 18 && pendingClaude.size > 0; i++) {
+        for (const id of [...pendingClaude]) {
+          const text = await roomPreviewText(id);
+          if (CLAUDE_UI_RE.test(text) && !RESUME_PROMPT_RE.test(text)) { pendingClaude.delete(id); continue; }
+          if (RESUME_PROMPT_RE.test(text) && !resumeNudged) {
+            resumeNudged = true;
+            log('resume question on screen — running hop resume-waiting');
+            try { log(execSync('hop resume-waiting 2>&1 | tail -5', { encoding: 'utf8', timeout: 90000 })); } catch (e) { log('resume-waiting err: ' + e.message); }
+          }
+        }
+        if (pendingClaude.size > 0) await sleep(5000);
+      }
+      for (const id of pendingClaude) problems.push(`${id}: claude chrome never appeared (still starting, or resume failed)`);
+      log(`VERIFY: ${Object.keys(preSessions).filter((k) => preSessions[k].live).length} live sessions checked, ` +
+        `${claudeRooms.length} claude rooms witnessed, ${problems.length} problem(s)`);
+      for (const p of problems) log(`VERIFY FAIL: ${p}`);
+      if (problems.length === 0) log('VERIFY: state matches the pre-restart census — names, folders, claude all back ✓');
+      fs.writeFileSync(path.join(OUT, 'verification.json'), JSON.stringify({ problems, claudeRooms }, null, 1), { mode: 0o600 });
+    } catch (e) { log('verify err: ' + (e && e.stack || e)); }
+
+    // 4c. Serialized-attach probe: the whole point of this cycle is the new
+    // host code — witness a serialized snapshot (in-band RIS prefix) on a
+    // bounded-replay attach, exactly as a wall tile would connect.
+    try {
+      const probeRoom = rooms.find((id) => id !== 'Solstice') || rooms[0];
+      const nh = hostState();
+      const result = await new Promise((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${nh.port}/ws?room=${encodeURIComponent(probeRoom)}&name=verify&cols=100&rows=30&replay=65536&nudge=0`);
+        const timer = setTimeout(() => { try { ws.close(); } catch (e) {} resolve('timeout'); }, 15000);
+        ws.on('message', (data) => {
+          try {
+            const msg = JSON.parse(String(data));
+            if (msg.type === 'snapshot') {
+              clearTimeout(timer);
+              try { ws.close(); } catch (e) {}
+              resolve(msg.data.startsWith('\x1bc') ? `serialized (${msg.data.length}B, capped=${msg.capped === true})` : `raw (${msg.data.length}B)`);
+            }
+          } catch (e) { /* keep waiting */ }
+        });
+        ws.on('error', () => { clearTimeout(timer); resolve('ws-error'); });
+      });
+      log(`serialized attach probe on ${probeRoom}: ${result}${String(result).startsWith('serialized') ? ' ✓ ACTIVE' : ' — NOT active'}`);
+    } catch (e) { log('serialized probe err: ' + e.message); }
     const ds = daemonState();
     const api = (method, p, body) => new Promise((resolve) => {
       const data = body ? JSON.stringify(body) : null;

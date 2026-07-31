@@ -1451,7 +1451,13 @@ const App = () => {
           deepRestoreRef.current = null;
           if (termRef.current) {
             const t = termRef.current;
-            t.write(`\x1bc${message.data}`, () => {
+            // Re-assert remote modes in-band after the snapshot: serialized
+            // snapshots carry the screen but not private modes, and xterm's
+            // own mode state gates scroll ownership and selection behavior
+            // (the refs above cover synthesized reports, not xterm itself).
+            const modeSeq = (message.mouseReporting ? "\x1b[?1002h" + (message.mouseSgr ? "\x1b[?1006h" : "") : "")
+              + (message.cursorHidden ? "\x1b[?25l" : "");
+            t.write(`\x1bc${message.data}${modeSeq}`, () => {
               if (pendingRestore) {
                 // The user was reading at the top of the OLD buffer; that
                 // content now sits newLen - oldLen lines down. Land there,

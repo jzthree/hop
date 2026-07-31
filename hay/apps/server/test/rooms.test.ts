@@ -737,6 +737,9 @@ describe("Room", () => {
     // matter how long ago it was painted.
     it("carries rows the bounded raw tail lost, without the wiggle", async () => {
       const { room, pty } = await setup("serial");
+      // The app enables mouse tracking (as Claude Code does at startup) —
+      // long outside any bounded tail, and never emitted by serialization.
+      pty().emit("\x1b[?1002h\x1b[?1006h");
       pty().emit("\x1b[2J\x1b[1;1HROW1-STABLE-BORDER-MARKER");
       // In-place repaints of one region, Ink-style: no scrolling, so the
       // marker row stays ON SCREEN while leaving every bounded byte tail.
@@ -756,6 +759,11 @@ describe("Room", () => {
       expect(pty().resizes.some((r: { cols: number }) => r.cols === 79)).toBe(false);
       // ~82KB of raw history is well under the deep-history hint threshold.
       expect(snapshot.capped).toBe(false);
+      // Private modes ride along in-band: the attaching terminal must know
+      // the app owns the wheel, or tiles scroll their local buffer instead.
+      expect(String(snapshot.data)).toContain("\x1b[?1002h");
+      expect(String(snapshot.data)).toContain("\x1b[?1006h");
+      expect(snapshot.mouseReporting).toBe(true);
     });
 
     it("flags a serialized snapshot as capped when deeper raw history exists", async () => {

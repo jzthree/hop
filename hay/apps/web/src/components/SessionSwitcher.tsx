@@ -706,7 +706,17 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
             // In-band RIS: clear and repaint in one parse pass. A separate
             // reset() painted an empty frame before the snapshot landed —
             // the blink that made preview → terminal feel like a switch.
-            term.write("\x1bc" + m.data, () => {
+            //
+            // Then re-assert the remote app's modes from the flags: a
+            // serialized snapshot carries the SCREEN but not private modes
+            // (the raw tail incidentally did), and this terminal's own state
+            // is what gates wheel forwarding vs local scrollback and
+            // plain-drag vs shift-drag selection — without it every tile
+            // guessed "no tracking" and scrolling/selection went wrong
+            // per-session.
+            const modes = (m.mouseReporting ? "\x1b[?1002h" + (m.mouseSgr ? "\x1b[?1006h" : "") : "")
+              + (m.cursorHidden ? "\x1b[?25l" : "");
+            term.write("\x1bc" + m.data + modes, () => {
               term.scrollToBottom();
               term.refresh(0, term.rows - 1);
               rescaleRef.current();

@@ -445,11 +445,19 @@ export class Room extends EventEmitter {
           wiggle();
           return;
         }
+        // Serialization carries the SCREEN but not private modes — the raw
+        // tail incidentally carried the app's mode-enable sequences, and
+        // clients (each terminal's own mode state) depend on them to route
+        // wheel events to the app vs local scrollback and to gate selection.
+        // Re-assert them in-band so every client — including ones that never
+        // read the separate flags — ends up in the app's actual modes.
+        const modeSeq = (this.mouseReporting ? "\x1b[?1002h" + (this.mouseSgr ? "\x1b[?1006h" : "") : "")
+          + (this.cursorHidden ? "\x1b[?25l" : "");
         socket.send(JSON.stringify({
           type: "snapshot",
           // In-band RIS: every client applies the serialized screen onto a
           // clean slate, including ones that don't reset on their own.
-          data: "\x1bc" + serialized,
+          data: "\x1bc" + serialized + modeSeq,
           capped: this.outputBytes > SERIALIZED_CAPPED_HINT_BYTES,
           ...snapshotFlags()
         } satisfies ServerMessage));

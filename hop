@@ -4399,7 +4399,14 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 // Same blindness applies before typing: a session whose
                 // command was launched as argv shows a shell here while
                 // claude runs beneath it. Typing again would land keystrokes
-                // in claude's own prompt.
+                // in claude's own prompt. And ABSENCE of claude chrome is not
+                // enough — under a many-session restore storm claude can take
+                // longer than every timeout to paint its first frame, and the
+                // typed "fallback" landed the whole relaunch command in the
+                // composer of the claude that then finished booting. The only
+                // screen that may be typed into is one POSITIVELY showing an
+                // idle shell prompt.
+                let promptVisible = false;
                 try {
                     const grid = await getRoomGridPreviewShared(job.plan.internalName);
                     const text = String(grid?.text || '');
@@ -4408,7 +4415,16 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                         job.since = Date.now();
                         continue;
                     }
-                } catch (e) { /* fall through to typing */ }
+                    const lines = text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
+                    const last = lines.length ? lines[lines.length - 1] : '';
+                    promptVisible = /[%$#❯>]\s*$/.test(last);
+                } catch (e) { /* host busy — treat as not visible */ }
+                if (!promptVisible) {
+                    // Nothing to safely type into (blank screen, app booting).
+                    // Keep waiting; the verify deadline bounds the wait.
+                    if (Date.now() - job.since > 30_000) { finish('never-started'); }
+                    continue;
+                }
                 // A fresh shell reports its own name once it has execed; that
                 // is our prompt-ready signal, and it beats guessing with a timer.
                 if (Date.now() - job.since < 400) continue;

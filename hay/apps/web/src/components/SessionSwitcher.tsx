@@ -182,16 +182,18 @@ const measurePreviewCharW = () => {
   previewCharW = measureAdvanceAt(PREVIEW_BASE_FS);
   return previewCharW;
 };
-// xterm quantizes its cell width to HUNDREDTHS of a CSS pixel (measured
-// empirically at five font sizes across dpr 1 and 2: cell = round(adv×100)/100
-// of the font's true advance). The preview's DOM text flows at the true
-// fractional advance, so 76+ columns accumulate ~1px of disagreement at the
-// right edge — the last visible shift in the preview → terminal swap.
-// Fractional letter-spacing closes the gap per character, putting preview
-// glyphs on exactly the grid the terminal will use.
+// The WebGL renderer — what live tiles actually use — FLOORS the cell width
+// to whole device pixels: cell = floor(advance × dpr) / dpr (measured
+// empirically at four font sizes across dpr 1 and 2; the DOM renderer
+// instead rounds to hundredths, which is why matching THAT rule still left
+// a shift). The preview's DOM text flows at the font's true fractional
+// advance, so 76+ columns accumulate a visible right-edge disagreement in
+// the preview → terminal swap. Fractional letter-spacing puts preview
+// glyphs on exactly the grid the WebGL terminal will draw.
 const tileLetterSpacing = (fs: number) => {
   const adv = measureAdvanceAt(fs);
-  return Math.round(adv * 100) / 100 - adv;
+  const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+  return Math.floor(adv * dpr) / dpr - adv;
 };
 
 // ONE font for the whole wall at a given zoom, derived from the box width —

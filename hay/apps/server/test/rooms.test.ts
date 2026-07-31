@@ -707,4 +707,100 @@ describe("Room", () => {
       expect(delta.data).toBe("fresh");
     });
   });
+
+  describe("serialized attach", () => {
+    const setup = async (roomId: string) => {
+      const { loadScreenGridDeps } = await import("../src/screenGrid");
+      expect(await loadScreenGridDeps()).toBe(true);
+      let ptyInstance: FakePty | null = null;
+      const factory: PtyFactory = () => {
+        ptyInstance = new FakePty() as unknown as FakePty;
+        return ptyInstance as any;
+      };
+      const manager = new RoomManager(factory);
+      const room = manager.getRoom(roomId, { cols: 80, rows: 24 }, "/tmp");
+      return { room, pty: () => ptyInstance! };
+    };
+
+    const waitForSnapshot = async (socket: FakeSocket) => {
+      await vi.waitFor(() => {
+        expect(findMessages(socket, "snapshot").length).toBeGreaterThan(0);
+      });
+      return findMessages(socket, "snapshot")[0] as any;
+    };
+
+    // THE recurring bug, reproduced: an incremental TUI (Claude Code/Ink)
+    // paints a row once and never re-emits it; once enough updates pass, the
+    // row leaves every bounded raw tail. A client attaching off such a tail
+    // rendered holes until the app happened to repaint — "have to scroll
+    // before it renders correctly". The serialized grid carries the row no
+    // matter how long ago it was painted.
+    it("carries rows the bounded raw tail lost, without the wiggle", async () => {
+      const { room, pty } = await setup("serial");
+      pty().emit("\x1b[2J\x1b[1;1HROW1-STABLE-BORDER-MARKER");
+      // In-place repaints of one region, Ink-style: no scrolling, so the
+      // marker row stays ON SCREEN while leaving every bounded byte tail.
+      const update = "\x1b[20;1H\x1b[K" + "x".repeat(60);
+      for (let i = 0; i < 1200; i++) pty().emit(update); // ~84KB > the 64KB ask
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "tile", name: "Tile", colorIndex: 0, cols: 80, rows: 24, replayBytes: 65536 },
+        socket
+      );
+      const snapshot = await waitForSnapshot(socket);
+      expect(String(snapshot.data).startsWith("\x1bc")).toBe(true);
+      expect(String(snapshot.data)).toContain("ROW1-STABLE-BORDER-MARKER");
+      // The raw tail this connection would have gotten cannot contain it.
+      expect(room.getPreviewSource(65536).output).not.toContain("ROW1-STABLE-BORDER-MARKER");
+      // Complete screen delivered — nothing needs the repaint nudge.
+      expect(pty().resizes.some((r: { cols: number }) => r.cols === 79)).toBe(false);
+      // ~82KB of raw history is well under the deep-history hint threshold.
+      expect(snapshot.capped).toBe(false);
+    });
+
+    it("flags a serialized snapshot as capped when deeper raw history exists", async () => {
+      const { room, pty } = await setup("capped");
+      const big = "\x1b[20;1H" + "y".repeat(4096);
+      for (let i = 0; i < 80; i++) pty().emit(big); // ~330KB ring
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "web", name: "Web", colorIndex: 0, cols: 80, rows: 24, replayBytes: 393216 },
+        socket
+      );
+      const snapshot = await waitForSnapshot(socket);
+      expect(String(snapshot.data).startsWith("\x1bc")).toBe(true);
+      expect(snapshot.capped).toBe(true);
+    });
+
+    it("replay=0 means no snapshot at all — live stream only", async () => {
+      const { room, pty } = await setup("claim");
+      pty().emit("some prior output\r\n");
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "claim", name: "Claim", colorIndex: 0, cols: 80, rows: 24, replayBytes: 0, nudge: false },
+        socket
+      );
+      // Give any (buggy) async snapshot path a chance to fire before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(findMessages(socket, "snapshot")).toHaveLength(0);
+      expect(pty().resizes.some((r: { cols: number }) => r.cols === 79)).toBe(false);
+    });
+
+    it("a deep-history request keeps the raw tail replay", async () => {
+      const { room, pty } = await setup("deep");
+      pty().emit("\x1b[2J\x1b[1;1Hdeep-history-anchor\r\n");
+      pty().emit("z".repeat(200_000));
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "deep", name: "Deep", colorIndex: 0, cols: 80, rows: 24, replayBytes: 1_572_864 },
+        socket
+      );
+      // Raw path is synchronous.
+      const snapshot = findMessages(socket, "snapshot")[0] as any;
+      expect(snapshot).toBeTruthy();
+      expect(String(snapshot.data).startsWith("\x1bc")).toBe(false);
+      expect(String(snapshot.data).length).toBeGreaterThan(200_000);
+      expect(String(snapshot.data)).toContain("deep-history-anchor");
+    });
+  });
 });

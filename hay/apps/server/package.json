@@ -20,8 +20,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "hay-shared": "*",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "express": "^4.21.2",
+    "hay-shared": "*",
     "node-pty-prebuilt-multiarch": "^0.10.1-pre.5",
     "ws": "^8.18.0"
   },

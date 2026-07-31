@@ -5,6 +5,8 @@ import type { IPty } from "node-pty-prebuilt-multiarch";
 import { clientMessageSchema, pickPresenceColor, safeParseClientMessage } from "hay-shared";
 import type { ClientMessage, PresenceClient, ServerMessage } from "hay-shared";
 import type { PtyFactory } from "./pty";
+import { createScreenGrid, loadScreenGridDeps, screenGridsAvailable } from "./screenGrid";
+import type { ScreenGrid } from "./screenGrid";
 
 export type SocketAdapter = {
   send: (data: string) => void;
@@ -26,7 +28,11 @@ export type ClientInfo = {
   cols: number;
   rows: number;
   // Optional per-connection cap for the join snapshot (clamped to the
-  // room-level bound). Monitors request ~64KB.
+  // room-level bound). 0 = no snapshot at all (live stream only — size-claim
+  // and kick-start sockets). Bounded requests (tiles ~64KB, web full screen
+  // ~384KB) are served a SERIALIZED grid — complete and a few KB — while
+  // larger requests are a deliberate ask for scrollback DEPTH and keep the
+  // raw-tail replay. Unset = raw tail at the room default (CLI reattach).
   replayBytes?: number;
   // False = skip the equal-size attach "wiggle" (the −1/+1 column repaint
   // nudge). Wall tiles decline it: they arrive already showing the current
@@ -95,6 +101,21 @@ const boundSnapshotReplay = (buffer: string): string => {
   }
   return tail;
 };
+
+// Serialized attach: connections asking for a bounded snapshot (web full
+// screen, wall tiles) get the room grid serialized — complete and a few KB —
+// instead of a raw tail. Larger requests are a deliberate ask for DEPTH
+// (deep-history reload, CLI full-scrollback reattach): raw tail reconstructs
+// far more scrollback than the grid retains, so those keep the old path.
+// Kill switch: HAY_SERIALIZED_ATTACH=0 reverts every attach to raw tails.
+const SERIALIZED_ATTACH_ENABLED = process.env.HAY_SERIALIZED_ATTACH !== "0";
+const SERIALIZED_MAX_REQUEST = 524_288;
+// Above this much retained raw history, the serialized snapshot is probably
+// shallower than what a deep replay could reconstruct — tell the client, so
+// its scroll-to-top full-history reload still knows to offer itself (it used
+// to infer cappedness from raw snapshot SIZE, which a few-KB serialized
+// snapshot never trips).
+const SERIALIZED_CAPPED_HINT_BYTES = 262_144;
 
 // Autofit-on-attach: a resize may claim the shared size when every OTHER
 // client has been input-idle at least this long. Someone actively typing keeps
@@ -235,6 +256,11 @@ export class Room extends EventEmitter {
   // False until the first client attaches: that client is the one whose
   // connect created the room, so its hello carries created=true.
   private hasHadClient = false;
+  // Authoritative screen state for serialized attach (see screenGrid.ts).
+  // Created lazily once the headless deps load; hydrated from the retained
+  // ring at creation so bytes that arrived earlier are never missing.
+  private grid: ScreenGrid | null = null;
+  private gridHydrated = false;
 
   constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, options: RoomCreateOptions) {
     super();
@@ -354,45 +380,84 @@ export class Room extends EventEmitter {
       } satisfies ServerMessage)
     );
 
-    if (this.outputBytes > 0) {
+    const replayRequest = Number.isFinite(info.replayBytes) ? Math.floor(info.replayBytes as number) : null;
+    const snapshotFlags = () => ({
+      alternateScreen: this.alternateScreen,
+      cursorHidden: this.cursorHidden,
+      keyboardEnhanced: this.keyboardEnhanced,
+      mouseReporting: this.mouseReporting,
+      mouseSgr: this.mouseSgr
+    });
+    const sendRawSnapshot = () => {
       socket.send(JSON.stringify({
         type: "snapshot",
         data: boundSnapshotReplay(this.tailOutput(
-          Number.isFinite(info.replayBytes) && (info.replayBytes as number) > 0
-            ? Math.min(SNAPSHOT_REPLAY_BYTES, Math.floor(info.replayBytes as number))
+          replayRequest !== null && replayRequest > 0
+            ? Math.min(SNAPSHOT_REPLAY_BYTES, replayRequest)
             : SNAPSHOT_REPLAY_BYTES
         )),
-        alternateScreen: this.alternateScreen,
-        cursorHidden: this.cursorHidden,
-        keyboardEnhanced: this.keyboardEnhanced,
-        mouseReporting: this.mouseReporting,
-        mouseSgr: this.mouseSgr
+        ...snapshotFlags()
       } satisfies ServerMessage));
-    }
-
-    // The snapshot is a raw byte TAIL, and incremental TUIs (Claude Code/Ink)
-    // never re-emit rows that don't change — e.g. the input box's horizontal
-    // border lines — so the replay can be missing them. When this client's
-    // size differs from the PTY's, the attach resize triggers a full repaint
-    // anyway; when sizes are EQUAL nothing would repaint, so nudge: a one-
-    // column wiggle (tmux's redraw trick) makes full-screen apps repaint.
-    if (
-      info.nudge !== false &&
-      client.cols === this.activeCols &&
-      client.rows === this.activeRows &&
-      this.activeCols > 4 &&
-      !this.ended
-    ) {
-      const cols = this.activeCols;
-      const rows = this.activeRows;
-      try { this.pty.resize(cols - 1, rows); } catch { /* pty may be gone */ }
-      setTimeout(() => {
-        if (this.ended) return;
-        // Only bounce back if nobody claimed a different size meanwhile.
-        if (this.activeCols === cols && this.activeRows === rows) {
-          try { this.pty.resize(cols, rows); } catch { /* pty may be gone */ }
+    };
+    // A raw TAIL can be missing rows incremental TUIs (Claude Code/Ink) never
+    // re-emitted within the window. When this client's size differs from the
+    // PTY's, the attach resize triggers a full repaint anyway; when sizes are
+    // EQUAL nothing would repaint, so nudge: a one-column wiggle (tmux's
+    // redraw trick) makes full-screen apps repaint. Raw-path compensation
+    // only — a serialized attach is already complete.
+    const wiggle = () => {
+      if (
+        info.nudge !== false &&
+        client.cols === this.activeCols &&
+        client.rows === this.activeRows &&
+        this.activeCols > 4 &&
+        !this.ended
+      ) {
+        const cols = this.activeCols;
+        const rows = this.activeRows;
+        try { this.pty.resize(cols - 1, rows); } catch { /* pty may be gone */ }
+        setTimeout(() => {
+          if (this.ended) return;
+          // Only bounce back if nobody claimed a different size meanwhile.
+          if (this.activeCols === cols && this.activeRows === rows) {
+            try { this.pty.resize(cols, rows); } catch { /* pty may be gone */ }
+          }
+        }, 60);
+      }
+    };
+    // replay=0 is an explicit "live stream only" (size-claim and kick-start
+    // sockets): honor it — these connections used to fall through to the
+    // DEFAULT cap and silently pull the full 1.5MB tail they never read.
+    const wantsSnapshot = this.outputBytes > 0 && replayRequest !== 0;
+    const gridForAttach = wantsSnapshot && replayRequest !== null && replayRequest > 0
+      && replayRequest <= SERIALIZED_MAX_REQUEST
+      ? this.ensureGrid()
+      : null;
+    // Scrollback rides along in proportion to the ask: a tile's ~64KB request
+    // wants the screen (plus enough history for a casual scroll-up), while
+    // the web full screen's ~384KB request wants the grid's full depth.
+    const serializedScrollback = replayRequest !== null && replayRequest <= 131_072 ? 200 : undefined;
+    if (gridForAttach) {
+      gridForAttach.serialize((serialized) => {
+        if (this.ended || !this.clients.has(client.id) || !socket.isOpen()) return;
+        if (serialized === null) {
+          sendRawSnapshot();
+          wiggle();
+          return;
         }
-      }, 60);
+        socket.send(JSON.stringify({
+          type: "snapshot",
+          // In-band RIS: every client applies the serialized screen onto a
+          // clean slate, including ones that don't reset on their own.
+          data: "\x1bc" + serialized,
+          capped: this.outputBytes > SERIALIZED_CAPPED_HINT_BYTES,
+          ...snapshotFlags()
+        } satisfies ServerMessage));
+        // No wiggle: the serialized grid IS the current screen.
+      }, serializedScrollback);
+    } else {
+      if (wantsSnapshot) sendRawSnapshot();
+      if (replayRequest !== 0) wiggle();
     }
 
     // Send current cwd to the new client
@@ -802,6 +867,7 @@ export class Room extends EventEmitter {
       this.pty.resize(cols, rows);
       this.activeCols = cols;
       this.activeRows = rows;
+      this.grid?.resize(cols, rows);
       this.activeClientId = client.id;
       // Broadcast the new active size to other clients so they can adjust —
       // and CONFIRM to the winner: a claimant otherwise learns nothing on
@@ -947,6 +1013,33 @@ export class Room extends EventEmitter {
     }
   }
 
+  // Grids are LAZY: created on the first serialized attach, not on output,
+  // so a room nobody ever opens (agent fleets) pays no grid memory at all.
+  // Creation hydrates from a bounded ring tail — deep enough to contain any
+  // app's last full repaint plus every update since, which is all screen
+  // correctness needs; serialized scrollback is bounded anyway.
+  private static readonly GRID_HYDRATE_BYTES = 2_000_000;
+  private ensureGrid(): ScreenGrid | null {
+    if (!SERIALIZED_ATTACH_ENABLED || this.ended) return this.grid;
+    if (!this.grid && screenGridsAvailable()) {
+      this.grid = createScreenGrid(this.activeCols, this.activeRows);
+      if (this.grid && !this.gridHydrated) {
+        this.gridHydrated = true;
+        if (this.outputBytes > 0) {
+          // Cut at a line boundary (same trick as boundSnapshotReplay) so a
+          // slice landing mid-escape-sequence can't garble the parse head.
+          let tail = this.tailOutput(Room.GRID_HYDRATE_BYTES);
+          if (this.outputBytes > tail.length) {
+            const nl = tail.indexOf("\n");
+            if (nl !== -1 && nl < 8192) tail = tail.slice(nl + 1);
+          }
+          this.grid.write(tail);
+        }
+      }
+    }
+    return this.grid;
+  }
+
   /** O(1) append; trims whole chunks from the head past MAX_BUFFER_SIZE. */
   private appendOutput(data: string) {
     if (!data) return;
@@ -964,6 +1057,9 @@ export class Room extends EventEmitter {
       this.outputChunks[0] = only;
       this.outputBytes = only.length;
     }
+    // Lazily-created grids hydrate from the ring at creation; here the grid
+    // (when it exists) just follows along with the delta.
+    this.grid?.write(data);
   }
 
   /**
@@ -989,6 +1085,8 @@ export class Room extends EventEmitter {
     if (this.ended) return;
     this.ended = true;
     this.stopCwdPolling();
+    this.grid?.dispose();
+    this.grid = null;
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
@@ -1101,6 +1199,9 @@ export class RoomManager {
 
   constructor(ptyFactory: PtyFactory) {
     this.ptyFactory = ptyFactory;
+    // Start loading the headless deps now so the first attach can serialize;
+    // rooms hydrate their grid from the ring when the load wins the race late.
+    if (SERIALIZED_ATTACH_ENABLED) void loadScreenGridDeps();
   }
 
   getRoom(roomId: string, initialSize: { cols: number; rows: number }, cwdOrOptions: string | RoomCreateOptions) {

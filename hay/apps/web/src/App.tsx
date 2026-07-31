@@ -1430,9 +1430,12 @@ const App = () => {
           remoteMouseSgrRef.current = message.mouseSgr === true;
           optimisticEchoRef.current.reset();
           userScrolledUpRef.current = false;
-          // A snapshot near the requested bound was almost certainly cut —
-          // that's when the "load full history" pill is worth offering.
-          snapshotWasCappedRef.current = typeof message.data === "string" && message.data.length >= 350000
+          // Deeper history exists than this snapshot carries: the server says
+          // so outright for serialized snapshots (which are a few KB no
+          // matter how deep the session is), and for raw tails a payload near
+          // the requested bound was almost certainly cut.
+          snapshotWasCappedRef.current = (message.capped === true
+            || (typeof message.data === "string" && message.data.length >= 350000))
             && !deepReplayRoomsRef.current.has(activeSessionRoomRef.current || "");
           // Reset IN the stream (RIS) rather than as a separate call. A bare
           // reset() paints an empty terminal immediately, while the snapshot

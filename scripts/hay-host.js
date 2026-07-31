@@ -370,7 +370,9 @@ async function main() {
                 cols,
                 rows,
                 // Per-connection snapshot cap (monitor tiles ask small).
-                replayBytes: Number.isFinite(replayRaw) && replayRaw > 0 ? replayRaw : undefined,
+                // 0 passes through as an explicit "no snapshot" — dropping it
+                // to undefined made claim sockets pull the full default tail.
+                replayBytes: Number.isFinite(replayRaw) && replayRaw >= 0 ? replayRaw : undefined,
                 // nudge=0: viewer already shows the current grid (wall tile)
                 nudge: wsUrl.searchParams.get('nudge') === '0' ? false : undefined
             },

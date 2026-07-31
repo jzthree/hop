@@ -65,7 +65,12 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     // encoding (?1006). Lets a reattaching client scroll the app with per-line
     // wheel events instead of coarse Page keys.
     mouseReporting: z.boolean().optional(),
-    mouseSgr: z.boolean().optional()
+    mouseSgr: z.boolean().optional(),
+    // True when the room retains more raw history than this snapshot carries.
+    // Serialized snapshots are a few KB however deep the session is, so the
+    // client can no longer infer "there is more history" from snapshot size —
+    // this flag is what keeps the scroll-to-top deep-history reload offered.
+    capped: z.boolean().optional()
   }),
   z.object({ type: z.literal("collab"), enabled: z.boolean(), controllerId: z.string().nullable() }),
   z.object({ type: z.literal("input_rejected"), reason: z.string() }),

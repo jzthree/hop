@@ -3296,8 +3296,16 @@ function buildSessionEntries(haySessions, opts = {}) {
         if (type !== 'port' && !includeStoredTerminalSessions && !sessionMap.has(name)) {
             continue;
         }
-        const displayName = config?.displayName || toDisplaySessionName(name);
-        const folderId = config?.folderId || null;
+        // Identity fields go through THE accessor, not this raw store entry.
+        // Reading the store directly silently reverted renames and un-filed
+        // folders whenever a recreated cache (e.g. restore's fresh session
+        // definitions) lacked them — the durable meta knew better the whole
+        // time, and the overwrite branch below was clobbering the correct
+        // value the live-rooms loop had already computed.
+        const effective = getEffectiveSessionConfig(name) || config;
+        const displayName = effective?.displayName || toDisplaySessionName(name);
+        const folderId = effective?.folderId || null;
+        const createdBy = effective?.createdBy || 'user';
         const clientSummary = getSessionClientSummary(name);
         if (!sessionMap.has(name)) {
             sessionMap.set(name, {
@@ -3319,7 +3327,7 @@ function buildSessionEntries(haySessions, opts = {}) {
                 startup: config?.startup,
                 autoStart: config?.autoStart,
                 createdAt: config?.createdAt,
-                createdBy: config?.createdBy || 'user',
+                createdBy,
                 agentPermitted: config?.agentPermitted === true,
                 localCliCount: clientSummary.localCliCount,
                 hasLocalCli: clientSummary.hasLocalCli
@@ -3346,7 +3354,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             entry.startup = config?.startup;
             entry.autoStart = config?.autoStart;
             entry.createdAt = config?.createdAt;
-            entry.createdBy = config?.createdBy || 'user';
+            entry.createdBy = createdBy;
             entry.agentPermitted = config?.agentPermitted === true;
             entry.localCliCount = localCliCount;
             entry.hasLocalCli = clientSummary.hasLocalCli || localCliCount > 0 || entry.hasLocalCli === true;
@@ -3357,8 +3365,11 @@ function buildSessionEntries(haySessions, opts = {}) {
         if (!name || sessionMap.has(name)) continue;
         const type = config?.type || 'terminal';
         if (type !== 'port' && !includeStoredTerminalSessions) continue;
-        const displayName = config?.displayName || toDisplaySessionName(name);
-        const folderId = config?.folderId || null;
+        // Same rule as above: identity via THE accessor, mechanics from the
+        // runtime cache.
+        const effective = getEffectiveSessionConfig(name) || config;
+        const displayName = effective?.displayName || toDisplaySessionName(name);
+        const folderId = effective?.folderId || null;
         const clientSummary = getSessionClientSummary(name);
         sessionMap.set(name, {
             name,
@@ -3379,7 +3390,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             startup: config?.startup,
             autoStart: config?.autoStart,
             createdAt: config?.createdAt,
-            createdBy: config?.createdBy || 'user',
+            createdBy: effective?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
             localCliCount: clientSummary.localCliCount,
             hasLocalCli: clientSummary.hasLocalCli

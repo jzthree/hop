@@ -79,7 +79,10 @@ const daemonApi = (method, p, body) => new Promise((resolve) => {
     headers: { Authorization: 'Bearer ' + ds.sessionSecret, ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}) }
   }, (res) => { let d = ''; res.on('data', (c) => d += c); res.on('end', () => resolve({ status: res.statusCode, data: d })); });
   req.on('error', () => resolve({ status: 0, data: '' }));
-  req.setTimeout(20000, () => req.destroy());
+  // destroy() WITH an error: a bare destroy() emits no 'error' event, the
+  // promise never settles, and the whole run hangs silently on one slow
+  // request (exactly what stranded the first verified restart at RECONCILE).
+  req.setTimeout(20000, () => req.destroy(new Error('timeout')));
   if (data) req.end(data); else req.end();
 });
 

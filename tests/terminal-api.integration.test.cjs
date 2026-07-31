@@ -585,6 +585,45 @@ test('a display name freed by a later rename can be reused', async () => {
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Freed', internalName: 'AliasTwo' });
 });
 
+// Regression: folder membership must survive every cache rebuild. The store
+// entry is a CACHE any path may recreate without folderId (restore's fresh
+// session definitions did exactly that), and buildSessionEntries' store loop
+// read that raw cache — clobbering the correct value the durable meta (and
+// the live-rooms loop) already knew. Nine of eleven folder assignments
+// vanished from the UI after a host cycle while every meta on disk was right.
+test('folder membership survives restore re-registration and a daemon restart', async () => {
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'FolderKeeper', type: 'terminal', cwd: tempDir, startRuntime: true });
+  await delay(600);
+  const folder = await requestJson(state.port, state.sessionSecret, 'POST', '/api/folders', { name: 'KeeperShelf' });
+  assert.equal(folder.status, 200, `folder create failed: ${JSON.stringify(folder.data)}`);
+  const folderId = folder.data.folder.id;
+  const moved = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/move',
+    { name: 'FolderKeeper', folderId });
+  assert.equal(moved.status, 200, `move failed: ${JSON.stringify(moved.data)}`);
+
+  const listedNow = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  assert.equal(listedNow.data.sessions.find(s => s.internalName === 'FolderKeeper')?.folderId, folderId,
+    'freshly moved session must list its folder');
+
+  // Restore re-registration recreates cached session definitions — the write
+  // that used to outrank the durable meta in the listing.
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', {});
+  await delay(1200);
+  const afterRestore = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  assert.equal(afterRestore.data.sessions.find(s => s.internalName === 'FolderKeeper')?.folderId, folderId,
+    'folder membership must survive restore re-registration');
+
+  const previousState = state;
+  await stopDaemon(true);
+  await launchDaemon(previousState);
+  const afterRestart = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  assert.equal(afterRestart.data.sessions.find(s => s.internalName === 'FolderKeeper')?.folderId, folderId,
+    'folder membership must survive a daemon restart');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'FolderKeeper', internalName: 'FolderKeeper' });
+});
+
 // Session names resolve case-insensitively everywhere a name addresses a
 // session: exact-case wearers win, a UNIQUE folded match resolves, and two
 // sessions differing only by case stay exact-only rather than guessed at.

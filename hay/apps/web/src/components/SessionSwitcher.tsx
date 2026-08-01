@@ -15,7 +15,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
-import { bufferLooksLikeClaude, createVoiceHold } from "../utils/voiceHold";
+import { createVoiceHold, isClaudeSurface } from "../utils/voiceHold";
 import {
   buildSwitcherModel,
   filterSessionsByOrigin,
@@ -312,16 +312,20 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   // "voice doesn't always work".
   const [voiceInterim, setVoiceInterim] = useState<string | null>(null);
   const voiceHoldRef = useRef<ReturnType<typeof createVoiceHold> | null>(null);
+  // Is this tile showing Claude Code? Decides KEY ENCODING (Shift+Enter's
+  // CSI-u) and voice eligibility, so it has to be right on restored
+  // sessions too. The `claudeApp` prop reads the session's foreground
+  // process, which an argv-launched restore reports as the wrapper shell
+  // FOREVER (`shell -lc "claude …; exec shell -l"`) — so it is false for
+  // every session that came back through `hop restore`. The buffer's own
+  // chrome is the honest witness; both callers share it.
+  const looksLikeClaude = () => isClaudeSurface(claudeAppRef.current, termRef.current as never);
   if (!voiceHoldRef.current) {
     voiceHoldRef.current = createVoiceHold({
       send: (data) => sendInputRef.current?.(data),
       notify: (m) => onNoticeRef.current?.(m),
       setOverlay: setVoiceInterim,
-      eligible: () => {
-        if (claudeAppRef.current) return true;
-        const t = termRef.current;
-        return !!t && bufferLooksLikeClaude(t as never);
-      }
+      eligible: () => looksLikeClaude()
     });
   }
 
@@ -463,8 +467,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
         }
         return false;
       }
+      // Shift+Enter → CSI 13;2u (newline in Claude's composer instead of
+      // submit). Claude parses CSI-u unconditionally but no longer
+      // advertises the kitty protocol at boot, so keyboardEnhanced is
+      // legitimately false — detection of Claude ITSELF is the gate, and it
+      // must survive a restore (see looksLikeClaude). A plain shell would
+      // render raw CSI-u as junk text, so the gate stays.
       if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey
-          && (kbdEnhancedRef.current || claudeAppRef.current)) {
+          && (kbdEnhancedRef.current || looksLikeClaude())) {
         if (ev.type === "keydown") sendInputRef.current?.("\x1b[13;2u");
         return false;
       }

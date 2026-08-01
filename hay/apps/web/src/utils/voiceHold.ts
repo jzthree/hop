@@ -152,6 +152,19 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
   return { handleKey, dispose, isActive: () => active };
 };
 
+/**
+ * Is this surface running Claude Code? Used for KEY ENCODING (Shift+Enter's
+ * CSI-u) and voice eligibility, so it must stay true for RESTORED sessions:
+ * an argv-launched restore (`shell -lc "claude …; exec shell -l"`) reports
+ * the wrapper shell as the foreground process forever, so a process-only
+ * check goes false on every session that came back through `hop restore`.
+ * The terminal's own chrome is the honest second witness.
+ */
+export const isClaudeSurface = (
+  foregroundIsClaude: boolean,
+  terminal: Parameters<typeof bufferLooksLikeClaude>[0] | null | undefined
+): boolean => foregroundIsClaude || (!!terminal && bufferLooksLikeClaude(terminal));
+
 /** Claude chrome scan over a terminal's visible rows — shared eligibility. */
 export const bufferLooksLikeClaude = (t: {
   rows: number;

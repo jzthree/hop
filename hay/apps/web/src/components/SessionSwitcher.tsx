@@ -497,9 +497,17 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       // tolerance, so no resize is ever asked for and the crop is permanent.
       // Translate so the LAST row is flush with the box bottom; overflow now
       // crops the oldest rows off the top, which is what scrollback is for.
-      inner.style.transformOrigin = "bottom left";
+      // Transform the SCREEN, not `.xterm`. `.xterm` sets overflow:hidden on
+      // itself, so translating it slides an already-clipped window: the rows
+      // outside never appear no matter how far you pan (and a rect-based
+      // measurement is fooled, because getBoundingClientRect reports clipped
+      // geometry as if visible — which is how the first version of this
+      // "fixed" the bottom crop on paper while the pixels stayed hidden).
+      // Moving the screen inside that clip is what actually reveals rows.
       inner.style.transform = "";
-      const boxRect = box.getBoundingClientRect();
+      screen.style.transformOrigin = "bottom left";
+      screen.style.transform = "";
+      const boxRect = inner.getBoundingClientRect(); // .xterm IS the clip
       const screenRect = screen.getBoundingClientRect(); // reads after the reset above
       const overflowX = Math.max(0, Math.round(screenRect.width - boxRect.width));
       const overflowY = Math.max(0, Math.round(screenRect.height - boxRect.height));
@@ -511,7 +519,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       const px = pan ? Math.max(-overflowX, Math.min(0, pan.x)) : 0;
       const py = pan ? Math.max(autoY, Math.min(0, pan.y)) : autoY;
       if (pan) panRef.current = { x: px, y: py };
-      if (px !== 0 || py !== 0) inner.style.transform = `translate(${px}px, ${py}px)`;
+      if (px !== 0 || py !== 0) screen.style.transform = `translate(${px}px, ${py}px)`;
       // Only publish on CHANGE: rescale runs from a ResizeObserver, and
       // setting a fresh object every pass would re-render (and re-observe)
       // in a loop.
@@ -581,8 +589,9 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     let panning: { sx: number; sy: number; ox: number; oy: number } | null = null;
     const panBounds = () => {
       const screen = box.querySelector(".xterm-screen") as HTMLElement | null;
-      if (!screen) return null;
-      const boxRect = box.getBoundingClientRect();
+      const clip = box.querySelector(".xterm") as HTMLElement | null;
+      if (!screen || !clip) return null;
+      const boxRect = clip.getBoundingClientRect(); // same clip rescale uses
       const scrRect = screen.getBoundingClientRect();
       return {
         overflowX: Math.max(0, scrRect.width - boxRect.width),
@@ -615,6 +624,22 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       panning = null;
       try { box.releasePointerCapture(e.pointerId); } catch { /* already released */ }
     };
+    // The natural gesture: a two-finger SIDEWAYS swipe pans a terminal that
+    // is wider than its tile. Horizontal wheel deltas are otherwise unused
+    // here (vertical belongs to scrolling the session), so this costs no
+    // other interaction and needs no modifier. Capture + non-passive because
+    // xterm would otherwise consume the event on a tracking app.
+    const onPanWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // vertical = scroll
+      const b = panBounds();
+      if (!b || b.overflowX < 1) return;
+      const cur = panRef.current || { x: 0, y: b.autoY };
+      panRef.current = { x: cur.x - e.deltaX, y: cur.y };
+      rescaleRef.current();
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    box.addEventListener("wheel", onPanWheel, { capture: true, passive: false });
     box.addEventListener("pointerdown", onPanDown, true);
     box.addEventListener("pointermove", onPanMove, true);
     box.addEventListener("pointerup", endPan, true);
@@ -626,6 +651,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
         ?._renderService?.dimensions?.css?.cell?.height) || PREVIEW_BASE_FS * 1.3)
     });
     return () => {
+      box.removeEventListener("wheel", onPanWheel, { capture: true } as EventListenerOptions);
       box.removeEventListener("pointerdown", onPanDown, true);
       box.removeEventListener("pointermove", onPanMove, true);
       box.removeEventListener("pointerup", endPan, true);
@@ -1508,6 +1534,23 @@ export const SessionSwitcher = ({
     flatNav.forEach((s, i) => m.set(sessionKey(s), i));
     return m;
   }, [flatNav]);
+  // Opening the wall focuses the session the app is ON. A deep link like
+  // /s/<name>/?view=wall names a session, so landing on the wall with
+  // nothing focused (and the keyboard sitting on the FIRST card) loses the
+  // one thing the URL asked for. The old name works too — the room id is
+  // the internal name, so a renamed session still resolves. This is not an
+  // "accidental" focus: arriving here is the user's explicit act, and it
+  // focuses in place rather than entering full screen.
+  useEffect(() => {
+    if (!open || focusedKey || !currentRoom) return;
+    const current = flatNav.find((s) => (s.internalName || s.name) === currentRoom || s.name === currentRoom);
+    if (!current) return;
+    const key = sessionKey(current);
+    setFocusedKey(key);
+    const idx = navIndexByKey.get(key);
+    if (typeof idx === "number") setKbdIndex(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, currentRoom, flatNav, navIndexByKey]);
   // Latest visual order, for reorderManual (defined earlier in the component).
   // Every session in the current scope, in manual order — the canonical list
   // reordering works against, regardless of what the filter is showing.

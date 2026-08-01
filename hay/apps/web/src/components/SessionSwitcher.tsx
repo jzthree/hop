@@ -1548,7 +1548,15 @@ export const SessionSwitcher = ({
     const key = sessionKey(current);
     setFocusedKey(key);
     const idx = navIndexByKey.get(key);
-    if (typeof idx === "number") setKbdIndex(idx);
+    if (typeof idx === "number") {
+      setKbdIndex(idx);
+      // ...and bring it into view. A deep link can name a session sitting
+      // far down a long wall; focusing a card the user cannot see is the
+      // same as not focusing it. Deferred a frame so the card exists.
+      requestAnimationFrame(() => {
+        document.querySelector(`[data-nav-index="${idx}"]`)?.scrollIntoView({ block: "center" });
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, currentRoom, flatNav, navIndexByKey]);
   // Latest visual order, for reorderManual (defined earlier in the component).

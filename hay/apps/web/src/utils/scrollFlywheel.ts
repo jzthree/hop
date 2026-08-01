@@ -74,13 +74,14 @@ export const attachScrollFlywheel = (
 ): (() => void) => {
   let vel = 0; // lines/second, signed
   let carry = 0; // fractional-line remainder between frames
+  let synthetic = false; // true while WE re-dispatch a wheel event
   let burst = 0; // wheel events in the current spin
   let lastWheelAt = 0;
   let lastFrameAt = 0;
   let raf = 0;
   let idleTimer = 0;
 
-  const stop = () => {
+  const stopLocal = () => {
     if (raf) cancelAnimationFrame(raf);
     if (idleTimer) window.clearTimeout(idleTimer);
     raf = 0;
@@ -88,6 +89,102 @@ export const attachScrollFlywheel = (
     vel = 0;
     carry = 0;
     burst = 0;
+  };
+
+  // ---- App-owned scrolling (alt screen / mouse tracking) -------------------
+  // The app scrolls itself, one step per wheel event. We re-dispatch wheel
+  // events to give that stream a natural shape: a notch is worth a few steps,
+  // and a spin coasts to a stop instead of halting dead. Re-dispatching (vs
+  // encoding mouse reports ourselves) keeps xterm the single owner of the
+  // wire format — whatever it sends for a real notch is exactly what it sends
+  // for ours.
+  const APP_STEPS_PER_NOTCH = 3;
+  const APP_MAX_RATE = 90; // steps/sec — fast, still ordered
+  let appVel = 0;
+  let appCarry = 0;
+  let appRaf = 0;
+  let appIdle = 0;
+  let appBurst = 0;
+  let appLastAt = 0;
+  let appTarget: EventTarget | null = null;
+  let appProto: { deltaY: number; clientX: number; clientY: number } | null = null;
+
+  const stopApp = () => {
+    if (appRaf) cancelAnimationFrame(appRaf);
+    if (appIdle) window.clearTimeout(appIdle);
+    appRaf = 0;
+    appIdle = 0;
+    appVel = 0;
+    appCarry = 0;
+    appBurst = 0;
+  };
+
+  const stop = () => { stopLocal(); stopApp(); };
+
+  const dispatchStep = () => {
+    if (!appTarget || !appProto) return;
+    synthetic = true;
+    try {
+      appTarget.dispatchEvent(new WheelEvent("wheel", {
+        deltaY: appProto.deltaY,
+        deltaMode: 0,
+        clientX: appProto.clientX,
+        clientY: appProto.clientY,
+        bubbles: true,
+        cancelable: true
+      }));
+    } catch {
+      /* target detached mid-glide */
+    } finally {
+      synthetic = false;
+    }
+  };
+
+  const appGlide = (t: number) => {
+    appRaf = 0;
+    const term = getTerm();
+    // Mode flipped (app exited, screen switched) or run out of speed.
+    if (!term || terminalOwnsScrolling(term) || Math.abs(appVel) < 4) return stopApp();
+    const dt = lastFrameAt ? Math.min(0.05, (t - lastFrameAt) / 1000) : 0.016;
+    lastFrameAt = t;
+    appCarry += Math.abs(appVel) * dt;
+    let steps = Math.trunc(appCarry);
+    appCarry -= steps;
+    while (steps-- > 0) dispatchStep();
+    appVel *= Math.exp(-dt / 0.35);
+    appRaf = requestAnimationFrame(appGlide);
+  };
+
+  const appWheel = (e: WheelEvent) => {
+    appTarget = e.target;
+    appProto = { deltaY: e.deltaY, clientX: e.clientX, clientY: e.clientY };
+    if (appRaf) { cancelAnimationFrame(appRaf); appRaf = 0; }
+
+    const now = e.timeStamp || performance.now();
+    const gap = now - appLastAt;
+    appLastAt = now;
+    if (gap > 250) appBurst = 0;
+    appBurst += 1;
+
+    // One notch already produced one step (the real event xterm just
+    // forwarded); add the rest so a notch moves like a notch.
+    for (let i = 1; i < APP_STEPS_PER_NOTCH; i++) dispatchStep();
+
+    const rate = APP_STEPS_PER_NOTCH / (Math.min(Math.max(gap, 30), 200) / 1000);
+    const signed = Math.sign(e.deltaY) * rate;
+    appVel = Math.sign(signed) === Math.sign(appVel) ? 0.6 * signed + 0.4 * appVel : signed;
+    appVel = Math.max(-APP_MAX_RATE, Math.min(APP_MAX_RATE, appVel));
+
+    if (appIdle) window.clearTimeout(appIdle);
+    appIdle = window.setTimeout(() => {
+      appIdle = 0;
+      if (appBurst >= 3 && Math.abs(appVel) >= 4) {
+        lastFrameAt = 0;
+        appRaf = requestAnimationFrame(appGlide);
+      } else {
+        stopApp();
+      }
+    }, 80);
   };
 
   const glide = (t: number) => {
@@ -109,11 +206,22 @@ export const attachScrollFlywheel = (
   };
 
   const onWheel = (e: WheelEvent) => {
+    if (synthetic) return; // our own re-dispatch — never feed it back in
     const term = getTerm();
     if (!term) return;
-    // App owns the wheel (alt screen, or mouse tracking on): hands off, and
-    // kill any active glide — the mode may have flipped mid-glide.
-    if (!terminalOwnsScrolling(term)) return stop();
+    // App owns the wheel (alt screen, or mouse tracking on — i.e. every
+    // Claude session). We must not scroll locally, but a terminal app moves
+    // one step per wheel event, so a discrete wheel crawls a row at a time.
+    // Give it the SAME feel a native scroll has: amplify each notch into a
+    // few events, then coast with a decaying stream after the spin. The app
+    // still does all the scrolling; we only shape the event rate.
+    if (!terminalOwnsScrolling(term)) {
+      stopLocal();
+      if (isDiscreteWheel(e)) appWheel(e);
+      else stopApp(); // trackpad: the OS already sends a dense glide
+      return;
+    }
+    stopApp();
     // Trackpad: native inertia already glides; never double it.
     if (!isDiscreteWheel(e)) return stop();
     if (raf) { cancelAnimationFrame(raf); raf = 0; } // wheel resumes: rebuild, don't glide yet
@@ -145,15 +253,18 @@ export const attachScrollFlywheel = (
   };
 
   const kill = () => stop();
-  // Passive and non-preventing: xterm still performs its own per-notch
-  // scroll (or forwards the notch to a tracking app); we only add the glide
-  // afterwards in the cases we own.
-  el.addEventListener("wheel", onWheel, { passive: true });
+  // CAPTURE phase, but strictly observational (passive: we never
+  // preventDefault). Capture is REQUIRED: when the app is tracking the
+  // mouse, xterm's own handler calls stopPropagation() on the way out, so a
+  // bubble-phase listener on this ancestor never runs at all — which is why
+  // the app-scroll shaping below silently did nothing. Observing first lets
+  // xterm do exactly what it always did, and lets us add steps around it.
+  el.addEventListener("wheel", onWheel, { capture: true, passive: true });
   el.addEventListener("mousedown", kill, true);
   window.addEventListener("keydown", kill, true);
   return () => {
     stop();
-    el.removeEventListener("wheel", onWheel);
+    el.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
     el.removeEventListener("mousedown", kill, true);
     window.removeEventListener("keydown", kill, true);
   };

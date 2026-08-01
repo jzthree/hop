@@ -371,6 +371,16 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   // find bar. Scope follows focus — ⌘F in a live tile searches THIS session;
   // ⌘F anywhere else is the wall filter, which finds sessions.
   const [find, setFind] = useState<{ query: string; index: number; total: number } | null>(null);
+  // The session's grid does not fit this tile — someone else (a full-screen
+  // client, the CLI, another person) holds the size, and our claim was
+  // declined or never made. The tile then crops silently, which reads as a
+  // rendering bug rather than "this terminal is bigger than this box". Track
+  // the overflow so the tile can SAY so, and let the user pan to the rest.
+  const [offGrid, setOffGrid] = useState<{ x: number; y: number; cols: number; rows: number } | null>(null);
+  const offGridRef = useRef<{ x: number; y: number; cols: number; rows: number } | null>(null);
+  // User's pan offset within the oversized terminal (px, <= 0). Null = follow
+  // the automatic bottom anchor.
+  const panRef = useRef<{ x: number; y: number } | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const findIndexRef = useRef(-1);
   const runTileFind = (query: string, step = 0) => {
@@ -491,8 +501,31 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       inner.style.transform = "";
       const boxRect = box.getBoundingClientRect();
       const screenRect = screen.getBoundingClientRect(); // reads after the reset above
-      const dy = Math.round(boxRect.bottom - screenRect.bottom);
-      if (dy !== 0) inner.style.transform = `translateY(${dy}px)`;
+      const overflowX = Math.max(0, Math.round(screenRect.width - boxRect.width));
+      const overflowY = Math.max(0, Math.round(screenRect.height - boxRect.height));
+      // Auto anchor: last row flush with the box bottom, left edge shown.
+      const autoY = Math.round(boxRect.bottom - screenRect.bottom);
+      const pan = panRef.current;
+      // A pan is clamped to whatever is actually off-screen right now — the
+      // tile may have been resized since the user dragged.
+      const px = pan ? Math.max(-overflowX, Math.min(0, pan.x)) : 0;
+      const py = pan ? Math.max(autoY, Math.min(0, pan.y)) : autoY;
+      if (pan) panRef.current = { x: px, y: py };
+      if (px !== 0 || py !== 0) inner.style.transform = `translate(${px}px, ${py}px)`;
+      // Only publish on CHANGE: rescale runs from a ResizeObserver, and
+      // setting a fresh object every pass would re-render (and re-observe)
+      // in a loop.
+      const next = overflowX > 1 || overflowY > 1
+        ? { x: overflowX, y: overflowY, cols: term.cols, rows: term.rows }
+        : null;
+      const prev = offGridRef.current;
+      const same = (!next && !prev)
+        || (!!next && !!prev && next.x === prev.x && next.y === prev.y
+            && next.cols === prev.cols && next.rows === prev.rows);
+      if (!same) {
+        offGridRef.current = next;
+        setOffGrid(next);
+      }
     };
     rescaleRef.current = rescale;
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(rescale) : null;
@@ -542,12 +575,61 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       return true;
     });
     const sub = term.onData((data) => sendInputRef.current?.(data));
+    // ⌥-drag pans an oversized terminal inside its tile. The modifier matters:
+    // a plain drag belongs to the session (text selection, or mouse reports
+    // to a tracking app like Claude), so panning must not steal it.
+    let panning: { sx: number; sy: number; ox: number; oy: number } | null = null;
+    const panBounds = () => {
+      const screen = box.querySelector(".xterm-screen") as HTMLElement | null;
+      if (!screen) return null;
+      const boxRect = box.getBoundingClientRect();
+      const scrRect = screen.getBoundingClientRect();
+      return {
+        overflowX: Math.max(0, scrRect.width - boxRect.width),
+        overflowY: Math.max(0, scrRect.height - boxRect.height),
+        autoY: Math.round(boxRect.bottom - scrRect.bottom)
+      };
+    };
+    const onPanDown = (e: PointerEvent) => {
+      if (!e.altKey || e.button !== 0) return;
+      const b = panBounds();
+      if (!b || (b.overflowX < 1 && b.overflowY < 1)) return;
+      const cur = panRef.current || { x: 0, y: b.autoY };
+      panRef.current = cur;
+      panning = { sx: e.clientX, sy: e.clientY, ox: cur.x, oy: cur.y };
+      try { box.setPointerCapture(e.pointerId); } catch { /* not captureable */ }
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onPanMove = (e: PointerEvent) => {
+      if (!panning) return;
+      panRef.current = {
+        x: panning.ox + (e.clientX - panning.sx),
+        y: panning.oy + (e.clientY - panning.sy)
+      };
+      rescaleRef.current(); // clamps to the current overflow and repaints
+      e.preventDefault();
+    };
+    const endPan = (e: PointerEvent) => {
+      if (!panning) return;
+      panning = null;
+      try { box.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    };
+    box.addEventListener("pointerdown", onPanDown, true);
+    box.addEventListener("pointermove", onPanMove, true);
+    box.addEventListener("pointerup", endPan, true);
+    box.addEventListener("pointercancel", endPan, true);
+
     const detachFlywheel = attachScrollFlywheel(box, () => termRef.current as never, {
       linesPerNotch: 4,
       lineHeightPx: () => Math.max(1, ((term as never as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { height?: number } } } } } })._core
         ?._renderService?.dimensions?.css?.cell?.height) || PREVIEW_BASE_FS * 1.3)
     });
     return () => {
+      box.removeEventListener("pointerdown", onPanDown, true);
+      box.removeEventListener("pointermove", onPanMove, true);
+      box.removeEventListener("pointerup", endPan, true);
+      box.removeEventListener("pointercancel", endPan, true);
       detachFlywheel();
       ro?.disconnect();
       sub.dispose();
@@ -919,6 +1001,28 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
               {viewers.length}
               {viewers.some((v) => /agent|hopa|\(pane\)/i.test(v.name)) && <b className="viewer-agent">AI</b>}
             </span>
+          )}
+          {offGrid && (
+            // Say WHY the tile is cropped. Without this the session just
+            // looks broken; with it, the size is visibly someone else's
+            // choice, and both remedies are one gesture away.
+            <button
+              type="button"
+              className="switcher-tile-offgrid"
+              title={
+                `This session's terminal is ${offGrid.cols}×${offGrid.rows}, larger than the tile`
+                + (driver ? ` — ${driver.name} is using it right now` : viewers.length ? " — another client holds the size" : "")
+                + ".\n⌥-drag to pan. Click to resize the session to fit this tile."
+              }
+              onClick={(e) => {
+                e.stopPropagation();
+                panRef.current = null; // back to the automatic anchor
+                claimRef.current();
+              }}
+            >
+              <span className="offgrid-glyph" aria-hidden="true">⤢</span>
+              {offGrid.cols}×{offGrid.rows}
+            </button>
           )}
           {find && (
             <span className="switcher-tile-find" onClick={(e) => e.stopPropagation()}>

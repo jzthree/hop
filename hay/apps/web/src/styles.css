@@ -3596,6 +3596,31 @@ button.primary {
   white-space: nowrap;
 }
 
+/* Live-tile: the session's grid is bigger than this tile, so the view is
+   cropped. Same pill vocabulary as the presence chrome — this is status,
+   not an error, because someone else legitimately owns the size. */
+.switcher-live-chrome .switcher-tile-offgrid {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  padding: 0 5px;
+  height: 16px;
+  border: 1px solid color-mix(in srgb, var(--ink-muted) 30%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  cursor: pointer;
+}
+.switcher-live-chrome .switcher-tile-offgrid:hover {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.switcher-live-chrome .offgrid-glyph {
+  opacity: 0.75;
+}
+
 /* Live-tile: who else is here, and who is driving. */
 .switcher-live-chrome .switcher-live-viewers {
   display: inline-flex;

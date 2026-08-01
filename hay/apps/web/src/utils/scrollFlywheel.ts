@@ -30,24 +30,19 @@ const wheelLines = (e: WheelEvent, opts: { linesPerNotch: number; lineHeightPx: 
     ? e.deltaY * opts.linesPerNotch
     : (e.deltaY / Math.max(1, opts.lineHeightPx())) * opts.linesPerNotch;
 
-// WHO OWNS THE WHEEL.
+// WHO OWNS THE WHEEL. Momentum (and scrollback UI generally) is only honest
+// when the TERMINAL owns scrolling: the normal buffer, with the app not
+// tracking the mouse. Otherwise the app owns the wheel and we keep our hands
+// off — xterm forwards the notch and the app scrolls its own view.
 //
-// In the ALTERNATE screen the app owns everything: there is no local
-// scrollback to move, and vim/less/fzf handle the wheel themselves.
-//
-// In the NORMAL buffer the scrollback belongs to the TERMINAL — and that is
-// where a Claude Code transcript lives, since Ink paints into the normal
-// buffer and lets old output scroll away into our history. Claude also turns
-// mouse tracking on (for its own click handling), which makes xterm forward
-// every wheel notch to the app INSTEAD of scrolling. The result was a wheel
-// that moved nothing locally and paid a network round trip per notch — with
-// momentum and the overlay scrollbar switched off besides. So: normal buffer
-// means the terminal scrolls, tracking or not (see the ownership takeover in
-// onWheel, which keeps xterm from encoding the event as a mouse report).
-const terminalOwnsScrolling = (term: TerminalLike) => term.buffer.active.type === "normal";
-
-/** True when xterm would hand this wheel event to the app instead of scrolling. */
-const appWouldGrabWheel = (term: TerminalLike) => (term.modes?.mouseTrackingMode ?? "none") !== "none";
+// Measured on the live fleet (2026-07-31): every Claude Code session runs
+// ALT-SCREEN (?1049h) with mouse tracking on, so Claude is always in the
+// app-owns-it branch — its transcript is its own to scroll, and there is no
+// local scrollback behind it to move. Do not "improve" this by scrolling
+// locally when tracking is on: a tracking app asked for wheel events, and
+// stealing them breaks the very apps that requested them.
+const terminalOwnsScrolling = (term: TerminalLike) =>
+  term.buffer.active.type === "normal" && (term.modes?.mouseTrackingMode ?? "none") === "none";
 
 /**
  * Classify a wheel event as a discrete mouse wheel (vs trackpad/magic mouse).
@@ -79,7 +74,6 @@ export const attachScrollFlywheel = (
 ): (() => void) => {
   let vel = 0; // lines/second, signed
   let carry = 0; // fractional-line remainder between frames
-  let ownedCarry = 0; // fractional-line remainder while WE scroll (tracking on)
   let burst = 0; // wheel events in the current spin
   let lastWheelAt = 0;
   let lastFrameAt = 0;
@@ -117,25 +111,9 @@ export const attachScrollFlywheel = (
   const onWheel = (e: WheelEvent) => {
     const term = getTerm();
     if (!term) return;
-    // Alt screen: the app owns the wheel outright — hands off, kill any glide.
+    // App owns the wheel (alt screen, or mouse tracking on): hands off, and
+    // kill any active glide — the mode may have flipped mid-glide.
     if (!terminalOwnsScrolling(term)) return stop();
-
-    // Normal buffer with the app tracking the mouse (every Claude session):
-    // xterm is about to encode this as a mouse report instead of scrolling.
-    // Take the event over — scroll OUR scrollback, locally and instantly —
-    // and keep it from reaching xterm's own handler. Sub-line remainders
-    // accumulate so trackpad pans stay smooth instead of snapping per event.
-    if (appWouldGrabWheel(term)) {
-      e.preventDefault();
-      e.stopPropagation();
-      ownedCarry += wheelLines(e, opts);
-      const whole = Math.trunc(ownedCarry);
-      if (whole !== 0) {
-        ownedCarry -= whole;
-        term.scrollLines(whole);
-      }
-    }
-
     // Trackpad: native inertia already glides; never double it.
     if (!isDiscreteWheel(e)) return stop();
     if (raf) { cancelAnimationFrame(raf); raf = 0; } // wheel resumes: rebuild, don't glide yet
@@ -167,17 +145,15 @@ export const attachScrollFlywheel = (
   };
 
   const kill = () => stop();
-  // CAPTURE + non-passive: both are required to take the wheel back from
-  // xterm before it encodes a mouse report (capture reaches us before the
-  // terminal's own listener on the descendant; non-passive permits
-  // preventDefault). With tracking off we change nothing — xterm still does
-  // the per-notch scroll and we only add the glide.
-  el.addEventListener("wheel", onWheel, { capture: true, passive: false });
+  // Passive and non-preventing: xterm still performs its own per-notch
+  // scroll (or forwards the notch to a tracking app); we only add the glide
+  // afterwards in the cases we own.
+  el.addEventListener("wheel", onWheel, { passive: true });
   el.addEventListener("mousedown", kill, true);
   window.addEventListener("keydown", kill, true);
   return () => {
     stop();
-    el.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
+    el.removeEventListener("wheel", onWheel);
     el.removeEventListener("mousedown", kill, true);
     window.removeEventListener("keydown", kill, true);
   };

@@ -24,12 +24,30 @@ type TerminalLike = {
   modes?: { mouseTrackingMode?: string };
 };
 
-// Momentum (and scrollback UI generally) is only honest when the TERMINAL
-// owns scrolling. With mouse tracking on, xterm forwards wheel events to the
-// app (claude scrolls its own transcript) — synthetic glide would scroll the
-// terminal viewport into torn scrollback underneath the app.
-const terminalOwnsScrolling = (term: TerminalLike) =>
-  term.buffer.active.type === "normal" && (term.modes?.mouseTrackingMode ?? "none") === "none";
+/** Lines this wheel event should move, mirroring xterm's own arithmetic. */
+const wheelLines = (e: WheelEvent, opts: { linesPerNotch: number; lineHeightPx: () => number }) =>
+  e.deltaMode === 1
+    ? e.deltaY * opts.linesPerNotch
+    : (e.deltaY / Math.max(1, opts.lineHeightPx())) * opts.linesPerNotch;
+
+// WHO OWNS THE WHEEL.
+//
+// In the ALTERNATE screen the app owns everything: there is no local
+// scrollback to move, and vim/less/fzf handle the wheel themselves.
+//
+// In the NORMAL buffer the scrollback belongs to the TERMINAL — and that is
+// where a Claude Code transcript lives, since Ink paints into the normal
+// buffer and lets old output scroll away into our history. Claude also turns
+// mouse tracking on (for its own click handling), which makes xterm forward
+// every wheel notch to the app INSTEAD of scrolling. The result was a wheel
+// that moved nothing locally and paid a network round trip per notch — with
+// momentum and the overlay scrollbar switched off besides. So: normal buffer
+// means the terminal scrolls, tracking or not (see the ownership takeover in
+// onWheel, which keeps xterm from encoding the event as a mouse report).
+const terminalOwnsScrolling = (term: TerminalLike) => term.buffer.active.type === "normal";
+
+/** True when xterm would hand this wheel event to the app instead of scrolling. */
+const appWouldGrabWheel = (term: TerminalLike) => (term.modes?.mouseTrackingMode ?? "none") !== "none";
 
 /**
  * Classify a wheel event as a discrete mouse wheel (vs trackpad/magic mouse).
@@ -61,6 +79,7 @@ export const attachScrollFlywheel = (
 ): (() => void) => {
   let vel = 0; // lines/second, signed
   let carry = 0; // fractional-line remainder between frames
+  let ownedCarry = 0; // fractional-line remainder while WE scroll (tracking on)
   let burst = 0; // wheel events in the current spin
   let lastWheelAt = 0;
   let lastFrameAt = 0;
@@ -98,9 +117,27 @@ export const attachScrollFlywheel = (
   const onWheel = (e: WheelEvent) => {
     const term = getTerm();
     if (!term) return;
-    // Alt screen or trackpad: no synthetic inertia, and kill any active glide
-    // (mode may have flipped mid-glide).
-    if (!terminalOwnsScrolling(term) || !isDiscreteWheel(e)) return stop();
+    // Alt screen: the app owns the wheel outright — hands off, kill any glide.
+    if (!terminalOwnsScrolling(term)) return stop();
+
+    // Normal buffer with the app tracking the mouse (every Claude session):
+    // xterm is about to encode this as a mouse report instead of scrolling.
+    // Take the event over — scroll OUR scrollback, locally and instantly —
+    // and keep it from reaching xterm's own handler. Sub-line remainders
+    // accumulate so trackpad pans stay smooth instead of snapping per event.
+    if (appWouldGrabWheel(term)) {
+      e.preventDefault();
+      e.stopPropagation();
+      ownedCarry += wheelLines(e, opts);
+      const whole = Math.trunc(ownedCarry);
+      if (whole !== 0) {
+        ownedCarry -= whole;
+        term.scrollLines(whole);
+      }
+    }
+
+    // Trackpad: native inertia already glides; never double it.
+    if (!isDiscreteWheel(e)) return stop();
     if (raf) { cancelAnimationFrame(raf); raf = 0; } // wheel resumes: rebuild, don't glide yet
 
     const now = e.timeStamp || performance.now();
@@ -109,10 +146,7 @@ export const attachScrollFlywheel = (
     if (gap > 250) burst = 0;
     burst += 1;
 
-    const notchLines =
-      e.deltaMode === 1
-        ? e.deltaY * opts.linesPerNotch
-        : (e.deltaY / Math.max(1, opts.lineHeightPx())) * opts.linesPerNotch;
+    const notchLines = wheelLines(e, opts);
     const rate = notchLines / (Math.min(Math.max(gap, 30), 200) / 1000);
     // Same direction: blend toward the new rate. Direction flip: hard reset.
     vel = Math.sign(rate) === Math.sign(vel) ? 0.6 * rate + 0.4 * vel : rate;
@@ -133,12 +167,17 @@ export const attachScrollFlywheel = (
   };
 
   const kill = () => stop();
-  el.addEventListener("wheel", onWheel, { passive: true });
+  // CAPTURE + non-passive: both are required to take the wheel back from
+  // xterm before it encodes a mouse report (capture reaches us before the
+  // terminal's own listener on the descendant; non-passive permits
+  // preventDefault). With tracking off we change nothing — xterm still does
+  // the per-notch scroll and we only add the glide.
+  el.addEventListener("wheel", onWheel, { capture: true, passive: false });
   el.addEventListener("mousedown", kill, true);
   window.addEventListener("keydown", kill, true);
   return () => {
     stop();
-    el.removeEventListener("wheel", onWheel);
+    el.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
     el.removeEventListener("mousedown", kill, true);
     window.removeEventListener("keydown", kill, true);
   };

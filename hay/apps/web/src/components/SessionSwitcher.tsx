@@ -162,7 +162,11 @@ const PREVIEW_BASE_LH = PREVIEW_BASE_FS * 1.3;
 let previewCharW = 0;
 const advanceCache = new Map<number, number>();
 if (typeof document !== "undefined") {
-  document.fonts?.ready?.then(() => { previewCharW = 0; advanceCache.clear(); }).catch(() => { /* no Font API */ });
+  document.fonts?.ready?.then(() => {
+    previewCharW = 0;
+    advanceCache.clear();
+    charHeightCache.clear();
+  }).catch(() => { /* no Font API */ });
 }
 const measureAdvanceAt = (fs: number) => {
   const hit = advanceCache.get(fs);
@@ -196,6 +200,33 @@ const tileLetterSpacing = (fs: number) => {
   return Math.floor(adv * dpr) / dpr - adv;
 };
 
+// Row height, the vertical half of the same story. xterm derives it from the
+// FONT'S natural line box (line-height:normal), not from fontSize — at 12px
+// Menlo that is 14px, so xterm's row is 18px while `fontSize * 1.3` says
+// 15.6. The preview was ~15% short per row: bottom-anchored, so the newest
+// lines looked right and everything above crept — the residual
+// preview → terminal shift on sessions with content up the screen.
+// Rule (probe-measured, exact at every size and dpr):
+//   row = floor(naturalCharHeight × lineHeight × dpr) / dpr
+const charHeightCache = new Map<number, number>();
+const measureCharHeightAt = (fs: number) => {
+  const hit = charHeightCache.get(fs);
+  if (hit) return hit;
+  const el = document.createElement("div");
+  el.style.cssText = `position:absolute;visibility:hidden;white-space:pre;line-height:normal;font-size:${fs}px`;
+  el.style.fontFamily = "var(--font-terminal)";
+  el.textContent = "W";
+  document.body.appendChild(el);
+  const h = el.getBoundingClientRect().height || fs * 1.2;
+  el.remove();
+  charHeightCache.set(fs, h);
+  return h;
+};
+const tileRowHeight = (fs: number) => {
+  const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+  return Math.floor(measureCharHeightAt(fs) * 1.3 * dpr) / dpr;
+};
+
 // ONE font for the whole wall at a given zoom, derived from the box width —
 // never from any session's geometry. Both live tiles and static previews use
 // this, which is what makes the wall read as one surface instead of a
@@ -212,9 +243,11 @@ const previewScaleObserver = typeof ResizeObserver !== "undefined"
         const inner = box.firstElementChild as HTMLElement | null;
         if (!inner) continue;
         const fs2 = tileFontFor(box.clientWidth);
+        const rowH = tileRowHeight(fs2);
         inner.style.fontSize = fs2 + "px";
-        inner.style.lineHeight = Math.round(fs2 * 1.3) + "px";
+        inner.style.lineHeight = rowH + "px";
         inner.style.letterSpacing = tileLetterSpacing(fs2) + "px";
+        inner.style.setProperty("--tile-row-h", rowH + "px");
       }
     })
   : null;
@@ -239,7 +272,12 @@ const ScaledScreen = ({ frame }: { frame: PreviewFrame }) => {
     <div className="switcher-preview-scalebox" ref={boxRef}>
       <div
         className="switcher-preview-screen"
-        style={{ fontSize: PREVIEW_BASE_FS, lineHeight: `${PREVIEW_BASE_LH}px`, letterSpacing: `${tileLetterSpacing(PREVIEW_BASE_FS)}px` }}
+        style={{
+          fontSize: PREVIEW_BASE_FS,
+          lineHeight: `${tileRowHeight(PREVIEW_BASE_FS)}px`,
+          letterSpacing: `${tileLetterSpacing(PREVIEW_BASE_FS)}px`,
+          ["--tile-row-h" as string]: `${tileRowHeight(PREVIEW_BASE_FS)}px`
+        } as React.CSSProperties}
       >
         {renderPreviewRuns(padded)}
       </div>

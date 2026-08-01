@@ -3489,8 +3489,12 @@ button.primary {
   font-family: var(--font-terminal);
 }
 .switcher-preview-screen .switcher-preview-row {
-  height: 1.3em;
-  line-height: 1.3em;
+  /* --tile-row-h is xterm's OWN row height for this font (derived from the
+     font's natural line box, not fontSize — see tileRowHeight). Matching it
+     is what keeps preview rows on the same baselines the live terminal will
+     use; the 1.3em fallback only applies before the measurement lands. */
+  height: var(--tile-row-h, 1.3em);
+  line-height: var(--tile-row-h, 1.3em);
 }
 
 

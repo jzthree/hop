@@ -476,8 +476,23 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
         requestAnimationFrame(() => rescaleRef.current());
         return;
       }
+      // BOTTOM-ANCHOR the live terminal, same rule as the preview.
+      //
+      // A session's grid rarely divides evenly into a tile: measured on the
+      // real wall, a 40-row session rendered 475px tall inside a 460px box,
+      // so the last row — Claude's composer, the newest output — sat below
+      // the clip and was simply invisible. Going live didn't help (identical
+      // geometry) and only full screen "fixed" it, by refitting. Autofit
+      // can't save it either: a one-row overflow is well inside the claim
+      // tolerance, so no resize is ever asked for and the crop is permanent.
+      // Translate so the LAST row is flush with the box bottom; overflow now
+      // crops the oldest rows off the top, which is what scrollback is for.
       inner.style.transformOrigin = "bottom left";
       inner.style.transform = "";
+      const boxRect = box.getBoundingClientRect();
+      const screenRect = screen.getBoundingClientRect(); // reads after the reset above
+      const dy = Math.round(boxRect.bottom - screenRect.bottom);
+      if (dy !== 0) inner.style.transform = `translateY(${dy}px)`;
     };
     rescaleRef.current = rescale;
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(rescale) : null;

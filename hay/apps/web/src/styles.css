@@ -3482,10 +3482,16 @@ button.primary {
   overflow: hidden;
 }
 .switcher-preview-screen {
+  /* BOTTOM-anchored. Anchored at the top, a screen even slightly taller than
+     its tile had its LAST rows clipped — and the last rows are the composer
+     and the newest output, i.e. the entire reason to look at the tile. The
+     autofit claim can't rescue it either: a one-row overflow is inside the
+     ~15% tolerance, so no resize is ever requested and the crop is
+     permanent. Overflow now eats the OLDEST rows off the top instead. */
   position: absolute;
-  top: 0;
+  bottom: 0;
   left: 0;
-  transform-origin: top left;
+  transform-origin: bottom left;
   font-family: var(--font-terminal);
 }
 .switcher-preview-screen .switcher-preview-row {

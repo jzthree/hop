@@ -2142,6 +2142,31 @@ export const SessionSwitcher = ({
       });
       const data = await res.json().catch(() => ({} as { name?: string; error?: string }));
       if (!res.ok || !data.name) {
+        // A name collision is the common failure, and "already in use" alone
+        // leaves the user hunting: the holder may be filed in another folder,
+        // or be an agent-created session they never opened. Name it, say
+        // where it lives, and put it on screen — the answer to "it doesn't
+        // work" should be the session that was in the way.
+        const taken = res.status === 409
+          ? wallSessions.find((s) => (s.displayName || s.name).toLowerCase() === next.toLowerCase())
+          : null;
+        if (taken) {
+          const home = folders.find((f) => f.id === taken.folderId);
+          onNotice(`"${taken.displayName || taken.name}" already exists${home ? ` in ${home.name}` : ""} — showing it`);
+          setCreating(false);
+          setCreateDraft("");
+          setCreateInFolder(null);
+          const key = sessionKey(taken);
+          setFocusedKey(key);
+          const idx = navIndexByKey.get(key);
+          if (typeof idx === "number") {
+            setKbdIndex(idx);
+            requestAnimationFrame(() => {
+              document.querySelector(`[data-nav-index="${idx}"]`)?.scrollIntoView({ block: "center" });
+            });
+          }
+          return;
+        }
         onNotice(data.error || "Failed to create session");
         return;
       }

@@ -483,6 +483,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       const wanted = tileFontFor(boxW);
       if (Math.abs(wanted - font) >= 0.25) {
         term.options.fontSize = wanted;
+        // A font-size change invalidates the GPU glyph atlas. Without an
+        // explicit rebuild, already-drawn cells can keep pointing at stale
+        // slots and paint BLANK until something forces re-rasterisation —
+        // which is exactly the "renders wrong until I scroll" report, and
+        // why a plain refresh() never cured it. The wall changes font size
+        // on every zoom and resize, so this is the hottest trigger there is.
+        const withAtlas = term as unknown as { clearTextureAtlas?: () => void };
+        if (typeof withAtlas.clearTextureAtlas === "function") withAtlas.clearTextureAtlas();
         requestAnimationFrame(() => rescaleRef.current());
         return;
       }
@@ -1584,31 +1592,33 @@ export const SessionSwitcher = ({
     flatNav.forEach((s, i) => m.set(sessionKey(s), i));
     return m;
   }, [flatNav]);
-  // Opening the wall focuses the session the app is ON. A deep link like
-  // /s/<name>/?view=wall names a session, so landing on the wall with
-  // nothing focused (and the keyboard sitting on the FIRST card) loses the
-  // one thing the URL asked for. The old name works too — the room id is
-  // the internal name, so a renamed session still resolves. This is not an
-  // "accidental" focus: arriving here is the user's explicit act, and it
-  // focuses in place rather than entering full screen.
+  // Opening the wall focuses the session the app is ON — once. A deep link
+  // like /s/<name>/?view=wall names a session, so landing with nothing
+  // focused loses what the URL asked for.
+  //
+  // ONCE is load-bearing: flatNav changes on every filter keystroke, so an
+  // unguarded effect re-anchored the selection to the current session while
+  // you typed — and ⌘⏎ then opened THAT instead of the match you were
+  // looking at. Filtering owns the selection (top match); this only seeds it.
+  const initialFocusDoneRef = useRef(false);
+  useEffect(() => { if (!open) initialFocusDoneRef.current = false; }, [open]);
   useEffect(() => {
     if (!open || focusedKey || !currentRoom) return;
+    if (initialFocusDoneRef.current || filter) return;
     const current = flatNav.find((s) => (s.internalName || s.name) === currentRoom || s.name === currentRoom);
     if (!current) return;
+    initialFocusDoneRef.current = true;
     const key = sessionKey(current);
     setFocusedKey(key);
     const idx = navIndexByKey.get(key);
     if (typeof idx === "number") {
       setKbdIndex(idx);
-      // ...and bring it into view. A deep link can name a session sitting
-      // far down a long wall; focusing a card the user cannot see is the
-      // same as not focusing it. Deferred a frame so the card exists.
       requestAnimationFrame(() => {
         document.querySelector(`[data-nav-index="${idx}"]`)?.scrollIntoView({ block: "center" });
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, currentRoom, flatNav, navIndexByKey]);
+  }, [open, currentRoom, flatNav, navIndexByKey, filter, focusedKey]);
   // Latest visual order, for reorderManual (defined earlier in the component).
   // Every session in the current scope, in manual order — the canonical list
   // reordering works against, regardless of what the filter is showing.

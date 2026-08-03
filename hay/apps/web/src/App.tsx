@@ -1102,6 +1102,15 @@ const App = () => {
     const t = termRef.current;
     if (!t) return;
     try {
+      // refresh() alone re-renders from the SAME GPU texture atlas, so it
+      // cannot fix the failure people actually hit: cells that draw blank
+      // because their glyphs are missing or stale in the atlas (font-size
+      // changes and context restores are the usual triggers). Rebuild the
+      // atlas first — the theme-change path has always done this, and it is
+      // the local equivalent of what a scroll achieves by making the app
+      // repaint from scratch.
+      const withAtlas = t as unknown as { clearTextureAtlas?: () => void };
+      if (typeof withAtlas.clearTextureAtlas === "function") withAtlas.clearTextureAtlas();
       t.refresh(0, t.rows - 1);
     } catch { /* terminal disposed mid-flight */ }
   };

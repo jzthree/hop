@@ -497,17 +497,16 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       // tolerance, so no resize is ever asked for and the crop is permanent.
       // Translate so the LAST row is flush with the box bottom; overflow now
       // crops the oldest rows off the top, which is what scrollback is for.
-      // Transform the SCREEN, not `.xterm`. `.xterm` sets overflow:hidden on
-      // itself, so translating it slides an already-clipped window: the rows
-      // outside never appear no matter how far you pan (and a rect-based
-      // measurement is fooled, because getBoundingClientRect reports clipped
-      // geometry as if visible — which is how the first version of this
-      // "fixed" the bottom crop on paper while the pixels stayed hidden).
-      // Moving the screen inside that clip is what actually reveals rows.
+      // WHICH ELEMENT CLIPS, measured rather than assumed (both earlier
+      // attempts got this wrong). `.switcher-focus-term` is the clip: 450px
+      // tall with overflow:hidden. `.xterm` is NOT — it sizes to its content
+      // (475px for a 25-row grid), so its own overflow:hidden clips nothing,
+      // and measuring against it made the overflow compute as ZERO and the
+      // anchor a no-op. Measure the CLIP, move the terminal inside it.
       inner.style.transform = "";
-      screen.style.transformOrigin = "bottom left";
       screen.style.transform = "";
-      const boxRect = inner.getBoundingClientRect(); // .xterm IS the clip
+      inner.style.transformOrigin = "bottom left";
+      const boxRect = box.getBoundingClientRect(); // the clip
       const screenRect = screen.getBoundingClientRect(); // reads after the reset above
       const overflowX = Math.max(0, Math.round(screenRect.width - boxRect.width));
       const overflowY = Math.max(0, Math.round(screenRect.height - boxRect.height));
@@ -519,7 +518,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       const px = pan ? Math.max(-overflowX, Math.min(0, pan.x)) : 0;
       const py = pan ? Math.max(autoY, Math.min(0, pan.y)) : autoY;
       if (pan) panRef.current = { x: px, y: py };
-      if (px !== 0 || py !== 0) screen.style.transform = `translate(${px}px, ${py}px)`;
+      if (px !== 0 || py !== 0) inner.style.transform = `translate(${px}px, ${py}px)`;
       // Only publish on CHANGE: rescale runs from a ResizeObserver, and
       // setting a fresh object every pass would re-render (and re-observe)
       // in a loop.
@@ -589,9 +588,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     let panning: { sx: number; sy: number; ox: number; oy: number } | null = null;
     const panBounds = () => {
       const screen = box.querySelector(".xterm-screen") as HTMLElement | null;
-      const clip = box.querySelector(".xterm") as HTMLElement | null;
-      if (!screen || !clip) return null;
-      const boxRect = clip.getBoundingClientRect(); // same clip rescale uses
+      if (!screen) return null;
+      const boxRect = box.getBoundingClientRect(); // same clip rescale uses
       const scrRect = screen.getBoundingClientRect();
       return {
         overflowX: Math.max(0, scrRect.width - boxRect.width),

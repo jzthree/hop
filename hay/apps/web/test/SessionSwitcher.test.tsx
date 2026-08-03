@@ -32,6 +32,10 @@ const props = {
 };
 
 beforeEach(() => {
+  // The wall persists filter/focus/scroll in sessionStorage so a REFRESH
+  // keeps your view. Tests share one jsdom, so a filter typed in one case
+  // would restore into the next and silently empty the wall.
+  sessionStorage.clear();
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => values.get(key) ?? null,

@@ -1092,7 +1092,20 @@ export const SessionSwitcher = ({
   onToggleKeyboard,
   onFind
 }: Props) => {
-  const [filter, setFilter] = useState("");
+  // View state survives a REFRESH but not a new tab: sessionStorage, not
+  // localStorage. Reloading the page (or hop reconnecting) used to dump the
+  // filter you had typed, the tile you had focused, and where you were
+  // scrolled — none of which is shareable state that belongs in the URL,
+  // and all of which you expect to still be there afterwards.
+  const [filter, setFilter] = useState(() => {
+    try { return sessionStorage.getItem("hay_switcher_filter") || ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    try {
+      if (filter) sessionStorage.setItem("hay_switcher_filter", filter);
+      else sessionStorage.removeItem("hay_switcher_filter");
+    } catch { /* private mode */ }
+  }, [filter]);
   const [originScope, setOriginScope] = useState<SessionOriginScope>("user");
   // Tile zoom: bigger tiles show more of each terminal preview.
   const [zoom, setZoom] = useState(() => {
@@ -1107,6 +1120,37 @@ export const SessionSwitcher = ({
   // Grid content width, kept fresh across viewport/panel resizes — it decides
   // how far the zoom ladder is climbable on THIS screen.
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Where you were scrolled on the wall, restored once the cards exist.
+  const scrollRestoredRef = useRef(false);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      try { sessionStorage.setItem("hay_switcher_scroll", String(el.scrollTop)); } catch { /* private mode */ }
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [open]);
+  useEffect(() => {
+    if (!open || scrollRestoredRef.current) return;
+    let saved = 0;
+    try { saved = Number(sessionStorage.getItem("hay_switcher_scroll") || 0); } catch { /* private mode */ }
+    if (!saved) { scrollRestoredRef.current = true; return; }
+    // Cards mount over a couple of frames; retry briefly until the wall is
+    // tall enough for the offset to mean anything.
+    let tries = 0;
+    const tick = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      if (el.scrollHeight > el.clientHeight + saved || tries++ > 20) {
+        el.scrollTop = saved;
+        scrollRestoredRef.current = true;
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, [open]);
   const [gridWidth, setGridWidth] = useState(0);
   useEffect(() => {
     if (!open) return;
@@ -1349,7 +1393,15 @@ export const SessionSwitcher = ({
   const [sheet, setSheet] = useState<Sheet | null>(null);
   // The wall's single interactive tile. Cleared on close / zooming below the
   // interactive threshold.
-  const [focusedKey, setFocusedKey] = useState<string | null>(null);
+  const [focusedKey, setFocusedKey] = useState<string | null>(() => {
+    try { return sessionStorage.getItem("hay_switcher_focus"); } catch { return null; }
+  });
+  useEffect(() => {
+    try {
+      if (focusedKey) sessionStorage.setItem("hay_switcher_focus", focusedKey);
+      else sessionStorage.removeItem("hay_switcher_focus");
+    } catch { /* private mode */ }
+  }, [focusedKey]);
   useEffect(() => { if (!open) setFocusedKey(null); }, [open]);
   useEffect(() => { if (!interactiveTiles) setFocusedKey(null); }, [interactiveTiles]);
   const [renameDraft, setRenameDraft] = useState("");
@@ -1597,14 +1649,30 @@ export const SessionSwitcher = ({
 
   // Every visit starts on user-owned sessions. Agent sessions stay one toggle
   // away without competing for the default view.
+  const restoredFilterRef = useRef<string>((() => {
+    try { return sessionStorage.getItem("hay_switcher_filter") || ""; } catch { return ""; }
+  })());
+  const openedOnceRef = useRef(false);
   useLayoutEffect(() => {
-    if (open) {
-      setOriginScope("user");
-      setFilter("");
-      setSheet(null);
-      setCreating(false);
-      setCreateDraft("");
+    if (!open) return;
+    // OPENING the wall resets it — but a page that LOADS with the wall
+    // already up is not an open, it is a refresh, and it must keep the
+    // filter/focus/scroll it restored. Without this the reset ran on mount
+    // and wiped the restore a frame after it happened.
+    if (!openedOnceRef.current) {
+      openedOnceRef.current = true;
+      if (restoredFilterRef.current) {
+        setSheet(null);
+        setCreating(false);
+        setCreateDraft("");
+        return;
+      }
     }
+    setOriginScope("user");
+    setFilter("");
+    setSheet(null);
+    setCreating(false);
+    setCreateDraft("");
   }, [open]);
 
 

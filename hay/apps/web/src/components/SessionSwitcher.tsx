@@ -27,6 +27,7 @@ import {
   type SwitcherSortMode
 } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
+import { DigestCard } from "./DigestCard";
 
 // Full-screen, in-app session switcher (mobile-first). Hot sessions — current,
 // attention, most recent — are preview cards; the tail is compact rows grouped
@@ -2667,6 +2668,12 @@ export const SessionSwitcher = ({
         )}
       </div>
       <div className="switcher-scroll" ref={scrollRef} onContextMenu={openWallMenu}>
+        {/* The host agent's briefing — same digest.json the phone renders.
+            Hidden while filtering: search is about one session, the briefing
+            is about the fleet. */}
+        {model.mode !== "filter" && (
+          <DigestCard sessions={sessions} onOpen={handleTap} />
+        )}
         {model.mode === "filter" ? (
           // Matches keep their terminal previews: search results are preview
           // cards at the current zoom, same as the wall — the screen content

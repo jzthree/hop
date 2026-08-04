@@ -3940,3 +3940,50 @@ button.primary {
   bottom: 30px;
   max-width: 86%;
 }
+
+/* ── The briefing (DigestCard): the host agent's front page, above the wall.
+   Same reading contract as the phone: summary is the headline, stories show
+   in full under session datelines, unread carries a dot. ── */
+.digest-card {
+  margin: 10px 12px 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #7c5cff) 22%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.digest-head { display: flex; align-items: center; justify-content: space-between; }
+.digest-badge {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  color: var(--accent, #7c5cff);
+}
+.digest-dismiss {
+  border: none; background: none; cursor: pointer;
+  color: var(--ink-muted); font-size: 14px; line-height: 1; padding: 2px 4px;
+}
+.digest-summary { font-size: 13.5px; font-weight: 550; color: var(--ink); }
+.digest-item {
+  display: flex; flex-direction: column; gap: 2px;
+  text-align: left; border: none; background: none; cursor: pointer;
+  padding: 5px 6px; margin: 0 -6px; border-radius: 8px;
+}
+.digest-item:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.digest-dateline {
+  font-family: var(--font-mono);
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.digest-item.needs .digest-dateline { color: #e5484d; }
+.digest-item.blocked .digest-dateline { color: #e79d13; }
+.digest-item.done .digest-dateline { color: #30a46c; }
+.digest-item.fyi .digest-dateline { color: var(--ink-muted); }
+.digest-dot {
+  width: 6px; height: 6px; border-radius: 3px;
+  background: var(--accent, #7c5cff);
+}
+.digest-headline { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.digest-item.read .digest-headline { color: var(--ink-muted); font-weight: 500; }
+.digest-why { font-size: 11.5px; color: var(--ink-muted); }

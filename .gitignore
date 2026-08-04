@@ -30,3 +30,6 @@ demo-output/
 .tmp-demo-playwright/
 .tmp-demo-playwright-local/
 .hop-worktrees/
+
+# hop-ios digest: runtime artifact the daemon serves (written by tools/digest.mjs)
+hay-web/assets/digest.json

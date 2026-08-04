@@ -1116,6 +1116,29 @@ const App = () => {
   };
   const forceRepaintRef = useRef(forceRepaint);
   forceRepaintRef.current = forceRepaint;
+
+  // The explicit "redraw" — what a scroll does, on demand. Local half:
+  // rebuild the glyph atlas and repaint (forceRepaint). Remote half: when
+  // the app owns the mouse (claude, vim), send a net-zero wheel pair so the
+  // APP repaints from scratch — that remote repaint is the thing scrolling
+  // actually provides, and no amount of local refreshing can substitute for
+  // it when rows never arrived. Manual only: it injects input, so it must
+  // never run on a timer.
+  const redrawSession = () => {
+    forceRepaintRef.current();
+    const t = termRef.current;
+    if (!t || !remoteMouseReportingRef.current) return;
+    const col = 1 + Math.floor((t.cols || 2) / 2);
+    const row = 1 + Math.floor((t.rows || 2) / 2);
+    // Order matters: UP then DOWN ends where the view started. (Down first
+    // is a no-op at the bottom, and the up then leaves the app scrolled.)
+    const pair = remoteMouseSgrRef.current
+      ? `\x1b[<64;${col};${row}M\x1b[<65;${col};${row}M`
+      : "";
+    if (pair) handleUserInputRef.current?.(pair);
+  };
+  const redrawSessionRef = useRef(redrawSession);
+  redrawSessionRef.current = redrawSession;
   // Mirror of the switcher-open state for callbacks that outlive a render.
   const switcherOpenRef = useRef(false);
   switcherOpenRef.current = switcherOpen;
@@ -3707,6 +3730,17 @@ const App = () => {
                 </span>
               </div>
               <div className="drawer-row">
+                <label>Redraw</label>
+                <button
+                  type="button"
+                  className="quick-btn"
+                  title="Repaint the screen — rebuilds local glyphs and, in apps like Claude, asks the app itself to repaint (what a scroll does)"
+                  onClick={() => redrawSessionRef.current()}
+                >
+                  Redraw screen
+                </button>
+              </div>
+              <div className="drawer-row">
                 <label>Typing</label>
                 <div className="view-mode-buttons">
                   <button
@@ -3951,6 +3985,15 @@ const App = () => {
                           {isMacPlatform ? "⌘/" : "Ctrl+Shift+/"} keys
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="footer-find-toggle"
+                        aria-label="Redraw the screen"
+                        title="Repaint the screen — rebuilds local glyphs and, in apps like Claude, asks the app itself to repaint (what a scroll does)"
+                        onClick={() => redrawSessionRef.current()}
+                      >
+                        redraw
+                      </button>
                       <span title={sortedPresence.map((c) => c.name).join(", ")}>
                         {(() => {
                           // Someone else typing is the fact worth surfacing —

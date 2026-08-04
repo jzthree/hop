@@ -22,13 +22,19 @@ Dark theme throughout; captions succinct, not salesy.
    Caption: `Agents work in real terminals. Watch, steer, take over.`
 4. **03-phone-live** (6s) — existing rig clip (mobile web).
    Caption: `The same fleet from your phone.`
-5. **04-hop-ios** (8s) — PHONE. Native app: wall → tile → keyboard feel,
-   then the briefing on the phone. Film on device (simulator hides the
-   keyboard feel, which is the whole point of the native app).
-6. **05-hopboard** (6s) — PHONE. Any app: hold the HopBoard mic key,
-   speak, text lands at the cursor. One take, no cuts — the honesty IS
-   the demo. Caption: `On-device Whisper dictation. Audio never leaves
-   the phone.`
+5. **04-mobile** (6s) — `docs/hero-mobile.svg` as a Ken-Burns still
+   (slow push-in, left phone then right phone). Covers BOTH hop-ios and
+   HopBoard in the house illustration style (same canvas/typography as
+   hero-overview.svg). Caption: none needed — the annotations are in
+   the frame. UPGRADE PATH: real device footage replaces this still
+   whenever it gets filmed; the storyboard slot and timing stay.
+   Why not simulator footage: simctl has no tap injection (driving the
+   app means running Orion's XCUITest rig inside their repo), system
+   dialogs (Apple ID sign-in) land on camera, and HopBoard specifically
+   cannot be real there — keyboard-extension + mic pipeline + Whisper on
+   the Neural Engine don't function in the simulator, so the 1–3s
+   transcription moment would have to be staged. The dictation demo's
+   honesty is its point; an illustration is honest, a fake capture isn't.
 7. **06-close** (3s) — wall again, one tile ringing its attention bell,
    cursor moves to it. Caption: `hop — github.com/jzthree/hop`.
 

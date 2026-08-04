@@ -1,6 +1,6 @@
 // Sanitized live-footage capture driver for the hop product video (dark theme).
 // Usage: node demo/capture/capture.mjs <clip>   where clip in:
-//   01-sessions | 02-agent-live | 02b-desktop-terminal | 03-phone-live |
+//   00-wall | 01-sessions | 02-agent-live | 02b-desktop-terminal | 03-phone-live |
 //   04-phone-switcher | 05-presence | 06-math | 07-theme
 //
 // Run demo/capture/setup-sessions.mjs and demo/capture/spawn-aurora.mjs first
@@ -112,7 +112,12 @@ async function sanitizeContext(context) {
         const resp = await route.fetch();
         let json;
         try { json = await resp.json(); } catch { return await route.fulfill({ response: resp }); }
-        json.sessions = (json.sessions || []).filter((s) => ALLOWED.includes(s.name));
+        json.sessions = (json.sessions || []).filter((s) => ALLOWED.includes(s.name))
+          // The rig creates its sessions through the terminal API, which the
+          // origin classifier (correctly) marks agent-created — but the wall
+          // defaults to the USER scope, so the whole demo cast would be
+          // hidden behind the Agent toggle. They PLAY user sessions.
+          .map((s) => ({ ...s, createdBy: "user" }));
         json.active = (json.active || []).filter((n) => ALLOWED.includes(n));
         json.starting = (json.starting || []).filter((n) => ALLOWED.includes(n));
         json.aliases = {};
@@ -598,6 +603,48 @@ try {
     await sleep(2400);
     await saveVideo(page, "07-theme", trimFor(t0, marker));
 
+  } else if (clip === "00-wall") {
+    // THE signature shot of the switcher-first era: the wall is the product.
+    // Live tiles ticking, folders, the briefing card up top, filter-to-find,
+    // click = engage in place, ⌘⏎ = the one deliberate door into full screen.
+    // The briefing is staged by ROUTE INTERCEPTION — no file ever touches
+    // hay-web/assets, so nothing sanitization-sensitive can leak or linger.
+    const { ctx, page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    await ctx.route("**/assets/digest.json", (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          generated_at: new Date().toISOString(),
+          summary: "Nebula finished the ingest refactor; Polaris is mid-benchmark; Aurora wants a review.",
+          items: [
+            { session: "Nebula", headline: "Ingest refactor landed — 41s → 9s on the sample day", urgency: "info" },
+            { session: "Polaris", headline: "Benchmark sweep 60% done, no regressions so far", urgency: "info" },
+            { session: "Aurora", headline: "Wants review: error-handling change in the exporter", urgency: "attention" }
+          ]
+        })
+      })
+    );
+    await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
+    await sleep(3500);
+    await assertDark(page, "00-wall");
+    const marker = Date.now();
+    await sleep(2600); // the wall breathing: tiles tick, briefing reads
+    // Find-by-typing: the filter narrows the wall live.
+    const filterBox = page.locator(".switcher-filter").first();
+    await filterBox.click();
+    await page.keyboard.type("neb", { delay: 160 });
+    await sleep(1600);
+    for (let i = 0; i < 3; i++) { await page.keyboard.press("Backspace"); await sleep(120); }
+    await sleep(900);
+    // Click a session: it engages IN PLACE — the wall never yanks you away.
+    await page.locator(".switcher-card", { hasText: "Nebula" }).first().click();
+    await sleep(3200);
+    // ⌘⏎ — the one deliberate door into full screen.
+    await page.keyboard.press("Meta+Enter");
+    await sleep(3400);
+    await saveVideo(page, "00-wall", trimFor(t0, marker));
   } else if (clip === "01-sessions") {
     const { page, t0 } = await newRecordedPage(browser, {});
     await page.goto(`${state.localUrl}/sessions`, { waitUntil: "networkidle", timeout: 30000 });

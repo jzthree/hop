@@ -203,7 +203,7 @@ const releaseLock = () => {
     try { log(execSync('hop status 2>&1 | head -8', { encoding: 'utf8', env, timeout: 60000 })); } catch (e) { log('status err: ' + e.message); }
     await sleep(2000);
     log('running hop restore…');
-    try { log(execSync('hop restore 2>&1 | tail -20', { encoding: 'utf8', env, timeout: 120000 })); } catch (e) { log('restore err: ' + e.message); }
+    try { log(execSync('hop restore 2>&1 | tail -20', { encoding: 'utf8', env, timeout: 600000 })); } catch (e) { log('restore err: ' + e.message); }
 
     // 4. Verify: new host pid + reconcile the restored set + probe env.
     await sleep(3000);
@@ -246,17 +246,17 @@ const releaseLock = () => {
       // command a human would use, then re-checked.
       let pendingClaude = new Set(claudeRooms);
       let resumeNudged = false;
-      for (let i = 0; i < 18 && pendingClaude.size > 0; i++) {
+      for (let i = 0; i < 60 && pendingClaude.size > 0; i++) {
         for (const id of [...pendingClaude]) {
           const text = await roomPreviewText(id);
           if (CLAUDE_UI_RE.test(text) && !RESUME_PROMPT_RE.test(text)) { pendingClaude.delete(id); continue; }
           if (RESUME_PROMPT_RE.test(text) && !resumeNudged) {
             resumeNudged = true;
             log('resume question on screen — running hop resume-waiting');
-            try { log(execSync('hop resume-waiting 2>&1 | tail -5', { encoding: 'utf8', timeout: 90000 })); } catch (e) { log('resume-waiting err: ' + e.message); }
+            try { log(execSync('hop resume-waiting 2>&1 | tail -5', { encoding: 'utf8', timeout: 300000 })); } catch (e) { log('resume-waiting err: ' + e.message); }
           }
         }
-        if (pendingClaude.size > 0) await sleep(5000);
+        if (pendingClaude.size > 0) await sleep(8000);
       }
       for (const id of pendingClaude) problems.push(`${id}: claude chrome never appeared (still starting, or resume failed)`);
       log(`VERIFY: ${Object.keys(preSessions).filter((k) => preSessions[k].live).length} live sessions checked, ` +

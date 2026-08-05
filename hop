@@ -4090,6 +4090,23 @@ function claudeTranscriptExists(rec) {
     return resolveClaudeTranscriptPath(rec) !== null;
 }
 
+// Restore patience must scale with the conversation being resumed. The
+// machinery gave every session the same 90s: right for a 50MB transcript,
+// hopeless for a 1GB one — claude spends minutes just LOADING it, the
+// verifier declares 'never started', the answer window closes, and the
+// session lands on a shell (or parks at an unanswered resume menu). Both
+// were observed on the 2026-08-05 cycle. Budget: a base plus ~1s per 10MB,
+// capped — a 1GB transcript gets ~8 minutes to come up.
+function restorePatienceMs(entry) {
+    let bytes = 0;
+    try {
+        const tPath = resolveClaudeTranscriptPath(readClaudeSessionRecord(entry.internalName));
+        if (tPath) bytes = fs.statSync(tPath).size;
+    } catch (e) { /* no transcript — base patience */ }
+    const scaled = 90_000 + Math.floor(bytes / 10_000_000) * 1000;
+    return Math.min(8 * 60_000, scaled);
+}
+
 // Rebuild a restorable claude command from a recorded argv string (the hook's
 // launchCmd): strip --resume/--continue and POSITIONAL arguments (an initial
 // prompt must not be re-sent into the resumed conversation); keep flags and
@@ -4371,9 +4388,13 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
         return !p || SHELL_NAMES.has(p.toLowerCase());
     };
     const outcomes = new Map();
-    const DEADLINE_MS = 90_000;
+    // Per-job deadline, scaled to the transcript being resumed (see
+    // restorePatienceMs) — one giant session must neither be abandoned at
+    // 90s nor hold every other session's verification hostage.
+    for (const job of pending) job.deadlineMs = restorePatienceMs(job.plan);
     const startedAt = Date.now();
-    while (pending.length && Date.now() - startedAt < DEADLINE_MS) {
+    const anyAlive = () => pending.some((j) => Date.now() - startedAt < j.deadlineMs);
+    while (pending.length && anyAlive()) {
         await new Promise((r) => setTimeout(r, 700));
         let rooms = [];
         try {
@@ -4389,6 +4410,11 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 try { closeTerminalApiEntry(job.entry.id); } catch (e) { /* ignore */ }
                 pending.splice(i, 1);
             };
+            // A job past ITS OWN deadline expires individually — it must not
+            // keep consuming ticks (or type into a session) while healthier
+            // jobs finish around it.
+            if (Date.now() - startedAt >= (job.deadlineMs || 90_000)) { finish('timeout'); continue; }
+
             if (!room) { finish('room-missing'); continue; }
             const running = !isShellProc(room.foregroundProcess);
             if (job.state === 'wait-ready') {
@@ -4422,7 +4448,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 if (!promptVisible) {
                     // Nothing to safely type into (blank screen, app booting).
                     // Keep waiting; the verify deadline bounds the wait.
-                    if (Date.now() - job.since > 30_000) { finish('never-started'); }
+                    if (Date.now() - job.since > Math.max(30_000, (job.deadlineMs || 90_000) / 3)) { finish('never-started'); }
                     continue;
                 }
                 // A fresh shell reports its own name once it has execed; that
@@ -4474,7 +4500,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
             if (job.state === 'answer-prompt') {
                 // Bounded: a conversation small enough not to ask is the
                 // common case, so give up quickly and call it resumed.
-                if (Date.now() - job.since > 45_000) { finish('resumed'); continue; }
+                if (Date.now() - job.since > Math.max(45_000, (job.deadlineMs || 90_000) / 2)) { finish('resumed'); continue; }
                 let screen = '';
                 try {
                     const grid = await getRoomGridPreviewShared(job.plan.internalName);

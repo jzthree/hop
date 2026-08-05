@@ -780,6 +780,36 @@ describe("Room", () => {
       expect(snapshot.capped).toBe(true);
     });
 
+    // THE ordering bug behind 'text doesn't update until I scroll' surviving
+    // the serialized-attach fix: serialization is ASYNC, the client is already
+    // in the broadcast list, so live output landed before the snapshot — and
+    // the snapshot's in-band RIS then erased it, while the serialized grid
+    // didn't contain those bytes either (they queue behind the serialize
+    // marker). Output during the window must be withheld and delivered as
+    // catch-up inside the snapshot payload itself.
+    it("output racing the serialize is withheld and appended to the snapshot", async () => {
+      const { room, pty } = await setup("race");
+      pty().emit("\x1b[2J\x1b[1;1Hpre-attach content\r\n");
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "racer", name: "Racer", colorIndex: 0, cols: 80, rows: 24, replayBytes: 65536 },
+        socket
+      );
+      // Arrives while the snapshot is still serializing (same tick).
+      pty().emit("LATE-MARKER-XYZ\r\n");
+      const snapshot = await waitForSnapshot(socket);
+      const messages = readMessages(socket);
+      const snapIdx = messages.findIndex((m) => m.type === "snapshot");
+      const outputBefore = messages.slice(0, snapIdx).filter((m) => m.type === "output");
+      expect(outputBefore).toHaveLength(0);
+      expect(String(snapshot.data)).toContain("LATE-MARKER-XYZ");
+      // After the snapshot the stream flows live again, no duplication.
+      pty().emit("AFTER-MARKER\r\n");
+      const after = readMessages(socket).filter((m) => m.type === "output");
+      expect(after.some((m) => String(m.data).includes("AFTER-MARKER"))).toBe(true);
+      expect(after.some((m) => String(m.data).includes("LATE-MARKER-XYZ"))).toBe(false);
+    });
+
     it("replay=0 means no snapshot at all — live stream only", async () => {
       const { room, pty } = await setup("claim");
       pty().emit("some prior output\r\n");

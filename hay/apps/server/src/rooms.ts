@@ -175,6 +175,10 @@ const toPresence = (client: ClientState): PresenceClient => ({
 });
 
 class ClientState {
+  // True from attach until this client's serialized snapshot has been sent.
+  // Output broadcasts are withheld meanwhile (see broadcast) and delivered
+  // as catch-up appended to the snapshot itself.
+  awaitingSnapshot = false;
   id: string;
   name: string;
   color: string;
@@ -438,9 +442,22 @@ export class Room extends EventEmitter {
     // the web full screen's ~384KB request wants the grid's full depth.
     const serializedScrollback = replayRequest !== null && replayRequest <= 131_072 ? 200 : undefined;
     if (gridForAttach) {
+      // Everything already in the ring at THIS moment will be in the
+      // serialized screen; everything after it will not (grid writes queue
+      // behind the serialize marker). Mute output to this client until the
+      // snapshot goes out, then hand it the exact delta from this cursor.
+      client.awaitingSnapshot = true;
+      const catchUpFrom = this.outputStart + this.outputBytes;
       gridForAttach.serialize((serialized) => {
-        if (this.ended || !this.clients.has(client.id) || !socket.isOpen()) return;
+        if (this.ended || !this.clients.has(client.id) || !socket.isOpen()) {
+          client.awaitingSnapshot = false;
+          return;
+        }
         if (serialized === null) {
+          // Raw fallback reads the ring as it stands NOW — everything the
+          // mute withheld is inside it. Unmute first so nothing new slips
+          // into the erased-by-reset gap either (raw has no RIS).
+          client.awaitingSnapshot = false;
           sendRawSnapshot();
           wiggle();
           return;
@@ -453,14 +470,19 @@ export class Room extends EventEmitter {
         // read the separate flags — ends up in the app's actual modes.
         const modeSeq = (this.mouseReporting ? "\x1b[?1002h" + (this.mouseSgr ? "\x1b[?1006h" : "") : "")
           + (this.cursorHidden ? "\x1b[?25l" : "");
+        // Catch-up: output that arrived while the snapshot was being
+        // serialized. Appended INSIDE the snapshot payload so snapshot and
+        // delta land as one atomic parse — no frame between reset and delta.
+        const catchUp = this.getOutputSince(catchUpFrom);
         socket.send(JSON.stringify({
           type: "snapshot",
           // In-band RIS: every client applies the serialized screen onto a
           // clean slate, including ones that don't reset on their own.
-          data: "\x1bc" + serialized + modeSeq,
+          data: "\x1bc" + serialized + modeSeq + (catchUp.reset ? "" : catchUp.data),
           capped: this.outputBytes > SERIALIZED_CAPPED_HINT_BYTES,
           ...snapshotFlags()
         } satisfies ServerMessage));
+        client.awaitingSnapshot = false;
         // No wiggle: the serialized grid IS the current screen.
       }, serializedScrollback);
     } else {
@@ -923,7 +945,16 @@ export class Room extends EventEmitter {
 
   private broadcast(message: ServerMessage) {
     const payload = JSON.stringify(message);
+    const isOutput = (message as { type?: string }).type === "output";
     for (const client of this.clients.values()) {
+      // A client whose serialized snapshot is still being prepared must not
+      // receive live output yet: the snapshot opens with an in-band RIS, so
+      // output sent before it would be ERASED by it — and the serialized
+      // grid does not contain those bytes either (they queued behind the
+      // serialize marker). That silent loss was 'the screen is stale until
+      // the app repaints' on every attach that raced live output. The
+      // withheld bytes are delivered as catch-up appended to the snapshot.
+      if (isOutput && client.awaitingSnapshot) continue;
       if (client.socket.isOpen()) {
         client.socket.send(payload);
       }

@@ -12843,6 +12843,33 @@ async function main() {
             // waiting on, and the link scrolls away if nothing pings them.
             process.stdout.write('\x07');
         }
+        // The virtual folder: clients browse every published artifact through
+        // one manifest. REBUILT from a disk scan on every publish rather than
+        // read-modify-written, so two agents publishing at once cannot lose
+        // each other's entries — last writer wins with the same complete list.
+        try {
+            const viewRoot = path.join(HAY_WEB_DIR, 'assets', 'view');
+            const entries = [];
+            for (const sess of fs.readdirSync(viewRoot)) {
+                const dir = path.join(viewRoot, sess);
+                if (!fs.statSync(dir).isDirectory()) continue;
+                for (const f of fs.readdirSync(dir)) {
+                    if (f === 'manifest.json') continue;
+                    const st = fs.statSync(path.join(dir, f));
+                    if (!st.isFile()) continue;
+                    entries.push({
+                        session: sess,
+                        name: f,
+                        path: `/assets/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}`,
+                        bytes: st.size,
+                        mtime: Math.floor(st.mtimeMs / 1000)
+                    });
+                }
+            }
+            entries.sort((a, b) => b.mtime - a.mtime);
+            fs.writeFileSync(path.join(viewRoot, 'manifest.json'),
+                             JSON.stringify({ items: entries }, null, 1));
+        } catch { /* the links printed above still work without a manifest */ }
         process.exit(failed > 0 ? 1 : 0);
     }
 

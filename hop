@@ -11708,7 +11708,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -12804,6 +12804,46 @@ async function main() {
     if (process.argv[2] === 'math') {
         const { runMathCli } = require('./scripts/hop-math.js');
         process.exit(runMathCli(process.argv.slice(3)));
+    }
+
+    // hop view <file...> — publish a renderable artifact (HTML, PDF, image)
+    // behind hop's auth and print the link. The browser is the viewer: every
+    // hop client either is one (web) or carries one (the iOS app opens these
+    // in an in-app sheet with the session cookie). Files land under the same
+    // served /assets/ root the briefing uses — no new endpoint, auth-gated by
+    // the session cookie like everything else. Written for agents (the
+    // hop-session skill teaches it): show the human the plot, don't describe it.
+    if (process.argv[2] === 'view') {
+        const files = process.argv.slice(3).filter((a) => !a.startsWith('-'));
+        if (files.length === 0) {
+            log('Usage: hop view <file...>   (HTML, PDF, images — anything a browser renders)', YELLOW);
+            process.exit(1);
+        }
+        const state = isServerRunning();
+        if (!state) { printNotRunningError(); process.exit(1); }
+        const session = process.env.HOP_SESSION || 'shared';
+        const destDir = path.join(HAY_WEB_DIR, 'assets', 'view', session);
+        fs.mkdirSync(destDir, { recursive: true });
+        let failed = 0;
+        for (const file of files) {
+            const src = path.resolve(file);
+            if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+                log(`hop view: no such file: ${file}`, RED);
+                failed += 1;
+                continue;
+            }
+            // Basename only — the URL should read like the file, and the
+            // session subdir already namespaces collisions between agents.
+            const dest = path.join(destDir, path.basename(src));
+            fs.copyFileSync(src, dest);
+            console.log(`View: ${state.url}/assets/view/${encodeURIComponent(session)}/${encodeURIComponent(path.basename(src))}`);
+        }
+        if (failed === 0 && files.length > 0) {
+            // One bell: the artifact is usually the deliverable the human is
+            // waiting on, and the link scrolls away if nothing pings them.
+            process.stdout.write('\x07');
+        }
+        process.exit(failed > 0 ? 1 : 0);
     }
 
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {

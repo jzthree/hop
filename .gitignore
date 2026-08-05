@@ -33,3 +33,4 @@ demo-output/
 
 # hop-ios digest: runtime artifact the daemon serves (written by tools/digest.mjs)
 hay-web/assets/digest.json
+hay-web/assets/view/

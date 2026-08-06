@@ -519,6 +519,9 @@ const App = () => {
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
   const userScrolledUpRef = useRef(false);
+  // Set by every write into the terminal; the render watchdog only spends a
+  // refresh when something actually changed since its last tick.
+  const outputSinceTickRef = useRef(true);
   // Late-bound hooks for the voice controller (created before these exist).
   const handleUserInputRef = useRef<((data: string) => void) | null>(null);
   const pushNoticeRef = useRef<((m: string) => void) | null>(null);
@@ -1251,6 +1254,7 @@ const App = () => {
     if (!termRef.current) {
       return;
     }
+    outputSinceTickRef.current = true;
 
     // Filter focus reporting sequences that can leak as visible text
     const filtered = data.replace(/\x1b\[I/g, '').replace(/\x1b\[O/g, '');
@@ -2565,6 +2569,12 @@ const App = () => {
       if (document.hidden || switcherOpenRef.current) return;
       const t = termRef.current;
       if (!t) return;
+      // Idle sessions get no tick: a full refresh every 1.4s on a screen
+      // nothing wrote to re-rasterizes identical rows forever (measurable
+      // on battery with several sessions open). Output sets the flag; one
+      // enforcement pass clears it.
+      if (!outputSinceTickRef.current) return;
+      outputSinceTickRef.current = false;
       try {
         const buf = t.buffer.active;
         if (!userScrolledUpRef.current && buf.viewportY < buf.baseY) t.scrollToBottom();

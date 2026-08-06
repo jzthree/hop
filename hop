@@ -6859,7 +6859,31 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
     return rememberExternalRuntimeSession(sessionName, getExternalHayHostStateOrThrow().port);
 }
 
+// Reconcile is called from EVERY /api/sessions poll and EVERY ws connect —
+// a wall open fires a dozen within milliseconds, each one a host round-trip
+// plus a meta read per room. The state it rebuilds changes on the order of
+// seconds, so concurrent callers share one run (single-flight) and callers
+// within a short TTL get the previous result. 300ms of staleness in a
+// reconciliation cache is invisible; the redundant fan-out was not.
+let reconcileInflight = null;
+let reconcileCached = { at: 0, value: null };
+const RECONCILE_TTL_MS = 300;
 async function reconcileExternalRuntimeSessions() {
+    if (!isExternalTerminalBackend()) return { rooms: [], runtimeAvailable: false };
+    if (reconcileCached.value && Date.now() - reconcileCached.at < RECONCILE_TTL_MS) {
+        return reconcileCached.value;
+    }
+    if (reconcileInflight) return reconcileInflight;
+    reconcileInflight = reconcileExternalRuntimeSessionsUncached()
+        .then((value) => {
+            reconcileCached = { at: Date.now(), value };
+            return value;
+        })
+        .finally(() => { reconcileInflight = null; });
+    return reconcileInflight;
+}
+
+async function reconcileExternalRuntimeSessionsUncached() {
     if (!isExternalTerminalBackend()) return { rooms: [], runtimeAvailable: false };
     const __r0 = Date.now();
     await ensureExternalHayHostReady();
@@ -6877,7 +6901,7 @@ async function reconcileExternalRuntimeSessions() {
         runtimeIds.add(room.id);
         const savedConfig = getSessionConfig(room.id);
         const runtimeConfig = getRuntimeSessionMetadata(room.id);
-        const durableMeta = readClaudeSessionMeta(room.id);
+        const durableMeta = readDurableIdentity(room.id); // mtime-cached — reconcile runs constantly
         // Durable meta FIRST, for the same reason displayName resolves that
         // way: it is the layer every origin writer persists and the only one
         // that survives a restart. Reading the store first meant a config

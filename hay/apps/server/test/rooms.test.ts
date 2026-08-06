@@ -709,7 +709,7 @@ describe("Room", () => {
   });
 
   describe("serialized attach", () => {
-    const setup = async (roomId: string) => {
+    const setup = async (roomId: string, initialSize = { cols: 80, rows: 24 }) => {
       const { loadScreenGridDeps } = await import("../src/screenGrid");
       expect(await loadScreenGridDeps()).toBe(true);
       let ptyInstance: FakePty | null = null;
@@ -718,7 +718,7 @@ describe("Room", () => {
         return ptyInstance as any;
       };
       const manager = new RoomManager(factory);
-      const room = manager.getRoom(roomId, { cols: 80, rows: 24 }, "/tmp");
+      const room = manager.getRoom(roomId, initialSize, "/tmp");
       return { room, pty: () => ptyInstance! };
     };
 
@@ -783,6 +783,34 @@ describe("Room", () => {
       const snapshot = await waitForSnapshot(socket);
       expect(String(snapshot.data)).toContain("ROW1-EARLY-GRID-MARKER");
       expect(room.getPreviewSource(2_000_000).output).not.toContain("ROW1-EARLY-GRID-MARKER");
+    });
+
+    it("parses queued screen output before applying a later resize", async () => {
+      const { room, pty } = await setup("ordered-grid-resize", { cols: 80, rows: 60 });
+      const owner = new FakeSocket();
+      room.attachClient(
+        { id: "owner", name: "Owner", colorIndex: 0, cols: 80, rows: 60, replayBytes: 0, nudge: false },
+        owner
+      );
+      const rows = Array.from({ length: 60 }, (_, i) => {
+        const row = String(i + 1).padStart(2, "0");
+        return `\x1b[${i + 1};1HROW-${row}`;
+      }).join("");
+      pty().emit("\x1b[?1049h\x1b[2J" + rows);
+
+      // PTY order is old-size output, then SIGWINCH. The headless grid used
+      // to resize synchronously while its earlier write was still queued,
+      // clamping rows 25-59 away before a late attach serialized the screen.
+      owner.emitMessage({ type: "resize", cols: 80, rows: 25, user: true });
+      const late = new FakeSocket();
+      room.attachClient(
+        { id: "late", name: "Late", colorIndex: 1, cols: 80, rows: 25, replayBytes: 65536 },
+        late
+      );
+      const snapshot = await waitForSnapshot(late);
+      for (let row = 36; row <= 60; row++) {
+        expect(String(snapshot.data)).toContain(`ROW-${String(row).padStart(2, "0")}`);
+      }
     });
 
     it("flags a serialized snapshot as capped when deeper raw history exists", async () => {
@@ -853,6 +881,9 @@ describe("Room", () => {
       // Split ESC c across chunks to cover the control-sequence carry path.
       pty().emit("\x1b");
       pty().emit("c\x1b[2J\x1b[1;1HAFTER-RIS");
+      // A later chunk must not reparse mode enables that remain before RIS in
+      // the control-sequence carry buffer.
+      pty().emit("plain");
       const socket = new FakeSocket();
       room.attachClient(
         { id: "after-ris", name: "After RIS", colorIndex: 0, cols: 80, rows: 24, replayBytes: 65536 },
@@ -865,6 +896,30 @@ describe("Room", () => {
       expect(snapshot.mouseSgr).toBe(false);
       expect(snapshot.cursorHidden).toBe(false);
       expect(snapshot.keyboardEnhanced).toBe(false);
+    });
+
+    // The preview → terminal size change, killed at the root: a preview must
+    // be painted from the SAME grid, at the SAME geometry, as the snapshot a
+    // live attach would receive.
+    it("serializeScreen matches the live room's geometry and carries modes", async () => {
+      const { room, pty } = await setup("faithful");
+      pty().emit("\x1b[?1002h\x1b[?1006h");
+      pty().emit("\x1b[2J\x1b[1;1HFAITHFUL-MARKER");
+      const result = await new Promise((resolve) => room.serializeScreen(resolve));
+      expect(result).not.toBeNull();
+      expect((result as any).cols).toBe(80);
+      expect((result as any).rows).toBe(24);
+      expect(String((result as any).data).startsWith("\x1bc")).toBe(true);
+      expect(String((result as any).data)).toContain("FAITHFUL-MARKER");
+      expect(String((result as any).data)).toContain("\x1b[?1002h");
+      // After a size claim, the serialized geometry follows the room.
+      const socket = new FakeSocket();
+      room.attachClient({ id: "typer", name: "T", colorIndex: 0, cols: 100, rows: 30 }, socket);
+      socket.emitMessage({ type: "input", data: "x" });
+      socket.emitMessage({ type: "resize", cols: 100, rows: 30 });
+      const after = await new Promise((resolve) => room.serializeScreen(resolve));
+      expect((after as any).cols).toBe(100);
+      expect((after as any).rows).toBe(30);
     });
 
     it("replay=0 means no snapshot at all — live stream only", async () => {

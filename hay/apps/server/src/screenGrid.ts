@@ -117,7 +117,17 @@ export const createScreenGrid = (cols: number, rows: number): ScreenGrid | null 
     },
     resize(nextCols: number, nextRows: number) {
       if (disposed) return;
-      try { term.resize(Math.max(2, nextCols), Math.max(1, nextRows)); } catch { /* keep old size */ }
+      const cols = Math.max(2, nextCols);
+      const rows = Math.max(1, nextRows);
+      try {
+        // xterm parses write() asynchronously. Queue the resize behind every
+        // earlier byte so room order stays PTY output → SIGWINCH, while later
+        // writes naturally queue behind this callback's synchronous resize.
+        term.write("", () => {
+          if (disposed) return;
+          try { term.resize(cols, rows); } catch { /* keep old size */ }
+        });
+      } catch { /* keep old size */ }
     },
     serialize(callback: (data: string | null) => void, scrollback: number = GRID_SCROLLBACK) {
       if (disposed) { callback(null); return; }

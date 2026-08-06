@@ -244,6 +244,38 @@ async function main() {
         // On-demand preview source for the session manager: terminal size + a
         // bounded tail of raw output. Rendered to text by the daemon, only when
         // a card is expanded — idle/unwatched rooms do no work here.
+        // Serialized screen at ROOM-TRUE geometry — the same bytes and dims a
+        // live attach snapshots. The daemon serves tile previews from this so
+        // a preview and the terminal it becomes cannot disagree.
+        const serializedMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)\/serialized$/);
+        if (serializedMatch && req.method === 'GET') {
+            const roomId = hay.sanitizeRoom(decodeURIComponent(serializedMatch[1]));
+            const fn = typeof rooms.serializeRoomScreen === 'function'
+                ? rooms.serializeRoomScreen.bind(rooms)
+                : null;
+            if (!roomId || !fn) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Not found' }));
+                return;
+            }
+            await new Promise((resolve) => {
+                let done = false;
+                const finish = (code, body) => {
+                    if (done) return;
+                    done = true;
+                    res.writeHead(code, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(body));
+                    resolve();
+                };
+                const guard = setTimeout(() => finish(504, { error: 'Serialize timed out' }), 5000);
+                fn(roomId, (result) => {
+                    clearTimeout(guard);
+                    if (!result) finish(404, { error: 'No screen available' });
+                    else finish(200, result);
+                });
+            });
+            return;
+        }
         const previewMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)\/preview$/);
         if (previewMatch && req.method === 'GET') {
             const roomId = hay.sanitizeRoom(decodeURIComponent(previewMatch[1]));

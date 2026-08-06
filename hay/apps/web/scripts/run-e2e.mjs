@@ -113,6 +113,59 @@ const runE2E = async () => {
     const switchedBuffer = await page1.evaluate(() => window.__hay?.getBufferText() || "");
     assert.ok(!switchedBuffer.includes("shared"), `old room output survived session switch: ${JSON.stringify(switchedBuffer)}`);
 
+    // A resize can collapse scrollback to y=base=0 without xterm emitting an
+    // onScroll event. App follow-mode must reconcile that state before the
+    // next real room output grows below a viewport parked at 0.
+    const followAfterResize = await page1.evaluate(async () => {
+      const terminal = window.__hay.terminal;
+      const write = (data) => new Promise((resolve) => terminal.write(data, resolve));
+      terminal.reset();
+      terminal.resize(20, 5);
+      await write(Array.from({ length: 20 }, (_, i) => `old-${i}\r\n`).join(""));
+      terminal.scrollLines(-2);
+      const before = {
+        y: terminal.buffer.active.viewportY,
+        base: terminal.buffer.active.baseY
+      };
+      terminal.resize(20, 30);
+      const afterResize = {
+        y: terminal.buffer.active.viewportY,
+        base: terminal.buffer.active.baseY
+      };
+      return { before, afterResize };
+    });
+    assert.ok(followAfterResize.before.y < followAfterResize.before.base, "follow-latch setup did not scroll above bottom");
+    assert.deepEqual(followAfterResize.afterResize, { y: 0, base: 0 }, "resize did not collapse the test scrollback");
+
+    // Deliver the new rows through the room, so this covers App's actual
+    // output/follow path rather than xterm's behavior for a direct test write.
+    await page1.evaluate(async ({ roomName, data }) => {
+      const peer = new WebSocket(
+        `ws://${location.host}/ws?room=${encodeURIComponent(roomName)}&name=FollowPeer&cols=20&rows=30`
+      );
+      await new Promise((resolve, reject) => {
+        peer.onopen = resolve;
+        peer.onerror = reject;
+      });
+      window.__followPeer = peer;
+      peer.send(JSON.stringify({ type: "input", data }));
+    }, {
+      roomName: freshRoom,
+      data: Array.from({ length: 15 }, (_, i) => `new-${i}\r\n`).join("")
+    });
+    await page1.waitForFunction(() => window.__hay.terminal.buffer.active.baseY > 0);
+    followAfterResize.afterWrite = await page1.evaluate(() => ({
+      y: window.__hay.terminal.buffer.active.viewportY,
+      base: window.__hay.terminal.buffer.active.baseY
+    }));
+    await page1.evaluate(() => window.__followPeer?.close());
+    assert.ok(followAfterResize.afterWrite.base > 0, "follow-latch test did not regrow scrollback");
+    assert.equal(
+      followAfterResize.afterWrite.y,
+      followAfterResize.afterWrite.base,
+      `terminal stopped following after resize: ${JSON.stringify(followAfterResize)}`
+    );
+
     const roomLock = `e2e-${Date.now()}-lock`;
     const context2 = await browser.newContext({ viewport: { width: 1280, height: 720 } });
     const page3 = await context2.newPage();

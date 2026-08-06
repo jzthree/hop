@@ -8269,6 +8269,21 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             try {
+                // HOST first: its grid IS the attach snapshot — room-true
+                // geometry and identical bytes, so a preview painted from it
+                // cannot disagree with the terminal a click turns it into.
+                // (Older hosts 404 here; the daemon grid below is the
+                // fallback until the next host cycle.)
+                try {
+                    const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
+                    const hs = hostRes?.data;
+                    if (hs && typeof hs.data === 'string' && hs.data.length > 0
+                        && Number.isInteger(hs.cols) && Number.isInteger(hs.rows)) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ data: hs.data, cols: hs.cols, rows: hs.rows }));
+                        return;
+                    }
+                } catch (e) { /* old host or transient — fall through */ }
                 await getRoomGridPreviewShared(internalName); // freshen (or create) the grid
                 const grid = roomGrids.get(internalName);
                 let data = null;

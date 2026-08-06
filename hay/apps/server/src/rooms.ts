@@ -575,11 +575,12 @@ export class Room extends EventEmitter {
     const combined = this.controlSequenceTail + data;
     const tailLength = this.controlSequenceTail.length;
     const risIndex = combined.lastIndexOf("\x1bc");
-    // Only process a RIS that ends in this chunk; one entirely inside the
-    // carry tail was already applied on the preceding call. Modes before the
-    // last new RIS are reset, while later sequences in the same chunk win.
+    // Only reset tracked state for a RIS that ends in this chunk; one entirely
+    // inside the carry tail was already applied on the preceding call. Always
+    // ignore bytes before the last RIS so carried pre-reset mode enables cannot
+    // be parsed again on the next chunk.
     const hasNewRis = risIndex !== -1 && risIndex + 2 > tailLength;
-    const stateInput = hasNewRis ? combined.slice(risIndex + 2) : combined;
+    const stateInput = risIndex !== -1 ? combined.slice(risIndex + 2) : combined;
 
     // Parse CSI mode sequences (cursor visibility, alternate screen)
     const regex = /\x1b\[\?([0-9;]*)([hl])/g;
@@ -1215,6 +1216,29 @@ export class Room extends EventEmitter {
   }
 
   /**
+   * The room's current screen, serialized — IDENTICAL in geometry and bytes
+   * to what a live attach snapshots. Previews painted from this cannot
+   * disagree with the terminal a click turns them into: that disagreement
+   * (daemon-side grids rendering at their own capped size while the room ran
+   * at another) was the preview → terminal size change. Modes ride in-band
+   * like the attach path so cursor/mouse state present identically too.
+   */
+  serializeScreen(
+    callback: (result: { data: string; cols: number; rows: number } | null) => void,
+    scrollback = 200
+  ) {
+    if (this.outputBytes === 0) { callback(null); return; }
+    const grid = this.ensureGrid();
+    if (!grid) { callback(null); return; }
+    grid.serialize((serialized) => {
+      if (serialized === null) { callback(null); return; }
+      const modeSeq = (this.mouseReporting ? "\x1b[?1002h" + (this.mouseSgr ? "\x1b[?1006h" : "") : "")
+        + (this.cursorHidden ? "\x1b[?25l" : "");
+      callback({ data: "\x1bc" + serialized + modeSeq, cols: this.activeCols, rows: this.activeRows });
+    }, scrollback);
+  }
+
+  /**
    * Incremental output for a persistent consumer-side screen parser (the
    * daemon's preview grids). `since` is an absolute cursor from a previous
    * call's `offset`; the response is exactly the chars appended after it, so
@@ -1351,6 +1375,16 @@ export class RoomManager {
   getRoomPreviewSource(id: string, maxBytes?: number) {
     const room = this.rooms.get(id);
     return room ? room.getPreviewSource(maxBytes) : null;
+  }
+
+  serializeRoomScreen(
+    id: string,
+    callback: (result: { data: string; cols: number; rows: number } | null) => void,
+    scrollback?: number
+  ) {
+    const room = this.rooms.get(id);
+    if (!room) { callback(null); return; }
+    room.serializeScreen(callback, scrollback);
   }
 
   getRoomOutputSince(id: string, since?: number, maxBytes?: number) {

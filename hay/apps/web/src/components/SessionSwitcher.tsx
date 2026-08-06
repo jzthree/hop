@@ -11,7 +11,6 @@ import {
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
@@ -829,24 +828,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     // terminal has had it all along, which is most of why a live tile felt
     // less responsive than full screen. Only the live tile: browsers cap
     // concurrent WebGL contexts (~16) and a wall can hold more tiles.
-    let webgl: WebglAddon | null = null;
-    let webglWanted = true;
-    const loadGpu = () => {
-      // Deferred until the first live snapshot has painted: the renderer
-      // swap is itself a visible flash, so it happens once the tile already
-      // shows the same pixels it will re-render — invisible in practice.
-      if (!webglWanted || webgl) return;
-      try {
-        webgl = new WebglAddon();
-        webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; });
-        term.loadAddon(webgl);
-        term.refresh(0, term.rows - 1);
-      } catch {
-        try { webgl?.dispose(); } catch { /* half-constructed */ }
-        webgl = null;
-        webglWanted = false;
-      }
-    };
+    // ONE renderer for the wall, in BOTH modes. WebGL used to load only when
+    // a tile went live, so the flip changed glyph quantization mid-swap (the
+    // WebGL renderer floors cell widths to device pixels; the DOM renderer
+    // doesn't) — a size change no metric-matching could fully erase, plus a
+    // browser cap of ~16 WebGL contexts a big wall can exceed, plus the
+    // texture-atlas blank-cell class. Tiles are small; the DOM renderer is
+    // plenty, and preview → live becomes the SAME renderer painting the same
+    // bytes at the same geometry. Full screen keeps WebGL.
     setConn("live");
     const sep = wsBase.includes("?") ? "&" : "?";
     const wsUrl = () =>
@@ -903,7 +892,6 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
               term.scrollToBottom();
               term.refresh(0, term.rows - 1);
               rescaleRef.current();
-              requestAnimationFrame(loadGpu);
             });
             kbdEnhancedRef.current = typeof m.keyboardEnhanced === "boolean"
               ? m.keyboardEnhanced
@@ -978,8 +966,6 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     const focusTimer = window.setTimeout(() => { if (terminalMayTakeFocus()) term.focus(); }, 50);
     return () => {
       disposed = true;
-      try { webgl?.dispose(); } catch { /* already gone */ }
-      webgl = null;
       window.clearTimeout(focusTimer);
       window.clearTimeout(reconnectTimer);
       document.removeEventListener("visibilitychange", onVisibility);

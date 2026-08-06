@@ -519,6 +519,10 @@ const App = () => {
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
   const userScrolledUpRef = useRef(false);
+  // A resize can collapse a previously scrolled viewport to y=base=0 without
+  // clearing xterm's internal user-scroll state. The next output must repair
+  // follow mode after xterm has actually grown the buffer again.
+  const followAfterResizeRef = useRef(false);
   // Set by every write into the terminal; the render watchdog only spends a
   // refresh when something actually changed since its last tick.
   const outputSinceTickRef = useRef(true);
@@ -1272,9 +1276,14 @@ const App = () => {
 
     // Filter focus reporting sequences that can leak as visible text
     const filtered = data.replace(/\x1b\[I/g, '').replace(/\x1b\[O/g, '');
+    const repairFollowAfterResize = followAfterResizeRef.current;
     termRef.current.write(filtered, () => {
+      if (repairFollowAfterResize) {
+        followAfterResizeRef.current = false;
+        userScrolledUpRef.current = false;
+      }
       // Auto-scroll to bottom unless the user has explicitly scrolled up
-      if (!userScrolledUpRef.current) {
+      if (repairFollowAfterResize || !userScrolledUpRef.current) {
         termRef.current?.scrollToBottom();
       }
     });
@@ -1319,6 +1328,12 @@ const App = () => {
     activeSizeRef.current = null;
     optimisticEchoRef.current.reset();
     userScrolledUpRef.current = false;
+    followAfterResizeRef.current = false;
+    // reset() can emit onScroll(0). Clear the previous room's history guards
+    // first so that event cannot masquerade as a real scroll-to-top gesture.
+    lastViewportYRef.current = 0;
+    snapshotSettledAtRef.current = 0;
+    snapshotWasCappedRef.current = false;
     termRef.current?.reset();
 
     // Fast first paint: the daemon can serialize the session's CURRENT
@@ -1944,6 +1959,30 @@ const App = () => {
       syncOverlayScrollbar();
     };
     terminal.onScroll(onBufferScroll);
+    // xterm does not always emit onScroll when a resize collapses scrollback.
+    // Its public y/base can then say "bottom" while both our follow flag and
+    // xterm's private user-scroll latch remain stuck above it. Reconcile every
+    // resize from buffer truth and remember to repair follow mode after the
+    // next write has regrown the buffer (scrollToBottom is a no-op at 0/0).
+    terminal.onResize(() => {
+      // onResize fires inside xterm's resize transaction, before its private
+      // user-scroll latch has fully settled. Reconcile just after resize()
+      // returns, still ahead of terminal writes queued later in the turn.
+      queueMicrotask(() => {
+        if (termRef.current !== terminal) return;
+        const { y, base } = scrollState();
+        lastViewportYRef.current = y;
+        if (y >= base) {
+          userScrolledUpRef.current = false;
+          followAfterResizeRef.current = true;
+          terminal.scrollToBottom();
+        } else {
+          userScrolledUpRef.current = true;
+          followAfterResizeRef.current = false;
+        }
+        syncOverlayScrollbar();
+      });
+    });
     // Buffer growth while following doesn't always fire onScroll — a light
     // interval keeps the thumb honest.
     const overlayInterval = window.setInterval(syncOverlayScrollbar, 700);

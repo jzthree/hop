@@ -766,6 +766,25 @@ describe("Room", () => {
       expect(snapshot.mouseReporting).toBe(true);
     });
 
+    it("tracks TUI rows before they age out of the grid hydration tail", async () => {
+      const { room, pty } = await setup("early-grid");
+      pty().emit("\x1b[?1002h\x1b[?1006h");
+      pty().emit("\x1b[2J\x1b[1;1HROW1-EARLY-GRID-MARKER");
+      // Repaint only row 20 for more than the lazy grid's 2MB hydration
+      // window. A grid first created at attach would have no row 1 to send.
+      const updateBatch = ("\x1b[20;1H\x1b[K" + "x".repeat(60)).repeat(64);
+      for (let i = 0; i < 500; i++) pty().emit(updateBatch);
+
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "late", name: "Late", colorIndex: 0, cols: 80, rows: 24, replayBytes: 65536 },
+        socket
+      );
+      const snapshot = await waitForSnapshot(socket);
+      expect(String(snapshot.data)).toContain("ROW1-EARLY-GRID-MARKER");
+      expect(room.getPreviewSource(2_000_000).output).not.toContain("ROW1-EARLY-GRID-MARKER");
+    });
+
     it("flags a serialized snapshot as capped when deeper raw history exists", async () => {
       const { room, pty } = await setup("capped");
       const big = "\x1b[20;1H" + "y".repeat(4096);
@@ -808,6 +827,44 @@ describe("Room", () => {
       const after = readMessages(socket).filter((m) => m.type === "output");
       expect(after.some((m) => String(m.data).includes("AFTER-MARKER"))).toBe(true);
       expect(after.some((m) => String(m.data).includes("LATE-MARKER-XYZ"))).toBe(false);
+    });
+
+    it("retains catch-up larger than the incremental preview limit", async () => {
+      const { room, pty } = await setup("large-race");
+      pty().emit("\x1b[?1002h\x1b[2J\x1b[1;1Hbefore large catch-up");
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "large-racer", name: "Large Racer", colorIndex: 0, cols: 80, rows: 24, replayBytes: 65536 },
+        socket
+      );
+      // Larger than getOutputSince's 1MB default: cursor-based catch-up used
+      // to reset here and silently drop every withheld byte.
+      const late = "x".repeat(1_100_000) + "LARGE-CATCHUP-MARKER";
+      pty().emit(late);
+      const snapshot = await waitForSnapshot(socket);
+      expect(String(snapshot.data)).toContain("LARGE-CATCHUP-MARKER");
+      const live = readMessages(socket).filter((m) => m.type === "output");
+      expect(live.some((m) => String(m.data).includes("LARGE-CATCHUP-MARKER"))).toBe(false);
+    });
+
+    it("clears tracked private modes when the app sends RIS", async () => {
+      const { room, pty } = await setup("ris-modes");
+      pty().emit("\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?25l\x1b[>1u");
+      // Split ESC c across chunks to cover the control-sequence carry path.
+      pty().emit("\x1b");
+      pty().emit("c\x1b[2J\x1b[1;1HAFTER-RIS");
+      const socket = new FakeSocket();
+      room.attachClient(
+        { id: "after-ris", name: "After RIS", colorIndex: 0, cols: 80, rows: 24, replayBytes: 65536 },
+        socket
+      );
+      const snapshot = await waitForSnapshot(socket);
+      expect(String(snapshot.data)).toContain("AFTER-RIS");
+      expect(snapshot.alternateScreen).toBe(false);
+      expect(snapshot.mouseReporting).toBe(false);
+      expect(snapshot.mouseSgr).toBe(false);
+      expect(snapshot.cursorHidden).toBe(false);
+      expect(snapshot.keyboardEnhanced).toBe(false);
     });
 
     it("replay=0 means no snapshot at all — live stream only", async () => {

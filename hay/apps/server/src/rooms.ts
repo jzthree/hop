@@ -179,6 +179,7 @@ class ClientState {
   // Output broadcasts are withheld meanwhile (see broadcast) and delivered
   // as catch-up appended to the snapshot itself.
   awaitingSnapshot = false;
+  snapshotCatchUp: string[] = [];
   id: string;
   name: string;
   color: string;
@@ -261,10 +262,15 @@ export class Room extends EventEmitter {
   // connect created the room, so its hello carries created=true.
   private hasHadClient = false;
   // Authoritative screen state for serialized attach (see screenGrid.ts).
-  // Created lazily once the headless deps load; hydrated from the retained
-  // ring at creation so bytes that arrived earlier are never missing.
+  // Start it as soon as a TUI advertises alternate-screen or mouse mode, so
+  // rows painted once at startup cannot age out of a bounded replay tail.
+  // Plain shells stay lazy and pay no grid cost until somebody attaches.
   private grid: ScreenGrid | null = null;
   private gridHydrated = false;
+  private gridStartPending = false;
+  private gridUnavailable = false;
+  private gridPendingSeed: string[] | null = null;
+  private gridPendingSeedBytes = 0;
 
   constructor(id: string, ptyFactory: PtyFactory, initialSize: { cols: number; rows: number }, options: RoomCreateOptions) {
     super();
@@ -297,6 +303,7 @@ export class Room extends EventEmitter {
       this.lastActivityAt = now();
       this.appendOutput(data);
       this.updateTerminalState(data);
+      this.startTuiGrid();
       this.answerTerminalQueriesIfHeadless(data);
       this.broadcast({ type: "output", data });
       this.emit("pty_output", { roomId: this.id, data, timestamp: now() });
@@ -445,19 +452,20 @@ export class Room extends EventEmitter {
       // Everything already in the ring at THIS moment will be in the
       // serialized screen; everything after it will not (grid writes queue
       // behind the serialize marker). Mute output to this client until the
-      // snapshot goes out, then hand it the exact delta from this cursor.
+      // snapshot goes out, retaining the exact withheld chunks for catch-up.
       client.awaitingSnapshot = true;
-      const catchUpFrom = this.outputStart + this.outputBytes;
+      client.snapshotCatchUp = [];
       gridForAttach.serialize((serialized) => {
         if (this.ended || !this.clients.has(client.id) || !socket.isOpen()) {
           client.awaitingSnapshot = false;
+          client.snapshotCatchUp = [];
           return;
         }
         if (serialized === null) {
-          // Raw fallback reads the ring as it stands NOW — everything the
-          // mute withheld is inside it. Unmute first so nothing new slips
-          // into the erased-by-reset gap either (raw has no RIS).
+          // Raw fallback reads the ring as it stands NOW. Unmute first so
+          // nothing new slips into the handoff (raw has no in-band RIS).
           client.awaitingSnapshot = false;
+          client.snapshotCatchUp = [];
           sendRawSnapshot();
           wiggle();
           return;
@@ -473,16 +481,17 @@ export class Room extends EventEmitter {
         // Catch-up: output that arrived while the snapshot was being
         // serialized. Appended INSIDE the snapshot payload so snapshot and
         // delta land as one atomic parse — no frame between reset and delta.
-        const catchUp = this.getOutputSince(catchUpFrom);
+        const catchUp = client.snapshotCatchUp.join("");
         socket.send(JSON.stringify({
           type: "snapshot",
           // In-band RIS: every client applies the serialized screen onto a
           // clean slate, including ones that don't reset on their own.
-          data: "\x1bc" + serialized + modeSeq + (catchUp.reset ? "" : catchUp.data),
+          data: "\x1bc" + serialized + modeSeq + catchUp,
           capped: this.outputBytes > SERIALIZED_CAPPED_HINT_BYTES,
           ...snapshotFlags()
         } satisfies ServerMessage));
         client.awaitingSnapshot = false;
+        client.snapshotCatchUp = [];
         // No wiggle: the serialized grid IS the current screen.
       }, serializedScrollback);
     } else {
@@ -564,16 +573,23 @@ export class Room extends EventEmitter {
 
   private updateTerminalState(data: string) {
     const combined = this.controlSequenceTail + data;
+    const tailLength = this.controlSequenceTail.length;
+    const risIndex = combined.lastIndexOf("\x1bc");
+    // Only process a RIS that ends in this chunk; one entirely inside the
+    // carry tail was already applied on the preceding call. Modes before the
+    // last new RIS are reset, while later sequences in the same chunk win.
+    const hasNewRis = risIndex !== -1 && risIndex + 2 > tailLength;
+    const stateInput = hasNewRis ? combined.slice(risIndex + 2) : combined;
 
     // Parse CSI mode sequences (cursor visibility, alternate screen)
     const regex = /\x1b\[\?([0-9;]*)([hl])/g;
     let match: RegExpExecArray | null;
-    let nextAlternate = this.alternateScreen;
-    let nextCursorHidden = this.cursorHidden;
+    let nextAlternate = hasNewRis ? false : this.alternateScreen;
+    let nextCursorHidden = hasNewRis ? false : this.cursorHidden;
 
-    let nextMouseReporting = this.mouseReporting;
-    let nextMouseSgr = this.mouseSgr;
-    while ((match = regex.exec(combined)) !== null) {
+    let nextMouseReporting = hasNewRis ? false : this.mouseReporting;
+    let nextMouseSgr = hasNewRis ? false : this.mouseSgr;
+    while ((match = regex.exec(stateInput)) !== null) {
       const params = match[1].split(";").filter(Boolean);
       const mode = match[2];
       for (const param of params) {
@@ -593,10 +609,10 @@ export class Room extends EventEmitter {
 
     // Enhanced keyboard reporting: kitty keyboard protocol (CSI >flags u push /
     // CSI <n u pop / CSI =flags u set) and xterm modifyOtherKeys (CSI >4;n m).
-    let nextKeyboardEnhanced = this.keyboardEnhanced;
+    let nextKeyboardEnhanced = hasNewRis ? false : this.keyboardEnhanced;
     const kbdRegex = /\x1b\[([<>=])[0-9;:]*u|\x1b\[>([0-9;]*)m/g;
     let kbdMatch: RegExpExecArray | null;
-    while ((kbdMatch = kbdRegex.exec(combined)) !== null) {
+    while ((kbdMatch = kbdRegex.exec(stateInput)) !== null) {
       if (kbdMatch[1] !== undefined) {
         nextKeyboardEnhanced = kbdMatch[1] !== "<"; // push/set = on, pop = off
       } else {
@@ -954,7 +970,10 @@ export class Room extends EventEmitter {
       // serialize marker). That silent loss was 'the screen is stale until
       // the app repaints' on every attach that raced live output. The
       // withheld bytes are delivered as catch-up appended to the snapshot.
-      if (isOutput && client.awaitingSnapshot) continue;
+      if (isOutput && client.awaitingSnapshot) {
+        client.snapshotCatchUp.push((message as { data: string }).data);
+        continue;
+      }
       if (client.socket.isOpen()) {
         client.socket.send(payload);
       }
@@ -1052,13 +1071,38 @@ export class Room extends EventEmitter {
     }
   }
 
-  // Grids are LAZY: created on the first serialized attach, not on output,
-  // so a room nobody ever opens (agent fleets) pays no grid memory at all.
-  // Creation hydrates from a bounded ring tail — deep enough to contain any
-  // app's last full repaint plus every update since, which is all screen
-  // correctness needs; serialized scrollback is bounded anyway.
+  // Incremental TUIs paint some rows once and then update other regions for
+  // hours. Reconstructing their first grid from any bounded tail can therefore
+  // omit cells until the app happens to repaint (for example, on scroll).
+  // Begin tracking at TUI entry; dependency loading is shared and normally
+  // finishes first, but the callback covers a TUI that starts immediately.
+  private startTuiGrid() {
+    if (!SERIALIZED_ATTACH_ENABLED || this.grid || this.gridStartPending || this.gridUnavailable || this.ended) return;
+    if (!this.alternateScreen && !this.mouseReporting) return;
+    if (screenGridsAvailable()) {
+      this.gridUnavailable = this.ensureGrid() === null;
+      return;
+    }
+    this.gridStartPending = true;
+    this.gridPendingSeed = [this.tailOutput(MAX_BUFFER_SIZE)];
+    this.gridPendingSeedBytes = this.gridPendingSeed[0].length;
+    void loadScreenGridDeps().then((available) => {
+      this.gridStartPending = false;
+      this.gridUnavailable = !available;
+      const seed = this.gridPendingSeed?.join("") ?? "";
+      this.gridPendingSeed = null;
+      this.gridPendingSeedBytes = 0;
+      if (available && !this.ended) {
+        this.gridUnavailable = this.ensureGrid(seed) === null;
+      }
+    });
+  }
+
+  // Plain-shell grids remain lazy until the first serialized attach. Creation
+  // hydrates from a bounded ring tail; append-only shell output is safely
+  // reconstructible from that tail, unlike the incremental TUI path above.
   private static readonly GRID_HYDRATE_BYTES = 2_000_000;
-  private ensureGrid(): ScreenGrid | null {
+  private ensureGrid(seed?: string): ScreenGrid | null {
     if (!SERIALIZED_ATTACH_ENABLED || this.ended) return this.grid;
     if (!this.grid && screenGridsAvailable()) {
       this.grid = createScreenGrid(this.activeCols, this.activeRows);
@@ -1067,8 +1111,8 @@ export class Room extends EventEmitter {
         if (this.outputBytes > 0) {
           // Cut at a line boundary (same trick as boundSnapshotReplay) so a
           // slice landing mid-escape-sequence can't garble the parse head.
-          let tail = this.tailOutput(Room.GRID_HYDRATE_BYTES);
-          if (this.outputBytes > tail.length) {
+          let tail = seed ?? this.tailOutput(Room.GRID_HYDRATE_BYTES);
+          if (seed === undefined && this.outputBytes > tail.length) {
             const nl = tail.indexOf("\n");
             if (nl !== -1 && nl < 8192) tail = tail.slice(nl + 1);
           }
@@ -1082,6 +1126,20 @@ export class Room extends EventEmitter {
   /** O(1) append; trims whole chunks from the head past MAX_BUFFER_SIZE. */
   private appendOutput(data: string) {
     if (!data) return;
+    if (this.gridPendingSeed) {
+      this.gridPendingSeed.push(data);
+      this.gridPendingSeedBytes += data.length;
+      while (this.gridPendingSeed.length > 1
+          && this.gridPendingSeedBytes - this.gridPendingSeed[0].length >= MAX_BUFFER_SIZE) {
+        this.gridPendingSeedBytes -= this.gridPendingSeed[0].length;
+        this.gridPendingSeed.shift();
+      }
+      if (this.gridPendingSeed.length === 1 && this.gridPendingSeedBytes > MAX_BUFFER_SIZE) {
+        const tail = this.gridPendingSeed[0].slice(-MAX_BUFFER_SIZE);
+        this.gridPendingSeed[0] = tail;
+        this.gridPendingSeedBytes = tail.length;
+      }
+    }
     this.outputChunks.push(data);
     this.outputBytes += data.length;
     while (this.outputChunks.length > 1 && this.outputBytes - this.outputChunks[0].length >= MAX_BUFFER_SIZE) {

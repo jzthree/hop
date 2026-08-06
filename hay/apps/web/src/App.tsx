@@ -522,6 +522,9 @@ const App = () => {
   // Set by every write into the terminal; the render watchdog only spends a
   // refresh when something actually changed since its last tick.
   const outputSinceTickRef = useRef(true);
+  // Timestamp of the last bytes from the session — the ack signal that
+  // paces synthetic wheel steps (see scrollFlywheel appGlide).
+  const lastOutputAtRef = useRef(0);
   // Late-bound hooks for the voice controller (created before these exist).
   const handleUserInputRef = useRef<((data: string) => void) | null>(null);
   const pushNoticeRef = useRef<((m: string) => void) | null>(null);
@@ -931,8 +934,18 @@ const App = () => {
     return presence.find((client) => client.id === controllerId)?.name ?? "Someone";
   }, [presence, controllerId]);
 
+  // Local echo policy. Exclusive control keeps the old rule. In COLLAB mode
+  // (the default for every shared session) echo used to be flatly OFF — so
+  // each character waited a full round trip, tunnel RTT included, even when
+  // you were the only person typing, which is the overwhelmingly common
+  // case. Echo now stays on unless another client is ACTUALLY typing right
+  // now (presence carries the flag), and drops the instant one starts. A
+  // sub-second overlap before presence propagates is absorbed by the
+  // reconciler's guards (complex-chunk passthrough, two-strike clear).
+  const othersTyping = presence.some((c) => c.id !== clientId && c.typing);
   const optimisticActive =
-    LATENCY_COMP && status === "connected" && !collabMode && controllerId === clientId;
+    LATENCY_COMP && status === "connected" && !othersTyping
+    && (collabMode ? true : controllerId === clientId);
 
   useEffect(() => {
     if (optimisticPrevRef.current && !optimisticActive) {
@@ -1255,6 +1268,7 @@ const App = () => {
       return;
     }
     outputSinceTickRef.current = true;
+    lastOutputAtRef.current = performance.now(); // same clock the flywheel compares
 
     // Filter focus reporting sequences that can leak as visible text
     const filtered = data.replace(/\x1b\[I/g, '').replace(/\x1b\[O/g, '');
@@ -1343,6 +1357,9 @@ const App = () => {
           // snapshot and must land where the snapshot would.
           t.scrollToBottom();
           t.refresh(0, t.rows - 1);
+          // This write bypasses writeToTerminal(). Re-arm the delayed render
+          // invariant after parsing, so a missed WebGL frame self-heals.
+          outputSinceTickRef.current = true;
         });
       })
       .catch(() => { /* fast paint is best-effort */ });
@@ -1508,6 +1525,10 @@ const App = () => {
                 userScrolledUpRef.current = false;
               }
               t.refresh(0, t.rows - 1);
+              // Snapshot writes bypass writeToTerminal(). Set this only after
+              // parsing so a slow snapshot cannot have its retry consumed
+              // before there is anything complete to repaint.
+              outputSinceTickRef.current = true;
               // The snapshot has fully landed: only from here on can a
               // viewport-top event mean a user gesture.
               lastViewportYRef.current = t.buffer.active.viewportY;
@@ -1703,7 +1724,8 @@ const App = () => {
         () => termRef.current,
         {
           linesPerNotch: 4, // mirrors scrollSensitivity above
-          lineHeightPx: () => Math.max(1, ((terminal as any)._core?._renderService?.dimensions?.css?.cell?.height) || fontSize * 1.3)
+          lineHeightPx: () => Math.max(1, ((terminal as any)._core?._renderService?.dimensions?.css?.cell?.height) || fontSize * 1.3),
+          lastOutputAt: () => lastOutputAtRef.current
         }
       );
     }

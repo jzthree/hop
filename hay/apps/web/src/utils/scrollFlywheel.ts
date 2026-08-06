@@ -59,6 +59,14 @@ export type FlywheelOptions = {
   linesPerNotch: number;
   /** Pixel height of one terminal row (for pixel-mode delta → lines). */
   lineHeightPx: () => number;
+  /**
+   * Timestamp of the last output received from the session, when the caller
+   * has one. Paces app-owned coasting: a tracking app repaints per wheel
+   * step and each step costs a network round trip — a fixed-rate coast
+   * outruns a distant app and queues repaints, which reads as scroll LAG.
+   * With this signal each synthetic step waits for evidence the app kept up.
+   */
+  lastOutputAt?: () => number;
 };
 
 /**
@@ -140,6 +148,7 @@ export const attachScrollFlywheel = (
     }
   };
 
+  let lastStepAt = 0;
   const appGlide = (t: number) => {
     appRaf = 0;
     const term = getTerm();
@@ -147,11 +156,21 @@ export const attachScrollFlywheel = (
     if (!term || terminalOwnsScrolling(term) || Math.abs(appVel) < 4) return stopApp();
     const dt = lastFrameAt ? Math.min(0.05, (t - lastFrameAt) / 1000) : 0.016;
     lastFrameAt = t;
-    appCarry += Math.abs(appVel) * dt;
-    let steps = Math.trunc(appCarry);
-    appCarry -= steps;
-    while (steps-- > 0) dispatchStep();
-    appVel *= Math.exp(-dt / 0.35);
+    // ACK pacing: after each synthetic step, wait for the app to answer
+    // (any output) before spending the next one — the coast then runs at
+    // the link's real rhythm instead of flooding a slow one. 300ms cap so
+    // an app that repaints invisibly (no bytes for us) can't stall the
+    // glide forever.
+    const ackAt = opts.lastOutputAt ? opts.lastOutputAt() : Infinity;
+    const waitingForAck = lastStepAt > 0 && ackAt < lastStepAt && performance.now() - lastStepAt < 300;
+    if (!waitingForAck) {
+      appCarry += Math.abs(appVel) * dt;
+      let steps = Math.trunc(appCarry);
+      appCarry -= steps;
+      if (steps > 0) lastStepAt = performance.now();
+      while (steps-- > 0) dispatchStep();
+      appVel *= Math.exp(-dt / 0.35);
+    }
     appRaf = requestAnimationFrame(appGlide);
   };
 

@@ -346,6 +346,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const kbdEnhancedRef = useRef(false);
   // null = watching; "live"/"down" = connected state for the chrome.
   const [conn, setConn] = useState<"live" | "down" | null>(null);
+  // Last bytes from the session — paces the app-scroll coast (flywheel).
+  const lastOutputAtRef = useRef(0);
   // Hold-space voice, same controller as the full screen — the tile is where
   // typing mostly happens now, and dictation not existing here was most of
   // "voice doesn't always work".
@@ -653,6 +655,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     box.addEventListener("pointercancel", endPan, true);
 
     const detachFlywheel = attachScrollFlywheel(box, () => termRef.current as never, {
+      lastOutputAt: () => lastOutputAtRef.current,
       linesPerNotch: 4,
       lineHeightPx: () => Math.max(1, ((term as never as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { height?: number } } } } } })._core
         ?._renderService?.dimensions?.css?.cell?.height) || PREVIEW_BASE_FS * 1.3)
@@ -906,6 +909,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
               ? m.keyboardEnhanced
               : scanKeyboardProtocol(String(m.data || ""), false);
           } else if (m.type === "output") {
+            lastOutputAtRef.current = performance.now();
             term.write(m.data);
             kbdEnhancedRef.current = scanKeyboardProtocol(String(m.data || ""), kbdEnhancedRef.current);
           } else if (m.type === "active_size") {

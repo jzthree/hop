@@ -40,17 +40,28 @@ phone app, which opens these in-app. It rings the bell once for you, since a
 published artifact is usually the thing the human is waiting on. Re-running
 it after updating the file re-publishes under the same link.
 
-## Asking for attention
+## Asking for attention — two tiers
 
-When you are blocked on the human — a question, a decision, a finished
-deliverable — ring the terminal bell:
+**Finished something, or pausing normally?** Ring the bell:
 
 ```bash
 printf '\a'
 ```
 
-hop counts bells and surfaces them as attention dots in the session switcher
-and as phone notifications. Ring once when you stop; don't ring repeatedly.
+The bell is QUIET on the phone: an attention dot in the switcher and a badge,
+no interruption. Ring once when you stop; don't ring repeatedly.
+
+**Blocked, and waiting wastes the human's time?** Use `hop notify`:
+
+```bash
+hop notify "VPN is down — reconnect and I can finish the transfer"
+hop notify "need your decision: overwrite the frozen artifact tree, or write elsewhere?"
+```
+
+This interrupts: it reaches their lock screen with your reason. Use it only
+when progress genuinely stops until they act — a decision, credentials, a
+dead connection. A routine completion never warrants it; a loop that keeps
+running never warrants it. One notify per blockage.
 
 ## Phone-friendly output
 

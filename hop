@@ -9921,7 +9921,7 @@ function startAuthProxy(authEmitter) {
 
             // Attach client to hay room
             session.room.attachClient(
-                { id: clientId, name: clientName, colorIndex, cols, rows },
+                { id: clientId, name: clientName, source, colorIndex, cols, rows },
                 hay.createSocketAdapter(ws)
             );
         });
@@ -11773,7 +11773,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'notify', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -12869,6 +12869,23 @@ async function main() {
     if (process.argv[2] === 'math') {
         const { runMathCli } = require('./scripts/hop-math.js');
         process.exit(runMathCli(process.argv.slice(3)));
+    }
+
+    // hop notify <message> — the INTERRUPT tier of attention. A plain bell
+    // is quiet on the phone (attention dot + badge); this prints a marked
+    // reason line and rings, and the phone turns THAT into a lock-screen
+    // notification. For agents, via the hop-session skill: use it only when
+    // blocked and waiting would waste the human's time (a decision, a dead
+    // VPN, credentials) — never for routine completions.
+    if (process.argv[2] === 'notify') {
+        const msg = process.argv.slice(3).join(' ').trim();
+        if (!msg) {
+            log('Usage: hop notify <why you need the human>', YELLOW);
+            process.exit(1);
+        }
+        process.stdout.write(`\n\u2691 NEEDS YOU: ${msg}\n`);
+        process.stdout.write('\x07');
+        process.exit(0);
     }
 
     // hop view <file...> — publish a renderable artifact (HTML, PDF, image)

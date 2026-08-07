@@ -724,7 +724,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     const sock = new WebSocket(
       wsBase + sep + "room=" + encodeURIComponent(room)
       + "&name=" + encodeURIComponent((userName || "user") + " (wall)")
-      + "&replay=0&cols=" + dims.cols + "&rows=" + dims.rows
+      + "&source=monitor&replay=0&cols=" + dims.cols + "&rows=" + dims.rows
     );
     sock.onopen = () => {
       try {

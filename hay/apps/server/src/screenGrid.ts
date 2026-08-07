@@ -39,6 +39,9 @@ export const GRID_SCROLLBACK = (() => {
   const env = Number(process.env.HAY_GRID_SCROLLBACK);
   return Number.isFinite(env) && env >= 0 ? Math.floor(env) : 1000;
 })();
+// Preserve ordinary shrink/grow sequences exactly while bounding an abusive
+// resize storm's retained work behind a single xterm write marker.
+const MAX_QUEUED_RESIZE_TRANSITIONS = 256;
 
 let deps: GridDeps | null = null;
 let loading: Promise<boolean> | null = null;
@@ -110,27 +113,52 @@ export const createScreenGrid = (cols: number, rows: number): ScreenGrid | null 
     return null;
   }
   let disposed = false;
+  let coalescibleResizes: number[] | null = null;
   return {
     write(data: string) {
       if (disposed) return;
+      // Output is an ordering boundary: a later resize must run after it,
+      // rather than coalescing into a resize marker queued before it.
+      if (data) coalescibleResizes = null;
       try { term.write(data); } catch { /* parser hiccup — next write continues */ }
     },
     resize(nextCols: number, nextRows: number) {
       if (disposed) return;
       const cols = Math.max(2, nextCols);
       const rows = Math.max(1, nextRows);
+      if (coalescibleResizes) {
+        if (coalescibleResizes.length < MAX_QUEUED_RESIZE_TRANSITIONS * 2) {
+          coalescibleResizes.push(cols, rows);
+        } else {
+          coalescibleResizes[coalescibleResizes.length - 2] = cols;
+          coalescibleResizes[coalescibleResizes.length - 1] = rows;
+        }
+        return;
+      }
+      const scheduled = [cols, rows];
+      coalescibleResizes = scheduled;
       try {
         // xterm parses write() asynchronously. Queue the resize behind every
         // earlier byte so room order stays PTY output → SIGWINCH, while later
         // writes naturally queue behind this callback's synchronous resize.
+        // Consecutive resizes share this marker. Replay ordinary geometry
+        // changes exactly: shrink/grow transitions mutate xterm's grid even
+        // without output. Only an abusive overflow degrades to the latest size.
         term.write("", () => {
           if (disposed) return;
-          try { term.resize(cols, rows); } catch { /* keep old size */ }
+          if (coalescibleResizes === scheduled) coalescibleResizes = null;
+          for (let i = 0; i < scheduled.length; i += 2) {
+            try { term.resize(scheduled[i], scheduled[i + 1]); } catch { /* keep previous size */ }
+          }
         });
-      } catch { /* keep old size */ }
+      } catch {
+        if (coalescibleResizes === scheduled) coalescibleResizes = null;
+      }
     },
     serialize(callback: (data: string | null) => void, scrollback: number = GRID_SCROLLBACK) {
       if (disposed) { callback(null); return; }
+      // A later resize must not move ahead of this point-in-time snapshot.
+      coalescibleResizes = null;
       try {
         // An empty write's callback fires once all queued data has parsed —
         // the serialize then reflects every byte up to this attach.

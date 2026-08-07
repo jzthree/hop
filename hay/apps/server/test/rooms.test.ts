@@ -243,6 +243,36 @@ describe("Room", () => {
     expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 90, rows: 20 });
   });
 
+  it("lets a monitor size only an unattended session", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("monitor-resize", { cols: 80, rows: 24 }, "/tmp");
+    const desktop = new FakeSocket();
+    const monitor = new FakeSocket();
+    room.attachClient(
+      { id: "desktop", name: "Desktop", colorIndex: 0, cols: 80, rows: 24, nudge: false },
+      desktop
+    );
+    room.attachClient(
+      { id: "wall", name: "Wall", source: "monitor", colorIndex: 1, cols: 80, rows: 40, nudge: false },
+      monitor
+    );
+
+    const before = ptyInstance!.resizes.length;
+    monitor.emitMessage({ type: "resize", cols: 80, rows: 40, claim: "attach", user: true });
+    expect(ptyInstance!.resizes.length).toBe(before);
+    expect(findMessages(monitor, "active_size").at(-1)).toMatchObject({ cols: 80, rows: 24 });
+
+    desktop.close();
+    monitor.emitMessage({ type: "resize", cols: 80, rows: 40, claim: "attach", user: true });
+    expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 80, rows: 40 });
+  });
+
   it('claim:"attach" takes the size unless a peer typed seconds ago', () => {
     vi.useFakeTimers();
     try {
@@ -811,6 +841,31 @@ describe("Room", () => {
       for (let row = 36; row <= 60; row++) {
         expect(String(snapshot.data)).toContain(`ROW-${String(row).padStart(2, "0")}`);
       }
+    });
+
+    it("preserves consecutive shrink and grow transitions in the screen grid", async () => {
+      const { room, pty } = await setup("ordered-grid-resize-burst", { cols: 20, rows: 5 });
+      const owner = new FakeSocket();
+      room.attachClient(
+        { id: "owner", name: "Owner", colorIndex: 0, cols: 20, rows: 5, replayBytes: 0, nudge: false },
+        owner
+      );
+      const rows = Array.from({ length: 5 }, (_, i) => `\x1b[${i + 1};1HROW-${i + 1}`).join("");
+      pty().emit("\x1b[?1049h\x1b[2J" + rows);
+
+      // Even with no output between them, shrink then grow is not equivalent
+      // to only the final size: xterm discards the rows clipped by the shrink.
+      owner.emitMessage({ type: "resize", cols: 20, rows: 2, user: true });
+      owner.emitMessage({ type: "resize", cols: 20, rows: 5, user: true });
+      const late = new FakeSocket();
+      room.attachClient(
+        { id: "late", name: "Late", colorIndex: 1, cols: 20, rows: 5, replayBytes: 65536 },
+        late
+      );
+      const snapshot = await waitForSnapshot(late);
+      expect(String(snapshot.data)).not.toContain("ROW-1");
+      expect(String(snapshot.data)).toContain("ROW-4");
+      expect(String(snapshot.data)).toContain("ROW-5");
     });
 
     it("flags a serialized snapshot as capped when deeper raw history exists", async () => {

@@ -75,6 +75,7 @@ wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
   const roomId = sanitizeRoom(url.searchParams.get("room"));
   const name = sanitizeName(url.searchParams.get("name"));
+  const source = url.searchParams.get("source") || "";
   const cols = Number(url.searchParams.get("cols") ?? 80);
   const rows = Number(url.searchParams.get("rows") ?? 24);
 
@@ -91,6 +92,7 @@ wss.on("connection", (ws, req) => {
     {
       id: clientId,
       name,
+      source,
       colorIndex,
       cols,
       rows

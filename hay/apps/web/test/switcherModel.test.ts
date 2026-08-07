@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSwitcherModel,
+  filterScore,
   filterSessionsByOrigin,
   projectKey,
   relativeTime,
@@ -373,5 +374,65 @@ describe("manual mode folders under filter", () => {
     if (model.mode !== "manual") throw new Error("expected manual");
     expect(model.folders[0].rows.map((r) => r.name)).toEqual(["alpha"]);
     expect(model.rows).toEqual([]); // loose list empty ≠ no results
+  });
+});
+
+describe("filterScore tiers", () => {
+  it("searches taglines — the user's own words for a session", () => {
+    const s = mk({ name: "exp42", tagline: "protein folding sweep" });
+    expect(filterScore(s, "folding")).toBe(50);
+    expect(filterScore(mk({ name: "exp43" }), "folding")).toBe(0);
+  });
+
+  it("ranks a name substring above a tagline hit", () => {
+    const byName = mk({ name: "folding-ui" });
+    const byTagline = mk({ name: "exp42", tagline: "protein folding sweep" });
+    expect(filterScore(byName, "folding")).toBeGreaterThan(filterScore(byTagline, "folding"));
+  });
+
+  it("multi-word terms AND across different fields", () => {
+    const s = mk({ name: "web", cwd: "/Users/x/Code/hop2" });
+    expect(filterScore(s, "hop2 web")).toBeGreaterThan(0);
+    expect(filterScore(s, "hop2 nothere")).toBe(0);
+  });
+
+  it("multi-word score is the weakest term's — every word must earn the rank", () => {
+    const s = mk({ name: "web", cwd: "/Users/x/Code/hop2" });
+    // "web" hits the name exactly (100); "hop2" only the cwd (≤70).
+    expect(filterScore(s, "web hop2")).toBeLessThan(filterScore(s, "web"));
+  });
+
+  it("single-term ranking is unchanged: exact > prefix > substring", () => {
+    expect(filterScore(mk({ name: "hub" }), "hub")).toBe(100);
+    expect(filterScore(mk({ name: "hubble" }), "hub")).toBe(80);
+    expect(filterScore(mk({ name: "the-hub-x" }), "hub")).toBe(60);
+  });
+
+  it("tolerates typos via subsequence, ranked below everything else", () => {
+    const s = mk({ name: "hubble" });
+    expect(filterScore(s, "hbl")).toBe(20);
+    expect(filterScore(s, "hlb")).toBe(0); // order matters
+    expect(filterScore(mk({ name: "ab" }), "ab")).toBe(100);
+  });
+
+  it("subsequence needs 3+ chars so short queries stay literal", () => {
+    expect(filterScore(mk({ name: "hubble" }), "he")).toBe(0);
+  });
+
+  it("matches the folder a session is filed in, passed by the model", () => {
+    const folders = [{ id: "f1", name: "Experiments" }];
+    const sessions = [mk({ name: "alpha", folderId: "f1" }), mk({ name: "beta" })];
+    const model = buildSwitcherModel(sessions, null, "experi", "recent", [], folders);
+    if (model.mode !== "filter") throw new Error("expected filter");
+    expect(model.rows.map((r) => r.name)).toEqual(["alpha"]);
+  });
+
+  it("folder-name queries narrow manual mode to that folder's sessions", () => {
+    const folders = [{ id: "f1", name: "Experiments" }];
+    const sessions = [mk({ name: "alpha", folderId: "f1" }), mk({ name: "beta" })];
+    const model = buildSwitcherModel(sessions, null, "experiments", "manual", [], folders);
+    if (model.mode !== "manual") throw new Error("expected manual");
+    expect(model.folders[0].rows.map((r) => r.name)).toEqual(["alpha"]);
+    expect(model.rows).toEqual([]);
   });
 });

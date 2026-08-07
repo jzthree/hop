@@ -55,10 +55,17 @@ hop port 8000 my-api
 `hop port` prints a `View:` URL behind hop's auth, same as `hop view` — one
 bell, tap to open. It proxies live (HTTP and WebSocket, so dev-server
 hot-reload still works) rather than copying anything, so the link stays
-current for as long as the server keeps running; re-running `hop port` with
-the same name updates it if the port changes. Unlike `hop view`, this is for
+current for as long as the server keeps running; re-running it with the same
+name updates the target port in place. Unlike `hop view`, this is for
 something ongoing, not a one-off deliverable — closing the server makes the
 link stop working.
+
+By default it's ATTACHED to this session, the same way `hop view`'s files
+are: it shows up alongside anything you've published here, not as a separate
+room in the session list — a webserver a human has to go hunting for a
+second entry to find isn't a hand-off, it's a scavenger hunt. If you
+genuinely need a standalone room not tied to any session (exposing a service
+nobody will think of as "part of" this conversation), pass `--standalone`.
 
 ## Asking for attention — two tiers
 

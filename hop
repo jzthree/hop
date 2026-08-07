@@ -1040,7 +1040,12 @@ function setPortSessionConfig(name, port, displayName, folderId, opts = {}) {
         updatedAt: new Date().toISOString(),
         displayName: displayName || existing?.displayName || toDisplaySessionName(name),
         folderId: folderId || existing?.folderId || null,
-        workspaceName
+        workspaceName,
+        // Set when `hop port` was run from inside another session: this proxy
+        // exists only so that session's artifact link resolves, not as a room
+        // of its own. GET /api/sessions excludes it from the main list on
+        // that basis — the reverse proxy route still works either way.
+        attachedTo: opts.attachedTo !== undefined ? opts.attachedTo : (existing?.attachedTo || null)
     });
 }
 
@@ -8250,7 +8255,16 @@ function startAuthProxy(authEmitter) {
         // API: List sessions
         if (parsedUrl.pathname === '/api/sessions' && req.method === 'GET') {
             const snapshot = await listAllSessionEntriesRuntimeFirst();
-            const sessions = snapshot.entries.map(s => ({
+            // A port session created by `hop port` from inside another
+            // session (attachedTo set) exists only so that session's
+            // artifact link resolves — it was never meant to compete for a
+            // spot in the switcher/session list as a room of its own. The
+            // proxy route (/s/<name>/) still works read directly; this only
+            // hides it from the list every client renders.
+            const visibleEntries = snapshot.entries.filter((s) =>
+                !(s.type === 'port' && getEffectiveSessionConfig(s.internalName)?.attachedTo)
+            );
+            const sessions = visibleEntries.map(s => ({
                 name: s.displayName,
                 displayName: s.displayName,
                 internalName: s.internalName,
@@ -8705,7 +8719,7 @@ function startAuthProxy(authEmitter) {
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName } = JSON.parse(body);
+                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo } = JSON.parse(body);
                     // Sessions created by an agent-marked request (X-Hop-Actor,
                     // set by MCP/hopa and by the CLI under a claude env) land
                     // in the agent bucket instead of impersonating the human.
@@ -8757,6 +8771,16 @@ function startAuthProxy(authEmitter) {
                             res.end(JSON.stringify({ error: 'Invalid port' }));
                             return;
                         }
+                        // Must name a real session — an unattached reference
+                        // would just be a hidden room nobody could find.
+                        const resolvedAttachedTo = typeof attachedTo === 'string' && attachedTo
+                            ? (resolveSessionInternalName(attachedTo, attachedTo) || null)
+                            : null;
+                        if (attachedTo && !resolvedAttachedTo) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'attachedTo session not found' }));
+                            return;
+                        }
                         if (await runtimeTerminalSessionExists(internalName)) {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
@@ -8787,7 +8811,8 @@ function startAuthProxy(authEmitter) {
                                 return;
                             }
                         } else {
-                            setPortSessionConfig(internalName, parsedPort, displayName, targetFolderId);
+                            setPortSessionConfig(internalName, parsedPort, displayName, targetFolderId,
+                                                 { attachedTo: resolvedAttachedTo });
                         }
                     } else {
                         const existingConfig = getEffectiveSessionConfig(internalName);
@@ -13118,6 +13143,37 @@ async function main() {
         process.exit(0);
     }
 
+    // The virtual folder both `hop view` and `hop port --attached` publish
+    // into: clients browse every artifact through one manifest, REBUILT from
+    // a disk scan on every publish rather than read-modify-written, so two
+    // agents publishing at once cannot lose each other's entries — last
+    // writer wins with the same complete list either way.
+    function rebuildArtifactManifest() {
+        try {
+            const viewRoot = path.join(HAY_WEB_DIR, 'assets', 'view');
+            const entries = [];
+            for (const sess of fs.readdirSync(viewRoot)) {
+                const dir = path.join(viewRoot, sess);
+                if (!fs.statSync(dir).isDirectory()) continue;
+                for (const f of fs.readdirSync(dir)) {
+                    if (f === 'manifest.json') continue;
+                    const st = fs.statSync(path.join(dir, f));
+                    if (!st.isFile()) continue;
+                    entries.push({
+                        session: sess,
+                        name: f,
+                        path: `/assets/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}`,
+                        bytes: st.size,
+                        mtime: Math.floor(st.mtimeMs / 1000)
+                    });
+                }
+            }
+            entries.sort((a, b) => b.mtime - a.mtime);
+            fs.writeFileSync(path.join(viewRoot, 'manifest.json'),
+                             JSON.stringify({ items: entries }, null, 1));
+        } catch { /* the links already printed still work without a manifest */ }
+    }
+
     // hop view <file...> — publish a renderable artifact (HTML, PDF, image)
     // behind hop's auth and print the link. The browser is the viewer: every
     // hop client either is one (web) or carries one (the iOS app opens these
@@ -13155,54 +13211,41 @@ async function main() {
             // waiting on, and the link scrolls away if nothing pings them.
             process.stdout.write('\x07');
         }
-        // The virtual folder: clients browse every published artifact through
-        // one manifest. REBUILT from a disk scan on every publish rather than
-        // read-modify-written, so two agents publishing at once cannot lose
-        // each other's entries — last writer wins with the same complete list.
-        try {
-            const viewRoot = path.join(HAY_WEB_DIR, 'assets', 'view');
-            const entries = [];
-            for (const sess of fs.readdirSync(viewRoot)) {
-                const dir = path.join(viewRoot, sess);
-                if (!fs.statSync(dir).isDirectory()) continue;
-                for (const f of fs.readdirSync(dir)) {
-                    if (f === 'manifest.json') continue;
-                    const st = fs.statSync(path.join(dir, f));
-                    if (!st.isFile()) continue;
-                    entries.push({
-                        session: sess,
-                        name: f,
-                        path: `/assets/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}`,
-                        bytes: st.size,
-                        mtime: Math.floor(st.mtimeMs / 1000)
-                    });
-                }
-            }
-            entries.sort((a, b) => b.mtime - a.mtime);
-            fs.writeFileSync(path.join(viewRoot, 'manifest.json'),
-                             JSON.stringify({ items: entries }, null, 1));
-        } catch { /* the links printed above still work without a manifest */ }
+        rebuildArtifactManifest();
         process.exit(failed > 0 ? 1 : 0);
     }
 
     // `hop view`'s counterpart for something LIVE rather than a file: a local
     // dev server. The reverse proxy (port-type sessions, mobile-aware,
     // WebSocket passthrough for HMR/live-reload) has existed for a while —
-    // this is just the missing front door. Same shape as `hop view`: one
-    // command, one printed link, one bell.
+    // this was just the missing front door.
+    //
+    // Default: ATTACHED to the calling session ($HOP_SESSION), the same way
+    // hop view's files are — it shows up in that session's own artifacts,
+    // not as a new room in the switcher (Jian: the first version created a
+    // standalone session and "I cannot see it" — true, because nothing but
+    // the raw session list ever pointed at it). A real standalone room —
+    // exposing a service that isn't tied to any one session — is the
+    // exception now and says so with --standalone.
     if (process.argv[2] === 'port') {
-        const args = process.argv.slice(3).filter((a) => !a.startsWith('-'));
-        const port = parseInt(args[0], 10);
+        const args = process.argv.slice(3);
+        const flags = new Set(args.filter((a) => a.startsWith('-')));
+        const positional = args.filter((a) => !a.startsWith('-'));
+        const port = parseInt(positional[0], 10);
         if (!Number.isInteger(port) || port < 1 || port > 65535) {
-            log('Usage: hop port <port> [name]   (expose a local web server for phone/desktop viewing)', YELLOW);
+            log('Usage: hop port <port> [name] [--standalone]   (expose a local web server for phone/desktop viewing)', YELLOW);
             process.exit(1);
         }
         const state = isServerRunning();
         if (!state) { printNotRunningError(); process.exit(1); }
-        const name = args[1] || `port-${port}`;
+        const caller = process.env.HOP_SESSION || null;
+        const standalone = flags.has('--standalone') || !caller;
+        const label = positional[1] || `port-${port}`;
+        const name = standalone ? label : `${caller}-${label}`;
         let res;
         try {
-            res = await callLocalApi(state, '/api/sessions', 'POST', { name, type: 'port', port });
+            res = await callLocalApi(state, '/api/sessions', 'POST',
+                { name, type: 'port', port, attachedTo: standalone ? undefined : caller });
         } catch (e) {
             log(`Failed to expose port ${port}: ${e.message}`, RED);
             process.exit(1);
@@ -13212,7 +13255,29 @@ async function main() {
             process.exit(1);
         }
         const linkName = res.data?.name || name;
-        console.log(`View: ${state.url}/s/${encodeURIComponent(linkName)}/`);
+        const proxyUrl = `${state.url}/s/${encodeURIComponent(linkName)}/`;
+        if (!standalone) {
+            // A tiny redirect page IS the artifact: the existing manifest
+            // scan (rebuildArtifactManifest, disk-based) picks it up with no
+            // new format, and the existing viewer (a WKWebView on iOS, an
+            // in-app open on web) navigates through it to the live proxy in
+            // one hop — same auth, same session cookie, no new plumbing on
+            // either client.
+            const destDir = path.join(HAY_WEB_DIR, 'assets', 'view', caller);
+            fs.mkdirSync(destDir, { recursive: true });
+            const artifactName = `${label}.html`;
+            fs.writeFileSync(path.join(destDir, artifactName), [
+                '<!DOCTYPE html><html><head><meta charset="utf-8">',
+                `<title>${label}</title>`,
+                `<meta http-equiv="refresh" content="0;url=${proxyUrl}">`,
+                '</head><body>Redirecting to the live server…</body></html>'
+            ].join(''));
+            rebuildArtifactManifest();
+            console.log(`View: ${proxyUrl}`);
+            console.log(`Attached to ${caller} — also in its artifacts.`);
+        } else {
+            console.log(`View: ${proxyUrl}`);
+        }
         // Same one-bell convention as `hop view` — the human is usually
         // waiting on this, and the link scrolls away unannounced otherwise.
         process.stdout.write('\x07');

@@ -273,50 +273,55 @@ describe("Room", () => {
     expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 80, rows: 40 });
   });
 
-  it('claim:"attach" takes the size unless a peer typed seconds ago', () => {
-    vi.useFakeTimers();
-    try {
-      let ptyInstance: FakePty | null = null;
-      const factory: PtyFactory = () => {
-        ptyInstance = new FakePty() as unknown as FakePty;
-        return ptyInstance as any;
-      };
-      const manager = new RoomManager(factory);
-      const room = manager.getRoom("attach-claim", { cols: 80, rows: 24 }, "/tmp");
-      const cli = new FakeSocket();
-      room.attachClient({ id: "cli", name: "Local", colorIndex: 0, cols: 80, rows: 24 }, cli);
+  it("the last user action — open or keystroke — owns the size", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("attach-claim", { cols: 80, rows: 24 }, "/tmp");
+    const cli = new FakeSocket();
+    room.attachClient({ id: "cli", name: "Local", colorIndex: 0, cols: 80, rows: 24 }, cli);
 
-      // The desktop CLI is actively typing right now.
-      cli.emitMessage({ type: "input", data: "ls" });
+    // The desktop CLI is actively typing right now.
+    cli.emitMessage({ type: "input", data: "ls" });
 
-      // A phone opens the session 2s later and attach-claims its fitted size:
-      // an actively-typing peer keeps the size — the claim loses.
-      vi.advanceTimersByTime(2_000);
-      const phone = new FakeSocket();
-      room.attachClient({ id: "ph", name: "Phone", colorIndex: 1, cols: 46, rows: 28 }, phone);
-      const before = ptyInstance!.resizes.length;
-      phone.emitMessage({ type: "resize", cols: 46, rows: 28, claim: "attach" });
-      expect(ptyInstance!.resizes.length).toBe(before);
+    // A phone opens the session and attach-claims its fitted size: opening
+    // is the latest user action, so the claim wins outright — even over
+    // someone who typed a moment ago. Strict recency, no idle windows.
+    const phone = new FakeSocket();
+    room.attachClient({ id: "ph", name: "Phone", colorIndex: 1, cols: 46, rows: 28 }, phone);
+    phone.emitMessage({ type: "resize", cols: 46, rows: 28, claim: "attach" });
+    expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 46, rows: 28 });
 
-      // 10s after the CLI's last keystroke (well inside the 60s a plain
-      // resize would need), the attach claim wins: opening a session is
-      // intent, and nobody is typing anymore.
-      vi.advanceTimersByTime(10_000);
-      phone.emitMessage({ type: "resize", cols: 46, rows: 28, claim: "attach" });
-      expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 46, rows: 28 });
+    // The CLI's next keystroke is now the latest user action: ownership
+    // transfers back and the PTY snaps to the CLI's declared fit
+    // immediately — before any resize message from it.
+    cli.emitMessage({ type: "input", data: "x" });
+    expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 80, rows: 24 });
 
-      // A plain (unclaimed) resize from another fresh viewer still cannot
-      // yank the size at 10s idle — the 60s election guards those.
-      const viewer = new FakeSocket();
-      room.attachClient({ id: "v", name: "Viewer", colorIndex: 2, cols: 200, rows: 50 }, viewer);
-      phone.emitMessage({ type: "input", data: "x" });
-      vi.advanceTimersByTime(10_000);
-      const beforeViewer = ptyInstance!.resizes.length;
-      viewer.emitMessage({ type: "resize", cols: 200, rows: 50 });
-      expect(ptyInstance!.resizes.length).toBe(beforeViewer);
-    } finally {
-      vi.useRealTimers();
-    }
+    // A plain (unclaimed) resize from a fresh viewer is a declaration, not
+    // a user action — it cannot move an owned size, and the viewer is
+    // snapped back to the shared grid.
+    const viewer = new FakeSocket();
+    room.attachClient({ id: "v", name: "Viewer", colorIndex: 2, cols: 200, rows: 50 }, viewer);
+    const beforeViewer = ptyInstance!.resizes.length;
+    viewer.emitMessage({ type: "resize", cols: 200, rows: 50 });
+    expect(ptyInstance!.resizes.length).toBe(beforeViewer);
+    expect(findMessages(viewer, "active_size").at(-1)).toMatchObject({ cols: 80, rows: 24, clientId: "cli" });
+
+    // But that declaration is remembered: the viewer's first keystroke makes
+    // it the owner and the PTY takes its declared 200×50 in the same beat.
+    viewer.emitMessage({ type: "input", data: "y" });
+    expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 200, rows: 50 });
+
+    // Wheel reports are reading, not typing: a pure SGR mouse payload from
+    // the phone transfers nothing.
+    const beforeWheel = ptyInstance!.resizes.length;
+    phone.emitMessage({ type: "input", data: "\x1b[<64;40;12M\x1b[<65;40;12M" });
+    phone.emitMessage({ type: "resize", cols: 46, rows: 28 });
+    expect(ptyInstance!.resizes.length).toBe(beforeWheel);
   });
 
   it("bounds the join-time snapshot replay to a tail cut at a line boundary", () => {
@@ -438,41 +443,31 @@ describe("Room", () => {
     expect(last?.clientId).toBe("typer");
   });
 
-  it("lets a resize claim the size once every other client is input-idle", () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(1_000_000);
-      let ptyInstance: FakePty | null = null;
-      const factory: PtyFactory = () => {
-        ptyInstance = new FakePty() as unknown as FakePty;
-        return ptyInstance as any;
-      };
-      const manager = new RoomManager(factory);
-      const room = manager.getRoom("claim", { cols: 120, rows: 30 }, "/tmp");
-      const typer = new FakeSocket();
-      const viewer = new FakeSocket();
-      room.attachClient({ id: "typer", name: "Alex", colorIndex: 0, cols: 120, rows: 30 }, typer);
-      room.attachClient({ id: "viewer", name: "Blake", colorIndex: 1, cols: 60, rows: 20 }, viewer);
+  it("frees the size when the owner detaches — no idle window needed", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("claim", { cols: 120, rows: 30 }, "/tmp");
+    const typer = new FakeSocket();
+    const viewer = new FakeSocket();
+    room.attachClient({ id: "typer", name: "Alex", colorIndex: 0, cols: 120, rows: 30 }, typer);
+    room.attachClient({ id: "viewer", name: "Blake", colorIndex: 1, cols: 60, rows: 20 }, viewer);
 
-      typer.emitMessage({ type: "input", data: "ls\r" });
-      typer.emitMessage({ type: "resize", cols: 120, rows: 30 });
+    typer.emitMessage({ type: "input", data: "ls\r" });
+    typer.emitMessage({ type: "resize", cols: 120, rows: 30 });
 
-      // Recently-typed elsewhere: the viewer's autofit is refused (and snapped back).
-      viewer.emitMessage({ type: "resize", cols: 60, rows: 20 });
-      expect((ptyInstance as unknown as FakePty).resizes.at(-1)).toEqual({ cols: 120, rows: 30 });
+    // The owner is elsewhere: the viewer's autofit is refused (and snapped back).
+    viewer.emitMessage({ type: "resize", cols: 60, rows: 20 });
+    expect((ptyInstance as unknown as FakePty).resizes.at(-1)).toEqual({ cols: 120, rows: 30 });
 
-      // Everyone else idle past the claim window: the same autofit now wins.
-      vi.setSystemTime(1_000_000 + 61_000);
-      viewer.emitMessage({ type: "resize", cols: 60, rows: 20 });
-      expect((ptyInstance as unknown as FakePty).resizes.at(-1)).toEqual({ cols: 60, rows: 20 });
-
-      // The previous holder is told the size moved.
-      const sizes = findMessages(typer, "active_size");
-      expect(sizes.at(-1)?.cols).toBe(60);
-      expect(sizes.at(-1)?.clientId).toBe("viewer");
-    } finally {
-      vi.useRealTimers();
-    }
+    // The owner leaves: the size is up for grabs, and the viewer's next
+    // plain refit takes it — no keystroke, no claim, no waiting.
+    typer.close();
+    viewer.emitMessage({ type: "resize", cols: 60, rows: 20 });
+    expect((ptyInstance as unknown as FakePty).resizes.at(-1)).toEqual({ cols: 60, rows: 20 });
   });
 
   it("counts attention bells but not OSC-terminator BELs", () => {

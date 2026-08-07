@@ -1357,11 +1357,15 @@ const App = () => {
   const scheduleReconnect = (nextSession: { name: string; room: string }) => {
     if (!shouldReconnectRef.current) return;
 
-    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
-    const delay = Math.min(1000 * Math.pow(2, reconnectAttemptRef.current), 30000);
+    // Immediately the first time — most disconnects (a tunnel blip, a laptop
+    // waking up) are already gone by the time a socket would even finish
+    // waiting to check. Backoff (1s, 2s, 4s, 8s, 16s, max 30s) only starts
+    // once that immediate retry has already failed.
+    const attempt = reconnectAttemptRef.current;
+    const delay = attempt === 0 ? 0 : Math.min(1000 * Math.pow(2, attempt - 1), 30000);
     reconnectAttemptRef.current += 1;
 
-    pushNotice(`Reconnecting in ${Math.round(delay / 1000)}s...`);
+    pushNotice(delay === 0 ? "Reconnecting..." : `Reconnecting in ${Math.round(delay / 1000)}s...`);
 
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = null;

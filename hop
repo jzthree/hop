@@ -6069,6 +6069,53 @@ function persistTagline(internalName, tagline) {
     return true;
 }
 
+// A relaunched claude session can land on its own interactive resume-choice
+// prompt ("1. Resume from summary / 2. Resume full session as-is"), and only
+// ONE relaunch path answers it on the user's behalf: hop restore's batch
+// (restoreSavedSessionsUnlocked, below). Every other way a session comes back
+// with `claude --resume <id>` — a fork, a daemon-side auto-relaunch after a
+// crash, `hop resume-waiting`'s own manual sweep not having been run — leaves
+// that prompt sitting on screen, unanswered, until something presses a key.
+// If a human eventually does (or Claude's own UI times out to its highlighted
+// default), that default is "1: Resume from summary" — the opposite of what
+// resume_mode="full" (the default) promises everywhere else. This sweep is
+// `hop resume-waiting` made automatic and continuous: same regex, same
+// resume_mode, same choice, but nobody has to remember to run it.
+let resumeSweepBusy = false;
+async function sweepStuckResumePrompts() {
+    if (shuttingDown || resumeSweepBusy) return;
+    const mode = getResumeMode();
+    const key = resumeChoiceKey(mode);
+    if (!key) return; // resume_mode="ask": leave the prompt for a human
+    resumeSweepBusy = true;
+    try {
+        const snapshot = await listAllSessionEntriesRuntimeFirst();
+        const candidates = (snapshot.entries || []).filter((s) => s.type !== 'port' && s.live === true && s.internalName);
+        for (const s of candidates) {
+            let screen = '';
+            try {
+                const grid = await getRoomGridPreviewShared(s.internalName);
+                screen = String(grid?.text || '');
+            } catch (e) { continue; } // host busy — try this session again next tick
+            if (!RESUME_PROMPT_RE.test(screen)) continue;
+            let entry;
+            try {
+                entry = await attachTerminalApiClient(s.internalName, s.displayName, { actor: 'system', label: 'resume-sweep' });
+                sendTerminalInput(entry, `${key}\r`);
+                log(`[resume-sweep] ${getSessionDisplayName(s.internalName) || s.internalName}: answered a stuck resume prompt (${mode})`, CYAN);
+            } catch (e) {
+                log(`[resume-sweep] ${s.internalName}: failed to answer (${e.message})`, YELLOW);
+            } finally {
+                if (entry) { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }
+            }
+        }
+    } catch (e) {
+        log(`[resume-sweep] sweep failed: ${e.message}`, YELLOW);
+    } finally {
+        resumeSweepBusy = false;
+    }
+}
+
 // Daemon-side automatic tagging: the feature has to "just work" — a user
 // should never run a command to get names that mean something. One session
 // per tick keeps it invisible (no CPU spike, no burst of model calls); the
@@ -14333,6 +14380,16 @@ async function main() {
         log(`[tagline] auto-sweep ${TAGLINE_DISABLED ? 'disabled by HOP_AI_TAGLINES' : 'enabled'}`, CYAN);
         setTimeout(runSweep, 60000).unref?.();
         setInterval(runSweep, 180000).unref?.();
+
+        // Stuck resume prompts are urgent in a way a stale tagline isn't — a
+        // session sitting on one is frozen, not just unlabeled — so this runs
+        // far more often and starts almost immediately after boot, right when
+        // a batch of crash-relaunched sessions is most likely to have one.
+        const runResumeSweep = () => {
+            sweepStuckResumePrompts().catch((e) => log(`[resume-sweep] error: ${e && e.message}`, YELLOW));
+        };
+        setTimeout(runResumeSweep, 5000).unref?.();
+        setInterval(runResumeSweep, 30000).unref?.();
     }
 
     if (DAEMON_FLAG) {

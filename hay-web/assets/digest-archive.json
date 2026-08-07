@@ -1,6 +1,43 @@
 {
  "editions": [
   {
+   "generated_at": "2026-08-07T02:41:14.646Z",
+   "summary": "Three sessions are stalled on words you typed but never sent — and in one of them, five hours of GPU time is running toward a result its own agent says cannot be interpreted.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It caught a flaw in its own setup: in the three arms currently running, the gate that was supposed to stay interpretable starts deep in saturation, so those runs will land on a flat, meaningless answer no matter what the data does. It wants to kill them now and relaunch with the gate centered on a calibration batch — five hours of compute either way. Your half-typed performance question is still sitting in the box unsent.",
+     "why": "As written, those three arms cannot answer the question they were launched for, so every hour they keep running is spent buying nothing.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "Third hour with your instruction to queue the bagging arms typed but unsent — the eight seed runs are still the only thing on the cluster and roughly 112 GPUs sit idle. It did protect itself before compacting: it wrote a full handoff, including a new negative result that the local-disk staging shortcut it built is actually slightly behind the plain fallback and should not be reinstated. It also needs a yes or no on adding a key so finished checkpoints can move to the analysis machine directly instead of being hand-relayed through your Mac.",
+     "why": "The plan survived, but nothing is queued, and the checkpoint transfer will stall the seed comparison the moment those runs finish.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Hubble",
+     "headline": "Lightscope 1.0 is approved and released, now propagating through the public catalog. The paid upgrade is still in a separate review, so anyone who downloads it today can install the app but cannot buy the paid tier yet. Your approval to build the onboarding sheet — the one walking users through the right camera settings — is typed but unsent.",
+     "why": "The app is live to the public in a state where the purchase path does not work, which is exactly the window that generates confused first reviews.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Orion",
+     "headline": "It did not stop at the size fix from last hour. It has spent the last twenty minutes replacing the entire size-election scheme with an identity-based ownership model, and is mid-build on the phone app with deploy and verification still ahead.",
+     "why": "Skip the three-step test it gave you earlier — the machinery that test was checking no longer exists.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Bellatrix",
+     "headline": "It started up carrying a research agenda from last week and asked you to pick among three directions on the accessibility question, but you redirected it to the terminal scrolling bug, which it is now investigating. Worth catching what it said in passing: its notes are up to eight days stale, and it believes the shared compute allocation was draining.",
+     "why": "That is the same pool the accessibility work is spending five-hour jobs in, so it is worth confirming how much is actually left before authorizing any relaunch there.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
    "generated_at": "2026-08-07T01:41:43.129Z",
    "summary": "The accessibility experiment just contradicted the explanation it gave you earlier and is holding its conclusion, while two instructions still sit typed-but-unsent — and a pending host restart could wipe them.",
    "items": [

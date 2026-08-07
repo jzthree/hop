@@ -343,6 +343,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   // Wired by the live effect; watch mode leaves them null so keys go nowhere.
   const sendInputRef = useRef<((data: string) => void) | null>(null);
   const kbdEnhancedRef = useRef(false);
+  // Throttle gate for typing-driven size ownership (below) — same 500ms
+  // budget as the full-screen terminal's fit-on-type, and for the same
+  // reason: proposeDimensions() forces a layout read, and doing that on
+  // every keystroke is what stalled touch input on phones there.
+  const lastTypeFitAtRef = useRef(0);
   // null = watching; "live"/"down" = connected state for the chrome.
   const [conn, setConn] = useState<"live" | "down" | null>(null);
   // Last bytes from the session — paces the app-scroll coast (flywheel).
@@ -927,6 +932,30 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     };
     connect();
     sendInputRef.current = (data: string) => {
+      // A keystroke INTO this tile is a genuine user action on it — per the
+      // size-ownership model, it should take the size and fit the tile it
+      // was typed into. Until now the tile only ever declared the SESSION's
+      // mirrored size (from wsUrl's cols/rows, unchanged since connect), so
+      // the server's keystroke ownership-transfer had nothing to apply: the
+      // tile "won" but never actually resized to itself. Declare the tile's
+      // own box fit as an ordinary resize (no claim, no monitor tag) before
+      // the input — same pattern as SecondaryPane's fitFocused(), applied on
+      // typing here since a wall tile has no separate focus/blur moment.
+      const nowFit = performance.now();
+      if (ws && ws.readyState === WebSocket.OPEN && nowFit - lastTypeFitAtRef.current > 500) {
+        lastTypeFitAtRef.current = nowFit;
+        const fitAddon = fitRef.current;
+        const boxEl = boxRef.current;
+        const t = termRef.current;
+        if (fitAddon && boxEl && t && boxEl.clientWidth >= 60 && boxEl.clientHeight >= 40) {
+          const dims = fitAddon.proposeDimensions();
+          if (dims?.cols && dims?.rows && dims.cols >= 20 && dims.rows >= 5
+            && (t.cols !== dims.cols || t.rows !== dims.rows)) {
+            t.resize(dims.cols, dims.rows);
+            ws.send(JSON.stringify({ type: "resize", cols: dims.cols, rows: dims.rows }));
+          }
+        }
+      }
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         pendingInput.push({ data, at: Date.now() });
         if (pendingInput.length > 200) pendingInput.shift();

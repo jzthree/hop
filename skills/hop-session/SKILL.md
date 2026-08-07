@@ -1,6 +1,6 @@
 ---
 name: hop-session
-description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers rendering math with hop math, publishing viewable files (HTML/PDF/images) with hop view, ringing the bell for attention, and phone-friendly output.
+description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers rendering math with hop math, publishing viewable files (HTML/PDF/images) with hop view, exposing a running local web server with hop port, ringing the bell for attention, and phone-friendly output.
 ---
 
 # Working in a hop terminal
@@ -39,6 +39,26 @@ human taps it and their browser renders it — on the desktop wall or from the
 phone app, which opens these in-app. It rings the bell once for you, since a
 published artifact is usually the thing the human is waiting on. Re-running
 it after updating the file re-publishes under the same link.
+
+## Showing a running web server (dev server, local app)
+
+When you start something that serves HTTP — a dev server, a quick API, a
+build's preview server — don't tell the human to open `localhost:<port>`;
+they may be on their phone with no way to reach your localhost. Expose it
+instead:
+
+```bash
+hop port 5173
+hop port 8000 my-api
+```
+
+`hop port` prints a `View:` URL behind hop's auth, same as `hop view` — one
+bell, tap to open. It proxies live (HTTP and WebSocket, so dev-server
+hot-reload still works) rather than copying anything, so the link stays
+current for as long as the server keeps running; re-running `hop port` with
+the same name updates it if the port changes. Unlike `hop view`, this is for
+something ongoing, not a one-off deliverable — closing the server makes the
+link stop working.
 
 ## Asking for attention — two tiers
 

@@ -13005,6 +13005,40 @@ async function main() {
         process.exit(failed > 0 ? 1 : 0);
     }
 
+    // `hop view`'s counterpart for something LIVE rather than a file: a local
+    // dev server. The reverse proxy (port-type sessions, mobile-aware,
+    // WebSocket passthrough for HMR/live-reload) has existed for a while —
+    // this is just the missing front door. Same shape as `hop view`: one
+    // command, one printed link, one bell.
+    if (process.argv[2] === 'port') {
+        const args = process.argv.slice(3).filter((a) => !a.startsWith('-'));
+        const port = parseInt(args[0], 10);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            log('Usage: hop port <port> [name]   (expose a local web server for phone/desktop viewing)', YELLOW);
+            process.exit(1);
+        }
+        const state = isServerRunning();
+        if (!state) { printNotRunningError(); process.exit(1); }
+        const name = args[1] || `port-${port}`;
+        let res;
+        try {
+            res = await callLocalApi(state, '/api/sessions', 'POST', { name, type: 'port', port });
+        } catch (e) {
+            log(`Failed to expose port ${port}: ${e.message}`, RED);
+            process.exit(1);
+        }
+        if (!res || res.status < 200 || res.status >= 300) {
+            log(`Failed to expose port ${port}${res?.data?.error ? `: ${res.data.error}` : ''}.`, RED);
+            process.exit(1);
+        }
+        const linkName = res.data?.name || name;
+        console.log(`View: ${state.url}/s/${encodeURIComponent(linkName)}/`);
+        // Same one-bell convention as `hop view` — the human is usually
+        // waiting on this, and the link scrolls away unannounced otherwise.
+        process.stdout.write('\x07');
+        process.exit(0);
+    }
+
     if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
         printFullHelp();
         process.exit(0);

@@ -1,6 +1,211 @@
 {
  "editions": [
   {
+   "generated_at": "2026-08-07T14:41:16.432Z",
+   "summary": "Everything the quota wall froze came back on its own — nothing needs a keystroke — but the error bar that decides whether the interpretable splice model actually beats the baseline has now gone unreported for four straight hours.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It woke itself on its own monitors and read the result that sat unread behind the quota wall all night. With the contaminated run directories moved aside and the arms relaunched clean, the first solid measurement is in: at a matched 10,000 steps, restricting the extra context stream so it can interact across only a single fixed distance, scored per cell type and as a fraction of the span it recovers. That is the direct test of the one surviving explanation — earlier this night the same session ruled out plain local expressivity, leaving cross-position interaction as the mechanism. One thing to know: whatever you had typed at that prompt is gone, replaced by a stray character, so the \"keep going\" you left there never sent and never needed to.",
+     "why": "This is the first uncontaminated number on the question the whole variant comparison was built to answer, and it is sitting on screen ready to read.",
+     "urgency": "finished"
+    },
+    {
+     "session": "Europa",
+     "headline": "The genome-training session cleared the usage-limit menu by itself and is now running what it calls the decisive test: comparing the ensemble against the baseline at a matched number of members, and producing the entire curve rather than a single point. It spent the window first making the seed set configurable so the comparison isn't locked to a hardcoded list. But the confidence interval it promised around 01:05 — the one that says whether the 0.0053 auPRC margin over the baseline is real or noise — has still never been reported, four editions on.",
+     "why": "The interpretability claim, and the multi-scale head being designed on top of it, still rest on a bare point estimate with no error bar; the matched-size curve is the right way to settle it, so this one is worth watching to landing.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "room",
+     "headline": "The catalogue audit found the problem is in the definitions, not the labellers: the contemporary style is being applied to reject plain lighting while simultaneously accepting plain upholstery. It is logging contradictions like this onto a defects watch list rather than resolving them. Only one comparison agent is running — the six labelling batches it planned before quota still have not launched, so enrichment has now been stopped for well over two hours.",
+     "why": "If the style boundaries are genuinely self-contradictory, relabelling cannot fix them — the taxonomy needs a call from you, and that call is what the next million-token pass is waiting on.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Orion",
+     "headline": "You reported that a session tried to display a local web server, spawned a room for it, and you cannot see that room — plus the broader ask that PDFs, images, video and browsers belong to the session that produced them rather than floating loose. The agent acknowledged both, classed them as terminal-side rather than phone-side work, and parked them behind the phone chrome build it is finishing now.",
+     "why": "A session you cannot see is also one you cannot close, so it is worth confirming that stray room isn't holding a port open while it waits its turn.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-07T08:40:46.639Z",
+   "summary": "The usage limit lifted about twenty minutes ago, and nothing came back on its own — the sessions it froze are still parked exactly where they stopped, including one holding a finished result nobody has read.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "The three clean relaunches of the variant arms reached a terminal state — the first uncontaminated read on that comparison — and the notification landed one line before the quota wall, so the result has now sat unread for over an hour. Quota is back, but the session ended its turn inside the block and won't wake itself; your \"keep going, wake me if anything breaks badly\" is still typed at the prompt, unsent. The smoke test on the second cluster is still alive and roughly thirty jobs are still running, so compute is fine — it's the reading that stopped.",
+     "why": "Pressing enter costs you one keystroke and gets you the measurement you waited all night for; leaving it means the arms finished for nothing.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "The catalogue session is still at an empty prompt with its whole plan written out on screen and none of it executed: re-merge the style labels, verify the type check, commit what the consistency audit learned, then launch the next six labelling batches and confirm their working directories actually fill. It stopped at exactly that launch step when quota ran out, and quota has since reset. Nothing is running, so nothing is being wasted — but nothing is progressing either, and the traditional-versus-transitional audit's conclusions remain unapplied to any product.",
+     "why": "Enrichment has now been fully halted for over an hour past the point it could have resumed, and it will stay halted until you tell it to go.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-07T07:41:06.486Z",
+   "summary": "The account hit its usage limit — it resets at 2:20am Chicago — and it froze three sessions mid-stride, including one where a result landed seconds earlier and nobody could read it.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "The genome-training session is stopped dead at a menu asking whether to wait for the limit to reset, spend usage credits, or upgrade the plan. It will do nothing at all until you pick one. The rank-matched confidence interval it re-armed for overnight — the one that decides whether the interpretable ensemble's 0.0053 auPRC margin over the baseline is real or noise — is due and cannot report through the block.",
+     "why": "That interval is the number the whole interpretability claim rests on, and it now can't reach you until you answer a three-item menu.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "Its watcher fired with exactly the news it was waiting for — the relaunched variant arms reached a terminal state — and the very next line on screen is the usage-limit block. So the arms finished and the result went unread. These are the three clean relaunches from last hour, the ones meant to replace the runs that had silently resumed old checkpoints, so this is the first uncontaminated read on that comparison. The second cluster's smoke test is still going, and about thirty jobs remain running on the main cluster.",
+     "why": "The one measurement you've been waiting all night for is sitting unlooked-at behind a quota wall, and the session can't wake itself to tell you.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "The catalogue session ran out of quota at precisely the step where it was to launch its next six labelling batches — after auditing the traditional-versus-transitional inconsistency, merging, and verifying. Nothing new is running. The audit's conclusions are written down but unapplied, and the wave that would have tested them never started.",
+     "why": "Enrichment is fully halted rather than merely slow, so no tokens are being wasted, but nothing resumes on its own once the limit lifts.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Solstice",
+     "headline": "The platform session again reports nothing pending, which means the fleet-wide restart it parked is now four editions old without happening, and the two session-recovery fixes from the phone-app side are still inert in the repo. What it did spend this hour on was a thirty-three-minute analysis of whether these hourly briefings could reuse cached context — concluding they can't and that it wouldn't matter anyway — during the same hour the account ran dry.",
+     "why": "Until that daemon actually cycles, the next mass relaunch strands sessions exactly as it did two nights ago, and the fix has been sitting one restart away the entire time.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-07T06:41:45.378Z",
+   "summary": "Three arms of the interpretable-variants experiment were quietly resuming old checkpoints instead of starting clean, so every number you've been given for the non-pioneer arm is void — and tonight's phone-app regressions trace back to your own rollback.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It caught a systematic error in its own relaunches: because each restart reused the same run directory, the saved checkpoint won over the fresh warm start. The non-pioneer arm silently retrained from the broken saturated gate, another arm resumed its own diverged weights, and the memory probe restarted exactly at its stop step and exited without training — which is why it logged nothing for hours. All three are relaunched clean, the old directories quarantined rather than deleted, and the shared-gate design it pitched you last hour is now running at one, two, four and eight gates. Your \"keep going, wake me if anything breaks badly\" is sitting at the prompt unsent.",
+     "why": "It says plainly that both the original non-pioneer run and its first fix were contaminated, so any number you carry for that arm has to be thrown out — and the run that looked hung was actually exiting instantly, which is the failure mode to check for elsewhere.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Orion",
+     "headline": "The two things you noticed on the phone — the menu disappearing a few seconds after opening a session, and a stray back button — were not new bugs. Your rollback of the app source earlier tonight reverted the two commits that had already fixed exactly this pair. It re-applied the nav-bar fix and deleted the auto-hide timer outright rather than restoring the intermediate version, which still hid the chrome by design. A new build is installed and waiting on a force-quit and reopen.",
+     "why": "Anything else that landed before that rollback point was undone just as silently, so it is worth asking what else was in those reverted commits before you find it the same way.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Solstice",
+     "headline": "The platform session has shipped and verified its search and briefing-history work and now reports nothing pending — which means the fleet-wide restart it parked hours ago, waiting for every terminal to fall idle before cycling the daemon, is no longer on anyone's list. The two session-recovery fixes from the iOS side still exist only in the repo.",
+     "why": "Third edition running with those fixes inert; until that daemon actually restarts, the next mass relaunch will strand sessions exactly as it did last night.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "room",
+     "headline": "The catalogue session has turned from labelling to auditing itself. It is pulling upholstered seating that came back tagged traditional in one batch and transitional in another, across six batches, to see whether those two styles are being applied consistently at all. Four labellers are running about twelve minutes deep, roughly 800k tokens between them.",
+     "why": "If that boundary turns out to be arbitrary, the enrichment done so far has to be re-cut rather than simply re-run — better to know that before the remaining products go through.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-07T05:41:17.334Z",
+   "summary": "The splice ensemble rebuilt without its uninterpretable component still beats the baseline — but only by 0.0053 with no error bar, and the interval that says whether that margin is real doesn't land until around 01:05.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "The scoring job you were waiting on came back: with the free-channel component removed, the ensemble is ahead of the baseline by 0.0053 auPRC. That is the full price of the interpretability constraint, and it is a bare point estimate with no confidence interval behind it. The session has re-armed for about 01:05 to build a rank-matched interval, and has formally marked the dropped component as excluded from the deliverable.",
+     "why": "If that interval crosses zero, the claim that the interpretable model beats SpliceAI does not survive — and the multi-scale head now being designed on top of it is resting on noise.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The dual-context session is debugging a run that silently never got past an early step, even though the input it needed is present — it has had to add step labels to the pipeline to find where it dies. Separately it is arguing for a real design change: instead of each weight matrix learning from a single motif, a shared bank of sixteen, which it estimates gives each one roughly 360× more gradient signal. Your mid-turn question about whether both randi and dsi are in use is still unanswered.",
+     "why": "A variant that fails without saying so burns its cluster allocation and leaves a hole in the variant comparison you are building — and the shared-bank proposal is a change worth your opinion before it commits.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "room",
+     "headline": "The catalog verification session discovered that one batch of a hundred items was killed before writing anything, so that work was never on disk despite having looked launched. It has relaunched that batch, and now checks that the working directories are actually filling with fetched images rather than assuming. Six labellers are running, each about nineteen minutes in and 200–290k tokens deep.",
+     "why": "If launched-but-empty happened once it may have happened silently before, so it is worth counting what is actually on disk against what you believe was labelled — each pass costs well over a million tokens to redo.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Orion",
+     "headline": "The iOS session has moved on from last night's session-recovery work to new ground — command-line help text, an install command for the orchestration instructions, and whether local web servers can be viewed from your phone. The two fixes it landed, the automatic sweep that clears stranded sessions and the stray-token fix, are still only in the repo because the daemon has not been restarted.",
+     "why": "Nothing will raise this again now that the session has moved past it, and until you restart, the next mass relaunch strands sessions exactly as it did last night.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-07T04:41:05.984Z",
+   "summary": "The splice model is being rebuilt without its one uninterpretable component, and the number telling you what that costs lands around 23:30 — while two fixes for last night's session wipeout sit inert until you restart the terminal daemon.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "The genome training session has dropped the free-channel component from the splice ensemble on the grounds that it buys accuracy at the cost of interpretability, and a scoring job is measuring the ensemble without it, due back around 23:30. It also closed out the reproduction bundle for the 0.76212 result — seeds and artifacts now check out. The next step it has queued is building an interpretable multi-scale head.",
+     "why": "You are about to learn the price in accuracy of the interpretability constraint, and whether the margin over SpliceAI survives it — that number decides whether the constraint is affordable.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Orion",
+     "headline": "It traced why some sessions came back last night stuck at a resume prompt instead of running: the check that clears them only ever existed as a command someone had to remember to type. It made that automatic — the daemon now sweeps every live session every 30 seconds — and committed it. That fix and the stray-OAuth-token fix are both dormant; it deliberately did not restart the daemon, per what you told it earlier.",
+     "why": "Two fixes for last night's fallout exist only in the repo, so the next mass relaunch will strand sessions exactly the same way until you restart.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Solstice",
+     "headline": "The terminal-responsiveness work has a detached job parked and waiting for the whole fleet to go quiet; when it fires it will run its cycle, verify, and briefly disconnect terminals before this session resumes itself. Until then the daemon serves the old preview grids, so you will still see part of the layout shift in that window. Afterwards both preview-grid roots go away and this week's letter-spacing and row-height mimicry drops back to a fallback for the non-interactive zoom levels.",
+     "why": "If terminals blink out tonight it is most likely this firing, not a repeat of last night's daemon shutdown — and it is worth landing it in the same window as the daemon restart the iOS session is waiting on rather than taking two disconnects.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-07T03:41:58.383Z",
+   "summary": "Two numbers you've been relying on just became unreliable — the RNA model's best score is probably stale and its search directory has vanished from this Mac, while the small-model plateau you were told about turns out to have been noise.",
+   "items": [
+    {
+     "session": "Supernova",
+     "headline": "The directory holding the RNA model's evolutionary search is no longer on this Mac. It was there on Jul 25; the project folder was last touched Jul 30. A copy exists on randi, so this reads as a deliberate move rather than loss — but that is unconfirmed, and its last two connections to randi failed on DNS. Separately, the 0.7823 you've been quoting as the best single model is likely stale: artifacts from Jul 27–30 show a newer line of runs that came after it and was never scored into that comparison.",
+     "why": "Right now both your leaderboard number and the only copy of the search results are unverified; it needs a yes to go check the cluster.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "music",
+     "headline": "It is retracting the earlier read that the 274M model had stopped improving — with more data, that flat stretch was noise near the floor. It has since hit a fresh best of 0.6466 and is still descending. The 558M also set a new best at 0.6520 and is closing steadily: the gap has gone 0.0067 → 0.0061 → 0.0054 across the last three checks.",
+     "why": "Neither model has actually flattened, so the learning-rate cooldown has no trigger yet and calling a winner now would be premature.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "A real answer is taking shape, and it is a negative one. The arm allowed an arbitrary local function over a 51 bp window with 1.28M parameters is sitting at the floor, while a 74k-parameter footprint model reaches 62% of the span. If that holds, local expressivity is not what the extra context stream provides, and the explanation moves to cross-position interaction. One arm is confirmed broken from a diverged step and will be restarted. It also just switched off both watchers on these runs.",
+     "why": "The first comparison that means anything lands hours out at 15–20k steps, and with the watchers off nothing will wake the session when the arms get there.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Orion",
+     "headline": "It found why everything died last night. At 21:42:34 the terminal daemon took a clean shutdown signal — not a crash — and the host process holding every session's terminal went down with it. Memory pressure and sleep/wake are both ruled out, so something sent it a deliberate signal and nothing logged what. Collateral is still surfacing across the fleet: the auto-statistician's web server and the sequence browser's dev server were both dead until someone happened to ask.",
+     "why": "Until the sender is identified this can recur tonight, and anything not launched detached dies with it.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Polaris",
+     "headline": "It was cut off mid-retry while checking on the archival transfer — both routes had failed and it was retrying when the interrupt landed — and it has sat at an empty prompt since. It did finish the permissions cleanup first, adding 15 read-only patterns to your global settings and deliberately refusing to allowlist ssh, scp, rsync, and curl on the grounds that they grant arbitrary remote execution.",
+     "why": "The transfer check you asked for never completed; the migration session reports its own legs healthy, so this may be duplicate work, but nobody has confirmed the archive side here is still moving.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
    "generated_at": "2026-08-07T02:41:14.646Z",
    "summary": "Three sessions are stalled on words you typed but never sent — and in one of them, five hours of GPU time is running toward a result its own agent says cannot be interpreted.",
    "items": [

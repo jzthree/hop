@@ -113,6 +113,46 @@ const runE2E = async () => {
     const switchedBuffer = await page1.evaluate(() => window.__hay?.getBufferText() || "");
     assert.ok(!switchedBuffer.includes("shared"), `old room output survived session switch: ${JSON.stringify(switchedBuffer)}`);
 
+    // A wall/watch tile may fit an unattended room, but it must not replace
+    // the PTY geometry underneath an attached desktop. Claude's alternate
+    // screen has no local scrollback, so foreign rows can otherwise be clipped.
+    const monitorClaim = await page1.evaluate(async (roomName) => {
+      const peer = new WebSocket(
+        `ws://${location.host}/ws?room=${encodeURIComponent(roomName)}&name=Wall&source=monitor&replay=0&cols=240&rows=70`
+      );
+      const nextActiveSize = () => new Promise((resolve) => {
+        const handler = (event) => {
+          const message = JSON.parse(String(event.data));
+          if (message.type !== "active_size") return;
+          peer.removeEventListener("message", handler);
+          resolve(message);
+        };
+        peer.addEventListener("message", handler);
+      });
+      const initialSize = nextActiveSize();
+      await new Promise((resolve, reject) => {
+        peer.onopen = resolve;
+        peer.onerror = reject;
+      });
+      const before = await initialSize;
+      const claimedSize = nextActiveSize();
+      peer.send(JSON.stringify({
+        type: "resize",
+        cols: 240,
+        rows: 70,
+        claim: "attach",
+        user: true
+      }));
+      const after = await claimedSize;
+      peer.close();
+      return { before, after };
+    }, freshRoom);
+    assert.deepEqual(
+      { cols: monitorClaim.after.cols, rows: monitorClaim.after.rows },
+      { cols: monitorClaim.before.cols, rows: monitorClaim.before.rows },
+      `monitor replaced an attached desktop's PTY size: ${JSON.stringify(monitorClaim)}`
+    );
+
     // A resize can collapse scrollback to y=base=0 without xterm emitting an
     // onScroll event. App follow-mode must reconcile that state before the
     // next real room output grows below a viewport parked at 0.

@@ -905,11 +905,17 @@ export class Room extends EventEmitter {
       ...[...this.clients.values()].filter((c) => c.id !== client.id).map((c) => c.lastInputAt)
     );
     const claimIdleMs = claim === "attach" ? ATTACH_CLAIM_IDLE_MS : RESIZE_CLAIM_IDLE_MS;
-    // A user-flagged claim is a deliberate human act (clicking a wall tile,
-    // switching to the session): it wins outright. Anyone actively typing
-    // elsewhere reclaims with their next keystroke, so misfires self-heal.
-    const isActive = userClaim ||
-      client.lastInputAt >= maxInputAt || now() - othersMaxInputAt > claimIdleMs;
+    // A wall/watch tile may size an unattended session, but must never clip a
+    // live desktop by forcing Claude's alternate screen to the tile's grid.
+    // Monitor claim sockets are deliberately short-lived and carry user:true,
+    // so this source check must precede the normal user-claim override.
+    const monitorHasInteractivePeer = client.source === "monitor"
+      && [...this.clients.values()].some((peer) => peer.id !== client.id && peer.source !== "monitor");
+    // A user-flagged interactive claim is a deliberate human act (switching
+    // to the session), so it wins outright. Anyone actively typing elsewhere
+    // reclaims with their next keystroke, so misfires self-heal.
+    const isActive = !monitorHasInteractivePeer && (userClaim ||
+      client.lastInputAt >= maxInputAt || now() - othersMaxInputAt > claimIdleMs);
     if (isActive) {
       this.pty.resize(cols, rows);
       this.activeCols = cols;

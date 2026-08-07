@@ -1,0 +1,362 @@
+{
+ "editions": [
+  {
+   "generated_at": "2026-08-07T01:41:43.129Z",
+   "summary": "The accessibility experiment just contradicted the explanation it gave you earlier and is holding its conclusion, while two instructions still sit typed-but-unsent — and a pending host restart could wipe them.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It walked back its own story. One arm came out more determined rather than less — the opposite direction from the receiver-side explanation it gave you — and it now says that explanation may simply be weaker than it stated. It is refusing to call the result until the one run that separates the two directions by construction finishes. Good news alongside it: the random-grouping control the comparison needed is now queued, six families are in flight, and both monitors are live.",
+     "why": "The mechanism claim you were handed is provisional, so nothing downstream should treat it as settled until that separating run lands.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "Your instruction to queue the bagging arms is still sitting at the prompt, unsent, an hour on — nothing was queued, and the eight seed runs remain the only thing on the cluster. The session has now also filled its context completely, so the reasoning it was holding about that decision is at risk of being compacted away before you press enter.",
+     "why": "A second hour of roughly 112 idle GPUs, and the longer it waits the more likely you have to re-explain the plan from scratch.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "opensupwrwhisper",
+     "headline": "The dictation keyboard is submission-ready: both on-device engines stripped, tests passing, release build installed to your phone on the first attempt. It is waiting on one call from you — the onboarding card and the README both name Wispr Flow directly. Its read is that Apple's rule covers store metadata rather than in-app copy, so this is not a rejection risk, but it cuts against the don't-name-them line you took last time. The README also still says it installs to your personal phone.",
+     "why": "Everything else is done; the App Store submission is gated purely on a wording decision only you can make.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Orion",
+     "headline": "The size fix landed. Any window that isn't your phone's natural size now pins the grid, scales the font, arms one-keystroke reclaim, and raises the chip — so the indicator can no longer be fooled, and the menu's self-check reads from the same source of truth. It gave you a three-step test to run.",
+     "why": "Hold that test briefly: the terminal-wall session is mid-replacement of the exact machinery that steals the size, so testing before its restart completes could give you a misleading answer.",
+     "urgency": "finished"
+    },
+    {
+     "session": "Solstice",
+     "headline": "It moved the terminal wall off WebGL entirely — removing the roughly sixteen-context browser cap a large wall could hit and eliminating the blank-cell class of bug — but only the rendering half is live. The geometry half needs new host code, so it launched a detached restart that waits for the fleet to fall idle and then cycles everything, with a brief disconnect.",
+     "why": "Until that fires you are seeing a half-applied change, and when it does fire the two instructions currently typed-but-unsent elsewhere may not survive the reconnect.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-07T00:41:50.651Z",
+   "summary": "Two of your instructions are typed at prompts but were never sent — queue the bagging arms on genome training, and widen the accessibility monitor — while the small-LM session quietly reports the 558M closing to 0.0054 of the 274M and still gaining.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "Your \"queue the bagging arms too\" is sitting at the prompt unsent. The agent had just advised waiting for the eight seed runs to finish so the two sets don't compete for local disk bandwidth — but that is the same bandwidth its own test an hour ago showed is not the bottleneck, and you are using 8 of the cluster's roughly 120 GPUs. It separately flagged that epoch pace is drifting; if it keeps slipping, arms hit the 12-hour wall near epoch 215.",
+     "why": "The reason to wait probably no longer holds and 112 GPUs are idle; the wall risk is survivable either way, since the best-so-far checkpoint saves continuously — 37 written already — and only the final end-of-run file would be lost.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "music",
+     "headline": "The bigger model is catching the smaller one. The 558M posted another best at 0.6520 and is still falling hard, and its gap to the 274M has narrowed three readings running — 0.0067, then 0.0061, now 0.0054 — closing about 0.0007 to 0.001 each update. Neither curve has flattened, so the agent is refusing to call a winner, and the learning-rate cooldown it was watching for has not triggered because the 274M is still descending too.",
+     "why": "At this pace the larger model crosses the smaller within a handful more updates, so any \"the small one is good enough\" conclusion has a short shelf life.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "It set the bar the whole experiment has to clear: seed-to-seed noise alone is about ±0.001, so any difference between arms smaller than that means nothing, and the gap it is chasing is unfalsifiable unless read against a random-versus-random baseline. Five arm families are queued, none finished, one actually running. Your instruction to add the non-pioneer and block-diagonal arms to the monitor is typed but unsent, and it confirmed it is not self-paced, so results will sit unread until the monitor fires.",
+     "why": "If no random-versus-random control is in the queue, the headline comparison cannot be interpreted however the arms turn out — worth fixing before more compute goes into them.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Orion",
+     "headline": "The newest build shipped and installed cleanly on the first attempt with 112 tests green, and it established that the layout bug is a rendering problem rather than a geometry one — the distinction that took days of screenshots to pin down. Two of its edit scripts silently wrote nothing mid-build; the strict check caught both before anything went out.",
+     "why": "Nothing is broken, but it cannot check the phone itself: kill and reopen the app, then confirm hold-to-delete repeats and the menu reports the right size.",
+     "urgency": "finished"
+    },
+    {
+     "session": "Bellatrix",
+     "headline": "Before you handed it the scrolling bug, it had laid out three ways forward on the research question and asked you to pick one — that question is now unanswered while it works on scrolling. It also warned that its own notes are two to eight days stale and that your Vista allocation was draining the last time it looked, so it wants the remaining compute verified before launching anything.",
+     "why": "The research thread you asked about is parked rather than closed, and the compute it would need may not still be there.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T23:41:20.836Z",
+   "summary": "The genome-training session found that arms reading straight from your home directory are keeping exact pace with locally-staged ones — both at epoch 16 — so the storage engineering two sessions have been doing isn't buying any speed.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "It tested the assumption everyone has been building around and it did not hold: the training arms reading data from your home directory are matching the ones staged on fast local disk step for step, both sitting at epoch 16. Read throughput simply is not the bottleneck at this scale. It also declined to mount the cluster filesystem over the network for training — the trainer has no resume, so one dropped mount mid-epoch throws away a ten-hour job — but says a direct network link is worth having for moving files, and that it is a two-minute account change whenever you say so.",
+     "why": "This quietly retires the case for elaborate data staging, which is where a lot of effort has gone this week including the disk fight on your interpretability session — and incidentally the arms I flagged last hour as silent are now printing epochs, so they did get restarted.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The disk crunch is over. The environment moved out of the capped scratch space and rebuilt in your home directory, and it launched on an H200 node the old setup could not reach at all. But it is refusing to call the second cluster usable yet: an older script it read had paths from a previous cluster baked in, so it wants a real arm to train a few hundred steps and match the loss curve before claiming anything. The four queued experiment families and the one currently running are all still on the original cluster.",
+     "why": "Nothing is at risk — the actual science is untouched and the second cluster is only spare capacity — but note the finding from your genome-training session that local staging buys nothing, which may make some of this work unnecessary.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Umbra",
+     "headline": "The paper tool session hit a server overload error, auto-compacted itself, and has been sitting at an empty prompt ever since with nothing running. It had a recurring task loop active before this happened.",
+     "why": "It stopped mid-work through no fault of its own and will not pick back up on its own — whatever it was writing is paused until you send it anything.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Orion",
+     "headline": "Your reply confirming the notification tier works is typed at the prompt but was never sent. The agent meanwhile wrote the deploy-and-relaunch discipline into its permanent memory, including the reminder to kill and reopen the app after every install.",
+     "why": "Low stakes, but it is waiting on a confirmation you already wrote — one keystroke closes it out.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T22:41:12.168Z",
+   "summary": "Your answer to the motif-pairing session's disk question is typed at its prompt but was never sent — its data move to the cluster is stalled 3 MB from done until you press Enter.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It ran out of disk three megabytes from the finish line. About 50 GB of training data landed and verified byte-for-byte, but the scratch space is capped right around 50 GB, so the warm-start checkpoint and the job scripts never wrote. You already answered — move the virtual environment to your home directory to free room — and that reply is sitting typed at the prompt, unsent.",
+     "why": "One keystroke finishes the transfer; until then the motif-pairing run has no checkpoint to warm-start from, and since scratch is normally purged anyway, the longer-term home for this 54 GB — a raised quota or a proper lab allocation — is still a decision only you can make.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "music",
+     "headline": "It is walking back the plateau call from earlier. The flat stretch on the 274M model was noise near the floor — it is still creeping downward at constant learning rate, so no cooldown is warranted. Meanwhile the 558M set another new best and is descending hard, and the gap between the two has closed from 0.0067 to 0.0061 to 0.0054.",
+     "why": "Neither model has actually flattened, so there is still no winner to declare — and at roughly 0.0007–0.001 gained per update the larger model is on course to cross the smaller one, which would settle the size question without you intervening.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "It is unstuck — signed back in and working a queue again, tracking the ensemble rerun due this afternoon and the epoch-budget run still on for Friday morning. What it has not mentioned anywhere is the two weighted training arms that had gone two hours without printing a single epoch.",
+     "why": "Those were the arms burning roughly two GPU-hours each re-scanning a data file that an earlier step already read, and nothing on screen shows they were ever restarted on the fixed script — worth one direct question before more borrowed GPU time goes to it.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Orion",
+     "headline": "The notification work is deployed, but it is not live on your phone yet — you have to kill the app and relaunch it to pick up the new build. The throwaway session it used for testing is still running and can be killed whenever.",
+     "why": "Until you relaunch, your phone is still on the old behavior, so you would not see the change you asked for even though it shipped.",
+     "urgency": "finished"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T21:41:27.338Z",
+   "summary": "Two sessions were signed out mid-work and are sitting at login screens — including the training-reproducibility one, so four jobs are running unwatched while two of them burn preemptible GPU time on a scan that should have taken minutes.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "It got signed out and is stuck at the account picker. Its last check confirmed all four training jobs alive, but the two weighted arms still haven't printed a single epoch after two hours — both are re-scanning the data file's contents, work the earlier step already did, at roughly two GPU-hours each. It had planned to restart them on the fixed script if they still weren't training by its next pass, and it can't make that pass while logged out.",
+     "why": "The long run is on track for Friday morning, but the two weighted arms are spending borrowed GPU time on nothing and the agent that would catch it is frozen.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "demo-view",
+     "headline": "The \"reconnect the VPN so I can finish\" alert that reached your phone is a prop — this is the throwaway session the iOS work has been using to test the new notification path, and that was the test payload.",
+     "why": "Nothing is waiting on you; your actual VPN automation session finished and committed cleanly, and this scratch session can be killed.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "room",
+     "headline": "It is one keystroke from resuming: the screen now reads \"Login successful. Press Enter to continue.\" It signed in as your secondary Google account rather than your main one, which is worth a glance before you continue.",
+     "why": "The remaining 270 products are still untouched, and two verified changes are still unshipped — the placeholder-image import gate covering 14 products, and the higher-resolution image swap a labeller confirmed on 100 of 100.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Orion",
+     "headline": "Notification tiering shipped with its full test suite green, and the deliberate half of it is that an ordinary bell no longer raises a banner at all. A session that finishes and merely rings now appears only in the badge and on the wall — never on your lock screen. Only agents that explicitly send a notify message will interrupt you.",
+     "why": "Every agent in your fleet that signals completion by ringing has just gone silent on your phone until you teach it the new call.",
+     "urgency": "finished"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "Rather than keep waiting on the credential question, it launched the motif-pairing experiment on the cluster it can already reach. It initialises the mixing weight at 0.95 instead of 1.0, because at exactly 1 the accessibility branch receives no gradient and weight decay kills it before it is ever used — the starved-branch failure this project has already hit twice.",
+     "why": "It now logs that branch's statistics every thousand steps, so a null result will distinguish \"no motif needs open chromatin\" from \"the branch never moved\" — the ambiguity that wasted the two previous attempts.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T20:40:58.461Z",
+   "summary": "Last hour's headline was wrong and has been retracted — the smaller SLE model has not flattened, both models are still improving, and there is no winner to call; meanwhile two sessions are quietly stalled on things you'd assume were running.",
+   "items": [
+    {
+     "session": "music",
+     "headline": "It walked back the flat-line call from an hour ago: that reading was noise near the floor, and at constant learning rate the smaller model is still crawling downward. The larger one set another new best and is descending hard, and the gap between them has closed from 0.0067 to 0.0061 to 0.0054 over three updates.",
+     "why": "There is no winner to call and no case for spending the learning-rate cooldown — if you were about to act on last night's read, that ground has moved.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "It has stopped and is waiting on a decision only you can make. To move the 54 GB of data onto the second cluster it wants to add an SSH key there, which is a credential change it refuses to make unsupervised; the alternative is relaying through your laptop over many hours, which dies the moment the Mac sleeps. It can check for a faster transfer service without touching anything if you'd rather.",
+     "why": "Today's queue is fine — only about seven of your jobs compete for GPUs — but the next wave of seed replications has nowhere to run until a transfer path exists.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Hubble",
+     "headline": "The ten-minute watcher it promised for the App Store go-live took a single baseline reading and then stopped. The listing is still propagating and the in-app purchase is still stuck awaiting submission, and nothing is polling either any more.",
+     "why": "You were told you'd be alerted the moment the store page appears; as it stands that will happen silently.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "Still parked exactly where it was. The word to resume was typed halfway — three letters sitting at the prompt — and never sent, so the queue was never rebuilt and the remaining 270 products are untouched.",
+     "why": "It is holding close to a million tokens of context doing nothing, with the placeholder-image import gate and the verified higher-resolution swap still unshipped.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Europa",
+     "headline": "It is armed to launch the seed-replication fleet at 16:02, the moment the second cluster's build lands — the same cluster the accessibility work is waiting on a credential decision to reach. It also amended the ensemble score it reported earlier, and left open whether one precision-recall gain is a real effect or an artifact of the segmental tail.",
+     "why": "Two of your sessions now hinge on that same cluster being ready, and one headline number has already moved once.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T19:41:38.016Z",
+   "summary": "Two results are in and unread: the fresh-seed replication that gates your motif sign conclusion finished all four cells, and your smaller SLE model has flattened at 0.6467 while the larger one is still improving.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "The two-by-two sign experiment, re-run under a fresh random seed, has completed all four cells — that was the replication gating the sign result — and the numbers are sitting there ready to read. It also walked back its own queue alarm: of the 85 pending jobs only about seven actually compete for GPUs, and the four new arms are behind six of your own running jobs, so they will start on their own.",
+     "why": "The conclusion you deferred is now one read away, and nothing needs cancelling to make room for the new arms after all.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "music",
+     "headline": "The 274M model has genuinely floored at 0.6467, while the 558M is still descending about 0.002–0.003 every couple of days and eating the gap. Its constant-learning-rate phase has given everything it is going to give.",
+     "why": "If you were leaning toward calling a winner, that flat line is the signal — the only lever left on the smaller model is the learning-rate cooldown, and the question is whether it is worth spending.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "burrow",
+     "headline": "It finally committed the VPN work it had been holding — as one large commit rather than three, since the strands interleave across 38 changes in a single file — then installed, relaunched and verified the running build changed. The duplicate processes fighting over the tunnel port are gone, and it saved commit-install-relaunch-verify as a standing preference it won't ask about again.",
+     "why": "That closes yesterday's contradiction between the two VPN sessions, but the \"all 84 tests green\" verdict came from the other session on an earlier commit — the build now installed on your machine has not been through that check.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "room",
+     "headline": "Stopped with its tally in: roughly 70 vocabulary repairs and 59 catalogue defects found, plus two verified wins queued — an import gate that catches placeholder images, and a higher-resolution image swap for one retailer that checked out on 100 of 100 products.",
+     "why": "One word rebuilds the queue and it picks up the remaining 270 products automatically; until then it sits idle holding a very large context.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "slides",
+     "headline": "Finished the filmstrip, logo and agent fixes for the slides tool and left three commits sitting unpushed on master, asking whether to send them.",
+     "why": "The work exists only on this machine until you answer, and the badge overlapping the thumbnail title is still untouched.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T18:56:04.308Z",
+   "summary": "Two sessions now disagree about your VPN app: one just pushed the gateway/password fixes and reports CI fully green, while the other still believes that same work is sitting uncommitted and not installed.",
+   "items": [
+    {
+     "session": "Nebula",
+     "headline": "Reports the VPN app's password and gateway work committed, pushed, and fully green — 84 tests locally plus a clean-checkout build on GitHub — touching the very same gateway and password files that burrow says are still uncommitted in its tree.",
+     "why": "Either burrow's \"three rounds uncommitted, nothing installed\" is now stale and the fixes really are safe, or two agents are editing one checkout and burrow's pending commit will collide — worth resolving before you let burrow commit and reinstall.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Supernova",
+     "headline": "Still waiting on your go-ahead to check the cluster for the current ensemble leader — and the DNS failures it blamed have cleared: the infrastructure session deployed to randi in the meantime and verified the service healthy there.",
+     "why": "The obstacle it cited is gone, so the question of whether 0.7823 is still your best score, and whether the moved experiment directory is intact, is now one word away from being answered.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "Moved past the retraction to a concrete proposal: replace the per-motif spline with one shared curve shape plus a per-motif scale — 360 parameters against the dense version's 201,552, a 280-fold cut — and run it alongside the free-spline version as a paired falsification test.",
+     "why": "It's a genuinely sharp experiment (if the shared curve holds, the nonlinearity is universal in shape), but nothing is launched: this and the exclusion-radius test that would settle the pairing result are both parked on your word, and another session has flagged the Vista allocation as draining.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Hubble",
+     "headline": "The watcher for the App Store listing going live and the in-app purchase leaving its stuck state took one baseline reading, reported no change, and then stopped.",
+     "why": "Nothing is now watching, so the notification you're implicitly waiting on will never arrive — if the purchase is still stuck tomorrow you'll need to look in the App Store Connect web interface yourself.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Solstice",
+     "headline": "Armed a detached restart cycle that waits for the fleet to go idle before swapping in new rendering host code — and every session on the fleet is idle right now.",
+     "why": "Expect terminals to blink out briefly and self-resume at any moment; that's intended, but don't confuse it with a crash, and don't start burrow's install at the same time since that also drops your VPN and tunnels.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T17:41:16.678Z",
+   "summary": "The RNA ensemble's leading score may already be stale and the experiment directory behind it has vanished from this Mac — and separately, the 274M model has stopped improving while the 558M keeps closing.",
+   "items": [
+    {
+     "session": "Supernova",
+     "headline": "The 0.7823 you've been quoting as the ensemble's best may no longer be current, and the local experiment directory it came from is gone — last read on Jul 25, absent now.",
+     "why": "Work clearly continued past it (new visualizations on Jul 27, a fresh diagnostic dump Jul 30 tied to a cluster job), so the number anchoring your ensemble story could be superseded; the copy on the cluster looks intact but is unconfirmed, and the session is waiting on your OK to go check because its last two connections there failed DNS.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "music",
+     "headline": "The 274M has flatlined at 0.6467 for roughly two days, bouncing but never beating it, while the 558M set another new best at 0.6528 and is still descending about 0.002–0.003 every couple of days.",
+     "why": "The smaller model's constant-learning-rate phase has given everything it's going to give — so it's spending GPUs for nothing until you pull the cooldown lever — and the gap has narrowed from 0.0067 to 0.0061, which is the signal to start thinking about which one you're actually calling the winner.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "Only half the motif-pairing correlation survived: the outgoing direction held, but the incoming side swung from +0.44 in one arm to +0.02 in another, so the session will now only stand behind the outgoing result.",
+     "why": "It also suspects roughly 70% of the interaction is a per-motif magnitude correction rather than genuine pairing, which would undercut the biological reading — the direct reproducibility run is going now, but the exclusion-radius test that would actually settle it is built and waiting on your word.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "burrow",
+     "headline": "Three separate rounds of VPN work — reconnect retries, tunnel drift and reload, and password handling across the gateway and tunnel editors — are all sitting uncommitted, and none of it is in the app you're actually running.",
+     "why": "Everything you've been told is fixed this week isn't live yet, and installing means a relaunch that drops the VPN and your tunnels, so it deliberately stopped and left the call to you.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Polaris",
+     "headline": "Polaris was interrupted partway through its transfer-status update and has been idle ever since, after deciding it couldn't safely pre-approve the remote-shell commands that generate most of your permission prompts.",
+     "why": "Probably harmless — the dedicated transfer session reports both the cloud copy and the QNAP archival healthy with a fresh three-day deadline and a daily 8am check, and says you're clear to drop the university VPN whenever you like — so Polaris mostly needs dismissing or restarting.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-06T16:41:14.748Z",
+   "summary": "Two results got more honest overnight — the accessibility competition gradient was an estimator artifact, and the splice-variant winner is inside seed noise — while a fleet-wide terminal restart sits armed waiting for an idle the annotation loop may never give it.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "The graded competition effect reported earlier is retracted. Re-run without the shrunk estimator, the effect is binary: motif pairs whose binding sites overlap suppress each other about twice as strongly (−4.7 to −4.9) as pairs that don't (−2.4), with full and partial overlap indistinguishable.",
+     "why": "Both the monotone gradient and the apparent sign flip were artifacts of the estimator — so the core claim, that distinct sequence-dissimilar motifs compete when their sites physically collide, now rests on raw counts and is firmer than when first made, but any slide saying competition weakens smoothly with separation needs fixing.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "The splice variant ranking collapsed: the top four models span 0.0018 while seed-to-seed variation alone is 0.0022, so they are one equivalence class, not an order. The highest-scoring recipe has the worst site-detection auPRC (0.8929) and actively hurts the ensemble.",
+     "why": "Picking a winner from this sweep would be picking noise; the recommendation is the simplest recipe (binary targets, no usage table), and even its 0.7360 is the lucky draw of a three-seed distribution averaging 0.7336, so it should not be quoted as a point estimate.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "burrow",
+     "headline": "Three finished rounds of VPN work — tunnel reload, connection retries, credential handling — are sitting uncommitted, and none of it is in your installed app. It is waiting on your yes, because reinstalling means a relaunch that drops the VPN and every tunnel.",
+     "why": "Nothing ships until you answer, the same holds for three unpushed commits on the slides tool, and the docs' promise that it never rewrites your existing config is now false and has been corrected in place.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Solstice",
+     "headline": "A detached restart is armed on this machine: it waits for the whole fleet to go idle, then cycles the daemon to deliver the second half of the terminal rendering fix. Until it fires, preview grids stay on the old slow path.",
+     "why": "The furniture-annotation loop runs five agents continuously, so fleet-idle may never arrive and the restart could sit forever — or fire mid-batch and disconnect every terminal at once.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "The labeling loop is 91 batches deep with five agents running concurrently at roughly 190k tokens each, and its own critique found the precision check had gone unfalsifiable — it would have scored 41 of 42 on a set that was genuinely worse.",
+     "why": "Precision figures this loop reported before that catch are inflated, and it is burning close to a million tokens per wave unattended.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  }
+ ]
+}

@@ -117,25 +117,20 @@ const SERIALIZED_MAX_REQUEST = 524_288;
 // snapshot never trips).
 const SERIALIZED_CAPPED_HINT_BYTES = 262_144;
 
-// Autofit-on-attach: a resize may claim the shared size when every OTHER
-// client has been input-idle at least this long. Someone actively typing keeps
-// the size they set; a viewer opening the session after everyone went idle
-// takes it over immediately instead of waiting to type first.
-const RESIZE_CLAIM_IDLE_MS = (() => {
-  const env = Number(process.env.HAY_RESIZE_CLAIM_IDLE_MS);
-  return Number.isFinite(env) && env >= 0 ? env : 60_000;
-})();
-// A claim:"attach" resize (a fresh client's first autofit) is deliberate:
-// someone just opened the session there. It takes the shared size unless a
-// peer typed within this window — only an actively-typing peer holds it.
-// 2.5s (was 5s): an actively typing peer keeps refreshing its own window, so
-// this only decides how long a PAUSED typist blocks a deliberate new attach —
-// measured 5s made wall-tile focus feel stuck (converged at ~5s through the
-// tunnel; ~3s with this).
-const ATTACH_CLAIM_IDLE_MS = (() => {
-  const env = Number(process.env.HAY_ATTACH_CLAIM_IDLE_MS);
-  return Number.isFinite(env) && env >= 0 ? env : 2_500;
-})();
+// Size ownership: the last USER ACTION owns the PTY size — opening the
+// session (a claim:"attach" or user:true resize) or a real keystroke,
+// whichever happened last. No idle windows, no election. The owner's
+// resizes apply unconditionally (their viewport IS the session's size);
+// everyone else's are recorded as that client's declared fit and answered
+// with a corrective active_size so followers can adopt the owner's grid.
+// When a keystroke transfers ownership, the PTY immediately takes the new
+// owner's declared fit. Monitors (source=monitor: wall tiles, preview
+// sockets) never own the size; they may size an UNATTENDED session so
+// previews render true. Wheel/mouse reports are reading, not typing, and
+// transfer nothing. SGR mouse reports only — every hop client sends wheel
+// as CSI < b;x;y M/m. Anchored and exclusive: a payload containing
+// anything besides mouse reports still counts as typing.
+const PURE_MOUSE_REPORT = /^(?:\x1b\[<\d+;\d+;\d+[Mm])+$/;
 const CONTROL_SEQUENCE_TAIL = 32;
 const DEBUG_STATE = process.env.HAY_DEBUG === "1";
 
@@ -185,12 +180,11 @@ class ClientState {
   color: string;
   typing = false;
   lastActive = now();
-  // Timestamp of this client's last real keystroke input (not resize, not the
-  // typing indicator, not connect). 0 = has never typed. Drives the active PTY
-  // size election so size follows the active typer, not whoever last resized.
-  lastInputAt = 0;
   socket: SocketAdapter;
   source: string;
+  // Declared fit: the size this client's viewport wants, updated by every
+  // resize message whether or not it applied. Becomes the PTY size the
+  // moment a keystroke makes this client the size owner.
   cols: number;
   rows: number;
 
@@ -224,7 +218,9 @@ export class Room extends EventEmitter {
   private clients = new Map<string, ClientState>();
   private collabMode = true;
   private controllerId: string | null = null;
-  private activeClientId: string | null = null;
+  // The client whose last user action (open or keystroke) owns the PTY size.
+  // null = up for grabs (fresh room, or the owner detached).
+  private sizeOwnerId: string | null = null;
   private activeCols: number;
   private activeRows: number;
   // Retained raw output as a chunk ring: append is O(1) and trimming drops
@@ -385,7 +381,7 @@ export class Room extends EventEmitter {
     socket.send(
       JSON.stringify({
         type: "active_size",
-        clientId: this.activeClientId ?? client.id,
+        clientId: this.sizeOwnerId ?? client.id,
         cols: this.activeCols,
         rows: this.activeRows
       } satisfies ServerMessage)
@@ -880,7 +876,21 @@ export class Room extends EventEmitter {
       return;
     }
     client.lastActive = now();
-    client.lastInputAt = now();
+    // A real keystroke takes the size: transfer ownership and bring the PTY
+    // to the new owner's declared fit immediately, so typing from a phone
+    // reshapes the session even before its next resize message arrives.
+    // Wheel/mouse reports are reading, not typing — a phone scrolling claude
+    // must not take the size from someone typing at a desk.
+    if (
+      client.source !== "monitor" &&
+      this.sizeOwnerId !== client.id &&
+      !PURE_MOUSE_REPORT.test(data)
+    ) {
+      this.sizeOwnerId = client.id;
+      if (client.cols !== this.activeCols || client.rows !== this.activeRows) {
+        this.applySize(client, client.cols, client.rows);
+      }
+    }
     this.pty.write(data);
     this.emit("pty_input", { roomId: this.id, clientId: client.id, data, timestamp: now() });
   }
@@ -889,66 +899,76 @@ export class Room extends EventEmitter {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
     if (cols < 1 || cols > 500 || rows < 1 || rows > 200) return;
 
+    // Always record the declared fit, applied or not — a later keystroke
+    // makes it the PTY size (see handleInput).
     client.cols = cols;
     client.rows = rows;
-    // The active PTY size follows whoever is actively typing — not whoever last
-    // resized. Previously a resize bumped lastActive and then checked "am I the
-    // most active?", which was trivially true for the resizer, so every resize
-    // won: a passive viewer resizing their window yanked the size from the
-    // active typer, and two differently-sized clients flapped. Elect on typing
-    // recency (lastInputAt) instead. A client that has never typed (lastInputAt
-    // 0) only wins when no one else has typed either — so the first/sole client
-    // can still size the PTY before typing.
-    const maxInputAt = Math.max(...[...this.clients.values()].map((c) => c.lastInputAt));
-    const othersMaxInputAt = Math.max(
-      0,
-      ...[...this.clients.values()].filter((c) => c.id !== client.id).map((c) => c.lastInputAt)
-    );
-    const claimIdleMs = claim === "attach" ? ATTACH_CLAIM_IDLE_MS : RESIZE_CLAIM_IDLE_MS;
-    // A wall/watch tile may size an unattended session, but must never clip a
-    // live desktop by forcing Claude's alternate screen to the tile's grid.
-    // Monitor claim sockets are deliberately short-lived and carry user:true,
-    // so this source check must precede the normal user-claim override.
-    const monitorHasInteractivePeer = client.source === "monitor"
-      && [...this.clients.values()].some((peer) => peer.id !== client.id && peer.source !== "monitor");
-    // A user-flagged interactive claim is a deliberate human act (switching
-    // to the session), so it wins outright. Anyone actively typing elsewhere
-    // reclaims with their next keystroke, so misfires self-heal.
-    const isActive = !monitorHasInteractivePeer && (userClaim ||
-      client.lastInputAt >= maxInputAt || now() - othersMaxInputAt > claimIdleMs);
-    if (isActive) {
-      this.pty.resize(cols, rows);
-      this.activeCols = cols;
-      this.activeRows = rows;
-      this.grid?.resize(cols, rows);
-      this.activeClientId = client.id;
-      // Broadcast the new active size to other clients so they can adjust —
-      // and CONFIRM to the winner: a claimant otherwise learns nothing on
-      // success and can only distinguish accept from reject by timeout.
-      this.broadcastActiveSize(client);
-      client.socket.send(
-        JSON.stringify({
-          type: "active_size",
-          clientId: client.id,
-          cols,
-          rows
-        } satisfies ServerMessage)
+
+    // A wall/watch tile may size an unattended session so previews render
+    // true, but must never clip a live client by forcing Claude's alternate
+    // screen to the tile's grid — and never takes ownership.
+    if (client.source === "monitor") {
+      const hasInteractivePeer = [...this.clients.values()].some(
+        (peer) => peer.id !== client.id && peer.source !== "monitor"
       );
-      this.emit("pty_resize", { roomId: this.id, clientId: client.id, cols, rows, timestamp: now() });
-    } else if (cols !== this.activeCols || rows !== this.activeRows) {
-      // The resize lost the election (a passive viewer auto-fitted itself).
-      // Snap that client back to the shared size — otherwise its local
-      // terminal re-wraps the buffer at a size the PTY isn't, and it has no
-      // way to learn the real size until the next winning resize.
-      client.socket.send(
-        JSON.stringify({
-          type: "active_size",
-          clientId: this.activeClientId ?? client.id,
-          cols: this.activeCols,
-          rows: this.activeRows
-        } satisfies ServerMessage)
-      );
+      if (!hasInteractivePeer) {
+        this.applySize(client, cols, rows);
+      } else if (cols !== this.activeCols || rows !== this.activeRows) {
+        this.sendActiveSize(client, this.sizeOwnerId ?? client.id);
+      }
+      return;
     }
+
+    // Opening the session here (claim:"attach") or a deliberate click
+    // (user:true) is a user action: strict recency, it takes ownership
+    // outright. Whoever was typing elsewhere takes it back with their next
+    // keystroke, so misfires self-heal.
+    if (claim === "attach" || userClaim) {
+      this.sizeOwnerId = client.id;
+      this.applySize(client, cols, rows);
+      return;
+    }
+
+    // The owner's viewport IS the session's size: its refits (rotation,
+    // keyboard show/hide, window drag) flow straight through. While nobody
+    // owns the size (fresh room, owner detached), any interactive client
+    // may size it without claiming it.
+    if (this.sizeOwnerId === client.id || this.sizeOwnerId === null) {
+      this.applySize(client, cols, rows);
+      return;
+    }
+
+    // Not the owner: the declaration is recorded; snap the client back to
+    // the shared size — otherwise its local terminal re-wraps the buffer at
+    // a size the PTY isn't, and it has no way to learn the real size until
+    // the next broadcast.
+    if (cols !== this.activeCols || rows !== this.activeRows) {
+      this.sendActiveSize(client, this.sizeOwnerId);
+    }
+  }
+
+  private applySize(client: ClientState, cols: number, rows: number) {
+    this.pty.resize(cols, rows);
+    this.activeCols = cols;
+    this.activeRows = rows;
+    this.grid?.resize(cols, rows);
+    // Broadcast to the others so they can adopt — and CONFIRM to the
+    // applier: a claimant otherwise learns nothing on success and can only
+    // distinguish accept from reject by timeout.
+    this.broadcastActiveSize(client);
+    this.sendActiveSize(client, client.id);
+    this.emit("pty_resize", { roomId: this.id, clientId: client.id, cols, rows, timestamp: now() });
+  }
+
+  private sendActiveSize(client: ClientState, ownerId: string) {
+    client.socket.send(
+      JSON.stringify({
+        type: "active_size",
+        clientId: ownerId,
+        cols: this.activeCols,
+        rows: this.activeRows
+      } satisfies ServerMessage)
+    );
   }
 
   private broadcastActiveSize(client: ClientState) {
@@ -1001,6 +1021,11 @@ export class Room extends EventEmitter {
   private removeClient(clientId: string) {
     const wasController = this.controllerId === clientId;
     this.clients.delete(clientId);
+    if (this.sizeOwnerId === clientId) {
+      // The owner left: the size is up for grabs, so a remaining client's
+      // next refit (not just its next keystroke) may take it.
+      this.sizeOwnerId = null;
+    }
     if (wasController && !this.collabMode) {
       this.collabMode = true;
       this.controllerId = null;

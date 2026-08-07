@@ -957,20 +957,31 @@ const App = () => {
   useEffect(() => {
     viewModeRef.current = viewMode;
     localStorage.setItem("hay_view_mode", viewMode);
-    // When switching to fit mode, refit terminal
+    // Switching to fit: if a peer owns the size, follow their grid scaled to
+    // this viewport; otherwise local fit rules.
     if (viewMode === "fit" && termRef.current) {
       setTimeout(() => {
-        fitToViewport();
-        handleResize();
+        const owner = activeOwnerRef.current;
+        const active = activeSizeRef.current;
+        if (owner && owner !== clientIdRef.current && active) {
+          enterFollow(active.cols, active.rows);
+          handleResize(); // declare the natural fit under the follow
+        } else {
+          fitToViewport();
+          handleResize();
+        }
       }, 0);
     }
     // Switching to Manual restores the shared (active) size: fit mode may have
     // shrunk the local terminal to this viewport, wrapping the buffer at a
     // width the PTY isn't. Back at the true size, overflow + panning work.
-    if (viewMode === "full" && termRef.current && activeSizeRef.current) {
-      const { cols, rows } = activeSizeRef.current;
-      if (termRef.current.cols !== cols || termRef.current.rows !== rows) {
-        termRef.current.resize(cols, rows);
+    if (viewMode === "full" && termRef.current) {
+      exitFollow();
+      if (activeSizeRef.current) {
+        const { cols, rows } = activeSizeRef.current;
+        if (termRef.current.cols !== cols || termRef.current.rows !== rows) {
+          termRef.current.resize(cols, rows);
+        }
       }
     }
   }, [viewMode]);
@@ -1071,13 +1082,11 @@ const App = () => {
       if (nowFit - lastTypeFitAtRef.current > 500) {
         lastTypeFitAtRef.current = nowFit;
         fitToViewport();
-        // If another client holds the session at a different size, our fit can
-        // equal the last size we sent (a rejected claim) — the dedupe guard
-        // would swallow the reclaim. Typing is the election winner, so force
-        // the resize through whenever the active size isn't ours.
-        const active = activeSizeRef.current;
-        const t = termRef.current;
-        if (active && t && (active.cols !== t.cols || active.rows !== t.rows)) {
+        // Typing transfers ownership server-side (the keystroke above lands
+        // first) and the server snaps the PTY to our declared fit — this
+        // refresh just makes sure that declaration is current. Force it
+        // through the dedupe whenever the size isn't ours yet.
+        if (activeOwnerRef.current && activeOwnerRef.current !== clientIdRef.current) {
           lastSentSizeRef.current = null;
         }
         handleResize();
@@ -1182,6 +1191,45 @@ const App = () => {
   // Last size actually sent, to skip redundant resize messages. Reset when a
   // new connection opens so the server always learns the size once.
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  // Our own id per the server (from hello) — active_size carries the OWNER's
+  // clientId, so "is this size ours" is an identity check, never a size
+  // comparison (comparing sizes is how a follower gets fooled into thinking
+  // an adopted grid is its own).
+  const clientIdRef = useRef<string | null>(null);
+  // Who owns the shared size right now, per the latest active_size.
+  const activeOwnerRef = useRef<string | null>(null);
+  // Non-null while a PEER owns the size in fit mode: the local terminal is
+  // resized to the owner's grid and scaled to this viewport. Our own natural
+  // fit keeps flowing to the server as a declaration — the moment we type,
+  // the server transfers ownership and applies it.
+  const followSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+
+  // Measure the cols/rows this viewport would naturally hold at the current
+  // font — WITHOUT touching the terminal. Null when not measurable yet
+  // (render service not ready, or the container has no layout).
+  const measureNaturalFit = (): { cols: number; rows: number } | null => {
+    if (!termRef.current || !containerRef.current) return null;
+    const core = (termRef.current as any)._core;
+    if (!core?._renderService?.dimensions?.css?.cell) return null;
+    const cellWidth = core._renderService.dimensions.css.cell.width;
+    const cellHeight = core._renderService.dimensions.css.cell.height;
+    if (!cellWidth || !cellHeight) return null;
+    const scrollContainer = containerRef.current.closest(".terminal-scroll");
+    if (!scrollContainer) return null;
+    const rect = scrollContainer.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    const styles = window.getComputedStyle(scrollContainer);
+    const paddingLeft = parseFloat(styles.paddingLeft) || 0;
+    const paddingRight = parseFloat(styles.paddingRight) || 0;
+    const paddingTop = parseFloat(styles.paddingTop) || 0;
+    const paddingBottom = parseFloat(styles.paddingBottom) || 0;
+    const availableWidth = rect.width - paddingLeft - paddingRight;
+    const availableHeight = rect.height - paddingTop - paddingBottom;
+    return {
+      cols: Math.max(2, Math.floor(availableWidth / cellWidth)),
+      rows: Math.max(1, Math.floor(availableHeight / cellHeight))
+    };
+  };
 
   const handleResize = () => {
     if (!termRef.current) {
@@ -1189,8 +1237,13 @@ const App = () => {
     }
     const claim = attachClaimPendingRef.current ? ("attach" as const) : undefined;
     attachClaimPendingRef.current = false;
-    const cols = termRef.current.cols;
-    const rows = termRef.current.rows;
+    // While following a peer's grid the terminal is THEIR size — declare
+    // this viewport's natural fit instead. Sending the terminal's cols would
+    // register the peer's own grid as our declared fit, and the next
+    // keystroke's ownership transfer would "apply" it as a no-op.
+    const natural = followSizeRef.current ? measureNaturalFit() : null;
+    const cols = natural?.cols ?? termRef.current.cols;
+    const rows = natural?.rows ?? termRef.current.rows;
     if (!claim && lastSentSizeRef.current && lastSentSizeRef.current.cols === cols && lastSentSizeRef.current.rows === rows) {
       return;
     }
@@ -1206,42 +1259,63 @@ const App = () => {
     });
   };
 
+  // Scale the owner's grid to this viewport (letterboxed, centered
+  // horizontally) — a follower renders the PTY's true grid, never rewraps
+  // it. Transform only: bounds and cell metrics stay honest, so natural-fit
+  // measurement keeps working underneath.
+  const applyFollowScale = () => {
+    const follow = followSizeRef.current;
+    const inner = containerRef.current;
+    if (!follow || !inner || !termRef.current) return;
+    const core = (termRef.current as any)._core;
+    const cell = core?._renderService?.dimensions?.css?.cell;
+    if (!cell?.width || !cell?.height) return;
+    const scrollContainer = inner.closest(".terminal-scroll");
+    if (!scrollContainer) return;
+    const rect = scrollContainer.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return;
+    const gridW = follow.cols * cell.width;
+    const gridH = follow.rows * cell.height;
+    const scale = Math.min(rect.width / gridW, rect.height / gridH, 1.4);
+    const offsetX = Math.max(0, (rect.width - gridW * scale) / 2);
+    inner.style.transformOrigin = "top left";
+    inner.style.transform = `translate(${offsetX}px, 0) scale(${scale})`;
+  };
+
+  const enterFollow = (cols: number, rows: number) => {
+    followSizeRef.current = { cols, rows };
+    const t = termRef.current;
+    if (t && (t.cols !== cols || t.rows !== rows)) {
+      t.resize(cols, rows);
+    }
+    applyFollowScale();
+  };
+
+  const exitFollow = () => {
+    followSizeRef.current = null;
+    const inner = containerRef.current;
+    if (inner) {
+      inner.style.transform = "";
+      inner.style.transformOrigin = "";
+    }
+  };
+
   // Fit based on the scroll container viewport rather than the terminal element itself.
   // This ensures correct sizing across desktop padding and mobile full-bleed layouts.
   // Returns false when it couldn't measure yet (render service not ready, or the
   // container has no layout) so callers can retry on a later frame.
   const fitToViewport = (): boolean => {
-    if (!termRef.current || !containerRef.current) return false;
-
-    const terminal = termRef.current;
-    const core = (terminal as any)._core;
-    if (!core?._renderService?.dimensions?.css?.cell) return false;
-
-    const cellWidth = core._renderService.dimensions.css.cell.width;
-    const cellHeight = core._renderService.dimensions.css.cell.height;
-    if (!cellWidth || !cellHeight) return false;
-
-    const scrollContainer = containerRef.current.closest(".terminal-scroll");
-    if (!scrollContainer) return false;
-
-    const rect = scrollContainer.getBoundingClientRect();
-    // No layout yet (e.g. the terminal mounted while the switcher covered it) —
-    // report not-ready so the caller retries once it has real dimensions.
-    if (rect.width < 1 || rect.height < 1) return false;
-    const styles = window.getComputedStyle(scrollContainer);
-    const paddingLeft = parseFloat(styles.paddingLeft) || 0;
-    const paddingRight = parseFloat(styles.paddingRight) || 0;
-    const paddingTop = parseFloat(styles.paddingTop) || 0;
-    const paddingBottom = parseFloat(styles.paddingBottom) || 0;
-
-    const availableWidth = rect.width - paddingLeft - paddingRight;
-    const availableHeight = rect.height - paddingTop - paddingBottom;
-
-    const cols = Math.max(2, Math.floor(availableWidth / cellWidth));
-    const rows = Math.max(1, Math.floor(availableHeight / cellHeight));
-
-    if (terminal.cols !== cols || terminal.rows !== rows) {
-      terminal.resize(cols, rows);
+    // Following a peer's grid: the terminal must stay at THEIR size; the
+    // viewport is handled by the follow scale, not by resizing.
+    if (followSizeRef.current) {
+      applyFollowScale();
+      return true;
+    }
+    const fitted = measureNaturalFit();
+    if (!fitted) return false;
+    const terminal = termRef.current!;
+    if (terminal.cols !== fitted.cols || terminal.rows !== fitted.rows) {
+      terminal.resize(fitted.cols, fitted.rows);
     }
     return true;
   };
@@ -1403,7 +1477,10 @@ const App = () => {
       setStatus("connected");
       reconnectAttemptRef.current = 0; // Reset backoff on successful connection
       lastSentSizeRef.current = null; // fresh connection must learn the size once
-      handleResize();
+      // No resize here: the connect URL already declared our size, and the
+      // real fit (with the attach claim) goes out after the snapshot. The
+      // old immediate send carried the PREVIOUS session's grid and could
+      // reshape the PTY twice per switch.
       // Replay keystrokes buffered during the outage: this room only, in
       // order, and only within the age window — stale input is discarded.
       const queued = pendingInputRef.current;
@@ -1434,6 +1511,7 @@ const App = () => {
       }
       switch (message.type) {
         case "hello":
+          clientIdRef.current = message.clientId;
           setClientId(message.clientId);
           setCollabMode(message.collabMode);
           setControllerId(message.controllerId);
@@ -1560,13 +1638,14 @@ const App = () => {
           // Auto-fit and scroll to end once after snapshot load. Retry across
           // frames so a not-yet-measured render service doesn't leave the fresh
           // session at a stale (often too-wide) size. The fit's resize goes out
-          // as claim:"attach": opening a session is intent, so it takes the
-          // shared size immediately unless a peer typed in the last few seconds
-          // — without the claim it lost the 60s idle election to any recently
-          // active client and the page sat mis-wrapped until the first
-          // keystroke ("one autofit away").
+          // as claim:"attach": opening a session is a user action, so it takes
+          // ownership of the shared size outright — but only when someone is
+          // actually LOOKING. A hidden tab's auto-reconnect is not an opening;
+          // claiming from it would yank the size from whoever is present.
           if (viewModeRef.current === "fit") {
-            attachClaimPendingRef.current = true;
+            if (document.visibilityState === "visible") {
+              attachClaimPendingRef.current = true;
+            }
             fitWhenReady(12, () => termRef.current?.scrollToBottom());
           }
           break;
@@ -1579,13 +1658,30 @@ const App = () => {
           pushNotice(message.reason);
           break;
         case "active_size":
-          // Remember the active user's size for Manual mode (overflow/panning),
-          // but in Auto-fit mode DON'T resize to it — the local terminal is sized
-          // to this viewport, and applying the active size here is exactly what
-          // clobbered the post-load autofit (mobile snapping to a desktop/PTY
-          // 80×24). Manual mode still matches the active size for correct render.
+          // Identity, not size comparison: the message carries the OWNER's
+          // clientId. Ours → local fit rules (and adopt the confirmed size,
+          // since a keystroke's ownership transfer can apply our declared
+          // fit before any resize of ours goes out). A peer's → follow
+          // their grid, scaled to this viewport; our natural fit keeps
+          // flowing as a declaration and our next keystroke takes the size
+          // back server-side. Manual mode matches the shared size 1:1 for
+          // overflow + panning, as before.
           activeSizeRef.current = { cols: message.cols, rows: message.rows };
-          if (termRef.current && viewModeRef.current !== "fit") {
+          activeOwnerRef.current = message.clientId;
+          if (viewModeRef.current === "fit") {
+            if (message.clientId === clientIdRef.current) {
+              exitFollow();
+              if (termRef.current && (termRef.current.cols !== message.cols || termRef.current.rows !== message.rows)) {
+                termRef.current.resize(message.cols, message.rows);
+                // Our declared fit may have gone stale (e.g. rotated while
+                // following) — true it up; the resulting resize applies
+                // because the size is ours now.
+                fitWhenReady(4);
+              }
+            } else {
+              enterFollow(message.cols, message.rows);
+            }
+          } else if (termRef.current) {
             const currentCols = termRef.current.cols;
             const currentRows = termRef.current.rows;
             if (message.cols !== currentCols || message.rows !== currentRows) {
@@ -1877,14 +1973,22 @@ const App = () => {
       return true;
     });
 
+    // Debounced: a window drag / keyboard animation / orientation change
+    // emits a burst of observer callbacks, and every winning resize used to
+    // be a real SIGWINCH + grid reflow. One trailing fit per 150ms burst.
+    let fitDebounce: number | null = null;
     const resizeObserver = new ResizeObserver(() => {
-      // Only auto-fit in fit mode
-      if (viewModeRef.current === "fit") {
+      if (viewModeRef.current !== "fit") return;
+      if (fitDebounce !== null) window.clearTimeout(fitDebounce);
+      fitDebounce = window.setTimeout(() => {
+        fitDebounce = null;
         fitToViewport();
         // Force a full refresh to clear any stale canvas content after resize
         terminal.refresh(0, terminal.rows - 1);
+        // Owner: the refit flows straight to the PTY. Follower: this is a
+        // declaration of the new natural fit (fitToViewport only re-scaled).
         handleResize();
-      }
+      }, 150);
     });
     (terminal as any).__resizeObserver = resizeObserver;
 
@@ -2934,6 +3038,8 @@ const App = () => {
     if (termRef.current) {
       termRef.current.options.fontSize = fontSize;
       if (viewModeRef.current === "fit") {
+        // Cell metrics changed: re-fit (owner) or re-scale the followed
+        // grid and re-declare the natural fit (follower).
         fitToViewport();
         handleResize();
       } else {
@@ -2975,6 +3081,9 @@ const App = () => {
     setPresence([]);
     setControllerId(null);
     setClientId(null);
+    clientIdRef.current = null;
+    activeOwnerRef.current = null;
+    exitFollow();
     setLiveCwd(null);
     setStatus("connecting");
     setRoom(targetRoom);
@@ -3015,6 +3124,9 @@ const App = () => {
     setPresence([]);
     setControllerId(null);
     setClientId(null);
+    clientIdRef.current = null;
+    activeOwnerRef.current = null;
+    exitFollow();
     setLiveCwd(null);
     setStatus("connecting");
     setRoom(targetRoom);
@@ -3722,7 +3834,14 @@ const App = () => {
                 )}
               </div>
               <div className="quick-group">
-                <button type="button" className="quick-btn" onClick={() => { fitToViewport(); handleResize(); }}>
+                <button type="button" className="quick-btn" onClick={() => {
+                  // An explicit Fit is a deliberate act: claim the size, even
+                  // from a peer that owns it.
+                  attachClaimPendingRef.current = true;
+                  deliberateAttachRef.current = true;
+                  fitToViewport();
+                  handleResize();
+                }}>
                   Fit
                 </button>
                 {/* Mobile gets the in-app switcher; desktop keeps the manager page */}

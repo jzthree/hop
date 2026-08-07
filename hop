@@ -11920,7 +11920,7 @@ const HELP_SECTIONS = [
     ] },
     { title: 'Restore', lines: [
         `hop restore [--dry-run] [--agents]  Recreate your saved sessions, resuming claude conversations (--agents includes agent-created ones)`,
-        `hop update [--check|--host] Self-update from GitHub (daemon restart; sessions survive; --host cycles the host too)`,
+        `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
         `hop claude-hook status|remove   Check or remove the hook`,
         `hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`,
@@ -12557,7 +12557,10 @@ async function main() {
     // through restore). --check reports without touching anything.
     if (process.argv[2] === 'update') {
         const checkOnly = process.argv.includes('--check');
-        const withHost = process.argv.includes('--host');
+        // Cycling the host is the default now — it's what actually finishes
+        // an update (the daemon alone leaves every session's terminal running
+        // OLD code). Skipping it is the exception, and has to say so.
+        const withHost = !process.argv.includes('--no-host');
         const runGit = (cmd, timeout = 60000) =>
             execSync(cmd, { cwd: __dirname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim();
         try { runGit('git rev-parse --git-dir'); } catch (e) {
@@ -12635,7 +12638,7 @@ async function main() {
             log('Host salvage-restart launched (detached) — progress: ~/.hop2/transcript-salvage/restart.log', YELLOW);
             log('It waits for the fleet to go idle, then cycles the host through salvage → restore.', YELLOW);
         } else {
-            log(`Host still runs the previous code; ${CYAN}hop update --host${RESET} (or the salvage script) cycles it when convenient.`, RESET);
+            log(`Host still runs the previous code (skipped via ${CYAN}--no-host${RESET}); ${CYAN}hop update --host${RESET}${DIM} (redundant now, but accepted)${RESET} or the salvage script cycles it when convenient.`, RESET);
         }
         process.exit(0);
     }

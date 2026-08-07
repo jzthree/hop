@@ -524,7 +524,7 @@ test('rename sticks across reconcile ticks and never manufactures a session', as
 test('websocket attach to an unknown session refuses instead of creating one', async () => {
   const WebSocket = require('ws');
   const before = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-  const beforeCount = before.data.sessions.length;
+  const beforeNames = new Set(before.data.sessions.map(s => s.internalName));
 
   const outcome = await new Promise((resolve) => {
     const ws = new WebSocket(
@@ -542,7 +542,11 @@ test('websocket attach to an unknown session refuses instead of creating one', a
   const after = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
   assert.ok(!after.data.sessions.some(s => s.internalName === 'NoSuchSessionHere'
     || s.displayName === 'NoSuchSessionHere'), 'no session may be manufactured by attaching');
-  assert.equal(after.data.sessions.length, beforeCount, 'session count must be unchanged');
+  // Nothing NEW may appear. Not a strict count: an earlier test's short-lived
+  // session can be reaped inside this window, and its exit is not this
+  // regression — a manufactured session is.
+  const appeared = after.data.sessions.filter(s => !beforeNames.has(s.internalName));
+  assert.deepEqual(appeared.map(s => s.internalName), [], 'no session may appear during a refused attach');
 });
 
 // Regression: a name a session USED to have must be reusable.

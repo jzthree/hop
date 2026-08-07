@@ -107,26 +107,61 @@ export const projectKey = (cwd?: string) => {
   return (lead ? lead + "/" : "/") + kept.join("/");
 };
 
+/** Characters of `needle` appear in `hay` in order (VS Code-style fuzzy). */
+const isSubsequence = (needle: string, hay: string): boolean => {
+  let i = 0;
+  for (let j = 0; j < hay.length && i < needle.length; j++) {
+    if (hay[j] === needle[i]) i++;
+  }
+  return i === needle.length;
+};
+
 /**
- * Ranked filter matching: exact beats prefix beats substring, and the
+ * Ranked matching for ONE term: exact beats prefix beats substring, and the
  * home-shortened cwd the UI displays is first-class ("~" must rank sessions
- * whose workdir IS ~ above everything that merely lives under it).
+ * whose workdir IS ~ above everything that merely lives under it). Below the
+ * name/cwd tiers come the user's own descriptions — the tagline (`hop ai
+ * tagline`) and the folder the session is filed in — then the foreground
+ * process, then a typo-tolerant subsequence tier ("hubl" still finds Hubble;
+ * 3+ chars so one letter can't fuzzy-match half the wall).
  */
-export const filterScore = (s: SwitcherSession, q: string): number => {
+const termScore = (s: SwitcherSession, t: string, folderName: string): number => {
   const name = (s.displayName || s.name).toLowerCase();
   const cwdRaw = (s.cwd || "").toLowerCase();
   const cwdShort = s.cwd ? shortenForGroup(s.cwd).toLowerCase() : "";
   const proc = (s.foregroundProcess || "").toLowerCase();
-  if (name === q) return 100;
-  if (cwdShort === q) return 90; // exact workdir ("~", "~/code/hop2")
-  if (name.startsWith(q)) return 80;
+  const tagline = (s.tagline || "").toLowerCase();
+  if (name === t) return 100;
+  if (cwdShort === t) return 90; // exact workdir ("~", "~/code/hop2")
+  if (name.startsWith(t)) return 80;
   const cwdBase = cwdShort.split("/").filter(Boolean).pop() || "";
-  if (cwdBase === q) return 70; // project dir name typed exactly
-  if (name.includes(q)) return 60;
-  if (cwdShort.startsWith(q)) return 55; // workdir prefix ("~/code")
-  if (cwdShort.includes(q) || cwdRaw.includes(q)) return 40;
-  if (proc.includes(q)) return 30;
+  if (cwdBase === t) return 70; // project dir name typed exactly
+  if (name.includes(t)) return 60;
+  if (cwdShort.startsWith(t)) return 55; // workdir prefix ("~/code")
+  if (tagline.includes(t)) return 50; // the user's own words for the session
+  if (folderName.includes(t)) return 45; // the folder they filed it in
+  if (cwdShort.includes(t) || cwdRaw.includes(t)) return 40;
+  if (proc.includes(t)) return 30;
+  if (t.length >= 3 && isSubsequence(t, name)) return 20;
   return 0;
+};
+
+/**
+ * Multi-word queries are AND-terms, each free to hit a different field —
+ * "hop web" matches a session named "web" in ~/Code/hop2. The score is the
+ * weakest term's (every word must genuinely match), so single-term queries
+ * rank exactly as before.
+ */
+export const filterScore = (s: SwitcherSession, q: string, folderName = ""): number => {
+  const terms = q.split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return 0;
+  let weakest = Infinity;
+  for (const t of terms) {
+    const score = termScore(s, t, folderName);
+    if (score === 0) return 0;
+    if (score < weakest) weakest = score;
+  }
+  return weakest;
 };
 
 export const filterSessionsByOrigin = (
@@ -231,7 +266,11 @@ export const buildSwitcherModel = (
   const query = filter.trim();
   if (query) {
     const q = query.toLowerCase();
-    const matches = sessions.filter((s) => filterScore(s, q) > 0);
+    // Typing a folder's name surfaces the sessions filed in it.
+    const folderNameById = new Map(folders.map((f) => [f.id, f.name.toLowerCase()]));
+    const scoreOf = (s: SwitcherSession) =>
+      filterScore(s, q, (s.folderId && folderNameById.get(s.folderId)) || "");
+    const matches = sessions.filter((s) => scoreOf(s) > 0);
     // Manual mode: filtering NARROWS the wall, it never re-ranks it. Keeping
     // the user's own order in the filtered view is what makes "find it, then
     // drag it" work — you can see where a card sits relative to the other
@@ -246,7 +285,7 @@ export const buildSwitcherModel = (
       return { mode: "manual", rows: split.loose, folders: split.folders };
     }
     const rows = matches
-      .map((s) => ({ s, score: filterScore(s, q) }))
+      .map((s) => ({ s, score: scoreOf(s) }))
       .sort((a, b) => b.score - a.score || byAttentionThenRecency(a.s, b.s))
       .map((x) => x.s);
     return { mode: "filter", rows };

@@ -7,7 +7,8 @@ import {
   type CSSProperties,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -37,6 +38,17 @@ import { DigestCard } from "./DigestCard";
 const LONG_PRESS_MS = 450;
 const PREVIEW_REFRESH_MS = 5000;
 const FILTER_THRESHOLD = 10;
+
+// Mark the query terms inside a content-match snippet so the eye lands on WHY
+// the line matched instead of re-scanning it. Terms mirror the server's
+// AND-term split.
+const highlightSnippet = (snippet: string, query: string): ReactNode => {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return snippet;
+  const pattern = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const parts = snippet.split(new RegExp(`(${pattern})`, "ig"));
+  return parts.map((part, i) => (i % 2 === 1 ? <mark key={i}>{part}</mark> : part));
+};
 
 // Zoom ladder: one +/− press per step. Each level sets the grid's minimum
 // tile width, the preview window height, and the preview font size (the
@@ -1542,10 +1554,14 @@ export const SessionSwitcher = ({
   // Content-aware matches: debounced grep over each session's recent screen
   // text (daemon-side, over already-retained output — no index, no polling).
   const [contentMatches, setContentMatches] = useState<Array<{ session: SwitcherSession; snippet: string }>>([]);
+  // The server caps how many sessions it greps per keystroke; when the fleet
+  // exceeds the cap, say so — silence would read as "searched everything".
+  const [contentTruncated, setContentTruncated] = useState(false);
   useEffect(() => {
     const q = filter.trim();
     if (!open || q.length < 3) {
       setContentMatches([]);
+      setContentTruncated(false);
       return;
     }
     let cancelled = false;
@@ -1563,8 +1579,12 @@ export const SessionSwitcher = ({
             })
             .filter(Boolean) as Array<{ session: SwitcherSession; snippet: string }>
         );
+        setContentTruncated(data?.truncated === true);
       } catch {
-        if (!cancelled) setContentMatches([]);
+        if (!cancelled) {
+          setContentMatches([]);
+          setContentTruncated(false);
+        }
       }
     }, 250);
     return () => {
@@ -1572,6 +1592,37 @@ export const SessionSwitcher = ({
       window.clearTimeout(t);
     };
   }, [open, filter, visibleSessions]);
+
+  // Full-history search: greps ENTIRE transcripts server-side (ripgrep), so
+  // it runs only when the user explicitly asks — never per keystroke. Results
+  // are pinned to the query they answered; editing the filter discards them.
+  const [deepSearch, setDeepSearch] = useState<{
+    q: string;
+    status: "loading" | "done" | "unavailable";
+    rows: Array<{ session: SwitcherSession; snippet: string }>;
+  } | null>(null);
+  useEffect(() => {
+    if (deepSearch && deepSearch.q !== filter.trim()) setDeepSearch(null);
+  }, [filter, deepSearch]);
+  const runDeepSearch = async () => {
+    const q = filter.trim();
+    if (q.length < 3) return;
+    setDeepSearch({ q, status: "loading", rows: [] });
+    try {
+      const res = await fetch(`/api/sessions/search?q=${encodeURIComponent(q)}&deep=1`);
+      const data = await res.json();
+      const byKey = new Map(visibleSessions.map((s) => [s.internalName || s.name, s]));
+      const rows = (Array.isArray(data?.matches) ? data.matches : [])
+        .map((m: { internalName?: string; name?: string; snippet?: string }) => {
+          const session = byKey.get(m.internalName || "") || byKey.get(m.name || "");
+          return session ? { session, snippet: m.snippet || "" } : null;
+        })
+        .filter(Boolean) as Array<{ session: SwitcherSession; snippet: string }>;
+      setDeepSearch({ q, status: data?.deepUnavailable ? "unavailable" : "done", rows });
+    } catch {
+      setDeepSearch({ q, status: "unavailable", rows: [] });
+    }
+  };
 
   // Content matches the name filter didn't already surface.
   const extraContentMatches = useMemo(() => {
@@ -1594,18 +1645,35 @@ export const SessionSwitcher = ({
     return contentMatches.filter((m) => !seen.has(sessionKey(m.session)));
   }, [model, contentMatches, filter]);
 
+  // History hits the shallower tiers already showed are noise here — only
+  // sessions the user hasn't been offered yet earn a history card.
+  const extraDeepMatches = useMemo(() => {
+    if (!deepSearch || deepSearch.status !== "done" || deepSearch.q !== filter.trim()) return [];
+    const seen = new Set<string>();
+    if (model.mode === "filter") model.rows.forEach((r) => seen.add(sessionKey(r)));
+    extraContentMatches.forEach((m) => seen.add(sessionKey(m.session)));
+    const out: Array<{ session: SwitcherSession; snippet: string }> = [];
+    for (const m of deepSearch.rows) {
+      const key = sessionKey(m.session);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(m);
+    }
+    return out;
+  }, [deepSearch, model, extraContentMatches, filter]);
+
   // Flat navigation order = exactly the visual order: heroes, then group rows
   // (and under a filter: name matches, then on-screen content matches).
   const flatNav = useMemo<SwitcherSession[]>(
     () => {
-      if (model.mode === "filter") return [...model.rows, ...extraContentMatches.map((m) => m.session)];
+      if (model.mode === "filter") return [...model.rows, ...extraContentMatches.map((m) => m.session), ...extraDeepMatches.map((m) => m.session)];
       // Folder rows come first because that is their visual order; keyboard
       // ↑/↓ and Enter must traverse what the eye sees, foldered included.
       if (model.mode === "manual") return [...model.folders.flatMap((f) => f.rows), ...model.rows, ...extraContentMatches.map((m) => m.session)];
       if (model.mode === "project") return model.groups.flatMap((g) => g.rows);
       return [...model.hero, ...model.groups.flatMap((g) => g.rows)];
     },
-    [model, extraContentMatches]
+    [model, extraContentMatches, extraDeepMatches]
   );
   const navIndexByKey = useMemo(() => {
     const m = new Map<string, number>();
@@ -2463,7 +2531,7 @@ export const SessionSwitcher = ({
                 : (preview?.text || " ")}
           </pre>
         )}
-        {snippet && <div className="switcher-card-snippet" title={snippet}>{snippet}</div>}
+        {snippet && <div className="switcher-card-snippet" title={snippet}>{highlightSnippet(snippet, filter.trim())}</div>}
         <div className="switcher-card-meta">
           <span className="switcher-card-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : "\u00a0"}</span>
           <span className="switcher-card-when">{meta(s)}</span>
@@ -2705,11 +2773,38 @@ export const SessionSwitcher = ({
             )}
             {extraContentMatches.length > 0 && (
               <section className="switcher-group">
-                <h3 className="switcher-group-label">found in terminal output</h3>
+                <h3 className="switcher-group-label">found in terminal output{contentTruncated ? " · most recent sessions only" : ""}</h3>
                 <div className="switcher-grid">
                   {extraContentMatches.map(({ session: s, snippet }) => renderCard(s, snippet))}
                 </div>
               </section>
+            )}
+            {extraDeepMatches.length > 0 && (
+              <section className="switcher-group">
+                <h3 className="switcher-group-label">found in full history</h3>
+                <div className="switcher-grid">
+                  {extraDeepMatches.map(({ session: s, snippet }) => renderCard(s, snippet))}
+                </div>
+              </section>
+            )}
+            {filter.trim().length >= 3 && (
+              <div className="switcher-deep-row">
+                {!deepSearch ? (
+                  <button type="button" className="switcher-deep-btn" onClick={runDeepSearch}>
+                    Search full history for “{filter.trim()}”
+                  </button>
+                ) : deepSearch.status === "loading" ? (
+                  <span className="switcher-deep-note">searching full history…</span>
+                ) : deepSearch.status === "unavailable" ? (
+                  <span className="switcher-deep-note">full-history search unavailable on this host</span>
+                ) : (
+                  <span className="switcher-deep-note">
+                    {extraDeepMatches.length > 0
+                      ? `${extraDeepMatches.length} more in full history`
+                      : "nothing further back matches"}
+                  </span>
+                )}
+              </div>
             )}
           </>
         ) : model.mode === "project" ? (

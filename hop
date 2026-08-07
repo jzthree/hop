@@ -4090,6 +4090,96 @@ function claudeTranscriptExists(rec) {
     return resolveClaudeTranscriptPath(rec) !== null;
 }
 
+// ---- codex transcript discovery -------------------------------------------
+// Codex has no SessionStart hook, so unlike claude there is no per-session
+// record pointing at its transcript. What each rollout file DOES carry is a
+// first-line session_meta with the cwd it ran in — so a codex session's
+// transcript is found by matching cwd among recent rollouts, newest first.
+// Wrong attribution (two codex sessions in one cwd) is possible and accepted:
+// the snippet shown makes a mismatch visible, and the alternative is no codex
+// search at all.
+const codexRolloutCwdCache = new Map(); // rollout path -> cwd (immutable per file)
+let codexRolloutListCache = { at: 0, files: [] };
+function listCodexRolloutFiles() {
+    const now = Date.now();
+    if (now - codexRolloutListCache.at < 60_000) return codexRolloutListCache.files;
+    const files = [];
+    for (const root of getCodexConfigRoots()) {
+        const walk = (dir, depth) => {
+            let names = [];
+            try { names = fs.readdirSync(dir); } catch (e) { return; }
+            for (const n of names) {
+                const p = path.join(dir, n);
+                if (n.endsWith('.jsonl')) {
+                    try { files.push({ path: p, mtimeMs: fs.statSync(p).mtimeMs }); } catch (e) { /* gone */ }
+                } else if (depth < 3) {
+                    walk(p, depth + 1); // sessions/YYYY/MM/DD nesting
+                }
+            }
+        };
+        walk(path.join(root, 'sessions'), 0);
+    }
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    codexRolloutListCache = { at: now, files: files.slice(0, 200) };
+    return codexRolloutListCache.files;
+}
+
+function codexRolloutCwd(rolloutPath) {
+    if (codexRolloutCwdCache.has(rolloutPath)) return codexRolloutCwdCache.get(rolloutPath);
+    let cwd = null;
+    try {
+        const fd = fs.openSync(rolloutPath, 'r');
+        const buf = Buffer.alloc(4096);
+        const n = fs.readSync(fd, buf, 0, 4096, 0);
+        fs.closeSync(fd);
+        const meta = JSON.parse(buf.toString('utf8', 0, n).split('\n', 1)[0]);
+        cwd = meta?.payload && typeof meta.payload.cwd === 'string' ? meta.payload.cwd : null;
+    } catch (e) { /* unreadable or meta line > 4KB — treat as unmatched */ }
+    codexRolloutCwdCache.set(rolloutPath, cwd);
+    if (codexRolloutCwdCache.size > 2000) {
+        for (const key of [...codexRolloutCwdCache.keys()].slice(0, 500)) codexRolloutCwdCache.delete(key);
+    }
+    return cwd;
+}
+
+function resolveCodexTranscriptByCwd(cwd) {
+    if (!cwd) return null;
+    for (const f of listCodexRolloutFiles()) {
+        if (codexRolloutCwd(f.path) === cwd) return f.path;
+    }
+    return null;
+}
+
+// ripgrep for deep search: a system rg when installed, else the copy every
+// claude install bundles — the claude binary IS ripgrep when ARGV0=rg, the
+// same dispatch its own shell integration uses. Probed once, remembered.
+let rgRunnerCache = null; // { bin, env } | 'none'
+function resolveRgRunner() {
+    if (rgRunnerCache) return Promise.resolve(rgRunnerCache === 'none' ? null : rgRunnerCache);
+    const tryOne = (bin, env) => new Promise((resolve) => {
+        execFile(bin, ['--version'], { env, timeout: 5000 }, (err, stdout) => {
+            resolve(!err && /ripgrep/i.test(String(stdout)) ? { bin, env } : null);
+        });
+    });
+    return tryOne('rg', process.env)
+        .then((r) => r || tryOne('claude', { ...process.env, ARGV0: 'rg' }))
+        .then((r) => {
+            rgRunnerCache = r || 'none';
+            return r;
+        });
+}
+
+// A session's transcript for SEARCH: the claude record when there is one,
+// else — for sessions identifiably running codex — its newest rollout by cwd.
+function resolveSessionTranscriptPathForSearch(internalName, sessionEntry) {
+    const claudePath = resolveClaudeTranscriptPath(readClaudeSessionRecord(internalName));
+    if (claudePath) return claudePath;
+    if (/codex/i.test(String(sessionEntry?.foregroundProcess || ''))) {
+        return resolveCodexTranscriptByCwd(sessionEntry?.cwd || null);
+    }
+    return null;
+}
+
 // Restore patience must scale with the conversation being resumed. The
 // machinery gave every session the same 90s: right for a 50MB transcript,
 // hopeless for a 1GB one — claude spends minutes just LOADING it, the
@@ -7981,19 +8071,99 @@ function startAuthProxy(authEmitter) {
                 }
                 return { idx: anchor, len: terms[0].length };
             };
+            // Deep mode (&deep=1): ripgrep over the ENTIRE transcript of every
+            // session that has one — archived included, codex included. The
+            // shallow path reads 1MB tails; this reads gigabytes, which is why
+            // it only runs from an explicit user action (the button in the
+            // switcher), never per keystroke.
+            if (String(parsedUrl.query?.deep || '') === '1') {
+                let matches = [];
+                let deepUnavailable = false;
+                try {
+                    const snapshot = await listAllSessionEntriesRuntimeFirst();
+                    const entries = (snapshot.entries || [])
+                        .filter((e) => e.type !== 'port' && e.internalName && SESSION_NAME_RE.test(e.internalName))
+                        .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+                    const byFile = new Map(); // transcript path -> session entry (most recent wins)
+                    for (const s of entries.slice(0, 300)) {
+                        const tPath = resolveSessionTranscriptPathForSearch(s.internalName, s);
+                        if (tPath && !byFile.has(tPath)) byFile.set(tPath, s);
+                    }
+                    const rg = await resolveRgRunner();
+                    if (!rg) throw new Error('no ripgrep available (system rg or claude bundle)');
+                    const rgOnce = (args) => new Promise((resolve, reject) => {
+                        execFile(rg.bin, args, { env: rg.env, timeout: 30000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+                            // Exit 1 is rg for "no matches", not a failure.
+                            if (err && err.code !== 1) { reject(err); return; }
+                            resolve(stdout || '');
+                        });
+                    });
+                    // AND across terms = intersect the per-term file sets.
+                    let surviving = [...byFile.keys()];
+                    for (const term of terms) {
+                        if (surviving.length === 0) break;
+                        const out = await rgOnce(['-li', '--fixed-strings', '-e', term, '--', ...surviving]);
+                        const hit = new Set(out.split('\n').filter(Boolean));
+                        surviving = surviving.filter((f) => hit.has(f));
+                    }
+                    const esc = terms[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const found = await Promise.all(surviving.slice(0, 20).map(async (f) => {
+                        // Transcript lines are JSON: show a window around the
+                        // match, lightly unescaped, rather than the raw line.
+                        let snippet = '';
+                        try {
+                            const out = await rgOnce(['-io', '--max-count', '1', '-e', `.{0,80}${esc}.{0,80}`, '--', f]);
+                            snippet = (out.split('\n').filter(Boolean)[0] || '')
+                                .replace(/\\n/g, ' ').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+                                .replace(/\s+/g, ' ').trim().slice(0, 160);
+                        } catch (e) { /* snippet is optional */ }
+                        const s = byFile.get(f);
+                        return {
+                            internalName: s.internalName,
+                            name: s.displayName || s.internalName,
+                            lastActivityAt: s.lastActivityAt || 0,
+                            snippet: snippet || '(matched in history)'
+                        };
+                    }));
+                    matches = found
+                        .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))
+                        .map(({ lastActivityAt, ...m }) => m);
+                } catch (e) {
+                    // rg missing or timed out — tell the UI so it says so
+                    // instead of rendering a false "nothing matches".
+                    console.error(`[search] deep mode failed: ${e?.message || e}`);
+                    deepUnavailable = true;
+                    matches = [];
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ matches, deep: true, deepUnavailable }));
+                return;
+            }
             let matches = [];
+            let truncated = false;
             try {
-                const listed = await callExternalHayHostApi('/rooms');
-                const rooms = Array.isArray(listed?.data?.rooms) ? listed.data.rooms : [];
+                // Every terminal session, live or not: an archived session's
+                // transcript is exactly what "reopening resumes the
+                // conversation" promises, so search must reach it too — the
+                // old room-list walk silently skipped everything archived.
+                const snapshot = await listAllSessionEntriesRuntimeFirst();
+                const allEntries = (snapshot.entries || [])
+                    .filter((e) => e.type !== 'port' && e.internalName && SESSION_NAME_RE.test(e.internalName))
+                    .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+                const CAP = 120;
+                truncated = allEntries.length > CAP;
                 const now = Date.now();
-                const lookups = rooms.slice(0, 80).map(async (room) => {
-                    const id = String(room?.id || '');
-                    if (!id || !SESSION_NAME_RE.test(id)) return null;
+                const lookups = allEntries.slice(0, CAP).map(async (s) => {
+                    const id = s.internalName;
                     let entry = sessionSearchTextCache.get(id);
                     if (!entry || now - entry.at > 3000) {
-                        // Deeper-than-screen tail (?bytes honored by newer hosts).
-                        const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview?bytes=524288`);
-                        const raw = typeof prev?.data?.output === 'string' ? prev.data.output : '';
+                        // Deeper-than-screen tail (?bytes honored by newer
+                        // hosts). Only live sessions have a screen at all.
+                        let raw = '';
+                        if (s.live) {
+                            const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview?bytes=524288`);
+                            raw = typeof prev?.data?.output === 'string' ? prev.data.output : '';
+                        }
                         // The CONVERSATION transcript reaches back much further
                         // than any screen tail — grep its recent text too, so
                         // "the session where we discussed X" is findable even
@@ -8005,7 +8175,7 @@ function startAuthProxy(authEmitter) {
                         let transcriptLower = entry ? entry.transcriptLower : '';
                         let transcriptSig = entry ? entry.transcriptSig : '';
                         try {
-                            const tPath = resolveClaudeTranscriptPath(readClaudeSessionRecord(id));
+                            const tPath = resolveSessionTranscriptPathForSearch(id, s);
                             if (tPath) {
                                 const stat = fs.statSync(tPath);
                                 const sig = `${tPath}:${stat.size}:${stat.mtimeMs}`;
@@ -8015,7 +8185,11 @@ function startAuthProxy(authEmitter) {
                                     const buf = Buffer.alloc(readLen);
                                     fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
                                     fs.closeSync(fd);
-                                    transcriptText = (buf.toString('utf8').match(/"text":"((?:[^"\\]|\\.){4,2000})"/g) || [])
+                                    // Upper bound is recall, not safety: a
+                                    // message longer than the bound vanishes
+                                    // from the corpus entirely (2000 silently
+                                    // dropped most agent messages).
+                                    transcriptText = (buf.toString('utf8').match(/"text":"((?:[^"\\]|\\.){4,20000})"/g) || [])
                                         .map((m) => m.slice(8, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'))
                                         .join('\n');
                                     transcriptLower = transcriptText.toLowerCase();
@@ -8046,7 +8220,8 @@ function startAuthProxy(authEmitter) {
                     if (onScreen) {
                         return {
                             internalName: id,
-                            name: getSessionDisplayName(id) || id,
+                            name: s.displayName || id,
+                            lastActivityAt: s.lastActivityAt || 0,
                             snippet: snippetAround(entry.text, onScreen.idx, onScreen.len)
                         };
                     }
@@ -8054,16 +8229,21 @@ function startAuthProxy(authEmitter) {
                     if (inTranscript) {
                         return {
                             internalName: id,
-                            name: getSessionDisplayName(id) || id,
+                            name: s.displayName || id,
+                            lastActivityAt: s.lastActivityAt || 0,
                             snippet: `≡ ${snippetAround(entry.transcript, inTranscript.idx, inTranscript.len)}`
                         };
                     }
                     return null;
                 });
-                matches = (await Promise.all(lookups)).filter(Boolean);
+                // Most recently active first — the session you mean is almost
+                // always the one you touched last, not the room list's order.
+                matches = (await Promise.all(lookups)).filter(Boolean)
+                    .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))
+                    .map(({ lastActivityAt, ...m }) => m);
             } catch (e) { /* host unreachable — return what we have */ }
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ matches }));
+            res.end(JSON.stringify({ matches, truncated }));
             return;
         }
 

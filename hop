@@ -13274,7 +13274,7 @@ async function main() {
             ].join(''));
             rebuildArtifactManifest();
             console.log(`View: ${proxyUrl}`);
-            console.log(`Attached to ${caller} — also in its artifacts.`);
+            console.log(`Attached to ${caller} — also in its Views.`);
         } else {
             console.log(`View: ${proxyUrl}`);
         }

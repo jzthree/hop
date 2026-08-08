@@ -37,7 +37,7 @@ hop view report.html analysis.pdf
 `hop view` copies the file behind hop's auth and prints a `View:` URL. The
 human taps it and their browser renders it — on the desktop wall or from the
 phone app, which opens these in-app. It rings the bell once for you, since a
-published artifact is usually the thing the human is waiting on. Re-running
+published file is usually the thing the human is waiting on. Re-running
 it after updating the file re-publishes under the same link.
 
 ## Showing a running web server (dev server, local app)

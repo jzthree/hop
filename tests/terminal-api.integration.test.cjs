@@ -688,3 +688,49 @@ test('bare token API creations default to agent origin', async () => {
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'BareTokenProbe', internalName: 'BareTokenProbe' });
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'CliUserProbe', internalName: 'CliUserProbe' });
 });
+
+// An agent attach with no API activity and no open stream must expire — a
+// crashed or forgetful agent otherwise parks an "agent" in the session's
+// presence forever. Needs a daemon with a short TTL, so this test relaunches
+// (declaration order puts it last; nothing later depends on daemon state).
+test('an idle agent terminal attach is reaped after the TTL', async () => {
+  const previousState = state;
+  daemonEnv = {
+    ...daemonEnv,
+    HOP_TERMINAL_API_IDLE_TTL_MS: '1500',
+    HOP_TERMINAL_API_SWEEP_MS: '300'
+  };
+  await stopDaemon(true);
+  await launchDaemon(previousState);
+
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'idle-agent-probe',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const terminalId = create.data.id;
+
+  const listed = await requestJson(state.port, state.sessionSecret, 'GET', '/api/terminals', null, agentHeaders);
+  assert.ok(listed.data.terminals.some(t => t.id === terminalId), 'attach visible before the TTL');
+
+  // Touches reset the clock: keep it alive past one full TTL with writes.
+  await delay(1000);
+  await requestJson(state.port, state.sessionSecret, 'POST', `/api/terminals/${terminalId}/write`,
+    { data: ' ' }, agentHeaders);
+  await delay(1000);
+  const alive = await requestJson(state.port, state.sessionSecret, 'GET', '/api/terminals', null, agentHeaders);
+  assert.ok(alive.data.terminals.some(t => t.id === terminalId), 'touched attach survives past a TTL of idle-from-create');
+
+  // Now go silent: the sweep must detach it (session itself stays alive).
+  await delay(2500);
+  const after = await requestJson(state.port, state.sessionSecret, 'GET', '/api/terminals', null, agentHeaders);
+  assert.ok(!after.data.terminals.some(t => t.id === terminalId), 'idle attach reaped');
+  const sessions = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const s = sessions.data.sessions.find(x => x.displayName === 'idle-agent-probe');
+  assert.ok(s, 'the session itself outlives its reaped attach');
+  const clients = Number(s.clientCount) || 0;
+  assert.equal(clients, 0, `reap must detach the room client, got clientCount=${clients}`);
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+    { name: 'idle-agent-probe', internalName: s.internalName });
+});

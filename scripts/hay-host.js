@@ -393,11 +393,36 @@ async function main() {
         if (clientBg && typeof room.setClientColors === 'function') {
             room.setClientColors(clientBg, clientFg);
         }
+        // Tab identity forwarded by the daemon: the room evicts a same-key
+        // predecessor on attach, so a phone's reconnect replaces its own
+        // ghost in presence instead of standing next to it.
+        const deviceKeyRaw = wsUrl.searchParams.get('device') || '';
+        const deviceKey = /^[A-Za-z0-9._-]{1,80}$/.test(deviceKeyRaw) ? deviceKeyRaw : '';
+
+        // Liveness: browsers answer protocol pings in the network stack, so
+        // silence means the peer is gone (locked phone, network hop) even
+        // though no close frame ever arrived — through the tunnel that can
+        // outlive the client by hours. Ghosts die within a minute instead.
+        let wsAlive = true;
+        ws.on('pong', () => { wsAlive = true; });
+        const wsHeartbeat = setInterval(() => {
+            if (ws.readyState !== ws.OPEN) { clearInterval(wsHeartbeat); return; }
+            if (!wsAlive) {
+                clearInterval(wsHeartbeat);
+                try { ws.terminate(); } catch (e) { /* already gone */ }
+                return;
+            }
+            wsAlive = false;
+            try { ws.ping(); } catch (e) { /* closing */ }
+        }, 30000);
+        ws.on('close', () => clearInterval(wsHeartbeat));
+
         room.attachClient(
             {
                 id: randomUUID(),
                 name,
                 source,
+                deviceKey,
                 colorIndex: Math.floor(Math.random() * 1000),
                 cols,
                 rows,

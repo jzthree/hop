@@ -12857,41 +12857,51 @@ async function main() {
                 process.exit(1);
             }
         }
-        if (local === upstream) {
+        // --restart: cycle onto the CURRENT checkout even when git has
+        // nothing to pull. The running processes can predate the checkout —
+        // commit locally, push, `hop update`, and "Already up to date" used
+        // to leave every process on pre-commit code with no hint.
+        const restartOnly = process.argv.includes('--restart');
+        if (local === upstream && (checkOnly || !restartOnly)) {
             log(`Already up to date (${local.slice(0, 7)}).`, GREEN);
+            if (!checkOnly) log(`Processes were not cycled — if they predate this checkout, ${CYAN}hop update --restart${RESET} restarts them onto it.`, RESET);
             process.exit(0);
         }
-        const behind = runGit(`git rev-list --count HEAD..${upstream}`);
-        const ahead = runGit(`git rev-list --count ${upstream}..HEAD`);
-        log(`Update available: ${behind} new commit(s)${ahead !== '0' ? ` — but local is ${ahead} ahead; resolve manually` : ''}`, YELLOW);
-        try { log(runGit(`git log --oneline --no-decorate HEAD..${upstream} -15`), RESET); } catch (e) { }
-        if (checkOnly) process.exit(0);
-        if (ahead !== '0') process.exit(1);
-        let dirty = '';
-        try { dirty = runGit('git status --porcelain'); } catch (e) { }
-        if (dirty) {
-            log('Working tree has local changes — commit or stash them first.', RED);
-            process.exit(1);
-        }
-        // Dependency fingerprint across the pull: reinstall only when a
-        // lockfile actually changed.
-        const lockRev = (ref, file) => { try { return runGit(`git rev-parse ${ref}:${file}`); } catch (e) { return ''; } };
-        const locks = ['package-lock.json', 'hay/package-lock.json'];
-        const before = locks.map((f) => lockRev('HEAD', f));
-        try { runGit(`git merge --ff-only ${upstream}`); } catch (e) {
-            log(`Fast-forward failed: ${e.message}`, RED);
-            process.exit(1);
-        }
-        const after = locks.map((f) => lockRev('HEAD', f));
-        for (let i = 0; i < locks.length; i++) {
-            if (before[i] !== after[i]) {
-                const dir = locks[i].startsWith('hay/') ? path.join(__dirname, 'hay') : __dirname;
-                log(`Dependencies changed (${locks[i]}) — installing…`, CYAN);
-                try {
-                    execSync('npm install --no-audit --no-fund', { cwd: dir, stdio: 'inherit', timeout: 600000 });
-                } catch (e) {
-                    log(`npm install failed in ${dir}: ${e.message}`, RED);
-                    process.exit(1);
+        if (local === upstream) {
+            log(`Checkout already current (${local.slice(0, 7)}) — restarting processes onto it.`, CYAN);
+        } else {
+            const behind = runGit(`git rev-list --count HEAD..${upstream}`);
+            const ahead = runGit(`git rev-list --count ${upstream}..HEAD`);
+            log(`Update available: ${behind} new commit(s)${ahead !== '0' ? ` — but local is ${ahead} ahead; resolve manually` : ''}`, YELLOW);
+            try { log(runGit(`git log --oneline --no-decorate HEAD..${upstream} -15`), RESET); } catch (e) { }
+            if (checkOnly) process.exit(0);
+            if (ahead !== '0') process.exit(1);
+            let dirty = '';
+            try { dirty = runGit('git status --porcelain'); } catch (e) { }
+            if (dirty) {
+                log('Working tree has local changes — commit or stash them first.', RED);
+                process.exit(1);
+            }
+            // Dependency fingerprint across the pull: reinstall only when a
+            // lockfile actually changed.
+            const lockRev = (ref, file) => { try { return runGit(`git rev-parse ${ref}:${file}`); } catch (e) { return ''; } };
+            const locks = ['package-lock.json', 'hay/package-lock.json'];
+            const before = locks.map((f) => lockRev('HEAD', f));
+            try { runGit(`git merge --ff-only ${upstream}`); } catch (e) {
+                log(`Fast-forward failed: ${e.message}`, RED);
+                process.exit(1);
+            }
+            const after = locks.map((f) => lockRev('HEAD', f));
+            for (let i = 0; i < locks.length; i++) {
+                if (before[i] !== after[i]) {
+                    const dir = locks[i].startsWith('hay/') ? path.join(__dirname, 'hay') : __dirname;
+                    log(`Dependencies changed (${locks[i]}) — installing…`, CYAN);
+                    try {
+                        execSync('npm install --no-audit --no-fund', { cwd: dir, stdio: 'inherit', timeout: 600000 });
+                    } catch (e) {
+                        log(`npm install failed in ${dir}: ${e.message}`, RED);
+                        process.exit(1);
+                    }
                 }
             }
         }

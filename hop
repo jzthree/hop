@@ -7492,6 +7492,17 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // Apple App Site Association — the trust anchor for NATIVE passkey
+        // sign-in from hop-ios (webcredentials). Apple's CDN fetches this
+        // anonymously over HTTPS, so it must sit in front of the auth gate.
+        // Team + bundle are hop-ios's (project.yml); a WKWebView can never run
+        // WebAuthn, so without this file the phone has no passkey path at all.
+        if (parsedUrl.pathname === '/.well-known/apple-app-site-association' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ webcredentials: { apps: ['5AD7QB9795.io.zhoulab.hop.spike'] } }));
+            return;
+        }
+
         // --- PASSKEYS (WebAuthn) ---
         if (parsedUrl.pathname.startsWith('/api/passkeys/') && req.method === 'POST') {
             const respond = (status, payload) => {

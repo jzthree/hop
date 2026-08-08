@@ -1651,6 +1651,10 @@ export const SessionSwitcher = ({
     if (!deepSearch || deepSearch.status !== "done" || deepSearch.q !== filter.trim()) return [];
     const seen = new Set<string>();
     if (model.mode === "filter") model.rows.forEach((r) => seen.add(sessionKey(r)));
+    else if (model.mode === "manual") {
+      model.rows.forEach((r) => seen.add(sessionKey(r)));
+      model.folders.forEach((f) => f.rows.forEach((r) => seen.add(sessionKey(r))));
+    }
     extraContentMatches.forEach((m) => seen.add(sessionKey(m.session)));
     const out: Array<{ session: SwitcherSession; snippet: string }> = [];
     for (const m of deepSearch.rows) {
@@ -1669,7 +1673,7 @@ export const SessionSwitcher = ({
       if (model.mode === "filter") return [...model.rows, ...extraContentMatches.map((m) => m.session), ...extraDeepMatches.map((m) => m.session)];
       // Folder rows come first because that is their visual order; keyboard
       // ↑/↓ and Enter must traverse what the eye sees, foldered included.
-      if (model.mode === "manual") return [...model.folders.flatMap((f) => f.rows), ...model.rows, ...extraContentMatches.map((m) => m.session)];
+      if (model.mode === "manual") return [...model.folders.flatMap((f) => f.rows), ...model.rows, ...extraContentMatches.map((m) => m.session), ...extraDeepMatches.map((m) => m.session)];
       if (model.mode === "project") return model.groups.flatMap((g) => g.rows);
       return [...model.hero, ...model.groups.flatMap((g) => g.rows)];
     },
@@ -2579,6 +2583,50 @@ export const SessionSwitcher = ({
   const sheetSession = sheet?.session;
   const sheetAgentPermitted = sheetSession?.agentPermitted === true;
 
+  // Content/history hits plus the full-history row, rendered below whatever
+  // the mode showed. Manual mode keeps its own branch under a query (filtering
+  // narrows the user's order in place), so this tail must ride along there
+  // too — search reaches past the name tier in every mode, not just Recent.
+  const searchTail = filter.trim() ? (
+    <>
+      {extraContentMatches.length > 0 && (
+        <section className="switcher-group">
+          <h3 className="switcher-group-label">found in terminal output{contentTruncated ? " · most recent sessions only" : ""}</h3>
+          <div className="switcher-grid">
+            {extraContentMatches.map(({ session: s, snippet }) => renderCard(s, snippet))}
+          </div>
+        </section>
+      )}
+      {extraDeepMatches.length > 0 && (
+        <section className="switcher-group">
+          <h3 className="switcher-group-label">found in full history</h3>
+          <div className="switcher-grid">
+            {extraDeepMatches.map(({ session: s, snippet }) => renderCard(s, snippet))}
+          </div>
+        </section>
+      )}
+      {filter.trim().length >= 3 && (
+        <div className="switcher-deep-row">
+          {!deepSearch ? (
+            <button type="button" className="switcher-deep-btn" onClick={runDeepSearch}>
+              Search full history for “{filter.trim()}”
+            </button>
+          ) : deepSearch.status === "loading" ? (
+            <span className="switcher-deep-note">searching full history…</span>
+          ) : deepSearch.status === "unavailable" ? (
+            <span className="switcher-deep-note">full-history search unavailable on this host</span>
+          ) : (
+            <span className="switcher-deep-note">
+              {extraDeepMatches.length > 0
+                ? `${extraDeepMatches.length} more in full history`
+                : "nothing further back matches"}
+            </span>
+          )}
+        </div>
+      )}
+    </>
+  ) : null;
+
   return (
     <div
       // tile-dense: too narrow for inline actions. tile-micro: too short for
@@ -2766,46 +2814,12 @@ export const SessionSwitcher = ({
           // cards at the current zoom, same as the wall — the screen content
           // is usually WHY you're looking for the session.
           <>
-            {model.rows.length === 0 && extraContentMatches.length === 0 ? (
+            {model.rows.length === 0 && extraContentMatches.length === 0 && extraDeepMatches.length === 0 ? (
               <div className="switcher-empty">No sessions match “{filter.trim()}”</div>
             ) : (
               <div className="switcher-grid">{model.rows.map((s) => renderCard(s))}</div>
             )}
-            {extraContentMatches.length > 0 && (
-              <section className="switcher-group">
-                <h3 className="switcher-group-label">found in terminal output{contentTruncated ? " · most recent sessions only" : ""}</h3>
-                <div className="switcher-grid">
-                  {extraContentMatches.map(({ session: s, snippet }) => renderCard(s, snippet))}
-                </div>
-              </section>
-            )}
-            {extraDeepMatches.length > 0 && (
-              <section className="switcher-group">
-                <h3 className="switcher-group-label">found in full history</h3>
-                <div className="switcher-grid">
-                  {extraDeepMatches.map(({ session: s, snippet }) => renderCard(s, snippet))}
-                </div>
-              </section>
-            )}
-            {filter.trim().length >= 3 && (
-              <div className="switcher-deep-row">
-                {!deepSearch ? (
-                  <button type="button" className="switcher-deep-btn" onClick={runDeepSearch}>
-                    Search full history for “{filter.trim()}”
-                  </button>
-                ) : deepSearch.status === "loading" ? (
-                  <span className="switcher-deep-note">searching full history…</span>
-                ) : deepSearch.status === "unavailable" ? (
-                  <span className="switcher-deep-note">full-history search unavailable on this host</span>
-                ) : (
-                  <span className="switcher-deep-note">
-                    {extraDeepMatches.length > 0
-                      ? `${extraDeepMatches.length} more in full history`
-                      : "nothing further back matches"}
-                  </span>
-                )}
-              </div>
-            )}
+            {searchTail}
           </>
         ) : model.mode === "project" ? (
           <>
@@ -2831,7 +2845,9 @@ export const SessionSwitcher = ({
         ) : model.mode === "manual" ? (
           <>
             {model.rows.length === 0 && model.folders.every((f) => f.rows.length === 0) ? (
-              <div className="switcher-empty">{filter.trim() ? "No matches" : "No sessions"}</div>
+              extraContentMatches.length === 0 && extraDeepMatches.length === 0 && (
+                <div className="switcher-empty">{filter.trim() ? "No matches" : "No sessions"}</div>
+              )
             ) : (
               <>
                 <p className="switcher-hint">
@@ -2908,6 +2924,7 @@ export const SessionSwitcher = ({
                 <div className="switcher-grid">{model.rows.map((s) => renderCard(s))}</div>
               </>
             )}
+            {searchTail}
           </>
         ) : (
           <>

@@ -325,4 +325,16 @@ describe("manual folders in the wall", () => {
     expect(screen.getByText("inside")).toBeTruthy();
     expect(screen.getByText("Filed")).toBeTruthy();
   });
+
+  it("a query in manual mode still offers the full-history search", () => {
+    // Manual keeps its own render branch under a query (narrow-in-place), so
+    // the search tail — content hits + the deep button — must ride along or
+    // manual-mode users never see anything past the name tier.
+    render(<SessionSwitcher {...props} sessions={withFolder} folders={folders} open />);
+    fireEvent.click(screen.getByRole("button", { name: "Manual" }));
+    const input = document.querySelector(".switcher-top input") as HTMLInputElement
+      || document.querySelector("input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "outsid" } });
+    expect(screen.getByRole("button", { name: /Search full history for/ })).toBeTruthy();
+  });
 });

@@ -7463,6 +7463,27 @@ function startAuthProxy(authEmitter) {
         const ip = getClientIp(req);
         const sessionInfo = parseSessionFromRequest(req, parsedUrl);
 
+        // Shared caches must never store what the cookie gate protects.
+        // Cloudflare edge-caches common extensions (.pdf, images, .js) BY
+        // DEFAULT when the origin stays silent, then serves the copy to
+        // whoever asks next — cookie or not. Proven live: a `hop view` PDF
+        // fetched once WITH auth came back cf-cache-status: HIT without it.
+        // Enforced here, at the writeHead choke point, so proxied upstream
+        // headers cannot reopen the hole; a route with a deliberately
+        // different policy sets res.hopCacheControl before responding.
+        const rawWriteHead = res.writeHead.bind(res);
+        res.writeHead = (...args) => {
+            for (const a of args) {
+                if (a && typeof a === 'object' && !Array.isArray(a)) {
+                    for (const k of Object.keys(a)) {
+                        if (String(k).toLowerCase() === 'cache-control') delete a[k];
+                    }
+                }
+            }
+            res.setHeader('Cache-Control', res.hopCacheControl || 'private, no-store');
+            return rawWriteHead(...args);
+        };
+
         // Check auth via cookie OR Authorization header (internal hop-to-hop only)
         // Bearer token is read from state file by other hop processes on same machine
         const authHeader = req.headers.authorization;
@@ -7498,6 +7519,7 @@ function startAuthProxy(authEmitter) {
         // Team + bundle are hop-ios's (project.yml); a WKWebView can never run
         // WebAuthn, so without this file the phone has no passkey path at all.
         if (parsedUrl.pathname === '/.well-known/apple-app-site-association' && req.method === 'GET') {
+            res.hopCacheControl = 'public, max-age=300';    // public on purpose — Apple's CDN reads it
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ webcredentials: { apps: ['5AD7QB9795.io.zhoulab.hop.spike'] } }));
             return;
@@ -9866,6 +9888,12 @@ function startAuthProxy(authEmitter) {
                 '.txt': 'text/plain; charset=utf-8',
                 '.md': 'text/plain; charset=utf-8'
             };
+            // Hashed bundle files may live in the BROWSER's cache for a while
+            // ('private' keeps every shared cache out); html and Views files
+            // stay on the no-store default.
+            if (hubExt !== '.html' && !parsedUrl.pathname.startsWith('/assets/view/')) {
+                res.hopCacheControl = 'private, max-age=3600';
+            }
             let hubContent = fs.readFileSync(resolvedHub);
             if (hubExt === '.html') {
                 // Room-less config: marks the page as hop-served (hub mode).
@@ -10013,6 +10041,11 @@ function startAuthProxy(authEmitter) {
 
         // Determine content type
         const ext = path.extname(filePath).toLowerCase();
+        // Same split as hub scope: hashed bundles browser-cache privately,
+        // html and Views files keep the no-store default.
+        if (ext !== '.html' && !reqPath.startsWith('/assets/view/')) {
+            res.hopCacheControl = 'private, max-age=3600';
+        }
         const contentTypes = {
             '.html': 'text/html; charset=utf-8',
             '.js': 'application/javascript',

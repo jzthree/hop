@@ -2875,6 +2875,10 @@ function unregisterTerminalStream(id, res) {
     streams.delete(res);
     if (streams.size === 0) {
         terminalApiStreams.delete(id);
+        // The idle clock starts when the LAST stream closes — an agent that
+        // held a stream for an hour was active the whole time.
+        const entry = terminalApiSessions.get(id);
+        if (entry) entry.lastTouchedAt = Date.now();
     }
 }
 
@@ -3675,6 +3679,39 @@ function createVirtualClientAdapter(onServerMessage) {
     };
 }
 
+// Fetch a terminal API entry AND stamp it as recently used — every API touch
+// (stream, write, resize, exec, delete) resets the idle clock the reaper
+// below runs on.
+function getTerminalApiEntryTouched(terminalId) {
+    const entry = terminalApiSessions.get(terminalId);
+    if (entry) entry.lastTouchedAt = Date.now();
+    return entry;
+}
+
+// Idle reaper for agent attaches. A virtual client is presence like any
+// other ("agent" in the roster) but has no socket that could die — an agent
+// that crashed or simply never called close would sit in a session's
+// presence forever. Idle = no API touch and no open SSE stream. Reaping is
+// safe for well-behaved agents: the MCP core re-attaches by session name on
+// the next op (recoverTerminalId), so a reaped handle costs one round-trip.
+const TERMINAL_API_IDLE_TTL_MS = Number(process.env.HOP_TERMINAL_API_IDLE_TTL_MS || 15 * 60 * 1000);
+const TERMINAL_API_SWEEP_MS = Number(process.env.HOP_TERMINAL_API_SWEEP_MS || 60 * 1000);
+if (DAEMON_FLAG && TERMINAL_API_IDLE_TTL_MS > 0) {
+    setInterval(() => {
+        const nowMs = Date.now();
+        for (const entry of [...terminalApiSessions.values()]) {
+            if (terminalApiStreams.has(entry.id)) continue; // live stream = in use
+            const idleSince = entry.lastTouchedAt || Date.parse(entry.createdAt) || nowMs;
+            if (nowMs - idleSince <= TERMINAL_API_IDLE_TTL_MS) continue;
+            log(`[terminal-api] detached idle '${entry.actor}' terminal from ${entry.displayName || entry.sessionName} after ${Math.round((nowMs - idleSince) / 60000)}m`, DIM);
+            try { entry.adapter.close(); } catch (e) { /* already closing */ }
+            // adapter.close() detaches the room client and drops the entry;
+            // belt-and-braces in case a close handler threw mid-chain.
+            terminalApiSessions.delete(entry.id);
+        }
+    }, TERMINAL_API_SWEEP_MS).unref();
+}
+
 function closeTerminalApiEntry(terminalId) {
     terminalApiSessions.delete(terminalId);
     const streams = terminalApiStreams.get(terminalId);
@@ -3803,7 +3840,8 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         actor: opts.actor || 'user',
         clientId,
         adapter: adapterBundle,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        lastTouchedAt: Date.now()
     };
     terminalApiSessions.set(terminalId, sessionEntry);
     return sessionEntry;
@@ -3851,7 +3889,8 @@ async function attachTerminalApiClient(sessionName, displayName, opts = {}) {
         actor: opts.actor || 'user',
         clientId,
         adapter: adapterBundle,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        lastTouchedAt: Date.now()
     };
     terminalApiSessions.set(terminalId, sessionEntry);
     return sessionEntry;
@@ -9423,7 +9462,7 @@ function startAuthProxy(authEmitter) {
         const terminalStreamMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/stream$/);
         if (terminalStreamMatch && req.method === 'GET') {
             const terminalId = terminalStreamMatch[1];
-            const entry = terminalApiSessions.get(terminalId);
+            const entry = getTerminalApiEntryTouched(terminalId);
             if (!entry) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Terminal not found' }));
@@ -9459,7 +9498,7 @@ function startAuthProxy(authEmitter) {
         const terminalWriteMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/write$/);
         if (terminalWriteMatch && req.method === 'POST') {
             const terminalId = terminalWriteMatch[1];
-            const entry = terminalApiSessions.get(terminalId);
+            const entry = getTerminalApiEntryTouched(terminalId);
             if (!entry) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Terminal not found' }));
@@ -9498,7 +9537,7 @@ function startAuthProxy(authEmitter) {
         const terminalResizeMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/resize$/);
         if (terminalResizeMatch && req.method === 'POST') {
             const terminalId = terminalResizeMatch[1];
-            const entry = terminalApiSessions.get(terminalId);
+            const entry = getTerminalApiEntryTouched(terminalId);
             if (!entry) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Terminal not found' }));
@@ -9531,7 +9570,7 @@ function startAuthProxy(authEmitter) {
         const terminalExecMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)\/exec$/);
         if (terminalExecMatch && req.method === 'POST') {
             const terminalId = terminalExecMatch[1];
-            const entry = terminalApiSessions.get(terminalId);
+            const entry = getTerminalApiEntryTouched(terminalId);
             if (!entry) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Terminal not found' }));
@@ -9571,7 +9610,7 @@ function startAuthProxy(authEmitter) {
         const terminalDeleteMatch = (parsedUrl.pathname || '').match(/^\/api\/terminals\/([^/]+)$/);
         if (terminalDeleteMatch && req.method === 'DELETE') {
             const terminalId = terminalDeleteMatch[1];
-            const entry = terminalApiSessions.get(terminalId);
+            const entry = getTerminalApiEntryTouched(terminalId);
             if (!entry) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Terminal not found' }));
@@ -10154,6 +10193,28 @@ function startAuthProxy(authEmitter) {
             const rows = parseInt(wsUrl.searchParams.get('rows') || '24', 10);
             const source = wsUrl.searchParams.get('source') || '';
             const claimId = wsUrl.searchParams.get('claim') || null;
+            // Client-supplied tab identity; the room evicts a same-key
+            // predecessor on attach (reconnect replaces its own ghost).
+            const deviceKeyRaw = wsUrl.searchParams.get('device') || '';
+            const deviceKey = /^[A-Za-z0-9._-]{1,80}$/.test(deviceKeyRaw) ? deviceKeyRaw : '';
+
+            // Liveness: browsers answer protocol pings in the network stack,
+            // so silence means the peer is gone (locked phone, network hop)
+            // even though no close frame ever arrived. Without this, ghost
+            // clients sat in presence until the tunnel's TCP gave up.
+            let wsAlive = true;
+            ws.on('pong', () => { wsAlive = true; });
+            const wsHeartbeat = setInterval(() => {
+                if (ws.readyState !== WebSocket.OPEN) { clearInterval(wsHeartbeat); return; }
+                if (!wsAlive) {
+                    clearInterval(wsHeartbeat);
+                    try { ws.terminate(); } catch (e) { /* already gone */ }
+                    return;
+                }
+                wsAlive = false;
+                try { ws.ping(); } catch (e) { /* closing */ }
+            }, 30000);
+            ws.on('close', () => clearInterval(wsHeartbeat));
 
             const clientId = hay.generateClientId();
             const colorIndex = Math.floor(Math.random() * 1000);
@@ -10173,7 +10234,7 @@ function startAuthProxy(authEmitter) {
 
             // Attach client to hay room
             session.room.attachClient(
-                { id: clientId, name: clientName, source, colorIndex, cols, rows },
+                { id: clientId, name: clientName, source, deviceKey, colorIndex, cols, rows },
                 hay.createSocketAdapter(ws)
             );
         });

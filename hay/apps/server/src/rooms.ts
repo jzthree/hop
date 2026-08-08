@@ -24,6 +24,11 @@ export type ClientInfo = {
   // switcher wall): excluded from presence and client counts, and given a
   // small snapshot so a wall of tiles doesn't pull megabytes per open.
   source?: string;
+  // Stable per-browser-tab identity (device id + tab id). A tab holds one
+  // live connection per room, so a new attach bearing the same key means the
+  // previous connection is dead even if its socket never closed — it is
+  // evicted on the spot instead of haunting presence until TCP notices.
+  deviceKey?: string;
   colorIndex: number;
   cols: number;
   rows: number;
@@ -182,6 +187,7 @@ class ClientState {
   lastActive = now();
   socket: SocketAdapter;
   source: string;
+  deviceKey: string;
   // Declared fit: the size this client's viewport wants, updated by every
   // resize message whether or not it applied. Becomes the PTY size the
   // moment a keystroke makes this client the size owner.
@@ -192,6 +198,7 @@ class ClientState {
     this.id = info.id;
     this.name = info.name;
     this.source = info.source || "";
+    this.deviceKey = info.deviceKey || "";
     this.color = pickPresenceColor(info.colorIndex);
     this.socket = socket;
     this.cols = info.cols;
@@ -359,6 +366,19 @@ export class Room extends EventEmitter {
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
+    }
+
+    // Same tab, same room: the newcomer replaces its predecessor. A phone
+    // that dropped off the network never sends a close, so its old
+    // connection would otherwise sit in presence as a second "iPhone"
+    // until TCP gives up on the corpse.
+    if (info.deviceKey) {
+      for (const [id, peer] of [...this.clients]) {
+        if (peer.deviceKey === info.deviceKey && peer.source !== "monitor") {
+          try { peer.socket.close(); } catch { /* already dead */ }
+          this.removeClient(id);
+        }
+      }
     }
 
     const client = new ClientState(info, socket);

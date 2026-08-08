@@ -1004,3 +1004,57 @@ describe("Room", () => {
     });
   });
 });
+
+describe("device-key eviction", () => {
+  // The room actively closes the predecessor's socket; a plain FakeSocket
+  // close is indistinguishable from a client-side close, so count them.
+  class TrackingSocket extends FakeSocket {
+    serverCloses = 0;
+    close() {
+      this.serverCloses += 1;
+      super.close();
+    }
+  }
+
+  const makeRoom = (name: string) => {
+    const manager = new RoomManager(() => new FakePty() as any);
+    return manager.getRoom(name, { cols: 80, rows: 24 }, "/tmp");
+  };
+
+  it("a same-key attach replaces the predecessor instead of joining it", () => {
+    const room = makeRoom("evict");
+    const ghost = new TrackingSocket();
+    const fresh = new FakeSocket();
+    room.attachClient({ id: "a", name: "iPhone", colorIndex: 0, cols: 80, rows: 24, deviceKey: "dev1.tab1" }, ghost);
+    room.attachClient({ id: "b", name: "iPhone", colorIndex: 1, cols: 80, rows: 24, deviceKey: "dev1.tab1" }, fresh);
+
+    expect(ghost.serverCloses).toBe(1);
+    const presence = findMessages(fresh, "presence").at(-1) as any;
+    expect(presence.clients.map((c: { id: string }) => c.id)).toEqual(["b"]);
+  });
+
+  it("different tabs from the same device coexist", () => {
+    const room = makeRoom("tabs");
+    const tabA = new TrackingSocket();
+    const tabB = new FakeSocket();
+    room.attachClient({ id: "a", name: "iPhone", colorIndex: 0, cols: 80, rows: 24, deviceKey: "dev1.tab1" }, tabA);
+    room.attachClient({ id: "b", name: "iPhone", colorIndex: 1, cols: 80, rows: 24, deviceKey: "dev1.tab2" }, tabB);
+
+    expect(tabA.serverCloses).toBe(0);
+    const presence = findMessages(tabB, "presence").at(-1) as any;
+    expect(presence.clients.map((c: { id: string }) => c.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("keyless clients (CLI, older bundles) are never evicted", () => {
+    const room = makeRoom("legacy");
+    const legacy = new TrackingSocket();
+    const keyed = new FakeSocket();
+    room.attachClient({ id: "a", name: "cli", colorIndex: 0, cols: 80, rows: 24 }, legacy);
+    room.attachClient({ id: "b", name: "iPhone", colorIndex: 1, cols: 80, rows: 24, deviceKey: "dev1.tab1" }, keyed);
+    room.attachClient({ id: "c", name: "iPhone", colorIndex: 2, cols: 80, rows: 24, deviceKey: "dev1.tab1" }, new FakeSocket());
+
+    expect(legacy.serverCloses).toBe(0);
+    const presence = findMessages(legacy, "presence").at(-1) as any;
+    expect(presence.clients.map((c: { id: string }) => c.id).sort()).toEqual(["a", "c"]);
+  });
+});

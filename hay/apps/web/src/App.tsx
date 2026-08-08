@@ -279,6 +279,30 @@ const resolveInitialName = () => {
   return fromParams ?? stored ?? (injected && injected !== "Guest" ? injected : null) ?? "User";
 };
 
+// Stable connection identity: device half persists per browser, tab half per
+// tab. The server evicts a previous connection bearing the same key on
+// attach — a reconnect replaces its own ghost in presence instead of sitting
+// next to it — while two real tabs (different tab halves) coexist.
+const randomKeyPart = () =>
+  (window.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, "").slice(0, 10);
+const resolveDeviceKey = () => {
+  try {
+    let device = localStorage.getItem("hop_device_id");
+    if (!device) {
+      device = randomKeyPart();
+      localStorage.setItem("hop_device_id", device);
+    }
+    let tab = sessionStorage.getItem("hop_tab_id");
+    if (!tab) {
+      tab = randomKeyPart();
+      sessionStorage.setItem("hop_tab_id", tab);
+    }
+    return `${device}.${tab}`;
+  } catch {
+    return ""; // storage unavailable (private mode quota) — no eviction key
+  }
+};
+
 // Per-session "seen" markers, shared with the session manager page via
 // localStorage (same origin). Keyed by internal session name; values are the
 // server's own lastActivityAt/bellSeq so no cross-device clock comparison
@@ -1464,7 +1488,7 @@ const App = () => {
     const hex = (c?: string) => (c || "").replace("#", "").slice(0, 6);
     const url = `${wsUrl}?room=${encodeURIComponent(nextSession.room)}&name=${encodeURIComponent(
       nextSession.name
-    )}&cols=${cols}&rows=${rows}&replay=${replay}&bg=${hex(surface.background)}&fg=${hex(surface.foreground)}`;
+    )}&cols=${cols}&rows=${rows}&replay=${replay}&bg=${hex(surface.background)}&fg=${hex(surface.foreground)}&device=${encodeURIComponent(resolveDeviceKey())}`;
 
     wsRef.current?.close();
     setStatus("connecting");

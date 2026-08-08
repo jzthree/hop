@@ -9852,8 +9852,19 @@ function startAuthProxy(authEmitter) {
                 '.json': 'application/json',
                 '.png': 'image/png',
                 '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
                 '.svg': 'image/svg+xml',
-                '.ico': 'image/x-icon'
+                '.ico': 'image/x-icon',
+                // The `hop view` families: a PDF served as octet-stream
+                // downloads instead of rendering, which defeats the feature.
+                '.pdf': 'application/pdf',
+                '.mp4': 'video/mp4',
+                '.mov': 'video/quicktime',
+                '.webm': 'video/webm',
+                '.txt': 'text/plain; charset=utf-8',
+                '.md': 'text/plain; charset=utf-8'
             };
             let hubContent = fs.readFileSync(resolvedHub);
             if (hubExt === '.html') {
@@ -10009,8 +10020,19 @@ function startAuthProxy(authEmitter) {
             '.json': 'application/json',
             '.png': 'image/png',
             '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
             '.svg': 'image/svg+xml',
-            '.ico': 'image/x-icon'
+            '.ico': 'image/x-icon',
+            // The `hop view` families: a PDF served as octet-stream
+            // downloads instead of rendering, which defeats the feature.
+            '.pdf': 'application/pdf',
+            '.mp4': 'video/mp4',
+            '.mov': 'video/quicktime',
+            '.webm': 'video/webm',
+            '.txt': 'text/plain; charset=utf-8',
+            '.md': 'text/plain; charset=utf-8'
         };
         const contentType = contentTypes[ext] || 'application/octet-stream';
 

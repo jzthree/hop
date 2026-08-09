@@ -1,6 +1,6 @@
 ---
 name: hop-session
-description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers rendering math with hop math, publishing viewable files (HTML/PDF/images) with hop view, exposing a running local web server with hop port, ringing the bell for attention, and phone-friendly output.
+description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers rendering math with hop math, handing over results a terminal cannot render — plots, PDFs, images, rendered markdown write-ups — with hop view (always with --title), exposing a running local web server with hop port, ringing the bell for attention, and phone-friendly output.
 ---
 
 # Working in a hop terminal
@@ -24,21 +24,42 @@ formula in your response; do not repeat the raw LaTeX next to it. When you
 need the rendered text inside a file or message, capture it:
 `hop math '<latex>'` and copy the command's output verbatim.
 
-## Showing files a terminal cannot render (HTML, PDF, images)
+## Showing results a terminal cannot render (plots, PDFs, write-ups)
 
-When the deliverable is a plot, a figure, an HTML report, a PDF, or any
-image, do not describe it — publish it and hand over the link:
+When the deliverable is a plot, a figure, a report, a PDF, an image, or a
+write-up worth reading as a document, do not describe it — publish it and
+hand over the link:
 
 ```bash
-hop view results/roc_curve.png
-hop view report.html analysis.pdf
+hop view --title "ROC curve: new model vs baseline" results/roc_curve.png
+hop view --title "Q3 regression analysis" report.html analysis.pdf
 ```
 
-`hop view` copies the file behind hop's auth and prints a `View:` URL. The
-human taps it and their browser renders it — on the desktop wall or from the
-phone app, which opens these in-app. It rings the bell once for you, since a
-published file is usually the thing the human is waiting on. Re-running
-it after updating the file re-publishes under the same link.
+**Always pass `--title`.** It is what the human sees in the session's Views
+list and in the "new result" chip — a filename like `roc_curve.png` makes
+them open it to find out what it is; a title means they already know. One
+title describes the whole handoff, so publishing three plots under
+"before/after/diff for the cache change" reads correctly.
+
+Markdown is a first-class result, and you can pipe it straight from stdout
+with no temp file — it is **rendered** (headings, tables, fenced code,
+quotes), not dumped as raw text:
+
+```bash
+generate_summary | hop view --name findings.md --title "What the profiler found" -
+```
+
+Reach for this whenever the answer is long enough that reading it in a
+terminal is worse than reading it as a page: comparisons, tables of numbers,
+anything with structure. A table in the scrollback of a phone terminal is
+close to unreadable; the same table as a view is not.
+
+`hop view` copies the file behind hop's auth and prints a `View:` URL. It
+rings the bell once for you, since a published result is usually the thing
+the human is waiting on, and the session's Views surface shows it as new.
+Re-running after updating the file re-publishes under the same link.
+`hop view --list` shows what this session has published; `hop view --rm
+<name>` unpublishes.
 
 ## Showing a running web server (dev server, local app)
 

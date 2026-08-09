@@ -240,6 +240,37 @@ Agents working inside hop terminals can render formulas for the humans watching 
 
 `hop math` renders a **2D Unicode layout** — fractions, roots, sums/limits, sub/superscripts, Greek + operators, and accents — with no dependencies. Inline-image rendering (Kitty/iTerm) is deferred until graphics support lands in the web client (xterm.js): the real payoff is math that renders *inside* a shared hop session, which the re-rendering clients can't show yet, so until then it's Unicode everywhere.
 
+### Show something a terminal cannot draw (`hop view`, `hop port`)
+
+A terminal can only print text, which makes it the wrong surface for the
+thing you most often want back from a long-running job: a plot, a report, a
+rendered write-up. `hop view` publishes a file behind hop's auth and prints a
+link — the web client and the phone app both open it in place, with the
+session's cookie, so nothing has to be public.
+
+```bash
+hop view --title "ROC curve: new model vs baseline" results/roc_curve.png
+hop view --title "Q3 analysis" report.html analysis.pdf
+generate_summary | hop view --name findings.md --title "What the profiler found" -
+hop view --list          # what this session published
+hop view --rm x.png      # unpublish
+```
+
+HTML, PDF, images, video and markdown all render (markdown is converted at
+serve time — headings, tables, fenced code). `--title` is what a human sees
+in the session's Views list, so it is worth writing properly. Published files
+are grouped **by session**: a result belongs to the conversation that
+produced it.
+
+For something live rather than a file, `hop port 5173` proxies a local web
+server through the same auth (WebSocket-safe, so dev-server hot reload
+works), attached to the current session — `--standalone` makes it a room of
+its own instead.
+
+Agents do this for you when the bundled skill is installed (`hop agent-skill
+install`): the convention is to hand over a titled view rather than describe
+a result in prose.
+
 ## Operations
 
 ### Logging and History

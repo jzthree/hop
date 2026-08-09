@@ -224,6 +224,33 @@ function validateConfigDir() {
 validateConfigDir();
 
 const STATE_FILE = path.join(HOME_DIR, '.tunnel-state');
+// Where `hop view` and `hop port` publish. Deliberately under HOME_DIR and
+// NOT under HAY_WEB_DIR, which resolves to hay/apps/web/dist — vite's own
+// outDir. That directory is gitignored AND emptied on every `npm run build`,
+// so every published deliverable silently vanished the next time anyone
+// rebuilt the web bundle. A view is the thing the human was waiting on; it
+// outlives a build.
+const VIEWS_DIR = path.join(HOME_DIR, 'views');
+// One-time move of anything published before that was understood. Best
+// effort: a failure here just means the old copies stay unreachable, which
+// is where they were headed anyway.
+function migrateLegacyViews() {
+    try {
+        const legacy = path.join(HAY_WEB_DIR, 'assets', 'view');
+        if (!fs.existsSync(legacy)) return;
+        for (const sess of fs.readdirSync(legacy)) {
+            const src = path.join(legacy, sess);
+            if (sess === 'manifest.json' || !fs.statSync(src).isDirectory()) continue;
+            const dst = path.join(VIEWS_DIR, sess);
+            fs.mkdirSync(dst, { recursive: true });
+            for (const f of fs.readdirSync(src)) {
+                const to = path.join(dst, f);
+                if (!fs.existsSync(to)) fs.copyFileSync(path.join(src, f), to);
+            }
+        }
+        fs.rmSync(legacy, { recursive: true, force: true });
+    } catch (e) { /* the new root still works */ }
+}
 const SESSION_SECRET_FILE = path.join(HOME_DIR, '.session_secret');
 // Folders live here, not in the workspace store: saveSessionStore() no-ops
 // without an active workspace (the common case), so folders and their order
@@ -7479,6 +7506,7 @@ const STATIC_CONTENT_TYPES = {
 };
 
 function startAuthProxy(authEmitter) {
+    migrateLegacyViews();
     log(`[2/4] Starting Session Manager on port ${PROXY_PORT}...`, BOLD);
 
     const server = http.createServer(async (req, res) => {
@@ -8064,7 +8092,7 @@ function startAuthProxy(authEmitter) {
         const viewMatch = req.method === 'GET'
             && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline)?$/);
         if (viewMatch) {
-            const viewRoot = path.resolve(path.join(HAY_WEB_DIR, 'assets', 'view'));
+            const viewRoot = path.resolve(VIEWS_DIR);
             const target = path.resolve(path.join(
                 viewRoot, decodeURIComponent(viewMatch[1]), decodeURIComponent(viewMatch[2])));
             if (!target.startsWith(viewRoot + path.sep)
@@ -8079,14 +8107,25 @@ function startAuthProxy(authEmitter) {
             res.end(fs.readFileSync(target));
             return;
         }
+        // The index. /assets/view/manifest.json is the URL every SHIPPED iOS
+        // build fetches, so it keeps working forever regardless of where the
+        // files actually live; /api/views is the same bytes under a name that
+        // describes what it is, for clients written after the move.
+        if (req.method === 'GET' && (parsedUrl.pathname === '/assets/view/manifest.json'
+                                     || parsedUrl.pathname === '/api/views')) {
+            let body = '{"items":[]}';
+            try { body = fs.readFileSync(path.join(VIEWS_DIR, 'manifest.json'), 'utf8'); } catch (e) { }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(body);
+            return;
+        }
         if (req.method === 'GET' && parsedUrl.pathname.startsWith('/assets/view/')) {
             const segs = parsedUrl.pathname.slice('/assets/view/'.length).split('/');
-            if (segs.length === 2 && segs[1] && segs[1] !== 'manifest.json') {
+            if (segs.length === 2 && segs[1]) {
                 res.writeHead(302, { Location: `/view/${segs[0]}/${segs[1]}/inline` });
                 res.end();
                 return;
             }
-            // manifest.json falls through to plain static serving
         }
 
         if (sessionInfoAuth && sessionInfoAuth.source === 'query' && shouldRedirectToSessionPath(req)) {
@@ -13307,7 +13346,8 @@ async function main() {
     // writer wins with the same complete list either way.
     function rebuildArtifactManifest() {
         try {
-            const viewRoot = path.join(HAY_WEB_DIR, 'assets', 'view');
+            migrateLegacyViews();
+            const viewRoot = VIEWS_DIR;
             const entries = [];
             for (const sess of fs.readdirSync(viewRoot)) {
                 const dir = path.join(viewRoot, sess);
@@ -13349,7 +13389,7 @@ async function main() {
         const state = isServerRunning();
         if (!state) { printNotRunningError(); process.exit(1); }
         const session = process.env.HOP_SESSION || 'shared';
-        const destDir = path.join(HAY_WEB_DIR, 'assets', 'view', session);
+        const destDir = path.join(VIEWS_DIR, session);
         fs.mkdirSync(destDir, { recursive: true });
         let failed = 0;
         for (const file of files) {
@@ -13422,7 +13462,7 @@ async function main() {
             // in-app open on web) navigates through it to the live proxy in
             // one hop — same auth, same session cookie, no new plumbing on
             // either client.
-            const destDir = path.join(HAY_WEB_DIR, 'assets', 'view', caller);
+            const destDir = path.join(VIEWS_DIR, caller);
             fs.mkdirSync(destDir, { recursive: true });
             const artifactName = `${label}.html`;
             fs.writeFileSync(path.join(destDir, artifactName), [

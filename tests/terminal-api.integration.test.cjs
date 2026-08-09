@@ -734,3 +734,87 @@ test('an idle agent terminal attach is reaped after the TTL', async () => {
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
     { name: 'idle-agent-probe', internalName: s.internalName });
 });
+
+// Dropping a file into the web terminal uploads its BYTES (a browser never
+// reveals the real path) and hands back a host path the session can open.
+// The filename is attacker-shaped input on its way to becoming a path.
+function requestUpload(port, secret, reqPath, buffer) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: reqPath,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': buffer.length
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, data: data ? JSON.parse(data) : null }); }
+        catch (e) { resolve({ status: res.statusCode, data }); }
+      });
+    });
+    req.on('error', reject);
+    req.end(buffer);
+  });
+}
+
+test('a dropped file uploads to host staging and never escapes it', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'upload-probe',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const session = create.data.sessionName;
+
+  // Every byte value, so a text-mode body handler would visibly corrupt it.
+  const bytes = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+  const up = await requestUpload(
+    state.port, state.sessionSecret,
+    `/api/sessions/upload?name=${encodeURIComponent(session)}&filename=shot.png`,
+    bytes
+  );
+  assert.equal(up.status, 200);
+  assert.ok(up.data.path, 'returns the host path');
+  const landed = await fs.readFile(up.data.path);
+  assert.ok(landed.equals(bytes), 'bytes survive the round trip unmodified');
+  assert.equal(path.basename(up.data.path), 'shot.png');
+  assert.ok(up.data.path.startsWith(path.join(hopHome, 'uploads')),
+    `staged under HOP_HOME/uploads, got ${up.data.path}`);
+
+  // A second drop of the same name is a second file, not an overwrite.
+  const again = await requestUpload(
+    state.port, state.sessionSecret,
+    `/api/sessions/upload?name=${encodeURIComponent(session)}&filename=shot.png`,
+    Buffer.from('second')
+  );
+  assert.equal(again.status, 200);
+  assert.notEqual(again.data.path, up.data.path, 'collision gets its own path');
+  assert.ok((await fs.readFile(up.data.path)).equals(bytes), 'first upload untouched');
+
+  // Traversal in the filename must collapse to a basename inside staging.
+  const evil = await requestUpload(
+    state.port, state.sessionSecret,
+    `/api/sessions/upload?name=${encodeURIComponent(session)}&filename=${encodeURIComponent('../../../../etc/hop-pwned')}`,
+    Buffer.from('nope')
+  );
+  assert.equal(evil.status, 200);
+  assert.ok(evil.data.path.startsWith(path.join(hopHome, 'uploads')),
+    `traversal stayed in staging, got ${evil.data.path}`);
+  assert.equal(path.basename(evil.data.path), 'hop-pwned');
+
+  // An unknown session is not a place to write files.
+  const nowhere = await requestUpload(
+    state.port, state.sessionSecret,
+    '/api/sessions/upload?name=no-such-session-here&filename=x.txt',
+    Buffer.from('x')
+  );
+  assert.equal(nowhere.status, 404);
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+    { name: 'upload-probe', internalName: session });
+});

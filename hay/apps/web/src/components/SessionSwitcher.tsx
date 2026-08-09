@@ -1807,15 +1807,20 @@ export const SessionSwitcher = ({
       if (document.activeElement?.closest?.(".switcher-live-tile, .switcher-focus-tile")) return;
       if (event.key === "Escape") {
         event.preventDefault();
+        // Escape unwinds one layer at a time, innermost first. A typed query
+        // is a layer: Escape clears it and leaves you on the full wall.
+        // Dismissing the whole switcher out from under a search meant losing
+        // your place to undo one word.
         if (sheet) setSheet(null);
         else if (focusedKey) setFocusedKey(null);
+        else if (filter) setFilter("");
         else if (dismissable) onClose();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sheet, focusedKey]);
+  }, [open, sheet, focusedKey, filter]);
 
   // Tile previews: EVERY session gets a preview tile. Hot tiles (the
   // attention/recency heroes) refresh each tick; the long tail refreshes at a

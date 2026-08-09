@@ -326,6 +326,25 @@ describe("manual folders in the wall", () => {
     expect(screen.getByText("Filed")).toBeTruthy();
   });
 
+  it("Escape clears a typed filter before it dismisses the wall", () => {
+    const onClose = vi.fn();
+    render(<SessionSwitcher {...props} onClose={onClose} sessions={withFolder} folders={folders} open />);
+    const input = document.querySelector(".switcher-top input") as HTMLInputElement
+      || document.querySelector("input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "outsid" } });
+    expect(input.value).toBe("outsid");
+
+    // First Escape: the query is the innermost layer — it goes, the wall stays.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(input.value).toBe("");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText("inside")).toBeTruthy(); // full wall is back
+
+    // Second Escape: nothing left to unwind, so the wall dismisses.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("a query in manual mode still offers the full-history search", () => {
     // Manual keeps its own render branch under a query (narrow-in-place), so
     // the search tail — content hits + the deep button — must ride along or

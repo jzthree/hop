@@ -6,6 +6,16 @@
 // long tail becomes compact rows auto-grouped by project directory. A filter
 // query collapses everything into one flat ranked list.
 
+// Per-session rollup of what `hop view` / `hop port` published, as
+// /api/sessions reports it. latestAt is epoch SECONDS, matching the manifest.
+export type ViewsSummary = {
+  count: number;
+  latestAt: number;
+  latestName?: string;
+  latestTitle?: string;
+  latestPath?: string;
+};
+
 export type SwitcherSession = {
   name: string;
   displayName: string;
@@ -40,6 +50,8 @@ export type SwitcherSession = {
   // A hop CLI is attached in a real terminal window on the host. The wall
   // must never resize such a session — that window's size is physical truth.
   hasLocalCli?: boolean;
+  // Absent unless this session has published something.
+  views?: ViewsSummary;
 };
 
 export type SessionOriginScope = "user" | "agent" | "all";

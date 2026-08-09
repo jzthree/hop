@@ -28,6 +28,7 @@ import {
 } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { DigestCard } from "./DigestCard";
+import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
 
 // Full-screen, in-app session switcher (mobile-first). Hot sessions — current,
 // attention, most recent — are preview cards; the tail is compact rows grouped
@@ -103,6 +104,9 @@ type Props = {
   onOpenSettings?: () => void;
   onToggleKeyboard?: () => void;
   onFind?: () => void;
+  // Open the Views panel. No argument = the whole fleet (header button); an
+  // internalName = just that session (a card's chip).
+  onOpenViews?: (session?: string) => void;
 };
 
 type Sheet = {
@@ -1130,7 +1134,8 @@ export const SessionSwitcher = ({
   terminalTheme,
   onOpenSettings,
   onToggleKeyboard,
-  onFind
+  onFind,
+  onOpenViews
 }: Props) => {
   // View state survives a REFRESH but not a new tab: sessionStorage, not
   // localStorage. Reloading the page (or hop reconnecting) used to dump the
@@ -1479,6 +1484,15 @@ export const SessionSwitcher = ({
   const visibleSessions = useMemo(
     () => filterSessionsByOrigin(sessions, originScope),
     [sessions, originScope]
+  );
+  // Read once per session-list refresh rather than per card: every tile on a
+  // 30-session wall hitting localStorage on each of the wall's frequent
+  // re-renders is a synchronous cost the tile previews cannot absorb. The
+  // 5s poll's new array is also what re-reads markers the panel just wrote.
+  const viewsSeen = useMemo(() => loadViewsSeen(), [sessions]);
+  const unseenViewSessions = useMemo(
+    () => visibleSessions.filter((s) => hasUnseenViews(sessionKey(s), s.views?.latestAt, viewsSeen)).length,
+    [visibleSessions, viewsSeen]
   );
   // Parked sessions leave the wall but stay one glance away in a collapsed
   // section — and the FILTER still searches them, so a parked session is
@@ -2498,6 +2512,22 @@ export const SessionSwitcher = ({
             </span>
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
+          {/* A result waiting on this session is worth as much as its status:
+              a published PDF or write-up was otherwise invisible from the wall.
+              stopPropagation on pointerdown keeps the long-press sheet out of
+              it, the same way the inline action buttons do. */}
+          {onOpenViews && s.views && s.views.count > 0 && (
+            <button
+              type="button"
+              className={"switcher-chip views" + (hasUnseenViews(key, s.views.latestAt, viewsSeen) ? " fresh" : "")}
+              title={s.views.latestTitle || s.views.latestName || "Published views"}
+              aria-label={`${s.views.count} published view${s.views.count === 1 ? "" : "s"} in ${s.displayName}`}
+              onClick={(e) => { e.stopPropagation(); onOpenViews(key); }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              ◧ {s.views.count}
+            </button>
+          )}
           {waitingOnUser(preview) && (
             <span className="switcher-chip waiting" title="Claude is asking how to resume this conversation — open it and choose">
               NEEDS YOU
@@ -2698,6 +2728,16 @@ export const SessionSwitcher = ({
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
               </svg>
+            </button>
+          )}
+          {/* The hub renders this wall as the whole page, so this is the only
+              fleet-wide way in to Views when no session is open. */}
+          {onOpenViews && (
+            <button type="button" className="switcher-action" aria-label="Published views" title="Files agents published with hop view" onClick={() => onOpenViews()}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 4v16"/>
+              </svg>
+              {unseenViewSessions > 0 && <span className="views-chip-dot" aria-label="New views" />}
             </button>
           )}
           {onOpenSettings && (

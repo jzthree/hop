@@ -19,6 +19,8 @@ import { originalPathHint } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
+import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
+import type { ViewsSummary } from "./utils/switcherModel";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -260,6 +262,7 @@ type SessionInfo = {
   tagline?: string;
   parked?: boolean;
   archived?: boolean;
+  views?: ViewsSummary;
 };
 
 // Check if embedded in Hop
@@ -592,6 +595,9 @@ const App = () => {
   // layer calls through this ref to avoid declaration-order coupling.
   const switchSessionRef = useRef<((s: SessionInfo) => void) | null>(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  // Published views (`hop view`). `session` scopes the panel to one session;
+  // an object with none open it fleet-wide. Null = closed.
+  const [viewsOpen, setViewsOpen] = useState<{ session?: string } | null>(null);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   // Claude Code titles its process with a bare version number; hop's session
@@ -2882,7 +2888,12 @@ const App = () => {
           parked: s.parked === true,
           archived: s.archived === true,
           hasLocalCli: s.hasLocalCli === true,
-          folderId: typeof s.folderId === "string" ? s.folderId : null
+          folderId: typeof s.folderId === "string" ? s.folderId : null,
+          // Only present when the session has published — the switcher chip
+          // and the Views dot both key off its absence meaning "nothing here".
+          views: s.views && Number(s.views.count) > 0
+            ? { ...s.views, count: Number(s.views.count), latestAt: Number(s.views.latestAt) || 0 }
+            : undefined
         });
       }
 
@@ -3612,6 +3623,15 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
+  // How many sessions have published something this browser hasn't opened.
+  // Rides the 5s /api/sessions poll rather than fetching the manifest again;
+  // `viewsOpen` is a dep because closing the panel is what rewrites the
+  // seen-markers this reads — without it the dot stayed lit after a read.
+  const unseenViewSessions = useMemo(() => {
+    const seen = loadViewsSeen();
+    return sessions.filter((s) => hasUnseenViews(s.internalName || s.name, s.views?.latestAt, seen)).length;
+  }, [sessions, viewsOpen]);
+
   const sessionStyle = isMobile
     ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)
     : undefined;
@@ -3663,6 +3683,15 @@ const App = () => {
             <button
               type="button"
               className="topbar-sessions-btn"
+              title="Files agents published with hop view"
+              onClick={() => setViewsOpen({})}
+            >
+              Views
+              {unseenViewSessions > 0 && <span className="views-chip-dot" aria-label="New views" />}
+            </button>
+            <button
+              type="button"
+              className="topbar-sessions-btn"
               aria-label="Session settings"
               title="Session settings"
               onClick={() => setDrawerOpen(true)}
@@ -3695,7 +3724,7 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
-            
+            onOpenViews={(scope) => setViewsOpen({ session: scope })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
           />
@@ -3871,6 +3900,13 @@ const App = () => {
                   handleResize();
                 }}>
                   Fit
+                </button>
+                {/* The drawer is the only menu on mobile, where the topbar's
+                    Views button is hidden — without this entry the phone had
+                    to go through the switcher to reach a published result. */}
+                <button type="button" className="quick-btn" onClick={() => { setDrawerOpen(false); setViewsOpen({}); }}>
+                  Views
+                  {unseenViewSessions > 0 && <span className="views-chip-dot" aria-label="New views" />}
                 </button>
                 {/* Mobile gets the in-app switcher; desktop keeps the manager page */}
                 {isMobile && isEmbeddedInHop() ? (
@@ -4370,6 +4406,7 @@ const App = () => {
             tileWsBase={resolveWsUrl()}
             onFocusSession={focusSessionInPlace}
             folders={folders}
+            onOpenViews={(scope) => setViewsOpen({ session: scope })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {
@@ -4503,6 +4540,11 @@ const App = () => {
           )}
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
+      )}
+      {/* Outside the mode ternary on purpose: Views opens from the hub, from a
+          session, and from over the switcher, and it must outlive a switch. */}
+      {viewsOpen && (
+        <ViewsPanel session={viewsOpen.session} sessions={sessions} onClose={() => setViewsOpen(null)} />
       )}
     </div>
   );

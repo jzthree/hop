@@ -394,6 +394,26 @@ function listPublishTargets(state) {
     }
 }
 
+// Runtime data written into the served assets dir — the briefing's
+// digest.json is the live example — is deleted by every web bundle rebuild,
+// because HAY_WEB_DIR resolves to vite's outDir when a dev build exists.
+// hop-ios's digest tool already mitigates half of this by writing to BOTH
+// candidate roots; the daemon only ever READ the first, so after a rebuild
+// the surviving copy sat unreachable and the wall's briefing 404'd. This
+// completes the other half: fall back to the packaged bundle for anything
+// the dev build doesn't have.
+function packagedAssetFallback(relPath) {
+    try {
+        const packagedRoot = path.resolve(path.join(__dirname, 'hay-web'));
+        if (path.resolve(HAY_WEB_DIR) === packagedRoot) return null;   // same dir already
+        const candidate = path.resolve(path.join(packagedRoot, relPath));
+        if (!candidate.startsWith(packagedRoot + path.sep)) return null;
+        return fs.existsSync(candidate) && fs.statSync(candidate).isFile() ? candidate : null;
+    } catch (e) {
+        return null;
+    }
+}
+
 // Per-session view facts for the sessions list: how many, how recent, and
 // what the newest one is called. Read from the manifest (already a cheap
 // single file) rather than re-scanning, and re-read only when it changes —
@@ -10372,7 +10392,7 @@ function startAuthProxy(authEmitter) {
             let hubPath = isRootAsset
                 ? path.join(HAY_WEB_DIR, parsedUrl.pathname)
                 : path.join(HAY_WEB_DIR, 'index.html');
-            const resolvedHub = path.resolve(hubPath);
+            let resolvedHub = path.resolve(hubPath);
             const hubRoot = path.resolve(HAY_WEB_DIR);
             if (resolvedHub !== hubRoot && !resolvedHub.startsWith(hubRoot + path.sep)) {
                 res.writeHead(403);
@@ -10380,9 +10400,14 @@ function startAuthProxy(authEmitter) {
                 return;
             }
             if (!fs.existsSync(resolvedHub)) {
-                res.writeHead(404);
-                res.end('Not Found');
-                return;
+                const fallback = isRootAsset && packagedAssetFallback(parsedUrl.pathname);
+                if (!fallback) {
+                    res.writeHead(404);
+                    res.end('Not Found');
+                    return;
+                }
+                hubPath = fallback;
+                resolvedHub = fallback;
             }
             const hubExt = path.extname(resolvedHub).toLowerCase();
             const hubTypes = STATIC_CONTENT_TYPES;
@@ -10532,9 +10557,15 @@ function startAuthProxy(authEmitter) {
 
         // Check if file exists
         if (!fs.existsSync(filePath)) {
-            res.writeHead(404);
-            res.end('Not Found');
-            return;
+            // Same packaged fallback as hub scope — a rebuild must not take
+            // the briefing out from under a session-scoped page either.
+            const fallback = reqPath.startsWith('/assets/') && packagedAssetFallback(reqPath);
+            if (!fallback) {
+                res.writeHead(404);
+                res.end('Not Found');
+                return;
+            }
+            filePath = fallback;
         }
 
         // Determine content type

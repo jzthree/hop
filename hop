@@ -335,6 +335,12 @@ function renderMarkdown(src, title) {
         } else if ((m = line.match(/^&gt;\s?(.*)$/))) {
             flushPara(); flushList(); flushTable();
             out.push(`<blockquote>${inline(m[1])}</blockquote>`);
+        } else if (list && !para.length) {
+            // Lazy continuation: a wrapped bullet is still that bullet.
+            // Agents hard-wrap long list items constantly, and treating each
+            // wrap as a new block rendered a clean summary as a pile of
+            // one-item lists with orphaned paragraphs between them.
+            list.items[list.items.length - 1] += ' ' + line.trim();
         } else {
             flushList(); flushTable();
             para.push(line.trim());

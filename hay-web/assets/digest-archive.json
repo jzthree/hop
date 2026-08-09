@@ -1,6 +1,37 @@
 {
  "editions": [
   {
+   "generated_at": "2026-08-09T19:41:26.970Z",
+   "summary": "Your iOS terminal session is out of its credit lockout and already has four fixes live — the phone is being put on exactly the latest build, so the height bug is finally retestable — while the 60-GPU-hour kill decision the splice board asked you for an hour ago has quietly vanished from it.",
+   "items": [
+    {
+     "session": "Orion",
+     "headline": "After two editions answering everything with a credits error, this one is working again and has shipped: four fixes are done and live, and it is now checking the installed app version so it can put the phone on exactly the newest commit rather than one behind. That means the clue you left unread — terminal height wrong in the iOS client only, width always fine — landed in a session that can act on it. A side agent has been digging through git hooks and history for eighteen minutes and 142k tokens, which is a lot of spend on archaeology.",
+     "why": "You can retest the height bug on the phone as soon as that install finishes, and this is the only client-side session with working credits — the music, hop-daemon and App Store sessions are behind the hard weekly limit until Monday midnight.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "The request to kill the two high-sparsity arms — the ~60 GPU-hours you were asked to rule on an hour ago — is no longer on the board, so it either acted on its own recommendation or dropped the question. Meanwhile the arm I have flagged for days as chasing a settled question has turned around: it now reports it is still improving at epoch 516 with about 37 hours left, down from the frozen ~45-hour estimate, which is the first real evidence that training twice as long is buying something. The ensemble result stands unchanged at 0.7620, +0.0074 over baseline, with its interval entirely above zero.",
+     "why": "Nothing there is waiting on you anymore, but it is worth one glance to confirm those two GPUs were actually freed rather than left running on the direction its own motif images ruled out.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "You told it to regularize away the overfitting and keep pushing that thread, and it agreed to two things: build the anchoring regularizer you described, and move the work onto the cluster's ARM nodes. The whole hour so far has gone to the second one — hunting for a software environment that will actually run there. That makes three consecutive hours of plumbing (image rendering, figure formats, now environments), and the run meant to decide whether the accuracy ladder is only parameters bought back has now gone five hours without producing a single number.",
+     "why": "Your regularizer idea is the right next experiment, but the loop keeps spending its overnight tokens on infrastructure instead of the one result your write-up is waiting on.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Solstice",
+     "headline": "Unchanged and still walled off: the phantom-client fixes — heartbeats, device identity, agent-attach expiry — are committed and running live on the restarted daemon, but the probe that would confirm them never ran, and your drag-and-drop request came back as a credits error.",
+     "why": "Both halves of hop are in play tonight and only the iOS side can act, so if you want the duplicate-iPhone and dead-socket check actually run, ask the iOS session to do it rather than waiting on this one until Monday.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
    "generated_at": "2026-08-09T18:41:40.895Z",
    "summary": "The one thing you can still act on today is the splice session asking to kill ~60 GPU-hours aimed at a direction its own motif images already ruled out — and three more sessions went dark on credits this hour, including the one watching your two music models converge.",
    "items": [
@@ -1296,43 +1327,6 @@
      "session": "Oberon",
      "headline": "The auto-statistician's web dashboard is still down — killed with its shell in the daemon shutdown two nights ago — and the session sits idle holding a one-line offer to relaunch it detached. The sequence browser had the identical failure and came back only because you happened to ask this hour; it is detached now and will survive the next cycle. Terminals across the fleet did visibly reconnect in the last hour, so the host restart parked for five editions appears to have finally fired.",
      "why": "Anything else launched inside a session shell rather than detached is silently dead right now too, and nothing will report it until you go looking.",
-     "urgency": "fyi"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-07T15:41:28.935Z",
-   "summary": "The interpretability thread may have been chasing something that isn't there — one session now suspects the matrix it has spent days trying to read carries no learned information at all, and has a single cheap control that settles it.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "It has landed on one hypothesis that would explain every negative result in this thread at once: that the interaction matrix it has been trying to interpret holds nothing learned — that it is just a rich basis for reading local motif activity. The test is to freeze it at random values, never train it, and see whether the model still reaches about 60% of the span; if it does, there is literally nothing in there to interpret. That single explanation would cover the spectral grouping failing, the pair residual barely replicating across seeds, and the compact partner-specific models underperforming. The sharing curve is filling in alongside it: two groups recovers 62.4%, eight recovers 48.2%.",
-     "why": "Every interpretability claim in this line of work assumes something was learned in that matrix, and one frozen-random control now decides whether that assumption holds.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Europa",
-     "headline": "The error bar you have waited four editions for is finally in, and the session's own ledger marks the question closed, with the margin over the baseline restated slightly down to +0.0050 auPRC. What it flagged next matters more: with architectural changes ruled out of scope, the only levers left are bagging (running now — its eight jobs landed on the second cluster, sharing it with the accessibility work), annotation weighting, the epoch budget, which looks flat between 225 and 300 epochs, and one optimizer swap. The annotation axis is already measured closed.",
-     "why": "If bagging collapses the way seed diversity did, +0.0050 is simply what data and training levers can buy, and the next real move needs your approval to reopen architecture.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "room",
-     "headline": "The fifth label overturn in a row traces to the photographs rather than the labellers. A piece recorded as traditional on the strength of turned wood feet turns out, in the larger rendition of the very same photo, to have a plain flat rail with no turning at all. The labelling agent also pushed back on its own brief — judging each row on its own photo contradicts the rule that variants share one design — and the sweep has been relaunched to judge designs instead. Two agents are running again, including the last unlabelled batch in the queue.",
-     "why": "If labels depend on which rendition of a photo got looked at, the fix is in how images are sampled, not in the style definitions you were asked to arbitrate last hour.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Supernova",
-     "headline": "Five hours on, the yes-or-no it asked for is still unanswered: may it check the cluster for the current best RNA model and confirm the evolutionary search survived there. Nothing has moved, and the session has since compacted its context, so the reasoning behind the question is thinner than when it asked. Both things at stake are unchanged — the 0.7823 you quote as your best single model is probably stale, superseded by a late-July line of runs never scored into that comparison, and the only copy of that search now appears to sit on the cluster and nowhere else.",
-     "why": "It is a one-word answer, and until it comes your leaderboard number and your only copy of that search are both unverified.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Orion",
-     "headline": "The host restart parked for four editions is finally running in the background, carrying the two session-recovery fixes for the wipeout two nights ago. It also made reconnection retry instantly on the first attempt in both the phone app and the web client. The new build is on your phone, but it installed while the phone was locked, so it needs a manual relaunch before you see any of it.",
-     "why": "Once that restart lands, the stranded-session failure should stop recurring — worth confirming rather than assuming, since nothing else will raise it again.",
      "urgency": "fyi"
     }
    ],

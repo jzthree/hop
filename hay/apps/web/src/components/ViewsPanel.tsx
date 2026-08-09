@@ -18,6 +18,13 @@ type ViewItem = {
   bytes?: number;
   // Epoch SECONDS (the manifest stores unix time, not ms).
   mtime?: number;
+  // "server" is a LIVE proxied localhost server (`hop port`), not a stored
+  // file: it stops working when the server does, which a file never does.
+  kind?: "file" | "server";
+  // For a server, the proxy itself. The manifest scan can only see the
+  // redirect page `hop port` leaves behind; going straight to the proxy skips
+  // a visible flash and a round trip on a phone link.
+  target?: string;
 };
 
 type Props = {
@@ -60,8 +67,11 @@ export const hasUnseenViews = (
 // A short type tag instead of an emoji: this sits at ~9px on a phone, and
 // emoji coverage for document glyphs differs enough between iOS and Android
 // that the column stops lining up. The tag also survives a monospace column.
-const kindOf = (name: string) => {
+const kindOf = (name: string, kind?: string) => {
+  if (kind === "server") return "LIVE";
   const ext = (name.split(".").pop() || "").toLowerCase();
+  if (["csv", "tsv"].includes(ext)) return "TBL";
+  if (["mp3", "m4a", "wav", "flac", "aac", "ogg", "opus"].includes(ext)) return "AUD";
   if (ext === "pdf") return "PDF";
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "ico"].includes(ext)) return "IMG";
   if (["mp4", "mov", "webm"].includes(ext)) return "VID";
@@ -184,13 +194,19 @@ export const ViewsPanel = ({ session, sessions = [], onClose }: Props) => {
                 <div className="views-dateline">{label(key)}</div>
                 {rows.map((item) => {
                   const fresh = (item.mtime || 0) > (seenAtOpen[key] || 0);
-                  const meta = [
-                    // The filename is only worth a line of its own when the
-                    // title isn't already showing it.
-                    item.title ? item.name : "",
-                    relativeTime((item.mtime || 0) * 1000, now),
-                    formatBytes(item.bytes)
-                  ].filter(Boolean).join(" · ");
+                  const isServer = item.kind === "server";
+                  // A server has no meaningful size and its filename is an
+                  // implementation detail (the redirect page) — it is a door,
+                  // not a document, so say what it is instead.
+                  const meta = isServer
+                    ? "live server · opens the running app"
+                    : [
+                        // The filename is only worth a line of its own when
+                        // the title isn't already showing it.
+                        item.title ? item.name : "",
+                        relativeTime((item.mtime || 0) * 1000, now),
+                        formatBytes(item.bytes)
+                      ].filter(Boolean).join(" · ");
                   return (
                     // A real anchor to a new tab, not an in-app overlay or a
                     // button: these are PDFs, videos and whole HTML pages, and
@@ -203,12 +219,12 @@ export const ViewsPanel = ({ session, sessions = [], onClose }: Props) => {
                     // being an anchor keeps ⌘-click and "copy link" working.
                     <a
                       key={item.path}
-                      className={"views-row" + (fresh ? " fresh" : "")}
-                      href={item.path}
+                      className={"views-row" + (fresh ? " fresh" : "") + (isServer ? " server" : "")}
+                      href={isServer && item.target ? item.target : item.path}
                       target="_blank"
                       rel="noopener"
                     >
-                      <span className="views-kind" aria-hidden="true">{kindOf(item.name)}</span>
+                      <span className="views-kind" aria-hidden="true">{kindOf(item.name, item.kind)}</span>
                       <span className="views-row-text">
                         <span className="views-title">{item.title || item.name}</span>
                         {meta && <span className="views-meta">{meta}</span>}

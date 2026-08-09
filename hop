@@ -370,6 +370,30 @@ img { max-width:100%; border-radius:10px; }
 </style></head><body>\n${body}\n</body></html>`;
 }
 
+// Names `--session` will accept, for the error that asks for one. Reading the
+// daemon's own list rather than the views folder: the answer to "where can
+// this go" is every live session, not just the ones that already published.
+function listPublishTargets(state) {
+    try {
+        const out = execFileSync(process.execPath, ['-e', `
+            const http = require('http');
+            http.get({ host: '127.0.0.1', port: ${Number(state.port)}, path: '/api/sessions',
+                       headers: { Cookie: 'tunnel_session=' + process.argv[1] } }, (r) => {
+                let b = ''; r.on('data', (c) => b += c);
+                r.on('end', () => {
+                    try {
+                        const d = JSON.parse(b);
+                        console.log((d.sessions || []).map((s) => s.internalName).join('\\n'));
+                    } catch (e) { }
+                });
+            }).on('error', () => {});
+        `, String(state.sessionSecret)], { encoding: 'utf8', timeout: 4000 });
+        return out.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 12);
+    } catch (e) {
+        return [];
+    }
+}
+
 // Per-session view facts for the sessions list: how many, how recent, and
 // what the newest one is called. Read from the manifest (already a cheap
 // single file) rather than re-scanning, and re-read only when it changes —
@@ -424,12 +448,20 @@ function rebuildViewManifest() {
                 if (f.startsWith('.')) continue;         // the .meta.json sidecar
                 const st = fs.statSync(path.join(dir, f));
                 if (!st.isFile()) continue;
+                const m = meta[f] || {};
                 entries.push({
                     session: sess,
                     name: f,
                     // What the agent SAID it was handing over. Clients lead
                     // with this and fall back to the filename.
-                    title: meta[f]?.title || '',
+                    title: m.title || '',
+                    // 'server' means a LIVE proxied localhost server rather
+                    // than a stored file: it can stop working when the server
+                    // does, and `target` is the proxy itself, so a client can
+                    // skip the redirect page the scan actually found.
+                    kind: m.kind === 'server' ? 'server' : 'file',
+                    target: m.kind === 'server' ? (m.target || '') : undefined,
+                    port: m.kind === 'server' ? m.port : undefined,
                     // The extensionless serving path — see the /view route for
                     // why the extension must stay off the URL's end.
                     path: `/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}/inline`,
@@ -460,6 +492,7 @@ const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
 const LOG_DIR = path.join(HOME_DIR, 'logs');
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const UPLOAD_MAX_BYTES = parsePositiveIntEnv('HOP_UPLOAD_MAX_BYTES', 100 * 1024 * 1024);
 const DEFAULT_WORKSPACE_NAME = 'default';
 const HISTORY_DIR_NAME = 'history';
 const WORKSPACE_LOGS_DIR_NAME = 'logs';
@@ -5573,6 +5606,36 @@ function resolveActor(req) {
     return resolveActorFromHeaders(req?.headers || {}, ACTOR_HEADER);
 }
 
+// A dropped file's name is attacker-shaped input: it arrives as a query
+// param and becomes a filesystem path. Keep the basename only (so "../../.."
+// and absolute paths collapse to nothing), drop separators and control
+// characters, and bound the length while preserving the extension — the
+// extension is what makes an image open as an image downstream.
+function safeUploadFilename(raw) {
+    let name = typeof raw === 'string' ? raw : '';
+    name = name.replace(/[\x00-\x1f\x7f]/g, '');
+    name = path.basename(name.replace(/\\/g, '/'));
+    name = name.replace(/[/:]/g, '-').trim();
+    if (name === '' || name === '.' || name === '..') return 'dropped-file';
+    if (name.length > 120) {
+        const ext = path.extname(name).slice(0, 16);
+        name = name.slice(0, 120 - ext.length) + ext;
+    }
+    return name;
+}
+
+// Never overwrite: a second drop of "screenshot.png" is a second file, not a
+// replacement of the one the user may still be pointing an agent at.
+function uniqueUploadPath(dir, filename) {
+    const ext = path.extname(filename);
+    const stem = filename.slice(0, filename.length - ext.length);
+    let candidate = path.join(dir, filename);
+    for (let i = 1; fs.existsSync(candidate) && i < 1000; i++) {
+        candidate = path.join(dir, `${stem}-${i}${ext}`);
+    }
+    return candidate;
+}
+
 function resolveSessionInternalName(name, internalName) {
     if (internalName && (getEffectiveSessionConfig(internalName) || hopSessionExists(internalName))) return internalName;
     if (!name) return null;
@@ -7694,12 +7757,75 @@ const STATIC_CONTENT_TYPES = {
     '.svg': 'image/svg+xml',
     '.ico': 'image/x-icon',
     '.pdf': 'application/pdf',
+    // Everything below renders natively in a browser AND in the iOS app's
+    // WKWebView, so the only thing standing between a result and the human
+    // was this table. An unlisted extension falls back to octet-stream, which
+    // DOWNLOADS instead of rendering — the exact defeat the feature exists to
+    // avoid, and how .pdf itself behaved until the first live test.
+    '.heic': 'image/heic',
+    '.heif': 'image/heif',
+    '.avif': 'image/avif',
+    '.bmp': 'image/bmp',
+    '.tif': 'image/tiff',
+    '.tiff': 'image/tiff',
+    '.apng': 'image/apng',
     '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
     '.mov': 'video/quicktime',
     '.webm': 'video/webm',
+    '.ogv': 'video/ogg',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.wav': 'audio/wav',
+    '.flac': 'audio/flac',
+    '.oga': 'audio/ogg',
+    '.ogg': 'audio/ogg',
+    '.opus': 'audio/ogg',
     '.txt': 'text/plain; charset=utf-8',
+    '.log': 'text/plain; charset=utf-8',
+    '.xml': 'text/xml; charset=utf-8',
+    '.yaml': 'text/plain; charset=utf-8',
+    '.yml': 'text/plain; charset=utf-8',
+    '.ics': 'text/calendar; charset=utf-8',
     '.md': 'text/plain; charset=utf-8'
 };
+
+// Extensions we RENDER rather than hand over raw, because the raw form is
+// unreadable on a phone and the rendered form is the actual result.
+const VIEW_RENDERED = new Set(['.md', '.markdown', '.csv', '.tsv', '.json']);
+
+/// Delimited data as a table. A CSV is a RESULT — the numbers an agent
+/// computed — and delivering it as one long line of commas on a phone is the
+/// "just text" failure with extra steps. Quote-aware because a cell
+/// containing a comma is the normal case in real data, not an edge case.
+function renderDelimited(src, title, delim) {
+    const rows = [];
+    let row = [], cell = '', quoted = false;
+    for (let i = 0; i < src.length; i++) {
+        const c = src[i];
+        if (quoted) {
+            if (c === '"' && src[i + 1] === '"') { cell += '"'; i++; }
+            else if (c === '"') quoted = false;
+            else cell += c;
+        } else if (c === '"') quoted = true;
+        else if (c === delim) { row.push(cell); cell = ''; }
+        else if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+        else if (c !== '\r') cell += c;
+    }
+    if (cell.length || row.length) { row.push(cell); rows.push(row); }
+    const body = rows.filter((r) => r.length && !(r.length === 1 && r[0] === ''));
+    if (!body.length) return renderMarkdown('_(empty)_', title);
+    // Markdown's own table syntax, so one renderer styles both — and a cell
+    // holding a pipe would otherwise break the table it lives in.
+    const esc = (s) => String(s).replace(/\|/g, '\\|').trim();
+    const head = body[0].map(esc);
+    const md = [`# ${title}`, '', `| ${head.join(' | ')} |`,
+                `|${head.map(() => '---').join('|')}|`,
+                ...body.slice(1).map((r) => `| ${r.map(esc).join(' | ')} |`),
+                '', `_${body.length - 1} rows_`].join('\n');
+    return renderMarkdown(md, title);
+}
 
 function startAuthProxy(authEmitter) {
     migrateLegacyViews();
@@ -8302,12 +8428,23 @@ function startAuthProxy(authEmitter) {
             // RESULT, and handing over a wall of raw asterisks is the "just
             // text" outcome this feature exists to avoid. The stored file
             // stays the markdown the agent wrote.
-            if (viewExt === '.md' || viewExt === '.markdown') {
+            if (VIEW_RENDERED.has(viewExt)) {
                 const sess = decodeURIComponent(viewMatch[1]);
                 const file = decodeURIComponent(viewMatch[2]);
                 const caption = readViewMeta(sess)[file]?.title || file;
+                const raw = fs.readFileSync(target, 'utf8');
+                let html;
+                if (viewExt === '.csv') html = renderDelimited(raw, caption, ',');
+                else if (viewExt === '.tsv') html = renderDelimited(raw, caption, '\t');
+                else if (viewExt === '.json') {
+                    // Pretty-printed in a code block: a minified blob is
+                    // machine output, and the human opened this to read it.
+                    let pretty = raw;
+                    try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (e) { }
+                    html = renderMarkdown(`# ${caption}\n\n\`\`\`json\n${pretty}\n\`\`\``, caption);
+                } else html = renderMarkdown(raw, caption);
                 res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(renderMarkdown(fs.readFileSync(target, 'utf8'), caption));
+                res.end(html);
                 return;
             }
             res.writeHead(200, {
@@ -8934,6 +9071,67 @@ function startAuthProxy(authEmitter) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Screen failed' }));
             }
+            return;
+        }
+
+        // API: Upload a dropped file. A browser never reveals a dropped
+        // file's real path, so the old drop handler could only apologise and
+        // teach the OS copy-path gesture. Take the BYTES instead: the file
+        // lands on the host in a per-session staging dir and the terminal is
+        // handed a path the shell (or the agent reading it) can actually
+        // open. Staging — never the session's cwd — so a drop can't clobber
+        // a working file or dirty a repo.
+        if (parsedUrl.pathname === '/api/sessions/upload' && req.method === 'POST') {
+            const internalName = resolveSessionInternalName(parsedUrl.query.name, parsedUrl.query.internalName);
+            // resolveSessionInternalName INVENTS a name for anything it does
+            // not know (the invent-on-connect path), so an unknown session
+            // would otherwise become a staging directory on demand: an
+            // unbounded write surface keyed by a caller-supplied string.
+            // Uploads go only to sessions that actually exist.
+            const uploadSessionExists = internalName
+                && (getEffectiveSessionConfig(internalName) || hopSessionExists(internalName));
+            if (!internalName || !SESSION_NAME_RE.test(internalName) || !uploadSessionExists) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Session not found' }));
+                return;
+            }
+            const declaredLength = Number(req.headers['content-length']);
+            if (Number.isFinite(declaredLength) && declaredLength > UPLOAD_MAX_BYTES) {
+                res.writeHead(413, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: `File too large (max ${Math.floor(UPLOAD_MAX_BYTES / 1048576)}MB)` }));
+                return;
+            }
+            const chunks = [];
+            let received = 0;
+            let aborted = false;
+            req.on('data', (chunk) => {
+                if (aborted) return;
+                received += chunk.length;
+                if (received > UPLOAD_MAX_BYTES) {
+                    aborted = true;
+                    res.writeHead(413, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: `File too large (max ${Math.floor(UPLOAD_MAX_BYTES / 1048576)}MB)` }));
+                    req.destroy();
+                    return;
+                }
+                chunks.push(chunk);
+            });
+            req.on('end', () => {
+                if (aborted) return;
+                try {
+                    const dir = path.join(HOME_DIR, 'uploads', internalName);
+                    fs.mkdirSync(dir, { recursive: true });
+                    const filePath = uniqueUploadPath(dir, safeUploadFilename(parsedUrl.query.filename));
+                    fs.writeFileSync(filePath, Buffer.concat(chunks), { mode: 0o600 });
+                    log(`[upload] ${getSessionDisplayName(internalName) || internalName}: ${path.basename(filePath)} (${received} bytes)`, DIM);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, path: filePath, name: path.basename(filePath), bytes: received }));
+                } catch (e) {
+                    log(`[upload] failed for ${internalName}: ${e.message}`, YELLOW);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Upload failed' }));
+                }
+            });
             return;
         }
 
@@ -13588,9 +13786,24 @@ async function main() {
         const stdinName = flagValue('--name');
         const wantList = argv.includes('--list');
         const removals = argv.reduce((acc, a, i) => (a === '--rm' && argv[i + 1] ? acc.concat(argv[i + 1]) : acc), []);
-        const consumed = new Set(['--title', title, '--name', stdinName, '--list', '--rm', ...removals]);
+        const wantSession = flagValue('--session');
+        const consumed = new Set(['--title', title, '--name', stdinName, '--session', wantSession,
+                                  '--list', '--rm', ...removals]);
         const files = argv.filter((a) => !consumed.has(a) && (a === '-' || !a.startsWith('-')));
-        const session = process.env.HOP_SESSION || 'shared';
+        // WHICH session a result belongs to is the whole filing system: the
+        // chip that lights, the panel it appears in, the conversation it
+        // answers. It used to be `HOP_SESSION || 'shared'`, and that fallback
+        // was a silent misdelivery — 'shared' is not a session, so nothing
+        // resolves it to a name, no session's summary counts it, and no chip
+        // ever lights. The result was published to a folder nobody is looking
+        // at. (Not hypothetical: we deliberately scrub HOP_SESSION from
+        // subprocesses to keep claude's session identity straight, and a cron
+        // or MCP-driven agent never had it.)
+        //
+        // So: explicit --session wins, the environment is the convenience
+        // default, and having neither is an ERROR that says how to fix it —
+        // never a quiet write into the void.
+        const session = wantSession || process.env.HOP_SESSION || '';
         const destDir = path.join(VIEWS_DIR, session);
 
         if (wantList) {
@@ -13627,6 +13840,14 @@ async function main() {
         }
         const state = isServerRunning();
         if (!state) { printNotRunningError(); process.exit(1); }
+        if (!session) {
+            log('hop view: no session to publish into.', RED);
+            log('  Inside a hop session this is automatic (HOP_SESSION).', DIM);
+            log('  From anywhere else, name the session the result belongs to:', DIM);
+            log(`     hop view --session <name> --title "..." <file>`, CYAN);
+            log(`  ${DIM}Sessions:${RESET} ${listPublishTargets(state).join(', ') || '(none)'}`, RESET);
+            process.exit(2);
+        }
         fs.mkdirSync(destDir, { recursive: true });
         const meta = readViewMeta(session);
         let failed = 0;
@@ -13731,6 +13952,20 @@ async function main() {
                 `<meta http-equiv="refresh" content="0;url=${proxyUrl}">`,
                 '</head><body>Redirecting to the live server…</body></html>'
             ].join(''));
+            // A running server is not a file, and a row reading "probe.html"
+            // told the human nothing about what it actually was. The metadata
+            // says what it IS and where it really lives, so clients can send
+            // the tap straight to the proxy instead of through the redirect
+            // page, and can label it as something live that can go away.
+            const meta = readViewMeta(caller);
+            meta[artifactName] = {
+                ...(meta[artifactName] || {}),
+                title: `${label} — live server on port ${port}`,
+                kind: 'server',
+                target: `/s/${encodeURIComponent(linkName)}/`,
+                port
+            };
+            writeViewMeta(caller, meta);
             rebuildViewManifest();
             console.log(`View: ${proxyUrl}`);
             console.log(`Attached to ${caller} — also in its Views.`);

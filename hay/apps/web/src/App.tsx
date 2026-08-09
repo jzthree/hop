@@ -15,7 +15,7 @@ import { attachScrollFlywheel } from "./utils/scrollFlywheel";
 import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSearch";
 import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
-import { originalPathHint } from "./utils/fileDrop";
+import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -1023,13 +1023,51 @@ const App = () => {
   };
 
   // ── Drag-and-drop onto the terminal ──
-  // A browser never reveals a dropped file's real path, so a file drop can't
-  // paste one. Catch the drop and teach the working gesture instead: the
-  // OS-specific copy-path hotkey (⌘⌥C in Finder / Ctrl+Shift+C in Explorer).
-  // Dragged TEXT (a path string from anywhere) pastes normally.
+  // A browser never reveals a dropped file's real path — but it does hand
+  // over the BYTES, and hop's host is the machine the session runs on. So a
+  // drop uploads: the file lands in a per-session staging dir on the host
+  // and the terminal receives the path it can actually open. Dragged TEXT (a
+  // path string from anywhere) still pastes as text. The old copy-path hint
+  // remains the fallback for a host too old to have the upload endpoint.
   const [dropActive, setDropActive] = useState(false);
+  const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const dragDepthRef = useRef(0);
   const platformString = `${navigator.platform || ""} ${navigator.userAgent || ""}`;
+
+  const uploadDroppedFiles = async (files: File[]) => {
+    const room = activeSessionRoomRef.current;
+    if (!room) return;
+    setUploading({ done: 0, total: files.length });
+    const landed: string[] = [];
+    try {
+      for (const file of files) {
+        const res = await fetch(
+          `/api/sessions/upload?name=${encodeURIComponent(room)}&filename=${encodeURIComponent(file.name)}`,
+          { method: "POST", body: file }
+        );
+        if (!res.ok) {
+          // 404 means this host predates uploads: fall back to teaching the
+          // OS copy-path gesture rather than failing silently.
+          const detail = await res.json().catch(() => null);
+          pushNotice(res.status === 404 ? originalPathHint(platformString) : (detail?.error || `Upload failed (${res.status})`));
+          return;
+        }
+        const data = await res.json();
+        if (data?.path) landed.push(String(data.path));
+        setUploading((u) => (u ? { ...u, done: u.done + 1 } : u));
+      }
+      if (landed.length > 0) {
+        termRef.current?.paste(pasteableUploadPaths(landed));
+        pushNotice(landed.length === 1
+          ? `Uploaded to ${landed[0]}`
+          : `Uploaded ${landed.length} files — paths pasted`);
+      }
+    } catch {
+      pushNotice(originalPathHint(platformString));
+    } finally {
+      setUploading(null);
+    }
+  };
   // Without these guards a drop that misses the target navigates the whole
   // page to the file, killing the session view.
   useEffect(() => {
@@ -4144,8 +4182,9 @@ const App = () => {
                     e.preventDefault();
                     dragDepthRef.current = 0;
                     setDropActive(false);
-                    if ((e.dataTransfer?.files?.length || 0) > 0) {
-                      pushNotice(originalPathHint(platformString));
+                    const files = Array.from(e.dataTransfer?.files || []);
+                    if (files.length > 0) {
+                      void uploadDroppedFiles(files);
                       return;
                     }
                     // A dragged text snippet (e.g. a path string) pastes like
@@ -4170,9 +4209,13 @@ const App = () => {
                       </span>
                     </div>
                   )}
-                  {dropActive && (
+                  {(dropActive || uploading) && (
                     <div className="terminal-drop-overlay" aria-hidden="true">
-                      <span>{originalPathHint(platformString)}</span>
+                      <span>
+                        {uploading
+                          ? `Uploading ${uploading.total > 1 ? `${uploading.done + 1} of ${uploading.total}` : "file"}…`
+                          : "Drop to upload — the path pastes into this session"}
+                      </span>
                     </div>
                   )}
                   {isMobile && status === "connecting" && (

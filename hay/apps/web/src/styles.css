@@ -4019,3 +4019,112 @@ button.primary {
 .digest-headline { font-size: 12.5px; font-weight: 600; color: var(--ink); }
 .digest-item.read .digest-headline { color: var(--ink-muted); font-weight: 500; }
 .digest-why { font-size: 11.5px; color: var(--ink-muted); }
+
+/* ── Views: the index of what agents published with `hop view`. Layered above
+   the switcher (600) and its sheets (620) because it opens FROM them. ── */
+.views-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 720;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.views-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 730;
+  width: min(460px, 92vw);
+  /* Bounded, not sized to content: a fleet that has been publishing for a week
+     otherwise grows a dialog taller than the screen with no way to scroll it. */
+  max-height: min(74vh, 620px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  padding: 14px 16px;
+}
+.views-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.views-head-spacer { flex: 1; }
+.views-badge {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  color: var(--accent, #7c5cff);
+}
+.views-scope {
+  font-family: var(--font-mono);
+  font-size: 10.5px; color: var(--ink-muted);
+}
+.views-close {
+  border: none; background: none; cursor: pointer;
+  color: var(--ink-muted); font-size: 16px; line-height: 1; padding: 2px 4px;
+}
+.views-empty { margin: 6px 2px 4px; font-size: 12.5px; line-height: 1.5; color: var(--ink-muted); }
+.views-empty code { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink); }
+.views-list { overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
+.views-group + .views-group { margin-top: 10px; }
+.views-dateline {
+  font-family: var(--font-mono);
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--ink-muted);
+  padding-bottom: 3px;
+}
+.views-row {
+  display: flex; align-items: center; gap: 9px;
+  text-decoration: none; color: inherit;
+  padding: 6px; margin: 0 -6px; border-radius: 8px;
+}
+.views-row:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.views-kind {
+  flex: 0 0 34px;
+  font-family: var(--font-mono);
+  font-size: 8.5px; font-weight: 700; letter-spacing: 0.04em;
+  text-align: center;
+  padding: 3px 0; border-radius: 4px;
+  background: var(--bg-alt); color: var(--ink-muted);
+}
+.views-row.fresh .views-kind {
+  background: color-mix(in srgb, var(--accent, #7c5cff) 20%, transparent);
+  color: var(--accent, #7c5cff);
+}
+.views-row-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+/* Titles are agent-written prose of arbitrary length; without the clamp one
+   sentence reflowed the row to four lines and pushed the rest off-screen. */
+.views-title {
+  font-size: 12.5px; font-weight: 600; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.views-meta {
+  font-size: 11px; color: var(--ink-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.views-dot {
+  flex-shrink: 0;
+  width: 6px; height: 6px; border-radius: 3px;
+  background: var(--accent, #7c5cff);
+}
+
+/* The affordances that open it: a topbar/switcher button and a card chip,
+   each carrying the same unseen dot. */
+.views-chip-dot {
+  flex-shrink: 0;
+  width: 5px; height: 5px; border-radius: 3px;
+  background: var(--accent, #7c5cff);
+}
+/* The switcher's header action is a fixed 32px square with a centred glyph —
+   an inline dot would shove the icon off-centre, so it rides the corner. */
+.switcher-action { position: relative; }
+.switcher-action .views-chip-dot { position: absolute; top: 5px; right: 5px; }
+.switcher-chip.views {
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1.2;
+}
+.switcher-chip.views.fresh {
+  background: color-mix(in srgb, var(--accent, #7c5cff) 22%, transparent);
+  color: var(--accent, #7c5cff);
+}

@@ -251,6 +251,48 @@ function migrateLegacyViews() {
         fs.rmSync(legacy, { recursive: true, force: true });
     } catch (e) { /* the new root still works */ }
 }
+
+// The virtual folder both `hop view` and `hop port --attached` publish into:
+// clients browse every view through one manifest, REBUILT from a disk scan
+// rather than read-modify-written, so two agents publishing at once cannot
+// lose each other's entries — last writer wins with the same complete list
+// either way.
+//
+// MODULE scope, not the CLI's: the daemon serves the index too, and rebuilds
+// it on demand when it is missing. When this lived only in the CLI branch, a
+// manifest that disappeared (a wiped build dir, this release's storage move)
+// stayed gone until someone happened to publish again — the browser read
+// "Nothing published yet" over a folder full of files.
+function rebuildViewManifest() {
+    try {
+        migrateLegacyViews();
+        const entries = [];
+        for (const sess of fs.readdirSync(VIEWS_DIR)) {
+            const dir = path.join(VIEWS_DIR, sess);
+            if (sess === 'manifest.json' || !fs.statSync(dir).isDirectory()) continue;
+            for (const f of fs.readdirSync(dir)) {
+                const st = fs.statSync(path.join(dir, f));
+                if (!st.isFile()) continue;
+                entries.push({
+                    session: sess,
+                    name: f,
+                    // The extensionless serving path — see the /view route for
+                    // why the extension must stay off the URL's end.
+                    path: `/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}/inline`,
+                    bytes: st.size,
+                    mtime: Math.floor(st.mtimeMs / 1000)
+                });
+            }
+        }
+        entries.sort((a, b) => b.mtime - a.mtime);
+        const body = JSON.stringify({ items: entries }, null, 1);
+        fs.mkdirSync(VIEWS_DIR, { recursive: true });
+        fs.writeFileSync(path.join(VIEWS_DIR, 'manifest.json'), body);
+        return body;
+    } catch (e) {
+        return null;   // the links already printed still work without an index
+    }
+}
 const SESSION_SECRET_FILE = path.join(HOME_DIR, '.session_secret');
 // Folders live here, not in the workspace store: saveSessionStore() no-ops
 // without an active workspace (the common case), so folders and their order
@@ -8113,10 +8155,13 @@ function startAuthProxy(authEmitter) {
         // describes what it is, for clients written after the move.
         if (req.method === 'GET' && (parsedUrl.pathname === '/assets/view/manifest.json'
                                      || parsedUrl.pathname === '/api/views')) {
-            let body = '{"items":[]}';
+            let body = null;
             try { body = fs.readFileSync(path.join(VIEWS_DIR, 'manifest.json'), 'utf8'); } catch (e) { }
+            // Rebuild rather than answer "nothing published" over a folder
+            // that has files in it.
+            if (body === null) body = rebuildViewManifest();
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(body);
+            res.end(body || '{"items":[]}');
             return;
         }
         if (req.method === 'GET' && parsedUrl.pathname.startsWith('/assets/view/')) {
@@ -13339,40 +13384,6 @@ async function main() {
         process.exit(0);
     }
 
-    // The virtual folder both `hop view` and `hop port --attached` publish
-    // into: clients browse every artifact through one manifest, REBUILT from
-    // a disk scan on every publish rather than read-modify-written, so two
-    // agents publishing at once cannot lose each other's entries — last
-    // writer wins with the same complete list either way.
-    function rebuildArtifactManifest() {
-        try {
-            migrateLegacyViews();
-            const viewRoot = VIEWS_DIR;
-            const entries = [];
-            for (const sess of fs.readdirSync(viewRoot)) {
-                const dir = path.join(viewRoot, sess);
-                if (!fs.statSync(dir).isDirectory()) continue;
-                for (const f of fs.readdirSync(dir)) {
-                    if (f === 'manifest.json') continue;
-                    const st = fs.statSync(path.join(dir, f));
-                    if (!st.isFile()) continue;
-                    entries.push({
-                        session: sess,
-                        name: f,
-                        // The extensionless serving path — see the /view route
-                        // for why the extension must stay off the URL's end.
-                        path: `/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}/inline`,
-                        bytes: st.size,
-                        mtime: Math.floor(st.mtimeMs / 1000)
-                    });
-                }
-            }
-            entries.sort((a, b) => b.mtime - a.mtime);
-            fs.writeFileSync(path.join(viewRoot, 'manifest.json'),
-                             JSON.stringify({ items: entries }, null, 1));
-        } catch { /* the links already printed still work without a manifest */ }
-    }
-
     // hop view <file...> — publish a renderable artifact (HTML, PDF, image)
     // behind hop's auth and print the link. The browser is the viewer: every
     // hop client either is one (web) or carries one (the iOS app opens these
@@ -13410,7 +13421,7 @@ async function main() {
             // waiting on, and the link scrolls away if nothing pings them.
             process.stdout.write('\x07');
         }
-        rebuildArtifactManifest();
+        rebuildViewManifest();
         process.exit(failed > 0 ? 1 : 0);
     }
 
@@ -13471,7 +13482,7 @@ async function main() {
                 `<meta http-equiv="refresh" content="0;url=${proxyUrl}">`,
                 '</head><body>Redirecting to the live server…</body></html>'
             ].join(''));
-            rebuildArtifactManifest();
+            rebuildViewManifest();
             console.log(`View: ${proxyUrl}`);
             console.log(`Attached to ${caller} — also in its Views.`);
         } else {

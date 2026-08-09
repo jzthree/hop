@@ -252,6 +252,148 @@ function migrateLegacyViews() {
     } catch (e) { /* the new root still works */ }
 }
 
+// A view's TITLE, kept beside the files rather than in their names. An agent
+// hands over "ROC curve, new model vs baseline", not "roc_curve.png", and a
+// filename cannot carry that without becoming a filename nobody can type.
+// One sidecar per session dir so deleting a session's folder takes its
+// captions with it; dotfile so the manifest scan skips it.
+function viewMetaPath(session) { return path.join(VIEWS_DIR, session, '.meta.json'); }
+function readViewMeta(session) {
+    try { return JSON.parse(fs.readFileSync(viewMetaPath(session), 'utf8')) || {}; }
+    catch (e) { return {}; }
+}
+function writeViewMeta(session, meta) {
+    try { fs.writeFileSync(viewMetaPath(session), JSON.stringify(meta, null, 1)); }
+    catch (e) { /* a missing caption is not worth failing a publish over */ }
+}
+
+// Markdown, rendered at SERVE time rather than converted at publish time: the
+// stored file stays the file the agent wrote (re-publishable, diffable), and
+// the URL still reads like it. Deliberately small and dependency-free — hop
+// ships as one script and a markdown dependency is not worth a node_modules
+// entry. Covers what an agent actually emits in a result: headings, fenced
+// code, lists, tables, quotes, links, emphasis.
+function renderMarkdown(src, title) {
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const blocks = [];
+    // Fenced code first, so nothing below rewrites its insides.
+    let text = src.replace(/```([\w-]*)\n([\s\S]*?)```/g, (m, lang, body) => {
+        blocks.push(`<pre class="code"><code>${esc(body.replace(/\n$/, ''))}</code></pre>`);
+        return ` BLOCK${blocks.length - 1} `;
+    });
+    text = esc(text);
+    const inline = (s) => s
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">')
+        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
+    const out = [];
+    const lines = text.split('\n');
+    let para = [], list = null, table = null;
+    const flushPara = () => { if (para.length) { out.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
+    const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`); list = null; } };
+    const flushTable = () => {
+        if (!table) return;
+        const cells = (row, tag) => row.map((c) => `<${tag}>${inline(c.trim())}</${tag}>`).join('');
+        out.push(`<table><thead><tr>${cells(table.head, 'th')}</tr></thead><tbody>`
+            + table.rows.map((r) => `<tr>${cells(r, 'td')}</tr>`).join('') + '</tbody></table>');
+        table = null;
+    };
+    const flushAll = () => { flushPara(); flushList(); flushTable(); };
+    const splitRow = (l) => l.replace(/^\||\|$/g, '').split('|');
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (/^ BLOCK\d+ $/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
+        if (!line.trim()) { flushAll(); continue; }
+        // A table needs its separator row to be a table at all.
+        if (!table && line.includes('|') && /^\s*\|?[\s:-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1] || '')) {
+            flushPara(); flushList();
+            table = { head: splitRow(line), rows: [] };
+            i++;
+            continue;
+        }
+        if (table) {
+            if (line.includes('|')) { table.rows.push(splitRow(line)); continue; }
+            flushTable();
+        }
+        let m;
+        if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+            flushAll();
+            out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`);
+        } else if (/^\s*([-*_])\s*\1\s*\1[\s\S]*$/.test(line) && line.trim().length >= 3
+                   && /^[-*_\s]+$/.test(line)) {
+            flushAll(); out.push('<hr>');
+        } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+            flushPara(); flushTable();
+            if (list?.tag !== 'ul') { flushList(); list = { tag: 'ul', items: [] }; }
+            list.items.push(m[1]);
+        } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+            flushPara(); flushTable();
+            if (list?.tag !== 'ol') { flushList(); list = { tag: 'ol', items: [] }; }
+            list.items.push(m[1]);
+        } else if ((m = line.match(/^&gt;\s?(.*)$/))) {
+            flushPara(); flushList(); flushTable();
+            out.push(`<blockquote>${inline(m[1])}</blockquote>`);
+        } else {
+            flushList(); flushTable();
+            para.push(line.trim());
+        }
+    }
+    flushAll();
+    const body = out.join('\n').replace(/ BLOCK(\d+) /g, (m, i) => blocks[Number(i)]);
+    return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)}</title><style>
+:root { color-scheme: dark; }
+body { margin:0 auto; padding:24px 18px 64px; max-width:46rem; background:#0b0b12; color:#e8e6f0;
+  font:16px/1.65 -apple-system,"SF Pro Text",Helvetica,sans-serif; overflow-wrap:break-word; }
+h1,h2,h3,h4 { line-height:1.25; margin:1.6em 0 .5em; }
+h1 { font-size:1.7rem; } h2 { font-size:1.35rem; } h3 { font-size:1.12rem; }
+a { color:#a78bfa; }
+code { font-family:ui-monospace,"SF Mono",monospace; font-size:.87em; background:#201e2e;
+  padding:.12em .38em; border-radius:6px; }
+pre.code { background:#16151f; border:1px solid #2a2740; border-radius:12px; padding:12px 14px;
+  overflow-x:auto; } pre.code code { background:none; padding:0; font-size:.85rem; }
+blockquote { margin:1em 0; padding:.2em 0 .2em 1em; border-left:3px solid #3a3556; color:#b9b3d0; }
+table { border-collapse:collapse; width:100%; margin:1.2em 0; font-size:.93rem; display:block; overflow-x:auto; }
+th,td { border:1px solid #2a2740; padding:7px 10px; text-align:left; }
+th { background:#16151f; }
+hr { border:0; border-top:1px solid #2a2740; margin:2em 0; }
+img { max-width:100%; border-radius:10px; }
+</style></head><body>\n${body}\n</body></html>`;
+}
+
+// Per-session view facts for the sessions list: how many, how recent, and
+// what the newest one is called. Read from the manifest (already a cheap
+// single file) rather than re-scanning, and re-read only when it changes —
+// the sessions list is polled by every client, several times a minute.
+let viewSummaryCache = { mtimeMs: -1, bySession: {} };
+function viewSummaryBySession() {
+    try {
+        const mf = path.join(VIEWS_DIR, 'manifest.json');
+        const st = fs.statSync(mf);
+        if (st.mtimeMs !== viewSummaryCache.mtimeMs) {
+            const items = JSON.parse(fs.readFileSync(mf, 'utf8')).items || [];
+            const by = {};
+            for (const it of items) {
+                const cur = by[it.session];
+                // The manifest is newest-first, so the first one wins.
+                if (!cur) {
+                    by[it.session] = {
+                        count: 1, latestAt: it.mtime, latestName: it.name,
+                        latestTitle: it.title || '', latestPath: it.path
+                    };
+                } else cur.count += 1;
+            }
+            viewSummaryCache = { mtimeMs: st.mtimeMs, bySession: by };
+        }
+    } catch (e) {
+        viewSummaryCache = { mtimeMs: -1, bySession: {} };
+    }
+    return viewSummaryCache.bySession;
+}
+
 // The virtual folder both `hop view` and `hop port --attached` publish into:
 // clients browse every view through one manifest, REBUILT from a disk scan
 // rather than read-modify-written, so two agents publishing at once cannot
@@ -269,13 +411,19 @@ function rebuildViewManifest() {
         const entries = [];
         for (const sess of fs.readdirSync(VIEWS_DIR)) {
             const dir = path.join(VIEWS_DIR, sess);
-            if (sess === 'manifest.json' || !fs.statSync(dir).isDirectory()) continue;
+            if (sess === 'manifest.json' || sess.startsWith('.')
+                || !fs.statSync(dir).isDirectory()) continue;
+            const meta = readViewMeta(sess);
             for (const f of fs.readdirSync(dir)) {
+                if (f.startsWith('.')) continue;         // the .meta.json sidecar
                 const st = fs.statSync(path.join(dir, f));
                 if (!st.isFile()) continue;
                 entries.push({
                     session: sess,
                     name: f,
+                    // What the agent SAID it was handing over. Clients lead
+                    // with this and fall back to the filename.
+                    title: meta[f]?.title || '',
                     // The extensionless serving path — see the /view route for
                     // why the extension must stay off the URL's end.
                     path: `/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}/inline`,
@@ -8143,8 +8291,21 @@ function startAuthProxy(authEmitter) {
                 res.end('Not found');
                 return;
             }
+            const viewExt = path.extname(target).toLowerCase();
+            // Markdown is rendered, not dumped: an agent's write-up is a
+            // RESULT, and handing over a wall of raw asterisks is the "just
+            // text" outcome this feature exists to avoid. The stored file
+            // stays the markdown the agent wrote.
+            if (viewExt === '.md' || viewExt === '.markdown') {
+                const sess = decodeURIComponent(viewMatch[1]);
+                const file = decodeURIComponent(viewMatch[2]);
+                const caption = readViewMeta(sess)[file]?.title || file;
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(renderMarkdown(fs.readFileSync(target, 'utf8'), caption));
+                return;
+            }
             res.writeHead(200, {
-                'Content-Type': STATIC_CONTENT_TYPES[path.extname(target).toLowerCase()] || 'application/octet-stream'
+                'Content-Type': STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream'
             });
             res.end(fs.readFileSync(target));
             return;
@@ -8480,7 +8641,16 @@ function startAuthProxy(authEmitter) {
             const visibleEntries = snapshot.entries.filter((s) =>
                 !(s.type === 'port' && getEffectiveSessionConfig(s.internalName)?.attachedTo)
             );
+            // What each session has published, folded into the list every
+            // client already polls. Deliberately NOT a server-side unread
+            // counter: "new" is per-DEVICE (the phone can be behind while the
+            // wall is caught up), so the server states the facts — how many,
+            // how recent, what the newest one is called — and each client
+            // compares latestAt against its own last-seen mark. No new state,
+            // no new poll, and the badge works the same everywhere.
+            const viewsBySession = viewSummaryBySession();
             const sessions = visibleEntries.map(s => ({
+                views: viewsBySession[s.internalName] || undefined,
                 name: s.displayName,
                 displayName: s.displayName,
                 internalName: s.internalName,
@@ -12256,7 +12426,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'notify', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'new'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -12368,6 +12538,17 @@ const HELP_SECTIONS = [
     ] },
     { title: 'Math', lines: [
         `hop math '<latex>'        Render a LaTeX formula (inline image where supported, else Unicode)`,
+    ] },
+    // Was missing entirely: an agent in a session with no skill installed had
+    // no way to learn these existed, and `hop port --help` printed "Unknown
+    // command" because 'port' wasn't in KNOWN_COMMANDS.
+    { title: 'Views (show the human something a terminal cannot draw)', lines: [
+        `hop view <file...>        Publish HTML/PDF/image/video/markdown behind hop's auth and print the link`,
+        `hop view --title "..."    Say what the result IS — clients lead with this, not the filename`,
+        `hop view --name x.md -    Publish what's on stdin (no temp file needed)`,
+        `hop view --list [--all]   What this session has published (--all: the whole fleet)`,
+        `hop view --rm <name>      Unpublish one`,
+        `hop port <port> [name]    Expose a local web server (live proxy, WebSocket-safe); --standalone to detach`,
     ] },
     { title: 'Maintenance', lines: [
         `hop health [--restart]    Check tunnel health (--restart forces a tunnel restart)`,
@@ -13392,32 +13573,94 @@ async function main() {
     // the session cookie like everything else. Written for agents (the
     // hop-session skill teaches it): show the human the plot, don't describe it.
     if (process.argv[2] === 'view') {
-        const files = process.argv.slice(3).filter((a) => !a.startsWith('-'));
+        const argv = process.argv.slice(3);
+        const flagValue = (name) => {
+            const i = argv.indexOf(name);
+            return i >= 0 ? argv[i + 1] : null;
+        };
+        const title = flagValue('--title') || '';
+        const stdinName = flagValue('--name');
+        const wantList = argv.includes('--list');
+        const removals = argv.reduce((acc, a, i) => (a === '--rm' && argv[i + 1] ? acc.concat(argv[i + 1]) : acc), []);
+        const consumed = new Set(['--title', title, '--name', stdinName, '--list', '--rm', ...removals]);
+        const files = argv.filter((a) => !consumed.has(a) && (a === '-' || !a.startsWith('-')));
+        const session = process.env.HOP_SESSION || 'shared';
+        const destDir = path.join(VIEWS_DIR, session);
+
+        if (wantList) {
+            const items = (JSON.parse(rebuildViewManifest() || '{"items":[]}').items || [])
+                .filter((i) => argv.includes('--all') || i.session === session);
+            if (!items.length) { log(`No views published${argv.includes('--all') ? '' : ` by ${session}`} yet.`, DIM); process.exit(0); }
+            for (const i of items) {
+                console.log(`${i.session}/${i.name}${i.title ? `  — ${i.title}` : ''}  (${Math.max(1, Math.round(i.bytes / 1024))} KB)`);
+            }
+            process.exit(0);
+        }
+        if (removals.length) {
+            let gone = 0;
+            const meta = readViewMeta(session);
+            for (const name of removals) {
+                const target = path.resolve(path.join(destDir, path.basename(name)));
+                if (!target.startsWith(path.resolve(destDir) + path.sep) || !fs.existsSync(target)) {
+                    log(`hop view: not published here: ${name}`, RED);
+                    continue;
+                }
+                fs.rmSync(target); delete meta[path.basename(name)]; gone += 1;
+            }
+            writeViewMeta(session, meta);
+            rebuildViewManifest();
+            log(`Removed ${gone} view${gone === 1 ? '' : 's'}.`, gone ? GREEN : RESET);
+            process.exit(gone ? 0 : 1);
+        }
         if (files.length === 0) {
-            log('Usage: hop view <file...>   (HTML, PDF, images — anything a browser renders)', YELLOW);
+            log('Usage: hop view [--title "what this is"] <file...>', YELLOW);
+            log('       hop view --name report.md --title "..." -     (read the file from stdin)', DIM);
+            log('       hop view --list [--all]                        hop view --rm <name>', DIM);
+            log('HTML, PDF, images, video, markdown — anything a browser renders.', DIM);
             process.exit(1);
         }
         const state = isServerRunning();
         if (!state) { printNotRunningError(); process.exit(1); }
-        const session = process.env.HOP_SESSION || 'shared';
-        const destDir = path.join(VIEWS_DIR, session);
         fs.mkdirSync(destDir, { recursive: true });
+        const meta = readViewMeta(session);
         let failed = 0;
+        const published = [];
         for (const file of files) {
-            const src = path.resolve(file);
-            if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
-                log(`hop view: no such file: ${file}`, RED);
-                failed += 1;
-                continue;
+            let name;
+            if (file === '-') {
+                // Stdin: an agent that GENERATED the result shouldn't have to
+                // invent a temp file to hand it over. Markdown by default —
+                // it renders, and it's what a model writes without being asked.
+                name = path.basename(stdinName || 'result.md');
+                try {
+                    fs.writeFileSync(path.join(destDir, name), fs.readFileSync(0));
+                } catch (e) {
+                    log(`hop view: could not read stdin: ${e.message}`, RED);
+                    failed += 1;
+                    continue;
+                }
+            } else {
+                const src = path.resolve(file);
+                if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+                    log(`hop view: no such file: ${file}`, RED);
+                    failed += 1;
+                    continue;
+                }
+                // Basename only — the URL should read like the file, and the
+                // session subdir already namespaces collisions between agents.
+                name = path.basename(src);
+                fs.copyFileSync(src, path.join(destDir, name));
             }
-            // Basename only — the URL should read like the file, and the
-            // session subdir already namespaces collisions between agents.
-            const dest = path.join(destDir, path.basename(src));
-            fs.copyFileSync(src, dest);
-            console.log(`View: ${state.url}/view/${encodeURIComponent(session)}/${encodeURIComponent(path.basename(src))}/inline`);
+            // One title covers the batch: a caption describes the HANDOFF
+            // ("the before/after plots"), and repeating it per file reads
+            // worse than sharing it.
+            if (title) meta[name] = { ...(meta[name] || {}), title };
+            published.push(name);
+            console.log(`View: ${state.url}/view/${encodeURIComponent(session)}/${encodeURIComponent(name)}/inline`);
         }
+        if (published.length) writeViewMeta(session, meta);
         if (failed === 0 && files.length > 0) {
-            // One bell: the artifact is usually the deliverable the human is
+            // One bell: the view is usually the deliverable the human is
             // waiting on, and the link scrolls away if nothing pings them.
             process.stdout.write('\x07');
         }

@@ -2672,6 +2672,301 @@ function saveUsers(users) {
     fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
+// ── Self-service registration ─────────────────────────────────────────────
+// The landing host (the bare custom domain, e.g. hop.zhoulab.io) can serve a
+// PUBLIC signup page instead of the login gate: visitors ask for
+// <name>.<landing-host>, prove an eligible email address, and wait for the
+// admin to approve. Approval runs the existing addUser provisioning, so a
+// registrant ends up exactly where a hand-added user does — running their own
+// hop on their own machine, behind their own tunnel.
+//
+// OFF by default, and deliberately so: turning it on repurposes the hostname
+// the admin's own browser and phone are pointed at, so it must be a decision,
+// never a side effect of upgrading.
+const REGISTRATION_FILE = path.join(HOME_DIR, '.registration.json');
+const REGISTRATIONS_FILE = path.join(HOME_DIR, '.registrations.json');
+const MAIL_CONFIG_FILE = path.join(HOME_DIR, '.mail-config.json');
+const { RegistrationStore } = require('./lib/registration');
+const { sendMail: smtpSendMail } = require('./lib/mailer');
+
+// isLandingRequest() runs on EVERY http request, including the terminal's own
+// traffic, so the two config reads behind it are cached briefly. A CLI toggle
+// takes effect within a few seconds; a disk read per keystroke would not be
+// worth that immediacy.
+let registrationConfigCache = { at: 0, value: null };
+const REGISTRATION_CACHE_MS = 1000;
+
+function getRegistrationConfig() {
+    if (registrationConfigCache.value && Date.now() - registrationConfigCache.at < REGISTRATION_CACHE_MS) {
+        return registrationConfigCache.value;
+    }
+    let stored = {};
+    try {
+        stored = JSON.parse(fs.readFileSync(REGISTRATION_FILE, 'utf8')) || {};
+    } catch (e) { /* absent or corrupt: defaults below */ }
+    const value = {
+        enabled: stored.enabled === true,
+        allowedEmailDomain: stored.allowedEmailDomain || 'uchicago.edu',
+        // Where the admin's own hop lives once the bare host becomes the
+        // landing page. Purely for the "sign in" link and the approval mail.
+        adminSubdomain: stored.adminSubdomain || null
+    };
+    registrationConfigCache = { at: Date.now(), value };
+    return value;
+}
+
+function saveRegistrationConfig(config) {
+    writePrivateFile(REGISTRATION_FILE, JSON.stringify(config, null, 2));
+    registrationConfigCache = { at: 0, value: null }; // a deliberate change lands now
+}
+
+function getMailConfig() {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(MAIL_CONFIG_FILE, 'utf8'));
+        return parsed && parsed.host ? parsed : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function saveMailConfig(config) {
+    // 0600: this file holds an SMTP password.
+    writePrivateFile(MAIL_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+// The hostname that serves the public landing page: the custom domain itself.
+let landingHostCache = { at: 0, value: null };
+function getLandingHostname() {
+    if (Date.now() - landingHostCache.at < REGISTRATION_CACHE_MS) return landingHostCache.value;
+    const domain = getDomainConfig();
+    const value = domain && domain.hostname ? String(domain.hostname).toLowerCase() : null;
+    landingHostCache = { at: Date.now(), value };
+    return value;
+}
+
+function getRegistrationStore() {
+    const config = getRegistrationConfig();
+    return new RegistrationStore(REGISTRATIONS_FILE, {
+        allowedDomain: config.allowedEmailDomain,
+        // A name already provisioned — or reserved for the admin — can never
+        // be handed out by the public form.
+        takenSubdomains: () => {
+            const taken = Object.keys(getUsers());
+            if (config.adminSubdomain) taken.push(config.adminSubdomain);
+            return taken;
+        }
+    });
+}
+
+// Does this request belong to the public landing surface? Only when
+// registration is switched on AND the request arrived on the bare custom
+// domain — a user's own subdomain, localhost and the CLI are untouched.
+function isLandingRequest(req) {
+    const config = getRegistrationConfig();
+    if (!config.enabled) return false;
+    const landing = getLandingHostname();
+    if (!landing) return false;
+    const host = String(req?.headers?.host || '').split(':')[0].trim().toLowerCase();
+    return host === landing;
+}
+
+async function sendRegistrationMail(to, subject, text) {
+    const config = getMailConfig();
+    if (!config) throw new Error('Mail is not configured. Run: hop mail setup');
+    return smtpSendMail(config, { to, subject, text });
+}
+
+// Anything interpolated into the landing HTML that a stranger can influence
+// goes through this first.
+function escapeHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+const LANDING_STYLE = `
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #fafafa; color: #18181b; margin: 0; line-height: 1.55;
+         -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 620px; margin: 0 auto; padding: 4rem 1.25rem 5rem; }
+  h1 { font-size: 2rem; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 .5rem; }
+  .tag { color: #71717a; font-size: 1.05rem; margin: 0 0 2.5rem; }
+  h2 { font-size: 1rem; font-weight: 600; margin: 2.5rem 0 .75rem; }
+  p { margin: 0 0 1rem; }
+  .muted { color: #71717a; font-size: .9rem; }
+  .card { background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 1.5rem; }
+  label { display: block; font-size: .85rem; font-weight: 600; margin: 0 0 .35rem; }
+  input { width: 100%; padding: .7rem .8rem; font-size: 1rem; border: 1px solid #e4e4e7;
+          border-radius: 8px; background: #fff; color: #18181b; font-family: inherit; }
+  input:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124,58,237,.1); }
+  .field { margin-bottom: 1.1rem; }
+  .preview { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem;
+             color: #7c3aed; margin-top: .4rem; min-height: 1.2em; word-break: break-all; }
+  button { font-size: 1rem; padding: .8rem 1.5rem; background: #18181b; color: #fff; border: none;
+           border-radius: 8px; cursor: pointer; font-weight: 500; width: 100%; }
+  button:hover { opacity: .9; }
+  button:disabled { opacity: .5; cursor: default; }
+  .err { color: #b91c1c; font-size: .9rem; margin-top: .75rem; }
+  .ok { color: #15803d; font-size: .9rem; margin-top: .75rem; }
+  pre { background: #18181b; color: #fafafa; padding: 1rem; border-radius: 8px; overflow-x: auto;
+        font-size: .85rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+  ol { padding-left: 1.2rem; } li { margin-bottom: .5rem; }
+  a { color: #7c3aed; }
+  .foot { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #e4e4e7; }
+`;
+
+const landingShell = (title, inner) => `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title><style>${LANDING_STYLE}</style></head>
+<body><div class="wrap">${inner}</div></body></html>`;
+
+/** The public front door: what hop is, and the form to ask for a subdomain. */
+function renderLandingPage(landingHost, config) {
+    const domain = escapeHtml(landingHost);
+    const emailDomain = escapeHtml(config.allowedEmailDomain);
+    const adminLink = config.adminSubdomain
+        ? `<p class="muted">Already have a subdomain? <a href="https://${escapeHtml(config.adminSubdomain)}.${domain}">Sign in</a>.</p>`
+        : '';
+    return landingShell('hop — a terminal you can reach from anywhere', `
+    <h1>hop</h1>
+    <p class="tag">Your terminal sessions, reachable from any browser — including your phone.</p>
+
+    <p>hop runs on <strong>your own machine</strong> and serves your terminals over a private
+    URL. Long-running jobs keep running when you close the laptop; you pick them back up on
+    the train. Agents get their own sessions you can watch live.</p>
+
+    <p>Register here and you get <code>you.${domain}</code> pointed at the hop running on
+    your machine. Nothing of yours runs on anyone else's computer, and no one else can reach
+    your sessions — you set your own password and 2FA on first launch.</p>
+
+    <h2>Request a subdomain</h2>
+    <div class="card">
+      <form id="f" autocomplete="on">
+        <div class="field">
+          <label for="subdomain">Subdomain</label>
+          <input id="subdomain" name="subdomain" placeholder="yourname" maxlength="32"
+                 autocapitalize="none" autocorrect="off" spellcheck="false" required>
+          <div class="preview" id="preview"></div>
+        </div>
+        <div class="field">
+          <label for="email">University email</label>
+          <input id="email" name="email" type="email" placeholder="you@${emailDomain}"
+                 autocapitalize="none" autocorrect="off" spellcheck="false" required>
+          <div class="muted" style="margin-top:.4rem">Open to ${emailDomain} addresses. We email you a link to confirm it.</div>
+        </div>
+        <div class="field">
+          <label for="fullName">Name <span class="muted" style="font-weight:400">(optional)</span></label>
+          <input id="fullName" name="fullName" maxlength="120" placeholder="Ada Lovelace">
+        </div>
+        <button type="submit" id="go">Request subdomain</button>
+        <div id="msg"></div>
+      </form>
+    </div>
+    <p class="muted" style="margin-top:1rem">Requests are approved by hand, so it may take a day.</p>
+
+    <h2>Once you're approved</h2>
+    <ol>
+      <li>Install hop on the machine whose terminals you want to reach.</li>
+      <li>Run it with the credentials we send you.</li>
+      <li>Set a password and scan the 2FA code it prints.</li>
+      <li>Open <code>you.${domain}</code> from anywhere.</li>
+    </ol>
+
+    <div class="foot">${adminLink}</div>
+
+    <script>
+      // JSON, not the HTML-escaped copy: entities are not decoded inside a
+      // script element, so &quot; would arrive literally.
+      var HOST = ${JSON.stringify(String(landingHost || ''))};
+      var sub = document.getElementById('subdomain');
+      var preview = document.getElementById('preview');
+      var msg = document.getElementById('msg');
+      var go = document.getElementById('go');
+      function paint() {
+        var v = sub.value.trim().toLowerCase();
+        preview.textContent = v ? v + '.' + HOST : '';
+      }
+      sub.addEventListener('input', paint); paint();
+      document.getElementById('f').addEventListener('submit', async function (e) {
+        e.preventDefault();
+        msg.textContent = ''; msg.className = ''; go.disabled = true;
+        go.textContent = 'Sending…';
+        try {
+          var res = await fetch('/api/register', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              subdomain: sub.value, email: document.getElementById('email').value,
+              fullName: document.getElementById('fullName').value
+            })
+          });
+          var data = await res.json();
+          if (data.ok) {
+            document.getElementById('f').innerHTML =
+              '<p class="ok">Check your inbox. We sent a confirmation link to ' +
+              (data.email || 'your address').replace(/[<>&]/g, '') +
+              '. Click it and your request goes to the admin.</p>';
+          } else {
+            msg.className = 'err'; msg.textContent = data.error || 'Something went wrong.';
+            go.disabled = false; go.textContent = 'Request subdomain';
+          }
+        } catch (err) {
+          msg.className = 'err'; msg.textContent = 'Network error — try again.';
+          go.disabled = false; go.textContent = 'Request subdomain';
+        }
+      });
+    </script>`);
+}
+
+/** Small result page for verify/claim outcomes. */
+function renderNoticePage(title, bodyHtml) {
+    return landingShell(title, `<h1>${escapeHtml(title)}</h1>${bodyHtml}`);
+}
+
+/** The page an approved registrant lands on to collect their credentials. */
+function renderClaimPage(registration, token, landingHost) {
+    const host = escapeHtml(registration.hostname || `${registration.subdomain}.${landingHost}`);
+    const dl = `/claim/credentials.json?token=${encodeURIComponent(token)}`;
+    return landingShell('Your hop subdomain is ready', `
+    <h1>You're approved</h1>
+    <p class="tag">${host}</p>
+    <p>Download your tunnel credentials, then start hop on the machine whose terminals you
+    want to reach. The file is a secret — anyone holding it can serve traffic on your
+    subdomain, so keep it as you would an SSH key.</p>
+    <p><a href="${dl}"><button type="button">Download credentials.json</button></a></p>
+    <h2>Then run</h2>
+    <pre>npm install -g hop-shell
+hop client ./credentials.json --hostname ${host}</pre>
+    <p>On first launch hop asks you to set a password and shows a QR code for two-factor
+    authentication. After that, open <a href="https://${host}">${host}</a> from any browser.</p>
+    <p class="muted">This link works once. If you lose the file, ask the admin to re-issue it.</p>`);
+}
+
+// Registration abuse guard, separate from the login limiter so a flood of
+// signups can never lock the admin out of their own login page.
+const registrationAttempts = new Map(); // ip -> { count, windowStartedAt }
+const REGISTRATION_WINDOW_MS = 60 * 60 * 1000;
+const REGISTRATION_MAX_PER_WINDOW = 10;
+
+function checkRegistrationRate(ip) {
+    const key = String(ip || 'unknown');
+    const nowMs = Date.now();
+    // Bound the map so a rotating-IP flood cannot grow it without limit.
+    if (registrationAttempts.size > 5000) registrationAttempts.clear();
+    const entry = registrationAttempts.get(key);
+    if (!entry || nowMs - entry.windowStartedAt > REGISTRATION_WINDOW_MS) {
+        registrationAttempts.set(key, { count: 1, windowStartedAt: nowMs });
+        return { allowed: true };
+    }
+    entry.count += 1;
+    if (entry.count > REGISTRATION_MAX_PER_WINDOW) {
+        return { allowed: false, retryAfter: Math.ceil((entry.windowStartedAt + REGISTRATION_WINDOW_MS - nowMs) / 1000) };
+    }
+    return { allowed: true };
+}
+
 // Best-effort username for a request. Auth itself is a shared secret with no
 // identity, but multi-user setups give each user a dedicated hostname
 // (<user>.<prefix>.<domain>), so the Host header identifies who is connecting:
@@ -2846,6 +3141,140 @@ async function addUser(username) {
     log(`\nTheir URL: https://${hostname}`, BOLD);
     log(`\nTo export credentials for them:`, RESET);
     log(`  ${CYAN}hop user export ${username}${RESET}`, RESET);
+}
+
+// ── Registration review (admin side) ──────────────────────────────────────
+
+const REGISTRATION_STATUS_LABEL = {
+    pending_email: 'unconfirmed email',
+    pending_approval: 'awaiting your decision',
+    approved: 'approved — credentials not yet collected',
+    claimed: 'set up',
+    rejected: 'rejected'
+};
+
+function listPendingRegistrations() {
+    const store = getRegistrationStore();
+    const all = store.list();
+    const waiting = all.filter((r) => r.status === 'pending_approval');
+
+    if (waiting.length === 0) {
+        log(`\nNothing waiting for approval.`, YELLOW);
+    } else {
+        log(`\n${BOLD}Waiting for you:${RESET}\n`, CYAN);
+        for (const r of waiting) {
+            const when = r.verifiedAt ? new Date(r.verifiedAt).toLocaleString() : 'unknown';
+            log(`  ${BOLD}${r.subdomain}${RESET}`, GREEN);
+            log(`    Email:     ${r.email}${r.fullName ? `  (${r.fullName})` : ''}`, RESET);
+            log(`    Confirmed: ${when}`, RESET);
+            log(`    Approve:   ${CYAN}hop user approve ${r.subdomain}${RESET}`, RESET);
+            log('');
+        }
+    }
+
+    const others = all.filter((r) => r.status !== 'pending_approval');
+    if (others.length > 0) {
+        log(`${BOLD}Everything else:${RESET}`, RESET);
+        for (const r of others) {
+            log(`  ${r.subdomain} — ${REGISTRATION_STATUS_LABEL[r.status] || r.status}${r.reason ? ` (${r.reason})` : ''}`, DIM);
+        }
+        log('');
+    }
+}
+
+async function approveRegistration(subdomain) {
+    const name = String(subdomain || '').toLowerCase();
+    const store = getRegistrationStore();
+    const entry = store.get(name);
+
+    if (!entry) {
+        log(`No registration for "${name}". See: hop user pending`, RED);
+        process.exit(1);
+    }
+    if (entry.status !== 'pending_approval') {
+        log(`"${name}" is ${REGISTRATION_STATUS_LABEL[entry.status] || entry.status} — nothing to approve.`, YELLOW);
+        process.exit(1);
+    }
+    if (!getMailConfig()) {
+        log(`Mail is not configured, so they could never be told. Run: hop mail setup`, RED);
+        process.exit(1);
+    }
+
+    log(`\n${BOLD}Approving ${name} for ${entry.email}${RESET}\n`, CYAN);
+
+    // Provision FIRST. addUser exits non-zero if the tunnel or DNS fails, and
+    // by leaving the registration untouched until it succeeds, a failed run
+    // is simply retryable — no half-approved state, no dead claim link.
+    await addUser(name);
+    await exportUserCredentials(name);
+
+    const users = getUsers();
+    const provisioned = users[name] || {};
+    store.markProvisioned(name, {
+        hostname: provisioned.hostname,
+        tunnelId: provisioned.tunnelId,
+        tunnelName: provisioned.tunnelName
+    });
+
+    const approval = store.approve(name, { by: 'admin' });
+    if (!approval.ok) {
+        log(`\nProvisioned, but could not mark approved: ${approval.error}`, RED);
+        process.exit(1);
+    }
+
+    const landingHost = getLandingHostname();
+    const claimUrl = `https://${landingHost}/claim?token=${encodeURIComponent(approval.token)}`;
+    try {
+        await sendRegistrationMail(entry.email, `Your ${provisioned.hostname} is ready`,
+`Good news — ${provisioned.hostname} is yours.
+
+Collect your tunnel credentials and the setup steps here:
+
+${claimUrl}
+
+The link works once and expires in two weeks. Treat the file it gives you
+like an SSH key: anyone holding it can serve traffic on your subdomain.
+
+— hop`);
+        log(`\n${GREEN}✓ Approved. Claim link emailed to ${entry.email}.${RESET}`, GREEN);
+    } catch (e) {
+        // The account is real and the link is live; only delivery failed, so
+        // hand the admin the link rather than stranding the registrant.
+        log(`\n${YELLOW}Approved and provisioned, but the email failed: ${e.message}${RESET}`, YELLOW);
+        log(`Send them this link by hand (it works once):`, YELLOW);
+        log(`  ${claimUrl}`, CYAN);
+    }
+}
+
+async function rejectRegistration(subdomain, reason = '') {
+    const name = String(subdomain || '').toLowerCase();
+    const store = getRegistrationStore();
+    const entry = store.get(name);
+
+    if (!entry) {
+        log(`No registration for "${name}".`, RED);
+        process.exit(1);
+    }
+    const result = store.reject(name, { reason, by: 'admin' });
+    if (!result.ok) {
+        log(result.error, RED);
+        process.exit(1);
+    }
+    log(`\n${GREEN}✓ Rejected ${name}.${RESET} The name is free again.`, GREEN);
+
+    if (getMailConfig()) {
+        try {
+            await sendRegistrationMail(entry.email, `About your ${name} request`,
+`Your request for ${name} was not approved${reason ? `:\n\n  ${reason}` : '.'}
+
+You're welcome to request a different name.
+
+— hop`);
+            log(`Told ${entry.email}.`, DIM);
+        } catch (e) {
+            log(`Could not email them: ${e.message}`, YELLOW);
+        }
+    }
 }
 
 async function removeUser(username) {
@@ -8100,6 +8529,165 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // --- PUBLIC REGISTRATION (landing host only) ---
+        // Sits in front of the auth gate because its whole point is to serve
+        // strangers. Scoped hard: nothing here runs unless registration is
+        // switched on AND the request arrived on the bare custom domain.
+        if (isLandingRequest(req)) {
+            const regConfig = getRegistrationConfig();
+            const landingHost = getLandingHostname();
+            const store = getRegistrationStore();
+
+            // Ask for a subdomain.
+            if (parsedUrl.pathname === '/api/register' && req.method === 'POST') {
+                const limit = checkRegistrationRate(getClientIp(req));
+                if (!limit.allowed) {
+                    res.writeHead(429, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: `Too many requests. Try again in ${limit.retryAfter}s.` }));
+                    return;
+                }
+                let body = '';
+                let tooBig = false;
+                req.on('data', (chunk) => {
+                    body += chunk;
+                    if (body.length > 8192) { tooBig = true; req.destroy(); }
+                });
+                req.on('end', async () => {
+                    if (tooBig) return;
+                    let payload = {};
+                    try { payload = JSON.parse(body || '{}'); } catch (e) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'Malformed request.' }));
+                        return;
+                    }
+                    // Refuse before writing anything if mail is dead: a
+                    // registration nobody can confirm is just a parked name.
+                    if (!getMailConfig()) {
+                        log(`[registration] refused ${payload.subdomain || '?'} — mail is not configured`, YELLOW);
+                        res.writeHead(503, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'Registration is temporarily unavailable. Try again later.' }));
+                        return;
+                    }
+                    const result = store.submit({
+                        subdomain: payload.subdomain,
+                        email: payload.email,
+                        fullName: payload.fullName,
+                        ip: getClientIp(req)
+                    });
+                    if (!result.ok) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: result.error, field: result.field }));
+                        return;
+                    }
+                    const link = `https://${landingHost}/verify?token=${encodeURIComponent(result.token)}`;
+                    try {
+                        await sendRegistrationMail(result.email, `Confirm your ${result.subdomain}.${landingHost} request`,
+`Hello,
+
+You asked for ${result.subdomain}.${landingHost}.
+
+Confirm this address to send the request on to the admin:
+
+${link}
+
+The link is good for 24 hours. If this wasn't you, ignore this — nothing
+happens until someone clicks it.
+
+— hop`);
+                    } catch (e) {
+                        // Undo the hold: a name reserved by mail we could not
+                        // send would be unclaimable by anyone, including them.
+                        store.reject(result.subdomain, { reason: 'verification email failed', by: 'system' });
+                        log(`[registration] mail failed for ${result.email}: ${e.message}`, RED);
+                        res.writeHead(502, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'We could not send the confirmation email. Try again later.' }));
+                        return;
+                    }
+                    log(`[registration] ${result.subdomain} requested by ${result.email} — awaiting email confirmation`, CYAN);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, email: result.email }));
+                });
+                return;
+            }
+
+            // Confirm an email address.
+            if (parsedUrl.pathname === '/verify' && req.method === 'GET') {
+                const result = store.verify(parsedUrl.query.token || '');
+                setNoCache(res);
+                if (!result.ok) {
+                    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+                    res.end(renderNoticePage('That link did not work', `<p>${escapeHtml(result.error)}</p>
+                        <p><a href="/">Start again</a></p>`));
+                    return;
+                }
+                if (!result.already) {
+                    log(`[registration] ${result.registration.subdomain} confirmed ${result.registration.email} — awaiting approval (hop user pending)`, GREEN);
+                }
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(renderNoticePage('Email confirmed', `
+                    <p>Thanks — <strong>${escapeHtml(result.registration.subdomain)}.${escapeHtml(landingHost)}</strong>
+                    is now waiting for the admin to approve it.</p>
+                    <p>We'll email you when it's ready. Approvals are done by hand, so it may take a day.</p>`));
+                return;
+            }
+
+            // Collect credentials after approval.
+            if (parsedUrl.pathname === '/claim' && req.method === 'GET') {
+                const token = String(parsedUrl.query.token || '');
+                const result = store.resolveClaim(token);
+                setNoCache(res);
+                if (!result.ok) {
+                    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+                    res.end(renderNoticePage('That link did not work', `<p>${escapeHtml(result.error)}</p>`));
+                    return;
+                }
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(renderClaimPage(result.registration, token, landingHost));
+                return;
+            }
+
+            if (parsedUrl.pathname === '/claim/credentials.json' && req.method === 'GET') {
+                const result = store.resolveClaim(String(parsedUrl.query.token || ''));
+                setNoCache(res);
+                if (!result.ok) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: result.error }));
+                    return;
+                }
+                const exportFile = path.join(HOME_DIR, 'exports', result.registration.subdomain, 'credentials.json');
+                let contents = null;
+                try { contents = fs.readFileSync(exportFile); } catch (e) { contents = null; }
+                if (!contents) {
+                    log(`[registration] claim for ${result.registration.subdomain} found no export bundle`, RED);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Credentials are not ready. Contact the admin.' }));
+                    return;
+                }
+                // Consumed only once the bytes are actually on their way.
+                store.markClaimed(result.registration.subdomain);
+                log(`[registration] ${result.registration.subdomain} claimed its credentials`, GREEN);
+                res.writeHead(200, {
+                    'Content-Type': 'application/json',
+                    'Content-Disposition': 'attachment; filename="credentials.json"',
+                    'Content-Length': contents.length
+                });
+                res.end(contents);
+                return;
+            }
+
+            // The front door itself. An authenticated admin falls through to
+            // the normal app, so switching this on never costs them the
+            // hostname their own browser and phone are pointed at.
+            if (!isAuthenticated && req.method === 'GET' && parsedUrl.pathname !== '/signin') {
+                setNoCache(res);
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(renderLandingPage(landingHost, regConfig));
+                return;
+            }
+            // /signin is the deliberate escape hatch: it falls through to the
+            // login gate so the admin is never locked out of this hostname.
+        }
+
         // --- LOGIN PAGE ---
         if (!isAuthenticated) {
             const passwordRequired = isPasswordEnabled();
@@ -12661,7 +13249,8 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'new'
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'new',
+    'mail', 'registration'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -12740,6 +13329,18 @@ const HELP_SECTIONS = [
         `hop user add <name>       Add a user (creates tunnel + DNS)`,
         `hop user remove <name>    Remove a user`,
         `hop user export <name>    Export credentials for a user`,
+        `hop user pending          Registrations waiting for your decision`,
+        `hop user approve <name>   Approve a request (provisions + emails them)`,
+        `hop user reject <name> [reason]  Decline a request`,
+    ] },
+    { title: 'Self-service signup', lines: [
+        `hop registration          Show signup status`,
+        `hop registration enable   Serve a public signup page on the landing host`,
+        `hop registration disable  Go back to a login-only landing host`,
+        `hop registration domain <d>    Restrict signups to an email domain`,
+        `hop registration admin <sub>   Reserve your own subdomain`,
+        `hop mail setup            Configure SMTP (needed to send confirmations)`,
+        `hop mail test <address>   Send a test message`,
     ] },
     { title: 'Sessions', lines: [
         `hop session list [--all|-a]      List live sessions (--all/-a adds workspace defs across all workspaces)`,
@@ -14233,6 +14834,182 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop mail` — SMTP settings used by self-service registration.
+    if (process.argv[2] === 'mail') {
+        const subcommand = process.argv[3];
+        const readline = require('readline');
+        const ask = (question, fallback = '') => new Promise((resolve) => {
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            rl.question(question, (answer) => {
+                rl.close();
+                resolve(String(answer || '').trim() || fallback);
+            });
+        });
+        // Echo-free prompt so an app password never lands in scrollback.
+        const askSecret = (question) => new Promise((resolve) => {
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            const onData = (char) => {
+                if (['\n', '\r', ''].includes(String(char))) return;
+                process.stdout.write('\x1b[2K\r' + question);
+            };
+            process.stdin.on('data', onData);
+            rl.question(question, (answer) => {
+                process.stdin.removeListener('data', onData);
+                rl.close();
+                process.stdout.write('\n');
+                resolve(String(answer || '').trim());
+            });
+        });
+
+        if (!subcommand || subcommand === 'status') {
+            const config = getMailConfig();
+            if (!config) {
+                log(`\nMail is not configured.`, YELLOW);
+                log(`Registration cannot send confirmation links until it is.`, RESET);
+                log(`\nSet it up: ${CYAN}hop mail setup${RESET}`, RESET);
+            } else {
+                log(`\n${BOLD}Mail configuration:${RESET}\n`, CYAN);
+                log(`  SMTP host: ${config.host}:${config.port}`, RESET);
+                log(`  Username:  ${config.user || '(none)'}`, RESET);
+                log(`  Password:  ${config.pass ? '(set)' : '(none)'}`, RESET);
+                log(`  From:      ${config.from}`, RESET);
+                log(`\nSend a test: ${CYAN}hop mail test you@example.com${RESET}`, RESET);
+            }
+            process.exit(0);
+        }
+
+        if (subcommand === 'setup') {
+            const existing = getMailConfig() || {};
+            log(`\n${BOLD}SMTP settings${RESET}`, CYAN);
+            log(`For Gmail use smtp.gmail.com:465 with an App Password`, DIM);
+            log(`(myaccount.google.com → Security → 2-Step Verification → App passwords).`, DIM);
+            log('');
+            const host = await ask(`SMTP host [${existing.host || 'smtp.gmail.com'}]: `, existing.host || 'smtp.gmail.com');
+            const port = Number(await ask(`Port [${existing.port || 465}]: `, String(existing.port || 465))) || 465;
+            const user = await ask(`Username${existing.user ? ` [${existing.user}]` : ''}: `, existing.user || '');
+            const pass = (await askSecret(`Password (hidden)${existing.pass ? ' [keep existing]' : ''}: `)) || existing.pass || '';
+            const from = await ask(`From address [${existing.from || user}]: `, existing.from || user);
+            if (!host || !from) {
+                log(`\nHost and From are required.`, RED);
+                process.exit(1);
+            }
+            saveMailConfig({ host, port, user, pass, from });
+            log(`\n${GREEN}✓ Saved to ${MAIL_CONFIG_FILE} (readable only by you).${RESET}`, GREEN);
+            log(`\nVerify it works: ${CYAN}hop mail test ${user || 'you@example.com'}${RESET}`, RESET);
+            process.exit(0);
+        }
+
+        if (subcommand === 'test') {
+            const to = process.argv[4];
+            if (!to) {
+                log(`Usage: hop mail test <address>`, RED);
+                process.exit(1);
+            }
+            const config = getMailConfig();
+            if (!config) {
+                log(`Mail is not configured. Run: hop mail setup`, RED);
+                process.exit(1);
+            }
+            log(`Sending a test message to ${to}…`, DIM);
+            try {
+                await smtpSendMail(config, {
+                    to,
+                    subject: 'hop test message',
+                    text: 'If you are reading this, hop can send mail.\n\n— hop'
+                });
+                log(`${GREEN}✓ Sent. Check ${to} (including spam).${RESET}`, GREEN);
+            } catch (e) {
+                log(`${RED}Failed: ${e.message}${RESET}`, RED);
+                process.exit(1);
+            }
+            process.exit(0);
+        }
+
+        log(`Usage: hop mail [status|setup|test <address>]`, RED);
+        process.exit(1);
+    }
+
+    // Handle `hop registration` — the public signup surface on the landing host.
+    if (process.argv[2] === 'registration') {
+        const subcommand = process.argv[3];
+        const config = getRegistrationConfig();
+        const landingHost = getLandingHostname();
+
+        if (!subcommand || subcommand === 'status') {
+            log(`\n${BOLD}Self-service registration:${RESET} ${config.enabled ? `${GREEN}on${RESET}` : `${YELLOW}off${RESET}`}`, RESET);
+            log(`  Landing page:  ${landingHost ? `https://${landingHost}` : '(no custom domain — run hop domain <host>)'}`, RESET);
+            log(`  Open to:       ${config.allowedEmailDomain} addresses`, RESET);
+            log(`  Admin host:    ${config.adminSubdomain ? `${config.adminSubdomain}.${landingHost}` : '(not set)'}`, RESET);
+            log(`  Mail:          ${getMailConfig() ? `${GREEN}configured${RESET}` : `${RED}not configured — signups will be refused${RESET}`}`, RESET);
+            const waiting = landingHost ? getRegistrationStore().pending().length : 0;
+            log(`  Waiting:       ${waiting} request${waiting === 1 ? '' : 's'}${waiting ? ` (${CYAN}hop user pending${RESET})` : ''}`, RESET);
+            log('');
+            process.exit(0);
+        }
+
+        if (subcommand === 'enable') {
+            if (!landingHost) {
+                log(`Set a custom domain first: hop domain <hostname>`, RED);
+                process.exit(1);
+            }
+            if (!getMailConfig()) {
+                log(`Configure mail first, or every signup is refused: hop mail setup`, RED);
+                process.exit(1);
+            }
+            // Turning this on hands the bare hostname to the public. If the
+            // admin has no subdomain of their own yet, say so plainly rather
+            // than letting them discover it from their phone later.
+            if (!config.adminSubdomain) {
+                log(`\n${YELLOW}You have no admin subdomain set.${RESET}`, YELLOW);
+                log(`${landingHost} will show the signup page to anyone signed out —`, RESET);
+                log(`your own browser keeps working while its session cookie is valid,`, RESET);
+                log(`and ${CYAN}https://${landingHost}/signin${RESET} always reaches the login page.`, RESET);
+                log(`\nRecommended: ${CYAN}hop registration admin <yourname>${RESET} first.`, RESET);
+                const proceed = await promptYesNo(`\nEnable anyway? (y/N) `);
+                if (!proceed) process.exit(0);
+            }
+            saveRegistrationConfig({ ...config, enabled: true });
+            log(`\n${GREEN}✓ Registration is on.${RESET} https://${landingHost} now serves the signup page.`, GREEN);
+            log(`Review requests with: ${CYAN}hop user pending${RESET}`, RESET);
+            process.exit(0);
+        }
+
+        if (subcommand === 'disable') {
+            saveRegistrationConfig({ ...config, enabled: false });
+            log(`\n${GREEN}✓ Registration is off.${RESET} ${landingHost || 'The landing host'} is back to the login page.`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'domain') {
+            const value = process.argv[4];
+            if (!value) {
+                log(`Usage: hop registration domain <email-domain>`, RED);
+                process.exit(1);
+            }
+            saveRegistrationConfig({ ...config, allowedEmailDomain: String(value).toLowerCase().replace(/^@/, '') });
+            log(`\n${GREEN}✓ Registration open to ${String(value).toLowerCase().replace(/^@/, '')} addresses.${RESET}`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'admin') {
+            const value = process.argv[4];
+            if (!value) {
+                log(`Usage: hop registration admin <subdomain>`, RED);
+                process.exit(1);
+            }
+            const name = String(value).toLowerCase();
+            saveRegistrationConfig({ ...config, adminSubdomain: name });
+            log(`\n${GREEN}✓ Admin subdomain is ${name}.${RESET}`, GREEN);
+            log(`\nThat name is now reserved from public signup. To make it resolve, run:`, RESET);
+            log(`  ${CYAN}cloudflared tunnel route dns ${(getDomainConfig() || {}).tunnelName || 'hop'} ${name}.${landingHost}${RESET}`, RESET);
+            log(`It points at this same daemon, so your sessions are there immediately.`, DIM);
+            process.exit(0);
+        }
+
+        log(`Usage: hop registration [status|enable|disable|domain <d>|admin <sub>]`, RED);
+        process.exit(1);
+    }
+
     // Handle `hop domain-clear` command - remove custom domain config
     if (process.argv[2] === 'domain-clear') {
         if (fs.existsSync(DOMAIN_CONFIG_FILE)) {
@@ -14337,6 +15114,29 @@ async function main() {
                 process.exit(1);
             }
             await addUser(username);
+            process.exit(0);
+        }
+
+        if (subcommand === 'pending') {
+            listPendingRegistrations();
+            process.exit(0);
+        }
+
+        if (subcommand === 'approve') {
+            if (!username) {
+                log(`Usage: hop user approve <subdomain>`, RED);
+                process.exit(1);
+            }
+            await approveRegistration(username);
+            process.exit(0);
+        }
+
+        if (subcommand === 'reject') {
+            if (!username) {
+                log(`Usage: hop user reject <subdomain> [reason]`, RED);
+                process.exit(1);
+            }
+            await rejectRegistration(username, process.argv.slice(5).join(' '));
             process.exit(0);
         }
 

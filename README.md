@@ -320,6 +320,44 @@ hop client ./credentials.json
 
 First run prompts for password setup and TOTP enrollment, then the user logs in at their assigned URL such as `https://alice.hop.yourdomain.com`.
 
+### Self-service signup (optional)
+
+Instead of adding every user by hand, the landing host can serve a public
+signup page. Visitors ask for a subdomain, confirm an email address on a
+domain you nominate, and wait for you to approve — approval runs the same
+`hop user add` + `hop user export` provisioning as the manual flow, then
+emails them a one-time link to collect their credentials.
+
+```bash
+hop mail setup                      # SMTP (a Gmail App Password works)
+hop registration admin jianzhou     # reserve your own subdomain
+hop registration domain uchicago.edu
+hop registration enable
+```
+
+Then review requests as they arrive:
+
+```bash
+hop user pending
+hop user approve alice
+hop user reject bob "please use your own name"
+```
+
+Notes:
+
+- Off by default. Enabling it makes the bare hostname public; your own
+  browser keeps working while its session cookie is valid, and
+  `https://<landing-host>/signin` always reaches the login page.
+- Nothing runs on your machine for them. A registrant gets a Cloudflare
+  tunnel and a DNS record; hop itself runs on *their* computer, with their
+  own password and TOTP.
+- The tunnel lives in **your** Cloudflare account and the subdomain is under
+  **your** domain, so an approved user can serve anything they like at
+  `their-name.your-domain`. Approve people you would vouch for, and use
+  `hop user remove <name>` to revoke (delete the DNS record by hand).
+- Registrations live in `~/.hop2/.registrations.json` (0600). Verification
+  and claim links are stored only as hashes.
+
 ### Security
 
 - Password + TOTP is supported; password is required for custom domains

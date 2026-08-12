@@ -9011,6 +9011,43 @@ happens until someone clicks it.
             return;
         }
 
+        // Diagnostics FROM a client, so a phone can hand its trace to whoever
+        // is debugging it. "Copy diagnostics" puts the text on the pasteboard,
+        // which is useless when the person who needs it is a session on the
+        // other side of the tunnel — Jian: "there is no way for me to copy any
+        // diagnostic log for you." This lands them in a file on the host that
+        // an agent can just read.
+        if (parsedUrl.pathname === '/api/diagnostics' && req.method === 'POST') {
+            const body = await readRequestJson(req, 1024 * 512);
+            const text = String(body?.text || '').slice(0, 400000);
+            if (!text.trim()) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'empty' }));
+                return;
+            }
+            try {
+                const dir = path.join(HOME_DIR, 'diagnostics');
+                fs.mkdirSync(dir, { recursive: true });
+                const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const label = String(body?.label || 'client').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24) || 'client';
+                const file = path.join(dir, `${stamp}-${label}.txt`);
+                fs.writeFileSync(file, text);
+                // Keep the newest 40: these are pasted by hand, one at a time,
+                // and an unbounded directory is a slow leak nobody prunes.
+                const all = fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).sort();
+                for (const old of all.slice(0, Math.max(0, all.length - 40))) {
+                    try { fs.rmSync(path.join(dir, old)); } catch (e) { }
+                }
+                log(`[diagnostics] received ${text.length}B from ${label} → ${path.basename(file)}`, CYAN);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, file: path.basename(file) }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+            return;
+        }
+
         // ---- Views files --------------------------------------------------
         // Served on an EXTENSIONLESS path on purpose: the edge cache stores
         // by URL extension and can override origin cache directives, and a

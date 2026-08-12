@@ -323,3 +323,104 @@ test('a name is not left stranded when the confirmation email fails', async () =
     await restoreMail();
   }
 });
+
+// ── Moving hosts ──────────────────────────────────────────────────────────
+// A client set up against the old hostname has to (a) find out where home is
+// now and (b) get there without the user re-entering a password and a TOTP
+// code on every device.
+
+const setCanonical = (host) => writeJson('.config.json', host ? { canonicalHost: host } : {});
+
+test('/api/instance tells an unauthenticated client where home is now', async () => {
+  try {
+    await setCanonical('me.hoptest.example.com');
+    await until(async () => (await request('GET', '/api/instance')).json?.canonicalHost === 'me.hoptest.example.com',
+      'the canonical host to be advertised');
+
+    const res = await request('GET', '/api/instance');
+    assert.equal(res.status, 200);
+    // No cookie was sent: a lapsed client is exactly the one that must be told.
+    assert.equal(res.json.canonicalUrl, 'https://me.hoptest.example.com');
+    assert.equal(res.json.host, LANDING_HOST);
+    assert.equal(res.json.isCanonical, false, 'this client is on the old hostname');
+
+    const onCanonical = await request('GET', '/api/instance', { host: 'me.hoptest.example.com' });
+    assert.equal(onCanonical.json.isCanonical, true, 'a client already home is told to stay');
+  } finally {
+    await setCanonical(null);
+  }
+});
+
+test('with no canonical host configured, nothing claims a client should move', async () => {
+  await until(async () => (await request('GET', '/api/instance')).json?.canonicalHost === null,
+    'the canonical host to clear');
+  const res = await request('GET', '/api/instance');
+  assert.equal(res.json.canonicalHost, null);
+  assert.equal(res.json.isCanonical, true, 'no configured move means every host is home');
+});
+
+test('a handoff is refused to anyone not already signed in', async () => {
+  try {
+    await setCanonical('me.hoptest.example.com');
+    await until(async () => (await request('GET', '/api/instance')).json?.canonicalHost, 'canonical host');
+
+    const res = await request('POST', '/api/handoff', { body: {} });
+    assert.equal(res.status, 401, 'a handoff may never create access that did not exist');
+  } finally {
+    await setCanonical(null);
+  }
+});
+
+test('a signed-in client hands its session to the new hostname exactly once', async () => {
+  try {
+    await setCanonical('me.hoptest.example.com');
+    await until(async () => (await request('GET', '/api/instance')).json?.canonicalHost, 'canonical host');
+
+    const auth = { Cookie: `tunnel_session=${state.sessionSecret}` };
+    const mint = await request('POST', '/api/handoff', { body: {}, headers: auth });
+    assert.equal(mint.status, 200);
+    assert.match(mint.json.url, /^https:\/\/me\.hoptest\.example\.com\/api\/handoff\/redeem\?token=/);
+
+    const token = new URL(mint.json.url).searchParams.get('token');
+
+    // Redeeming on the OLD hostname must fail — the link is bound to the
+    // destination, so a stray click cannot re-authorize the wrong host.
+    const wrongHost = await request('GET', `/api/handoff/redeem?token=${encodeURIComponent(token)}`);
+    assert.equal(wrongHost.status, 400);
+    assert.ok(!String(wrongHost.headers['set-cookie'] || '').includes('tunnel_session='), 'no cookie on the wrong host');
+
+    // A misdirected attempt does NOT spend the token: it granted nothing, and
+    // burning it would let one stray redirect strand a device mid-migration.
+    // Only a genuine redeem on the destination consumes it.
+    const redeemed = await request('GET', `/api/handoff/redeem?token=${encodeURIComponent(token)}`,
+      { host: 'me.hoptest.example.com' });
+    assert.equal(redeemed.status, 302);
+    assert.equal(redeemed.headers.location, '/');
+    const setCookie = String(redeemed.headers['set-cookie'] || '');
+    assert.match(setCookie, /tunnel_session=/);
+    assert.match(setCookie, /HttpOnly/i);
+    // Host-scoped: a Domain= cookie here would hand this secret to every
+    // registered user's subdomain.
+    assert.ok(!/Domain=/i.test(setCookie), `handoff cookie must not be domain-wide: ${setCookie}`);
+
+    // Replay is dead.
+    const replay = await request('GET', `/api/handoff/redeem?token=${encodeURIComponent(token)}`,
+      { host: 'me.hoptest.example.com' });
+    assert.equal(replay.status, 400);
+  } finally {
+    await setCanonical(null);
+  }
+});
+
+test('a made-up handoff token is refused even on the right hostname', async () => {
+  try {
+    await setCanonical('me.hoptest.example.com');
+    await until(async () => (await request('GET', '/api/instance')).json?.canonicalHost, 'canonical host');
+    const res = await request('GET', '/api/handoff/redeem?token=invented',
+      { host: 'me.hoptest.example.com' });
+    assert.equal(res.status, 400);
+    assert.ok(!String(res.headers['set-cookie'] || '').includes('tunnel_session='), 'no cookie is minted');
+  } finally {
+    await setCanonical(null);
+  }
+});

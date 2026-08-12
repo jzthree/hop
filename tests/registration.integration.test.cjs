@@ -403,6 +403,16 @@ test('a signed-in client hands its session to the new hostname exactly once', as
     // registered user's subdomain.
     assert.ok(!/Domain=/i.test(setCookie), `handoff cookie must not be domain-wide: ${setCookie}`);
 
+    // The point of the whole exercise: the cookie it minted must actually
+    // authorize the new host, or the user is still typing a TOTP code.
+    const handedCookie = String(redeemed.headers['set-cookie'] || '').split(';')[0];
+    const useIt = await request('GET', '/api/sessions', {
+      host: 'me.hoptest.example.com',
+      headers: { Cookie: handedCookie }
+    });
+    assert.equal(useIt.status, 200);
+    assert.ok(Array.isArray(useIt.json?.sessions), `handed-off session must work, got ${useIt.body.slice(0, 80)}`);
+
     // Replay is dead.
     const replay = await request('GET', `/api/handoff/redeem?token=${encodeURIComponent(token)}`,
       { host: 'me.hoptest.example.com' });

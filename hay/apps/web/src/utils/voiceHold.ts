@@ -116,6 +116,17 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
    *  undefined — not a voice-relevant event; continue with other branches.
    */
   const handleKey = (ev: { type: string; code: string; key: string; repeat?: boolean; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean }): boolean | undefined => {
+    // Return, mid-dictation, ENDS it and keeps the words (Jian). Without
+    // this the Enter fell through to the terminal while the recogniser was
+    // still running: a bare newline hit the composer, and the transcript
+    // landed after it — the one key you would reach for to finish a thought
+    // was the one that split it in half. Swallowed rather than passed on, so
+    // this inserts and does not also submit; a second Return sends it.
+    if (active && ev.type === "keydown" && (ev.key === "Enter" || ev.code === "Enter"
+                                            || ev.code === "NumpadEnter")) {
+      stop();
+      return false;
+    }
     if (ev.code === "Space" && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey
         && !!speechRecognitionCtor() && (active || opts.eligible())) {
       if (ev.type === "keydown") {

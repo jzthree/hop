@@ -2734,6 +2734,49 @@ function saveMailConfig(config) {
     writePrivateFile(MAIL_CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
+// ── Canonical hostname + session handoff ──────────────────────────────────
+// An instance can move: the hostname a client was set up against stops being
+// the one it should use (most often because the old host became a public
+// landing page). Clients ask /api/instance where home is now, and carry their
+// existing session across with a one-time handoff rather than making the user
+// re-enter a password and a TOTP code on every device.
+//
+// The cookie itself CANNOT be shared across the move: it is host-scoped, and
+// widening it to Domain=<landing host> would broadcast this instance's
+// session secret to every registered user's subdomain. Hence a token.
+function getCanonicalHost() {
+    const configured = getHopConfig().canonicalHost;
+    return configured ? String(configured).toLowerCase() : null;
+}
+
+function requestHostname(req) {
+    return String(req?.headers?.['x-forwarded-host'] || req?.headers?.host || '')
+        .split(',')[0].split(':')[0].trim().toLowerCase();
+}
+
+// Single-use, short-lived. A handoff grants exactly the access the requester
+// already had, on one specific hostname, once.
+const handoffTokens = new Map(); // token -> expiresAt
+const HANDOFF_TTL_MS = 60 * 1000;
+
+function mintHandoffToken() {
+    const nowMs = Date.now();
+    for (const [token, expiresAt] of handoffTokens) {
+        if (expiresAt < nowMs) handoffTokens.delete(token);
+    }
+    const token = crypto.randomBytes(32).toString('base64url');
+    handoffTokens.set(token, nowMs + HANDOFF_TTL_MS);
+    return token;
+}
+
+function redeemHandoffToken(token) {
+    const key = String(token || '');
+    const expiresAt = handoffTokens.get(key);
+    if (!expiresAt) return false;
+    handoffTokens.delete(key);           // single use, even if expired
+    return expiresAt >= Date.now();
+}
+
 // The hostname that serves the public landing page: the custom domain itself.
 let landingHostCache = { at: 0, value: null };
 function getLandingHostname() {
@@ -8076,6 +8119,23 @@ function appendSetCookie(res, cookies) {
     res.setHeader('Set-Cookie', merged);
 }
 
+// The session cookie, minted in one place. Host-scoped deliberately: adding a
+// Domain would hand this instance's secret to every subdomain of the parent,
+// which on a multi-user host means every other user's machine.
+// (The three login paths below still inline an identical cookie; they predate
+// this helper and were left alone rather than refactoring live auth code.)
+function setAuthCookie(res) {
+    appendSetCookie(res, [
+        cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'lax',
+            path: '/',
+            maxAge: 60 * 60 * 24 * 7
+        })
+    ]);
+}
+
 function clearAuthCookies(res) {
     const expires = new Date(0);
     appendSetCookie(res, [
@@ -8345,6 +8405,79 @@ function startAuthProxy(authEmitter) {
             res.hopCacheControl = 'public, max-age=300';    // public on purpose — Apple's CDN reads it
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ webcredentials: { apps: ['5AD7QB9795.io.zhoulab.hop.spike'] } }));
+            return;
+        }
+
+        // Where does this instance live now? Unauthenticated on purpose: a
+        // client whose session has lapsed is exactly the one that needs to be
+        // told, and the answer is a public DNS name, not a secret.
+        if (parsedUrl.pathname === '/api/instance' && req.method === 'GET') {
+            const canonicalHost = getCanonicalHost();
+            const host = requestHostname(req);
+            setNoCache(res);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                host,
+                canonicalHost,
+                canonicalUrl: canonicalHost ? `https://${canonicalHost}` : null,
+                // False means "you are pointed at a hostname that is no longer
+                // this instance's front door" — the client's cue to migrate.
+                isCanonical: !canonicalHost || host === canonicalHost,
+                registrationEnabled: getRegistrationConfig().enabled
+            }));
+            return;
+        }
+
+        // Mint a handoff so an already-signed-in client can follow the move
+        // without re-authenticating. POST only: SameSite=lax means a
+        // cross-site POST carries no cookie, so this cannot be triggered from
+        // another origin.
+        if (parsedUrl.pathname === '/api/handoff' && req.method === 'POST') {
+            const canonicalHost = getCanonicalHost();
+            if (!isAuthenticated) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'Not signed in' }));
+                return;
+            }
+            if (!canonicalHost) {
+                res.writeHead(409, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'No canonical host configured' }));
+                return;
+            }
+            const token = mintHandoffToken();
+            setNoCache(res);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                ok: true,
+                // Built from config, never from the request: this must not
+                // become an open redirect.
+                url: `https://${canonicalHost}/api/handoff/redeem?token=${encodeURIComponent(token)}`,
+                expiresInMs: HANDOFF_TTL_MS
+            }));
+            return;
+        }
+
+        // Redeem on the new host. Must be unauthenticated-reachable — being
+        // signed out over there is the entire point.
+        if (parsedUrl.pathname === '/api/handoff/redeem' && req.method === 'GET') {
+            const canonicalHost = getCanonicalHost();
+            const host = requestHostname(req);
+            setNoCache(res);
+            // Only the canonical hostname may redeem. Another user's subdomain
+            // is a different daemon with a different token store, so this is
+            // belt and braces — but it states the intent.
+            if (!canonicalHost || host !== canonicalHost || !redeemHandoffToken(parsedUrl.query.token)) {
+                res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(renderNoticePage('That sign-in link did not work', `
+                    <p>It may have already been used, or it expired — they are good for a minute.</p>
+                    <p><a href="/">Sign in here instead</a>.</p>`));
+                return;
+            }
+            setAuthCookie(res);
+            recordAuth(authEmitter);
+            // Keep the token out of the Referer of whatever loads next.
+            res.writeHead(302, { Location: '/', 'Referrer-Policy': 'no-referrer' });
+            res.end();
             return;
         }
 
@@ -13287,7 +13420,7 @@ const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
     'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'new',
-    'mail', 'registration'
+    'mail', 'registration', 'canonical'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -13378,6 +13511,11 @@ const HELP_SECTIONS = [
         `hop registration admin <sub>   Reserve your own subdomain`,
         `hop mail setup            Configure SMTP (needed to send confirmations)`,
         `hop mail test <address>   Send a test message`,
+    ] },
+    { title: 'Moving hosts', lines: [
+        `hop canonical             Show the hostname clients should use`,
+        `hop canonical <hostname>  Point clients at a new hostname (they carry their session over)`,
+        `hop canonical clear       Stop advertising a canonical hostname`,
     ] },
     { title: 'Sessions', lines: [
         `hop session list [--all|-a]      List live sessions (--all/-a adds workspace defs across all workspaces)`,
@@ -14871,6 +15009,49 @@ async function main() {
         process.exit(0);
     }
 
+    // Handle `hop canonical` — the hostname clients should be using. Setting
+    // it does not move anything by itself; it tells clients where to go and
+    // enables the one-time session handoff, so devices can follow a move
+    // without being re-authenticated by hand.
+    if (process.argv[2] === 'canonical') {
+        const value = process.argv[3];
+        const current = getCanonicalHost();
+
+        if (!value) {
+            if (current) {
+                log(`\nCanonical host: ${GREEN}${current}${RESET}`, RESET);
+                log(`Clients reading /api/instance will migrate themselves to https://${current}.`, DIM);
+                log(`\nTo change: ${CYAN}hop canonical <hostname>${RESET}`, RESET);
+                log(`To clear:  ${CYAN}hop canonical clear${RESET}`, RESET);
+            } else {
+                log(`\nNo canonical host set — clients keep using whatever URL they were given.`, YELLOW);
+                log(`\nUsage: ${CYAN}hop canonical <hostname>${RESET}`, RESET);
+            }
+            process.exit(0);
+        }
+
+        if (value === 'clear') {
+            const config = getHopConfig();
+            delete config.canonicalHost;
+            saveHopConfig(config);
+            log(`\n${GREEN}✓ Canonical host cleared.${RESET}`, GREEN);
+            process.exit(0);
+        }
+
+        if (!/^[a-zA-Z0-9]([a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}$/.test(value)) {
+            log(`Invalid hostname: ${value}`, RED);
+            log(`Example: hop canonical me.hop.example.com`, RESET);
+            process.exit(1);
+        }
+        saveHopConfig({ ...getHopConfig(), canonicalHost: String(value).toLowerCase() });
+        log(`\n${GREEN}✓ Canonical host is ${String(value).toLowerCase()}.${RESET}`, GREEN);
+        log(`\nThis daemon must actually answer on that name — route it first:`, RESET);
+        log(`  ${CYAN}cloudflared tunnel route dns ${(getDomainConfig() || {}).tunnelName || 'hop'} ${String(value).toLowerCase()}${RESET}`, RESET);
+        log(`\nClients that read /api/instance will move themselves over, carrying`, DIM);
+        log(`their session with them. The old URL keeps working meanwhile.`, DIM);
+        process.exit(0);
+    }
+
     // Handle `hop mail` — SMTP settings used by self-service registration.
     if (process.argv[2] === 'mail') {
         const subcommand = process.argv[3];
@@ -15036,10 +15217,17 @@ async function main() {
             }
             const name = String(value).toLowerCase();
             saveRegistrationConfig({ ...config, adminSubdomain: name });
+            // The admin's subdomain is by definition where the admin's own
+            // clients belong, so make it canonical too — otherwise every
+            // device would sit on the soon-to-be-public hostname.
+            const canonical = `${name}.${landingHost}`;
+            saveHopConfig({ ...getHopConfig(), canonicalHost: canonical });
             log(`\n${GREEN}✓ Admin subdomain is ${name}.${RESET}`, GREEN);
-            log(`\nThat name is now reserved from public signup. To make it resolve, run:`, RESET);
-            log(`  ${CYAN}cloudflared tunnel route dns ${(getDomainConfig() || {}).tunnelName || 'hop'} ${name}.${landingHost}${RESET}`, RESET);
+            log(`  Reserved from public signup, and set as the canonical host for your clients.`, DIM);
+            log(`\nTo make it resolve, run:`, RESET);
+            log(`  ${CYAN}cloudflared tunnel route dns ${(getDomainConfig() || {}).tunnelName || 'hop'} ${canonical}${RESET}`, RESET);
             log(`It points at this same daemon, so your sessions are there immediately.`, DIM);
+            log(`\nYour clients will move themselves over once they see it (${CYAN}hop canonical${RESET}).`, RESET);
             process.exit(0);
         }
 

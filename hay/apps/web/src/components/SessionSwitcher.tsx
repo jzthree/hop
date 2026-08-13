@@ -3059,14 +3059,21 @@ export const SessionSwitcher = ({
             aria-label={`Actions for ${sheetSession.displayName}`}
             style={(() => {
               const width = 264;
-              const estH = sheet.mode === "rename" ? 140 : 340;
+              const estH = sheet.mode === "rename" ? 150 : 330;
               const left = Math.min(Math.max(8, sheet.anchor.x - width), window.innerWidth - width - 8);
               let top = sheet.anchor.y + 8;
               if (top + estH > window.innerHeight - 8) top = Math.max(8, sheet.anchor.y - estH - 8);
               return { left, top };
             })()}
           >
-            <p className="switcher-sheet-title">{sheetSession.displayName}</p>
+            <header className="switcher-sheet-head">
+              <p className="switcher-sheet-title">{sheetSession.displayName}</p>
+              {sheetSession.cwd && (
+                <p className="switcher-sheet-sub" title={sheetSession.cwd}>
+                  {sheetSession.cwd.replace(/^\/Users\/[^/]+/, "~")}
+                </p>
+              )}
+            </header>
             {sheet.mode === "rename" ? (
               <form className="inline-edit" onSubmit={submitRename}>
                 <input
@@ -3122,6 +3129,7 @@ export const SessionSwitcher = ({
                 >
                   Rename
                 </button>
+                {sheetSession.type !== "port" && <div className="switcher-sheet-sep" aria-hidden="true" />}
                 {sheetSession.type !== "port" && (
                   <button type="button" onClick={toggleAgentAccess}>
                     {sheetAgentPermitted ? "Disable agent access" : "Enable agent access"}
@@ -3142,10 +3150,10 @@ export const SessionSwitcher = ({
                     Stop &amp; park (resumable)
                   </button>
                 )}
+                <div className="switcher-sheet-sep" aria-hidden="true" />
                 <button type="button" className="danger" onClick={killSession}>
                   Kill session
                 </button>
-                <button type="button" onClick={() => setSheet(null)}>Cancel</button>
               </>
             )}
           </div>

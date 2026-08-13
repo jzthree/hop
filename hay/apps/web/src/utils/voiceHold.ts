@@ -12,13 +12,17 @@
 // - auto-repeat spaces are swallowed; any other key cancels a pending hold
 // - while listening, every space is eaten
 //
-// Swallowing a key here means handling THREE event types, not one. xterm
-// consults this handler from _keyDown AND from _keyPress, and when we refuse
-// a keydown it returns before setting its own _keyDownHandled flag — so the
-// browser still fires keypress, xterm still asks us, and an `undefined`
-// answer there let every auto-repeat land a real space in the composer. That
-// was "holding space keeps typing actual spaces". preventDefault goes with
-// it, so the character never reaches the hidden textarea either.
+// The event mechanics, measured (not assumed — both prior bugs came from
+// getting this wrong): for a plain printable like space, xterm types NOTHING
+// on keydown. The browser fires keypress as the keydown's default action,
+// and xterm's _keyPress is what feeds the character to the PTY. Therefore:
+//  - a fresh keydown is INERT for typing; it only arms the hold timer
+//  - its keypress IS the zero-latency space, and must pass through anything
+//    short of live dictation (swallowing it while merely pending ate every
+//    ordinary space — the second regression)
+//  - swallowing a keydown must preventDefault, which suppresses its
+//    keypress; returning bare false only stopped xterm, and the leaked
+//    keypress typed a space per auto-repeat — the first regression
 
 type RecognitionLike = {
   lang: string;
@@ -53,12 +57,6 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
   let active = false;
   /** A hold has begun (space is down) but dictation has not started yet. */
   let pending = false;
-  /** Is the space bar physically down right now? The controller may only
-   *  swallow a space while it IS — otherwise any state that got stuck (a
-   *  recogniser that never ended, a keyup lost to a window switch) would eat
-   *  every space forever, and a terminal that cannot type a space is worse
-   *  than dictation that does not start. Fail open, always. */
-  let spaceDown = false;
   let spacesTyped = 0;
   let finalText = "";
   let interimText = "";
@@ -152,7 +150,6 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
   // Releasing space outside the terminal (window switch mid-hold) means the
   // keyup never arrives, so end the hold when focus leaves.
   const onWindowBlur = () => {
-    spaceDown = false;
     if (active) stop();
     else { window.clearTimeout(timer); pending = false; }
   };
@@ -193,32 +190,31 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
           // listening. `repeat` is the honest signal: a FRESH press cannot be
           // part of the hold in progress, so the hold is over — whether the
           // keyup was lost to a window switch or the recogniser wedged. End
-          // it and let the keystroke through; the user is trying to type.
+          // it and fall through: the press below types via its keypress.
           if (ev.repeat) return swallow();
           stop();
         }
-        spaceDown = true;
         if (!ev.repeat) {
           window.clearTimeout(timer);
           pending = true;
-          spacesTyped = 1; // this one goes through, for zero latency
+          // Types via the keypress this keydown will spawn; counted so a
+          // matured hold knows to erase it.
+          spacesTyped = 1;
           timer = window.setTimeout(start, threshold);
           return true;
         }
-        return swallow(); // swallow auto-repeat while held
+        // Auto-repeat while held: preventDefault suppresses its keypress,
+        // so nothing reaches the composer.
+        return swallow();
       }
-      // The one that was missing. xterm asks again here, and its own
-      // _keyDownHandled guard is not set for a keydown we refused — so an
-      // `undefined` answer types a space per auto-repeat. The first space is
-      // already emitted by the keydown xterm DID process, so nothing is lost.
       if (ev.type === "keypress") {
-        // Only while the key is genuinely held — see spaceDown.
-        return (spaceDown && (active || pending)) ? swallow() : undefined;
+        // THE typing event (see header). Passes untouched unless dictation
+        // is live — a pending hold's keypress is the ordinary space itself.
+        return active ? swallow() : undefined;
       }
       if (ev.type === "keyup") {
         window.clearTimeout(timer);
         pending = false;
-        spaceDown = false;
         spacesTyped = 0;
         if (active) { stop(); return swallow(); }
         return true;

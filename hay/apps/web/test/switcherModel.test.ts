@@ -436,3 +436,40 @@ describe("filterScore tiers", () => {
     expect(model.rows).toEqual([]);
   });
 });
+
+describe("manual order never moves on its own", () => {
+  const s = (name: string, extra: Partial<SwitcherSession> = {}): SwitcherSession => ({
+    name, displayName: name, internalName: name, active: true, starting: false,
+    createdBy: "user", ...extra
+  });
+
+  it("activity cannot reorder placed sessions", () => {
+    const order = ["c", "a", "b"];
+    const quiet = [s("a", { lastActivityAt: 1 }), s("b", { lastActivityAt: 2 }), s("c", { lastActivityAt: 3 })];
+    const noisy = [s("a", { lastActivityAt: 9999 }), s("b", { lastActivityAt: 2 }), s("c", { lastActivityAt: 3 })];
+
+    const rowsOf = (list: SwitcherSession[]) => {
+      const m = buildSwitcherModel(list, null, "", "manual", order, []);
+      return m.mode === "manual" ? m.rows.map((r) => r.name) : [];
+    };
+    // A session printing output, ringing a bell, or going idle changes nothing.
+    expect(rowsOf(quiet)).toEqual(["c", "a", "b"]);
+    expect(rowsOf(noisy)).toEqual(["c", "a", "b"]);
+  });
+
+  it("a rename cannot move a placed session", () => {
+    // The saved order is keyed on internalName, so the label may change
+    // freely — an agent renaming a session must not rearrange the wall.
+    const order = ["c", "a", "b"];
+    const renamed = [s("a", { displayName: "zzz" }), s("b"), s("c")];
+    const m = buildSwitcherModel(renamed, null, "", "manual", order, []);
+    expect(m.mode === "manual" && m.rows.map((r) => r.internalName)).toEqual(["c", "a", "b"]);
+  });
+
+  it("an unplaced session lands at the tail, never between placed ones", () => {
+    const order = ["c", "a"];
+    const list = [s("a"), s("c"), s("b")];   // "b" was never dragged
+    const m = buildSwitcherModel(list, null, "", "manual", order, []);
+    expect(m.mode === "manual" && m.rows.map((r) => r.name)).toEqual(["c", "a", "b"]);
+  });
+});

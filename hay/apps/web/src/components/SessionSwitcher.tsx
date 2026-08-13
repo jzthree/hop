@@ -1735,6 +1735,25 @@ export const SessionSwitcher = ({
       ? [...full.folders.flatMap((f) => f.rows), ...full.rows].map(sessionKey)
       : [];
   }
+  // Manual means manual — including for sessions nobody has dragged yet.
+  // Placed cards were always immune to activity, but UNPLACED ones sorted by
+  // display name at the tail, so the wall still rearranged itself with no
+  // user action: creating a session inserted it alphabetically between
+  // existing cards, and renaming one (an agent may) slid it somewhere else.
+  // Give every newcomer a permanent index the first time the manual wall
+  // sees it; after that only a drag can move anything.
+  useEffect(() => {
+    if (!open || sortMode !== "manual") return;
+    const visual = orderedAllKeysRef.current;          // full wall, filter-independent
+    if (visual.length === 0) return;
+    const placed = new Set(manualOrder);
+    if (visual.every((k) => placed.has(k))) return;    // nothing new to pin
+    // Keep the order the user is looking at right now, then freeze it.
+    const next = [...manualOrder];
+    for (const key of visual) if (!placed.has(key)) next.push(key);
+    persistManualOrder(next);
+  }, [open, sortMode, manualOrder, wallSessions, folders]);
+
   const flatNavRef = useRef(flatNav);
   flatNavRef.current = flatNav;
 

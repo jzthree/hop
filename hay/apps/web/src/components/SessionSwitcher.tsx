@@ -867,11 +867,25 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     let reconnectTimer = 0;
     let reconnectAttempt = 0;
     const pendingInput: Array<{ data: string; at: number }> = [];
+    // Sub-second drops stay invisible: the "reconnecting…" chrome waits out
+    // a grace window, and the first retry goes immediately — a tunnel
+    // restart or a waking laptop usually reconnects before either fires.
+    let downChromeTimer = 0;
+    const markDown = () => {
+      if (disposed) return;
+      window.clearTimeout(downChromeTimer);
+      downChromeTimer = window.setTimeout(() => { if (!disposed) setConn("down"); }, 1200);
+    };
+    const markLive = () => {
+      window.clearTimeout(downChromeTimer);
+      downChromeTimer = 0;
+      setConn("live");
+    };
     const scheduleReconnect = () => {
       if (disposed) return;
-      setConn("down");
+      markDown();
       window.clearTimeout(reconnectTimer);
-      const delay = Math.min(1000 * 2 ** reconnectAttempt, 15000);
+      const delay = reconnectAttempt === 0 ? 0 : Math.min(1000 * 2 ** (reconnectAttempt - 1), 15000);
       reconnectAttempt += 1;
       reconnectTimer = window.setTimeout(() => connect(), delay);
     };
@@ -884,7 +898,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       sock.onopen = () => {
         if (disposed || ws !== sock) return;
         reconnectAttempt = 0;
-        setConn("live");
+        markLive();
         window.setTimeout(() => rescaleRef.current(), 30);
         const cutoff = Date.now() - 15000;
         for (const pend of pendingInput) {
@@ -975,7 +989,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         pendingInput.push({ data, at: Date.now() });
         if (pendingInput.length > 200) pendingInput.shift();
-        setConn("down");
+        markDown();
         if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
           reconnectAttempt = 0;
           connect();
@@ -1019,6 +1033,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       sendInputRef.current = null;
       term.options.disableStdin = true;
       term.options.cursorBlink = false;
+      window.clearTimeout(downChromeTimer);
       setConn(null);
       setViewers([]);
       setDriver(null);

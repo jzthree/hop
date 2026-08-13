@@ -2479,15 +2479,18 @@ button.primary {
 .switcher-sheet {
   position: fixed;
   z-index: 620;
-  width: 264px;
+  width: 248px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px;
-  border-radius: 12px;
+  gap: 1px;
+  padding: 5px;
+  border-radius: 10px;
   background: var(--panel);
   border: 1px solid var(--line);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  /* Two shadows read as depth; one big blur reads as a glow. */
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    0 12px 32px rgba(0, 0, 0, 0.22);
   transform-origin: top right;
   animation: switcher-menu-in 0.12s ease-out;
 }
@@ -2497,23 +2500,50 @@ button.primary {
   to { opacity: 1; transform: scale(1); }
 }
 
+/* Header: the session NAME keeps the terminal's monospace — it is a terminal
+   identifier — while every verb below runs in the UI font. Mono verbs at
+   generous spacing were what made the menu read as debug output. */
+.switcher-sheet-head {
+  padding: 5px 9px 7px;
+  margin: 0 0 4px;
+  border-bottom: 1px solid var(--line);
+}
+
 .switcher-sheet-title {
-  margin: 0 0 2px;
+  margin: 0;
   font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.switcher-sheet > button {
+.switcher-sheet-sub {
+  margin: 2px 0 0;
   font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switcher-sheet-sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--line);
+  flex-shrink: 0;
+}
+
+.switcher-sheet > button {
+  font-family: inherit;
   font-size: 13px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid transparent;
+  line-height: 1.2;
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: none;
   background: none;
   color: var(--ink);
   cursor: pointer;
@@ -2525,9 +2555,26 @@ button.primary {
   background: var(--bg-alt);
 }
 
+/* Destructive: red text, red-tinted hover — no border box; a lone outlined
+   row in a borderless list read as a broken button, not as caution. */
 .switcher-sheet > button.danger {
   color: var(--err);
-  border-color: color-mix(in srgb, var(--err) 35%, transparent);
+}
+
+.switcher-sheet > button.danger:hover,
+.switcher-sheet > button.danger:active {
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+/* Touch: same menu, roomier targets. */
+@media (pointer: coarse) {
+  .switcher-sheet {
+    width: 264px;
+  }
+  .switcher-sheet > button {
+    font-size: 14px;
+    padding: 11px 10px;
+  }
 }
 
 @media (min-width: 768px) {

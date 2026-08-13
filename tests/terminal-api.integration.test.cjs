@@ -198,6 +198,10 @@ async function startDaemon() {
   await fs.mkdir(hopHome, { recursive: true });
   await fs.mkdir(binDir, { recursive: true });
   await writeFakeCloudflared(path.join(binDir, 'cloudflared'), cloudflaredLog);
+  // An inert `claude`: the fork test relaunches a recorded conversation, and
+  // the real binary must never start inside a test harness.
+  await fs.writeFile(path.join(binDir, 'claude'),
+    '#!/usr/bin/env bash\necho "stub claude: $@"\n', { mode: 0o755 });
 
   daemonEnv = {
     ...process.env,
@@ -817,4 +821,45 @@ test('a dropped file uploads to host staging and never escapes it', async () => 
 
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
     { name: 'upload-probe', internalName: session });
+});
+
+
+// Fork must never send a session to live among the transcripts: the hook's
+// record is the preferred cwd source (claude --resume runs where the
+// conversation lives) but also the most clobber-prone, and a value inside
+// ~/.claude*/projects/* is never a real workspace.
+test('fork falls past a poisoned record cwd to the durable one', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'forksrc',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+
+  // A poisoned hook record: right conversation, transcript-store cwd.
+  await fs.mkdir(path.join(hopHome, 'claude-sessions'), { recursive: true });
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.json`), JSON.stringify({
+    sessionId: '11111111-2222-3333-4444-555555555555',
+    cwd: path.join(os.homedir(), '.claude', 'projects', '-Users-test-project'),
+    launchCmd: 'claude',
+    updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const fork = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', {
+    internalName: internal
+  });
+  assert.equal(fork.status, 200);
+  assert.equal(fork.data.kind, 'claude', 'the record still drives a claude-resume fork');
+
+  await delay(600);
+  const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const forked = list.data.sessions.find(s => s.internalName === fork.data.internalName);
+  assert.ok(forked, 'fork exists');
+  assert.equal(forked.cwd, tempDir,
+    `fork must inherit the session's real cwd, got ${forked.cwd}`);
+
+  for (const name of [internal, fork.data.internalName]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+      { name, internalName: name });
+  }
 });

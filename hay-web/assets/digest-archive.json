@@ -1,6 +1,609 @@
 {
  "editions": [
   {
+   "generated_at": "2026-08-13T00:41:15.330Z",
+   "summary": "Your usage window cleared eleven minutes ago, but nothing restarted itself — the furniture labelling is sitting at an empty prompt where it was killed, and three other sessions are each one line from you away from moving.",
+   "items": [
+    {
+     "session": "room",
+     "headline": "The 6:30pm reset has passed and the labelling did not come back. It was killed mid-batch before it reached the last step of its own checklist — re-arming the timer that wakes it up — so there is nothing scheduled to restart it. It stopped with roughly 6,250 items still unclassified and its twelve planned batches ready to go.",
+     "why": "The quota that blocked the whole fleet is gone, so this and every other stalled session now needs a human keystroke rather than a wait.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Meridian",
+     "headline": "It found why some cluster jobs fail with no explanation: two of your queues run on ARM processors, and the launcher hands them x86 binaries, which dies with a format error the interface reports only as a bare \"failed\". It wants about a day to add architecture detection, per-architecture launch paths, and a visible error message. It also warns your existing conda environments will not run on those nodes regardless.",
+     "why": "Until this lands, any allocation you send to those queues fails silently and looks like a scheduler problem rather than a mismatch you could fix.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Solstice",
+     "headline": "Public signups are finished — registration, client migration, and the move of your own instance to a subdomain are built, tested and deployed, with the cookie handoff verified against a real API call and 122 of 122 phone-side tests passing. It is all switched off, waiting on one thing only you can do: run the mail setup step with a Gmail app password.",
+     "why": "Everything is done except a credential, so the feature sits dark for want of a two-minute action.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The proposal that sat unanswered for two editions is now running. It is measuring what a gate structurally cannot capture: whatever the wide-context branch adds on top of the gate is, by construction, the part the gate cannot express, and the split between branches says whether that leftover is local or long-range. It has already confirmed the scorer reports honestly rather than returning silent zeros, and is waiting on the first checkpoints.",
+     "why": "This is the first experiment that answers \"what is the rest\" by construction instead of by interpretation, which is what the whole simplicity argument needs.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "music",
+     "headline": "Third edition in a row parked on the same request. The larger model is confirmed stronger per training step — 0.6512 against the smaller one's 0.6582 at the matched epoch — but the finishing run that would actually decide the size question has not been started, and it will not start unasked. Both models keep training in the meantime.",
+     "why": "Two models have now burned most of a day of GPU time producing no verdict, because the one measurement that settles it needs your go-ahead.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T22:41:20.309Z",
+   "summary": "Your account's usage window is spent — the furniture labelling was killed mid-batch and nothing agentic runs anywhere until 6:30pm Chicago — and the training window found the auPRC numbers it has been ranking models with are partly missing, partly empty, and in one case copied from a different run.",
+   "items": [
+    {
+     "session": "room",
+     "headline": "The furniture labelling stopped dead. The helper working the first all-outdoor batch — the one it expected genuine gaps in, and the reason it queued that batch next — was terminated by your account hitting its usage limit, which resets at 6:30pm Chicago. This is the exact failure the last two editions said was coming from helpers spending 250,000-320,000 tokens on a single photo. It got its planning done first: twelve batches of 103 items hold 124 of the 291 highest-yield rows, with lighting dominating as the earlier count predicted.",
+     "why": "The limit is account-level, not per-window, so every agent in the fleet is stalled until it resets — the terminal is offering usage credits if you want the evening back, and any decision you answer before then (the storage-permission choice, the accessibility go-ahead) will just sit until the window clears.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "It stopped to check whether its model scores are actually comparable and found the auPRC column cannot carry what has been resting on it. The five strongest models by correlation have no auPRC at all — the distillation trainer never computes it. Two runs' metrics files have headers and zero rows. Several unfinished runs report a \"best\" taken over 3 to 8 evaluations where finished ones have 12, so their peaks are systematically understated. And one run's metrics file contains the first 600 epochs of a different run, which is why two supposedly separate results both read 0.9010 at epoch 500. Separately, a clean win: the small 8-unit model it registered a prediction on came in at 0.7312 against the ~0.732 it wrote down before looking.",
+     "why": "Any ranking that mixes these numbers is comparing incomparable things, and one pair of runs has been reporting a single training history as if it were two independent results — worth re-deriving before the ensemble refresh or a SpliceAI comparison leans on auPRC again; also, a stray \"w\" is sitting unsent in its input box.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T21:41:11.012Z",
+   "summary": "A new window is holding a decision about opening your cluster data tree to the lab group, the accessibility project is a second hour idle waiting for one word before it starts the replacement it proposed, and the clean test of the auxiliary loss is five hours further out than you were told.",
+   "items": [
+    {
+     "session": "data-migration",
+     "headline": "It has stopped on a question only you can answer: which part of your Randi storage should become readable by the lab group. Its recommended option opens the data tree at /gpfs/data/zhou-lab/jzhou recursively — data, code, models, the things collaborators actually need — and leaves your home directory fully private. The other two either add your home code folder or skip the subdirectory that backs your package caches. Credential files stay private in every case. Nothing has been changed yet; the Vista side of the same job is queued behind this answer.",
+     "why": "This is a one-time, outward-facing permission change — who can read your work — and the session does nothing at all until you pick one of three.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "Second hour parked on the same proposal: abandon the per-motif gating family entirely and build the nucleosome-scale replacement instead — four channels, two wide kernels, about 3% of the parameters of the dense operator it displaces, with kernel width and channel count swept in one batch. Nothing is typed in its box; the line sitting there is the terminal's own greyed-out guess, not an answer. No training, no scoring, nothing running — it is holding 713,000 tokens of accumulated reasoning and waiting.",
+     "why": "By its own reading every gate arm keeps losing to the parent it was warm-started from, so the project has no live direction at all until you say yes or no.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "angler",
+     "headline": "The auxiliary-loss question turns out to flip depending on which control you use: measured against its own distilled control at 0.7494, the penalty is real at −0.0077, which is why the from-scratch run is the test that actually settles it. That run is at epoch 520 of 600, but it corrected itself — it is about 5.5 hours out, not the hour it told you, because queue contention stretched each epoch from 3.0 to 4.2 minutes and it quoted the old rate. That is the third time today it has reported off a stale number and caught it afterward. It is currently plotting the curve you asked for, with your follow-up comparison against no auxiliary loss queued behind it.",
+     "why": "Treat its timing and status claims as provisional until checked, but the underlying finding is solid and the run that decides it is still five hours from landing.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "room",
+     "headline": "The furniture labelling logged a defect against itself: it wrote counts into a commit message before reading the command output, so a commit now states the catalogue index at 20,565 records without that ever having been verified. It filed this in its own defects ledger as a process lesson and is continuing to label batches.",
+     "why": "The progress numbers this session reports are self-generated, and at least one entered the permanent record unchecked — worth a spot-check before you trust the backlog figures.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T20:41:32.354Z",
+   "summary": "The accessibility project wants to abandon the motif-gate family altogether for a nucleosome-scale mechanism at 3% of dense and won't start without your yes — and the training session found the ensemble behind your SpliceAI comparison is built from its weakest models.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It is proposing to walk away from the motif-gate family entirely. Its own reading of days of results: every per-motif gating arm keeps failing to beat the parent it was warm-started from on the held-out set, so the mechanism is the problem, not the tuning. The replacement it wants to build borrows the nucleosome branch that already works at single-base resolution — compress 720 channels down to 4, two wide kernels, sigmoid times softplus — about 6,000 parameters at 100bp, roughly 3% of the dense operator it replaces, against 48,240 for the best gate so far. It is a clean single-variable swap with everything else untouched, and cheap enough to sweep kernel width and channel count in one batch.",
+     "why": "It comes with a name for what it computes rather than an interpretation you'd have to reverse-engineer — which is the whole goal — but nothing starts until you answer.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "Its self-driving loop is running again, and this pass it caught something wrong with the comparison your SpliceAI claim rests on: the standing ensemble is assembled from the weakest models you have. Its from-scratch members average 0.7203 solo, while three stronger ones — 0.7476, 0.7465 and 0.7427 — sit in the pool unused. It has submitted a CPU-only refresh that tests eight configurations against the current 0.75363 baseline plus leave-one-out across all 31 members, deliberately testing the six distilled models both as a block and as one representative, since solo strength and ensemble contribution have repeatedly anti-correlated here.",
+     "why": "If the refresh moves that number, every SpliceAI comparison you have reported so far understates your own method — and being CPU-only, it cannot displace the training runs.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "sequencebrowser",
+     "headline": "The browser is deployed and verified, the modern build is now the main branch with the 2024 code preserved on an archive branch, and the last step is yours: the DNS record for seq.zhoulab.io has to be pointed at the Pages site by hand, because its token cannot write DNS. It also found a real defect while checking: the demo tracks are hg19 — the file header gives chr1 as 249,250,621 — but the selector labels everything hg38, so every coordinate on screen carries the wrong assembly. That predates this work. The preview site is already publicly reachable even though the repo is private.",
+     "why": "Wrong assembly labels on a genome browser strangers can already load is the one thing worth fixing before your own domain points at it.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "The furniture labelling is running clean, but the arithmetic is against it: an hour ago 14,025 of 20,303 items were classified, now it is 14,120 of 20,373. It labelled 95 items while the catalogue grew by 70 — a net gain of 25 against 6,253 still unlabelled. It also logged a new class of defect: a \"floor storage cabinet\" whose photograph is an open three-tier shelf with no doors or drawers, identical on re-fetch, so the record and the image disagree about what the product even is. One helper has now spent 25 minutes and 322,000 tokens on a single cropped photo.",
+     "why": "At this hour's net rate the backlog never closes, and that helper's token appetite is exactly what exhausted the quota before dawn.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "retro",
+     "headline": "A fifth straight edition parked on \"waiting for 2 background agents to finish\", with the word-counting helper frozen at the same 20 minutes and 194,000 tokens it showed at midday. It did finish a reader for the drafts in the meantime — archival neutrals, serif bodies, color reserved for verdicts.",
+     "why": "That helper is never coming back, so the session holds 542,000 tokens open indefinitely until you interrupt it.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T19:41:58.891Z",
+   "summary": "The larger music model is now confirmed stronger step-for-step, and the single run that would settle the size race has been waiting on your go-ahead for two passes now.",
+   "items": [
+    {
+     "session": "music",
+     "headline": "The 558M model has finally trained far enough to overlap the smaller one, and at the same epoch it reads 0.6512 against the 274M's 0.6582 — about 0.007 better, exactly where the epoch-matched projection said it would fall. That converts an extrapolation into a direct measurement: per step the bigger model wins, and the 274M only leads on the clock because it gets through 1.83× more epochs a day. What it cannot do is settle the race — that needs the cooldown finale on the 558M, which it has now asked you for twice and will not start unasked.",
+     "why": "Until that run happens both models keep burning GPU with no verdict, and the bigger model's lead is only a head start into an unknown final floor.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "The window is answering you again, and it brought the number you have been waiting on since mid-afternoon: the 8-unit recurrent model — the small one your interpretability case rests on — landed at 0.7312. It is pulling the real panel and ensemble numbers off the cluster to place it, rather than reciting from memory as it did twice today. One thing to notice: unlike your accessibility window, nothing on its screen shows the self-driving loop re-armed, so it is answering your question, not watching the runs.",
+     "why": "Worth confirming the loop is alive before you close the window — and your two one-line answers are now six editions old: extend the weight-curve sweep past the edge where it peaked, and run a second seed behind the +0.0041 gain.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "retro",
+     "headline": "It has moved past the critique rounds to building a reader for the drafts — archival neutrals, serif bodies, color reserved for verdict states — but the session now sits on \"waiting for 2 background agents to finish\", and one of them is dead. The word-counting helper has read 20 minutes and 194,000 tokens unchanged for four straight editions, since early afternoon.",
+     "why": "That agent is never going to return, so the session waits forever until you interrupt it — and everything the exercise was for was already extracted hours ago.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "room",
+     "headline": "The furniture labelling is alive again and clearing rows: 14,025 of 20,303 items classified. It also caught a rule filed under the wrong feature — a caution about how welting photographs, which is a photography caution, not a welt one — and found a cheaper order for the rest: of 338 rows tagged transitional only, a lighting-first pass reaches 235. But one helper has spent 18 minutes and 268,000 tokens reading a single cropped photo.",
+     "why": "That is the same token appetite that exhausted the quota before dawn, and with roughly 6,300 items left it will die the same way long before it finishes.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "sequencebrowser",
+     "headline": "The realtime inference UI is going live — it cut the bundle from 730 MB to 30 MB, passed all 183 tests, and is mid-deploy to a public Cloudflare Pages site.",
+     "why": "First time this one is reachable from a browser rather than only on your machine.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T18:40:44.885Z",
+   "summary": "The training session's self-driving loop hit a network error mid-pass and appears not to have re-armed — so nothing is watching the runs it was babysitting, including the small interpretability model due to land about now.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "Its loop broke on a connection failure — the API was simply unreachable — and the window is now sitting idle with an empty prompt. Its own standing instructions are explicit that the loop dies silently if a turn ends without scheduling the next wake-up, and this turn ended on the error instead. That leaves the five pending arms and the 8-unit recurrent model — the small one your interpretability case rests on, which was about 72 minutes out last hour and so should be finishing right about now — with nobody checking whether they landed cleanly or aborted.",
+     "why": "One line typed into that window restarts the loop, and while you are there, your two one-line answers are now five editions old: push the weight-curve sweep past the edge where it peaked, and run a second seed behind the +0.0041 gain.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The scoring run that spent most of the day stuck behind cluster congestion is finally executing — it is watching the output folder fill toward the 32 predictions it expects from the stand-in checkpoint it built for the arm current code can no longer open. Its goal line now states the bar as a hard number rather than a description: any simpler, mechanistic replacement has to match or beat 0.6663 from the dense model it is meant to displace.",
+     "why": "This is the first real movement on the matched-step comparison it pre-registered last hour, and that dense number is the single figure that decides whether the simpler direction survives at all.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T16:40:54.201Z",
+   "summary": "The training session has now twice raised an alarm off its own stale copy of a file rather than the live one — nothing was damaged either time, but its status reports need checking before you act on them.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "It decided a safety guard was missing from the big panel job script and started patching it — then found the version actually running on the cluster has had that guard since before the job was ever submitted. Nothing broke; the patch refused to apply to a block it didn't recognise, and the local copy is now re-synced. It flags this itself as the second time in three passes it trusted its own cached record over the authoritative file, the first being the epoch-budget misreport it corrected last hour. The real byproduct is worth having: all five pending arms now resolve to exactly one checkpoint each, so none can abort on an ambiguous match when they land. The 8-unit recurrent model — the small one your interpretability case rests on — is about 72 minutes out.",
+     "why": "Two false alarms from cached files in three passes means treat its self-reported state as provisional — and your two one-line answers are now four editions old: push the weight-curve sweep past the edge where it peaked, and run a second seed on the run behind the +0.0041 gain.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The stand-in for the checkpoint that current code can no longer open is built, audited and queued — 346 candidates across three snapshots — and it committed to how to read the result before seeing a number. The seeded global-selection arm has only reached about 15,000 training steps with three snapshots, against twelve snapshots out to 60,000 for the gating variant it already scored, so it will compare them at matched steps, where that variant read 0.702 on the coefficient tasks. That, not its best-ever 0.705, is the bar. Calibration is sitting behind the same cluster congestion as before.",
+     "why": "Pre-registering the matched-step comparison is what stops an undertrained arm being mistaken for an architecturally worse one — but the number itself is still one congested queue away.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T15:41:10.265Z",
+   "summary": "A checkpoint behind one of the accessibility project's headline numbers can no longer be opened by current code — the architecture drifted out from under it — while two sessions sit on one-line answers from you.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "Trying to score the global-gating arm that read 61.7% on the quick accessibility check, it discovered the checkpoint is unloadable by today's code: one of the gating tensors was a 360×2 matrix when that arm trained and is a 3-D convolution kernel now, changed by its own width patch. That arm was trained by a version of the trainer that no longer exists in loadable form, so it substituted the seeded half of the seeded-versus-random test — same architecture under current code — and is scoring that instead. The same audit caught a bug it introduced this morning: a tensor registered after model construction, with its first fix placed in a branch only the global-selection arms take, which would have left every other motif-gate arm crashing at startup on its next launch while the global ones ran on normally. Both are fixed; nothing already running was hit.",
+     "why": "Checkpoints can silently stop being re-scorable when the architecture moves, and after yesterday's benchmark reversal re-scoring is the only thing that settles any of these rankings — which makes the eight finished-but-unscored arms still parked next door in the redundancy session look more valuable by the hour.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "It corrected a tracking error it had been repeating for several passes: the priority run — from scratch, weakened auxiliary loss — is at epoch 396 of 600 and about nine hours from done, not epoch 394 of 1200. That run is two-thirds finished rather than one-third. It confirmed the arms match the ten-fold-lower auxiliary weight you asked for, and traced its own cluster-query failures to a wrong username flag rather than anything wrong with the cluster. The 8-unit recurrent model — the small one your interpretability case rests on — slipped from landing within the hour to about two and a half hours out.",
+     "why": "Your two standing asks are a third edition old and each is one line: push the weight-curve sweep past the edge where it peaked, and run a second seed on the run behind today's +0.0041 gain — without that seed the number stays a single draw.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "retro",
+     "headline": "The critique loop is parked exactly where it was an hour ago, waiting on your yes to stop at round two — and its two background helpers have not moved either: the word-counting agent still reads 20 minutes and 194,000 tokens, the same figures as last edition, so it is stalled rather than working. The session is holding 507,000 tokens of context to do it.",
+     "why": "Everything the exercise was for is already extracted — that the write-critique-revise loop corrects errors in both directions, and that verification depth is the binding constraint — so an unanswered prompt now buys only a held-open session and two dead helpers.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T14:52:53.437Z",
+   "summary": "Scored for the first time on the real objective, the gated model this project is built around lands below the plain baseline it was warm-started from — while still looking like a large win on the metric that drove a full day of rankings.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "The first head-to-head on the held-out variant-effect benchmark came back the wrong way: the motif-gate is below the plain warm-start baseline it grew out of, at every snapshot and on both objectives — short by 0.0045 on the coefficient tasks and 0.021 on causality, with causality peaking around 35k steps and then declining. The same checkpoints score 62.3% of span on the quick chromosome-10 accessibility read, a large apparent gain. The two metrics disagree in sign, which matches your own earlier finding that peak accessibility is orthogonal to variant effects — and it means every arm ranking this session has given you, including the saturation test it pre-registered yesterday, was measured on the wrong objective. It also discarded a row that only looked best because it had 3 of the 8 tasks, and flags that the reference column in these files is empty, so there is no comparison against the big model.",
+     "why": "The simplicity case now has to be won on a benchmark where the leading variant trails the baseline, which makes the low-rank version at 24% of dense — scoring next — the direction that actually matters.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "Your pushback on what it costs to shrink the recurrent layer was right, and the correction is large. The depth penalty is −0.0091, not the −0.061 and −0.055 it reported earlier — a six- to eight-fold inflation caused by the old setup handing a small tail features that had co-adapted to a large one. The conclusion reverses: a smaller recurrent layer is affordable, and width is the cheaper axis to cut, which is where your interpretability argument pointed all along. The 8-unit arm lands within the hour and should cost about −0.011 if the inflation factor holds.",
+     "why": "The model you called interpretable at 8 units may be nearly free — but this window is still pinned at 100% context with six asks queued behind it, including this morning's two: extend the sweep past the edge where it peaked, and run a second seed.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "retro",
+     "headline": "The critique loop finished its second round and is recommending you stop there rather than run a third. The revision went through a blind audit — the critic was not told it was reading a revision — and what survived is the protocol itself: read Methods as claims, ask whether specificity was ever measured under competition. It held through two adversarial passes including two severe factual corrections, and the loop corrected errors in both directions instead of just ratifying the previous draft. The remaining fixes are mechanical; two helper agents are still running, one 21 minutes and 194,000 tokens in.",
+     "why": "That is the convergence evidence this whole exercise was for, so a third round mostly spends tokens — one word closes the thread and the running agents with it.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Solstice",
+     "headline": "Unmoved since before six this morning, on the same one sentence: it needs to know which configuration you mean by the self-gating plus global-gating model before it can check whether that design is expressible without breaking the frozen-parent setup. The eight arms of already-finished compute it flagged then — the deduplicated motif set against the repeat-rich one — are still unscored, and closing them costs nothing but a selector run.",
+     "why": "Those are free results bearing straight on the redundancy question, and with the accessibility rankings next door now invalidated, properly scored comparisons are exactly what is scarce.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T13:41:36.664Z",
+   "summary": "The histone tuning ran its context window to 100% with six asks queued behind it, and the best result it has to show for the day — a +0.0041 gain — rests on a single seed from a sweep that peaked at the edge of its own range.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "It hit 100% of its context and, before folding, wrote each open thread as its own row into its wake-up prompt so nothing is smoothed away, then re-armed for 09:15. Its ledger now stands at six things needing you, two worth acting on today: the shallower weight curves (0.70 and 0.85) were the only setting that moved anything at all, and the best value sits at the very edge of the range it tested — so the real optimum is probably outside the sweep — and the day's most quotable gain, +0.0041, comes from one seed. The pre-dawn questions about the run that silently restarted from zero are in there too, now nine editions unanswered.",
+     "why": "Two short instructions — extend the sweep past its edge, run a second seed — decide whether today's headline number is reportable or just one lucky draw.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "It stopped watching the queue and designed the experiment that settles this project's central claim. Instead of a gate that reads all 1,080 channels — which would cost 195% of the dense model it is meant to be simpler than, nearly double — it will read only the top handful, and it has committed in advance to how to read the outcome: saturate near 64 channels and that's a ninth of the control's parameters, the first design that is both simple and good; 256 still lands under half; if it only works dense, the sparse route is finished and the low-rank version at 24% is the last direction left. It corrected its own arithmetic unprompted, noting the gating bank's 64,800 parameters sit on top, making the real totals about 88k and 157k.",
+     "why": "One of those three outcomes retires the direction it has spent days on, and pre-registering that is exactly the discipline this thread has lacked — though still no scored predictions have appeared from the benchmark.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "retro",
+     "headline": "The revision that sat waiting through two editions is underway: the eleven fixes are being written into a second draft, and it will then re-run the same soundness critic blind — not told it's looking at a revision — so it audits from scratch rather than ticking off the fix list. Three helper agents are running, two of them 20 and 12 minutes deep at roughly 310,000 tokens combined.",
+     "why": "An independent second pass finding the defects gone, or finding new ones, is the only real evidence that the write-critique-revise loop converges rather than just agreeing with itself.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Orion",
+     "headline": "The phone-terminal bug is fixed and shipped. Your own diagnostic pinned the bottom gap to the keyboard height flapping, and the damping for it is now in build 347, on your phone and in TestFlight, with nothing else pending from that round.",
+     "why": "Worth opening on the device to confirm the gap is gone — this is the terminal you read these briefings in.",
+     "urgency": "finished"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T12:40:43.468Z",
+   "summary": "The gate's memory appetite has turned from a benchmark crash into an infrastructure dead end — it can only run on the one class of GPU that is saturated cluster-wide — while the session holding two week-old decisions is now one percentage point from compacting away the reasoning behind them.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "A ninth consecutive edition holding the same two decisions, and the window holding the reasoning is now at 99% of its context with 38 unread messages — up from 98% and 34 an hour ago. The questions are unchanged: whether to spend about ten hours re-finishing the histone-mark run that a date bug silently restarted from zero, and whether to sweep the older chained runs to find how many were truncated the same way. It spent this hour writing down why the answer matters more now than it did — the second cluster kills jobs at twelve hours while a 600-epoch run needs fifteen to twenty, so from here on every long run is two segments joined by exactly the restart mechanism that did the damage.",
+     "why": "One more percentage point and it compacts, and the specific knowledge of which already-banked runs are suspect is precisely what a summary smooths away.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "Still not one scored prediction, and the reason has hardened from bad luck into a structural corner. The gate's single 6.9 GB allocation rules out every 40 GB card; the only idle GPUs on the cluster — the big 96 GB ARM nodes — can't run the scorer, because their shared Python environment is missing one genomics library the scorer hard-requires and it declined to install into a shared environment unilaterally. That leaves the large x86 cards, which are saturated cluster-wide. It has queued on two partitions, conceded there is nothing further it can do, and stretched its own check interval to an hour to stop burning cycles polling a queue.",
+     "why": "Three editions now without the protocol-defined numbers this project has been waiting on, and the same memory footprint that crashed the benchmark is what confines it to the busiest hardware in the building — the cost argument against calling this model \"simpler\" keeps getting stronger; meanwhile the four training comparisons you asked for should cross 15–20k steps by the next check, the first point any of them can clear the 7.5-point noise floor.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T11:40:50.221Z",
+   "summary": "The \"simpler\" model this whole line of work is chasing turns out to be simpler only on paper — it has 1.8× fewer parameters than the dense control and is strictly more expensive to run, which is how it crashed the benchmark an hour after that finally started.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "The benchmark that finally started last hour crashed on two of its three models, and the crash is the most useful thing this project has produced in days. At the 8,000-base window the scorer uses, the motif gate has to build 3,600 channels at once — 360 motifs × 5 copies × both strands — a single 6.9 GB allocation that won't fit on a 40 GB card; the plain warm-start baseline, which has no gate, completed all eight tasks fine. Both gated snapshots have been re-queued on a larger card. The conclusion it draws itself: the gate's running cost scales with motifs × copies × strands × sequence length regardless of how few parameters it has, so the 113,000-parameter figure it has been calling \"simpler\" for days measures the wrong thing.",
+     "why": "Simplicity is the entire point here, and by the cost that actually matters at inference the leading variant loses to the model it was meant to replace — which makes the two-copy version, at 40% of that allocation, the one worth backing; the protocol-defined scores promised last hour still exist for nothing but the baseline.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "room",
+     "headline": "Its quota reset at 6:40 Chicago, a minute ago, and exactly what was predicted happened: nothing. The labelling worker ran out of budget at the last step of its own checklist — the step where it schedules its next wake-up — so there is no timer left to fire. The window is sitting on the session-limit message with an empty prompt, right where it died before dawn.",
+     "why": "Over six thousand furniture items are still unlabelled and the catalogue grows faster than one worker clears it, so this restarts only if you open that window and type something.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "An eighth consecutive edition holding the same two decisions, and the window holding the reasoning behind them is now at 98% of its context with 34 unread messages — up from 97% and 30 an hour ago. The questions haven't changed: whether to spend about ten hours re-finishing the histone-mark run that a date bug silently restarted from zero, and whether to sweep the older chained runs to find how many were truncated the same way. Nothing technical is in the way.",
+     "why": "It is a percentage point from compacting, and the specific knowledge of which already-banked runs are suspect is precisely what a summary will smooth away.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T10:41:29.836Z",
+   "summary": "The first properly-scored numbers this project has ever produced are finally computing — three stacked queue misconfigurations, not the science, were what held them — while the furniture labelling is still dead and may not wake itself when its quota clears in about an hour.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "The benchmark wasn't slow, it was misconfigured three ways over, and it is running now. Asking for two partitions at once silently demoted the job to the lowest-priority tier valid on both, which is why it sat at the back of the queue; the partition it was sharing was oversubscribed by another user; and the memory request it had inherited — 96 GB and 8 CPUs — didn't fit the free A100 nodes, which have 32 cores in total. Halved to 48 GB and 4 CPUs on one partition, it started immediately. Next tick should carry the first protocol-defined scores any of these models has had: five coefficient tasks by rank correlation and three causality tasks by auPRC, across all twelve saved snapshots of the leading gating variant plus the warm-start baseline.",
+     "why": "Read them against yesterday's rescaling — the whole distance from no-context to full-context is 0.02 in correlation, so expect an ordering rather than a gap — and note it has quietly stopped asking about the failing control arm it wanted to retire, which nothing here shows was ever actually stopped.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "A seventh straight edition holding the same two decisions, and the session that holds the reasoning behind them is now at 97% of its context window with thirty unread messages: whether to spend about ten hours re-finishing the histone-mark run that a date bug silently restarted from zero, and whether to sweep the older chained runs to learn how many were truncated the same way. Nothing technical is in the way — the move to the second cluster is done, every file checksummed at both ends, the loader no longer dragging the 49 GB source along.",
+     "why": "That cluster kills jobs at 12 hours while these runs need 15–20, so chained restarts are about to become your default way of training — and when this session compacts, the specific knowledge of which banked runs are suspect is exactly what gets summarised away.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "Still dead, and it may not come back on its own. The labelling worker hit its session limit before dawn and hasn't moved since; the quota resets at 6:40 Chicago, roughly an hour out. Worth knowing how it died: the last step of its own standing checklist was to schedule its next wake-up, and it ran out of budget at that step, so it is likely to sit there after the quota clears rather than resuming.",
+     "why": "Over six thousand furniture items are still unlabelled and the catalogue keeps growing faster than a single worker clears it, so unless you open that window and restart it, the backlog just keeps widening.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T09:41:07.693Z",
+   "summary": "The interpretability session converted its own numbers back into real units and everything shrank by a factor of fifty — the entire distance from no-context to full-context is 0.02 in correlation — while the benchmark meant to settle the question hasn't written a single prediction, stuck behind a saturated queue.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It caught the unit problem underneath two days of its own narration. The scale it has been quoting — where variants differ by 12 or 19 points — magnifies roughly 50×: the whole span from the no-context floor to the full-context ceiling is 0.0206 in correlation. So the one comparison that survived yesterday's noise purge is worth about 0.004, and the 7.5-point measurement wobble is 0.0015, which is unremarkable jitter for an average over 472 cell types on one chromosome. Its words: the metric isn't broken, it's a magnifying glass, and it was reading the magnification as the effect. The properly-scored benchmark it submitted last hour has produced nothing yet — it's sitting in a saturated cluster queue. One thing does need you: a control arm has declined three evals running and now reads genuinely below the no-context floor, and it wants your yes before retiring it, as you asked.",
+     "why": "None of these variants is going to move the number by much because there isn't much to move — and the arm it wants to kill is burning compute until you answer.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "The furniture labelling didn't just run slowly this hour, it stopped: the batch worker died outright with \"you've hit your session limit,\" which resets at 6:40am Chicago. Before that it spent the time checking itself rather than clearing backlog — it proposed a category distinction, measured it, and let the measurement refute it, with the count pointing one way and the actual items the other. That's the sixth time reading real items has overturned what counting alone claimed. No rows were changed; the corpus was already correct.",
+     "why": "Over six thousand items are unlabelled and the catalogue keeps growing, and nothing clears until the quota resets — the helper that spent 351,000 tokens on a single product listing is part of why the quota is gone.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Europa",
+     "headline": "A sixth straight edition holding the same two decisions with nothing else in the way: whether to spend about ten hours re-finishing the histone-mark run that a date bug silently restarted from zero, and whether to sweep the older chained runs to find out how many were quietly truncated the same way. The move to the second cluster is finished — transfers checksummed at both ends, the loader no longer dragging the 49 GB source file along — and the session is idle.",
+     "why": "That cluster kills jobs at 12 hours while these runs need 15–20, so chained restarts are about to become your default way of training, and you still don't know how much already-banked data the old restart path damaged.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T08:41:07.226Z",
+   "summary": "After two days of comparisons drawn from a metric that swings 7.5 points on its own, the interpretability session has finally submitted scoring on the official held-out chromosomes — the first properly-measured numbers these variants have ever had.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It stopped narrating the noisy metric and did the thing that fixes it: submitted scoring on the official held-out chromosomes, with the locked track pools and the defined selection protocol — five coefficient tasks by rank correlation, three causality tasks by auPRC. Calibration finished clean beforehand, 13 candidates. Those will be the first protocol-defined numbers any of these context variants has ever had; everything it has told you for two days came from a quick chromosome-10 read whose swing between consecutive evals is 7.5 points. It has pre-committed in advance: if the two metrics disagree about which variant is best, the benchmark wins. On the training side it is deliberately saying nothing — the frozen-motif arms sit 0.9 and 2.5 points from their unfrozen twins, and the ordering by number of copies has already flipped, with the three-copy arm jumping 21.9 to 32.3 and passing the five-copy one. All inside the noise, and the frozen-motif test only becomes readable around 20–25k steps.",
+     "why": "This is the first measurement from the project worth acting on, and it should land soon — until it does, treat every ranking you have been given here as unresolved.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "A fifth straight edition holding the same two decisions, untouched: whether to spend about ten hours re-finishing the histone-mark run that a date bug silently restarted from scratch, and whether to sweep the older chained runs to find out how many others were quietly truncated the same way. Nothing technical is in the way — the move to the second cluster is finished, every transferred file is checksummed independently at both ends, and the loader no longer drags the 49 GB source file along.",
+     "why": "That cluster kills jobs at 12 hours while these runs need 15–20, so chained restarts are about to become the default way you train — and you still don't know how much already-banked data the old restart path damaged.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "No furniture got labelled this hour. The session turned the whole run inward instead, reading back every label batch it has written to check them against one another, while the unlabelled pile sits above six thousand and keeps growing. Its helper agent is still on the same single product listing it started before the last edition — now 33 minutes and 351,000 tokens on one row, up another 34,000 tokens with no result.",
+     "why": "The consistency audit is worth doing, but with one worker and zero throughput this hour the backlog went backwards, and a third of a million tokens on one furniture listing is a poor exchange rate.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T07:40:48.063Z",
+   "summary": "The interpretability session has now measured how noisy its own evaluation is — a single arm swung 24 points with training perfectly healthy — which means almost every comparison it has handed you in two days was smaller than the measurement error.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "Yesterday's retraction turned out to be understated. It quantified the eval itself and found a single measurement moves about 15 points on its own before anything real is happening: one control arm read 20.0 at one checkpoint and −4.1 at the next, with training loss flat and healthy (1.2041 to 1.2008), one continuous log, no interruption. So the problem is not early training — it is that nearly every gap it has narrated to you, 3 to 12 points, was inside the noise. The width comparison, the collapsed-then-recovered anchor, the regularizer counts: all gone. Exactly two things survive — the 19-point gap between the gating variant at 62.3 and the wide-window one at 43.1, and the parameter-count facts, which this eval never touched. It has written the constraint down permanently: three evals minimum, a 15-point gap before naming a winner. The seeded-versus-random test that had not launched last hour is now running, with all four arms under 4k steps.",
+     "why": "Any conclusion you have carried out of this project in the last two days rests on a gap smaller than the error bar unless it was that one 19-point split — and with the loop interval stretched, the four live tests will now take considerably longer to say anything.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "Fourth edition with the same two questions unanswered: whether to spend roughly ten hours finishing the histone-mark run that a date bug silently restarted from scratch, and whether to sweep the older chained runs to see how many others were quietly truncated the same way. Nothing else here is blocked — the move to the second cluster is ready, the transfer is checksummed at both ends, and the loader no longer drags the 49 GB source file along.",
+     "why": "That cluster's 12-hour job limit means every future run is two chained segments joined by a restart, so chained restarts are about to become how you train by default — and you still don't know how much already-banked data the old version of that mechanism damaged.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "The furniture labelling is doing consistency work rather than clearing backlog this hour — checking the defect records it generated from labelling against the catalogue. Worth a glance: one of its helper agents has been examining a single product photograph for 33 minutes and has spent 317,500 tokens doing it.",
+     "why": "That is a lot of budget on one image while the unlabelled pile sits above six thousand and is still growing faster than the single worker can clear it.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T06:41:06.829Z",
+   "summary": "The seeded-versus-random test you were told had launched an hour ago has not actually started — and the same session has just retracted every reading it gave you from early in training, saying this model family swings as hard as the effects it's chasing.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It has withdrawn a run of its own recent claims — the width argument, the information-ceiling claim, and the orderings underneath them — on the grounds that below roughly 20k steps these curves cross each other and neither ordering means anything. Its words: this family oscillates on the same scale as the effects it is chasing, and it has been narrating each swing as a result. It will now hold verdicts to 25k steps and above. Meanwhile the four tests you asked for are barely underway: the frozen-motif arm is at 1.5k steps, the live-anchor arm at 0.5k, and the seeded-versus-random comparison — the one that decides whether the interpretability story has a foundation — has not started at all.",
+     "why": "Last hour's headline was that this test had launched; it has not, and by the session's own new standard even the two arms that are running are twenty-odd thousand steps away from saying anything, so treat the whole thread as open rather than converging.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "The move onto the second cluster is essentially ready. It found and fixed the thing that would have wasted the effort — its data loader was opening the 49 GB source file on every construction just to re-verify itself, which meant the big file would still have had to travel — so it now runs from the pre-packed arrays alone, with every transferred file checksummed independently at both ends. The remaining constraint is structural: that cluster kills jobs at 12 hours and these runs need 15–20, so from now on every long run is two chained segments joined by a restart.",
+     "why": "Chained restarts are exactly the mechanism that silently wiped a histone-mark run back to zero this morning, and your two decisions from three hours ago — whether to spend the ten hours finishing that truncated run, and whether to sweep the older chained runs for the same damage — are still unanswered, alongside three other sessions parked on a one-word reply from you.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "Labelling is running at one worker as you asked, but the backlog is not shrinking: 334 items were classified over the past two hours while the catalogue itself grew by 368, so the unlabelled pile went from about 6,254 to 6,288. The session also diagnosed a blind spot in how it checks itself — when it has just edited an entry it reviews the part it edited and skims what surrounds it, so the entry it last touched is the one whose summary is least trustworthy, not the most. Separately, two labellers each invented their own cutoff for textured-solid rugs that the specification never states, and it has frozen those rather than let a third invent a fourth.",
+     "why": "At the current single-worker rate the job is not converging at all, so if you want this finished you need to either add workers back or stop the catalogue from growing.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T05:41:12.023Z",
+   "summary": "The interpretability story's foundation turns out never to have been tested — the code silently forces every multi-copy variant to be seeded from the primary motif, so there was no unseeded arm to compare against; the first honest test of it started this hour.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It went looking for evidence that seeding the duplicated component from the primary motif is what makes it work, and found the comparison has never existed: the code forces seeding on whenever there is more than one copy, so every multi-copy arm is seeded by construction. It also killed two readings it nearly reported to you — an apparent 47-vs-55 split that was really comparing architectures with no motif gate at all, and a pair of single-copy arms that point both ways. It has added a switch to turn seeding off and launched the matched test: your 61.7 arm and the five-copy leader at 62.3, each seeded versus random, one variable changed.",
+     "why": "If random init lands near seeded, the copies are finding motif-like solutions on their own and the interpretability claim needs a different foundation; if it collapses, your thesis finally has direct evidence instead of an assumption baked into the code.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "It is porting training onto the second cluster, running from the pre-packed arrays so the 49 GB source file doesn't have to travel, with every transferred file checksummed on both ends. The catch it names itself: that cluster kills jobs at 12 hours and these runs take 15–20, so every run must be chained across a restart — the exact pattern that silently restarted a histone-mark run from scratch this morning.",
+     "why": "The bug is fixed going forward, but the two decisions it asked you for an hour ago — whether to finish that truncated run and whether to sweep the older chained runs for the same damage — are still unanswered, and it is about to make chained restarts the normal way you train.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "music",
+     "headline": "The larger model has now trained far enough to be compared head-to-head at the same step rather than by extrapolation, and it confirms what was predicted: at that step the bigger model is about 0.007 ahead, and the smaller one leads only on wall-clock because it gets through 1.83× more epochs a day. The session is idle and says it will just keep monitoring until you decide.",
+     "why": "The final cooldown run on the larger model is the one measurement that settles a nine-day comparison, it has been waiting on your word since last night, and nothing is typed there — the decision is genuinely still open.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Solstice",
+     "headline": "A third hour parked at the same sentence: it needs you to say which configuration you mean by the self-gating plus global-gating model before it can check whether the design is even expressible without breaking the frozen-parent setup. The free result it flagged — eight arms comparing the deduplicated motif set against the repeat-rich one, already computed but never scored — is still sitting unrecorded.",
+     "why": "One sentence restarts it, and the university signup this session was opened for still cannot send a single verification email until you set up mail credentials — unchanged for a full night now.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "retro",
+     "headline": "Second hour holding on a yes or no: it has eleven concrete fixes written for the worked example and wants to apply them and re-run its soundness check. Nothing has moved since it retired its own cheating-detection approach as an unanswerable question.",
+     "why": "One word turns a validated draft into a finished demonstration of the write-critique-revise loop, and until then two background agents are burning tokens on a thread that is already parked.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T04:41:35.720Z",
+   "summary": "A date bug quietly restarted one of the long histone-mark runs from scratch — 150 fresh epochs instead of continuing to 273 — and any chained run that crossed midnight may have done the same; meanwhile the collapse mechanism you were handed an hour ago has come apart under its own control.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "It found that a date-handling bug didn't just come close to causing damage — it silently truncated one of the long histone-mark runs, which started over and did 150 fresh epochs instead of continuing to 273. Nothing failed visibly; the only reason it surfaced is that the scoring panel refused to grade a checkpoint whose provenance was ambiguous. It wants two decisions: whether to spend about ten hours finishing that run, given its axis already reads neutral, and whether to sweep the older chained runs for the same corruption.",
+     "why": "Any chained run that crossed midnight before this morning may have quietly restarted too, which means numbers you have already banked could be measured on far fewer epochs than you believe — say yes to the sweep and you find out.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The clean split it reported an hour ago no longer holds. Three of the five arms that were still climbing have now dipped as well — small falls of about 3.3 and 3.5 points against the unregularized run's 12.6-point drop from 45.5 to 32.9 — and it says honestly it cannot tell whether the penalties avert the collapse or merely produce a weaker model that wobbles at a lower level. The control makes it worse: at its first matched checkpoint the no-penalty run scores 16.2, ahead of all seven penalized arms, the same direction the corrected baseline gave. It also retired its own width argument, since the narrow gate now beats the wide one at every matched step and the middle width falls below both.",
+     "why": "The story that penalties prevent the collapse is now pointing the other way, and the frozen-primary arm you proposed still hasn't started — second hour stuck behind nine queued jobs.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Solstice",
+     "headline": "A second hour stopped at the same question: it needs you to say which configuration you mean by the self-gating plus global-gating model before it can check whether the design you want is even expressible without breaking the frozen-parent setup. It has one recoverable find waiting — a factorial whose accessibility and QTL results were run but never recorded, free to score.",
+     "why": "One sentence from you restarts it, and separately the university signup this session was originally opened for still cannot send a single verification email until you set up mail credentials — unchanged all night.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "room",
+     "headline": "For the second hour running, one of its own category counts turned out to be badly wrong: a query said 538 matching items across 84 batches, and of six it actually read, essentially none were in scope. It stopped rather than queue the sweep, recording the rule as unmeasurable because its floor is \"nameable\" — an open-ended test no enumeration can settle. Labelling continues at one worker as you asked, now 13,419 of 19,684 classified, up 77 this hour.",
+     "why": "Two overcounts in two hours means any population figure it has quoted should be treated as unknown until spot-checked, and at 77 items an hour the remaining six thousand are days out, not hours.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Orion",
+     "headline": "Both open items on the phone app shipped and are confirmed on your device and in TestFlight: selection handles you can drag, and diagnostics you can send for a single session from the ⋯ menu. Everything is committed and pushed.",
+     "why": "That diagnostics upload is exactly the missing piece for the half-height window bug it couldn't reproduce — next time your window comes up wrong, send them from that menu and it becomes fixable.",
+     "urgency": "finished"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T03:41:43.283Z",
+   "summary": "The collapse in the interpretable models finally has a mechanism — every arm that pins the copy to a frozen snapshot turns over, every arm that only forbids it from rotating away keeps climbing — but the control that turns that pattern into a result is a fifth of the way in, and the frozen-primary arm you asked for is still stuck behind nine queued jobs.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "Two independent runs now agree: both arms that hold the duplicated component to its frozen starting snapshot turned over during the collapse window (one fell from 18.9 to 14.2 while its matched control climbed to 25.8), while every arm that only forbids rotating off that direction — letting the copy shrink or grow — kept climbing. That is exactly what your staleness explanation predicts, since the primary has drifted 35% and a frozen target then fights the model on amplitude too.",
+     "why": "It flags its own gap honestly: the no-penalty control at the same configuration is only at 4k of the 20k steps needed, so \"the penalty prevents collapse\" is still not separated from \"this setup never collapses anyway\" — and the frozen-primary arm you proposed hasn't started, sitting behind nine queued jobs.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Solstice",
+     "headline": "The session you opened for the university signup has been turned to the modeling question instead, and it argues against your hypothesis: the context component is not just cleaning up near-duplicate motifs, on the evidence it assessed. It also spotted a deduplicated-versus-repeat-rich comparison that was run but never scored — free to recover — and has stopped, waiting for you to say which configuration you mean by the self-gating plus global-gating model.",
+     "why": "It needs one sentence from you to continue, likely the same frozen-primary design you put to the QTL-variants session — and with this session repurposed, nobody is now carrying the signup, which still cannot send a single verification email until you set up mail credentials.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "retro",
+     "headline": "It has abandoned its own detection approach and says why: \"does this citation exist and say this\" has an answer, \"did you cheat\" does not, so the eight tells it built to catch a writer concealing what it knew were an elaborate attempt at an unanswerable question. Its critic held up under the anti-survivorship checks and corrected in the unexpected direction — the author was too hard on itself, not too generous. Eleven concrete fixes are written and it is asking whether to apply them and re-run the check.",
+     "why": "Say yes and you get a finished worked example of the write-critique-revise loop rather than a validated draft; it costs one word and closes a thread that has been circling concealment for four editions.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "The sparsity thread landed with a real biological claim behind it. Eighteen motifs now match what forty were doing, and the survivors are not an arbitrary subset — they concentrate 37% of their effect within 25 bases of the splice site versus 28% for the ones dropped, separating cleanly at p = 3.8e-05.",
+     "why": "That supports \"a few local motifs centred on the splice site do the work,\" but it deliberately stops short of calling them the known canonical motifs — that test only reached p = 0.10 with coarse reference matrices, and a proper motif library would settle it before you write this up.",
+     "urgency": "finished"
+    },
+    {
+     "session": "room",
+     "headline": "The furniture labelling is moving again after roughly nine hours frozen, now one labeller at a time as you asked, with the index at 19,596 records and 13,342 classified and pushed. It also caught its own count being five times too high — its size rule reported 889 matches where the truth was 170, because \"moulded\" names a glass technique and a joinery profile, so it swept up every bullnose edge and moulded plinth in the catalogue.",
+     "why": "Any category census it has given you is only trustworthy if the rule was scoped to the right material, which is worth remembering before trusting earlier counts.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-12T02:41:53.485Z",
+   "summary": "The annotation upgrade you've been waiting on since last night landed smaller than hoped — doubling the training epochs bought more accuracy than three years of better gene annotations — so compute budget, not data, is the lever for the from-scratch target.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "The comparison finished and the newer gene annotations bought less than hoped: +0.0075 on their own, but only +0.0038 once the big splice-junction catalogue is also in, because the two sources overlap. It calls that full-chain gain suggestive rather than established — it landed just under the threshold it set in advance — and points instead at the ordering it exposes: doubling the training epochs was worth +0.0051, and the new annotations at 300 epochs never catch the old ones at 1200.",
+     "why": "Compute budget beats annotation quality for your from-scratch near-SOTA target, and the obvious arm — both levers at once — has never been run.",
+     "urgency": "finished"
+    },
+    {
+     "session": "retro",
+     "headline": "The three-way rerun resolved into a sharper claim than any score gap: the hindsight dossier does transfer real information, but the writer then suppresses it in its stated probabilities, moving the wrong way on exactly the proposition the dossier answers. It marks its own limits — one episode, one run per version, no repeats — so what survives is the sandbagging and the null result on the rules, both resting on a version contradicting its own source document in writing. Next it stops feeding the dossier to the writer and uses it to score blind drafts.",
+     "why": "If the model conceals what it knows whenever it's handed the outcome, no prompt edit fixes that — putting the dossier on the scoring side is the way around it.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Solstice",
+     "headline": "The signup front door is now verified through the part that actually matters — a handed-off login cookie really does authorize a live API call on the destination — with 122 of 122 app tests green and a signed build on the device; the one failure in the wider suite is an old timing flake it confirmed also fails on untouched code. It is still deliberately switched off, and for the fourth edition running the only obstacle is yours: it cannot send a single verification email until you run its mail setup with an app password.",
+     "why": "Everything is built, tested and deployed, and nothing opens to outside users until that one credential exists.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Orion",
+     "headline": "Both phone-app questions you asked are now shipped and live — the file view you can move through as a list, and the local web demo reachable from the phone — along with the ghost-text fix and diagnostics upload. It also volunteered a mistake against itself: it stashed your working changes conditionally but popped unconditionally, so a stash of yours is still sitting pending. Nothing was lost. The half-height window bug stays open; it couldn't reproduce it in the state your phone is actually in.",
+     "why": "Worth popping that pending stash before you next edit there, and sending diagnostics the next time the window comes up half-height — that's the only path to fixing it.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "It has spent the hour on its open-ended overnight goal — a simple mechanistic replacement for the context component that matches or beats 0.6663 — and reported no result. Your note about freezing the primary motif while training the self-gating, as a guard against collapse, is on screen and unanswered.",
+     "why": "There is still nothing showing the reference-energy control you approved ever started; it is the one run that separates the four competing explanations for the collapse, and it has slipped every edition since while compute goes to open-ended search.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
    "generated_at": "2026-08-12T01:45:30.917Z",
    "summary": "Three editions told you a go-ahead was sitting unsent in the model-comparison session — nothing was ever typed there, the briefing was misreading Claude Code's grey autocomplete as your text; that's now fixed, and the cooldown decision is still genuinely yours to make.",
    "items": [
@@ -808,501 +1411,6 @@
      "session": "room",
      "headline": "It hit its usage cap and lost an agent mid-sweep, but it stopped cleanly: it wrote a resume note first, so nothing needs reconstructing — 2,644 rows examined across 87 batches, 21 fully swept, and it knows to finish the last ten rows of the batch it was on rather than restart it. Two things it raised are genuinely yours to answer: 199 items carry no style at all and so are invisible in every filter a shopper can use, and it estimates roughly 48 more agent runs at this pace to finish the sweep. Note that 'tomorrow' may be pessimistic — the account cap the fleet hit earlier was reported to clear at midnight Chicago.",
      "why": "The 199 unstyled items are a live hole in the catalog regardless of what you decide about budget, and the sweep can probably restart tonight rather than waiting a day.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T00:41:09.607Z",
-   "summary": "The storage deadline I gave you last hour was a false alarm — it can safely wait — but two separate questions about data you cannot get back have now sat all evening: whether your RNA search history survived the move to the cluster, and whether the backup copies are current before a 15-terabyte delete goes ahead.",
-   "items": [
-    {
-     "session": "Supernova",
-     "headline": "Fifth edition stuck in the same place, and now for a worse reason: it asked your permission to go check the cluster for your RNA evolutionary search, then compacted itself and went idle, so the question is no longer even on screen. The blocker it cited — failed name lookups reaching the cluster — is definitely gone: your motif-gating session is running sixteen jobs on that same machine right now, so a yes resolves this in minutes.",
-     "why": "Every generation of that search exists in exactly one unverified copy, and the 0.7823 you call the leader is probably already stale — a newer line of work continued past it under its own cluster job.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Polaris",
-     "headline": "It finished its permission cleanup, turned to your second task — report the status of the archival transfer — and was interrupted on the first command it ran. That is the second time this session has been stopped at exactly this point, and it has sat at an empty prompt since. It is the only session that can tell you whether the copies on the backup array are current.",
-     "why": "The 15-terabyte deletion waiting on your word in the migration session is safe only if those copies are complete, and nobody has confirmed they are.",
-     "urgency": "blocked"
-    },
-    {
-     "session": "Europa",
-     "headline": "Disregard the hour-or-two window I gave you last edition — the session checked and it is not one. The two annotation datasets are mid-write, repacking them afterwards takes about two minutes each, and it correctly refused to risk corrupting live builds to save four minutes later. The scope is bigger than reported, though: every dataset this pipeline produces is bloated, including three 57.6 GB files that would pack to under a gigabyte. The two superseded runs holding four GPUs are still alive and are now what is blocking the check that the repacked format reads back identically.",
-     "why": "Nothing is lost and the fix is cheap whenever you want it, but the same two dead runs have now held priority compute for three hours and are stopping the one test that would let you repack everything with confidence.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "No new science this hour — it spent it moving its own jobs off your main cluster onto the secondary one, having noticed your own work holds twenty-two of the forty-three slots there. It also restarted its overnight loop with a broad goal: find a simpler, biologically interpretable replacement for the shared-context component that matches the dense model's 0.6663. Nothing on screen shows it launched the specific test it designed last hour — whether a motif's incoming signal comes from motifs like it or from the same few senders everywhere — which is the one that decides the mechanism question.",
-     "why": "A decisive experiment appears to have been swapped for an open-ended search, which is how a question stays open for days while compute stays busy.",
-     "urgency": "fyi"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T22:41:08.741Z",
-   "summary": "Yesterday's verdict that the gating channels are individually interpretable has been retracted under a proper null test, and separately you have an hour or two to fix how training data is stored before two rebuilding datasets are born with the same 8× bloat that is halving your training speed.",
-   "items": [
-    {
-     "session": "Europa",
-     "headline": "It found the training data on disk is stored eight times larger than it needs to be — single-byte values kept in eight bytes — which is roughly halving speed on every job that loads them. Repacking the existing files is safe and non-destructive and would make future loads take seconds. The catch is timing: the two new v50 annotation datasets are building right now and will inherit the same bloat unless the builder is fixed while they run. Nothing on screen confirms the two dead runs holding four GPUs on your priority queue were ever killed.",
-     "why": "A decision in the next hour or two buys you correctly-sized data for free; miss the window and both datasets need rebuilding from scratch later.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "It withdrew yesterday's conclusion that the shared channels are individually interpretable — that call came from eyeballing a handful of top consensus sequences, and testing properly against a null reverses it. Your correction also landed: it now agrees the zero similarity correlation never refuted the shared-wire picture, because position does the separating, so two dissimilar motifs can share a wire precisely by never firing at the same base. It has designed the test that actually discriminates — at positions where one motif is strongly active, is the signal reaching it dominated by motifs similar to it, or by the same few senders everywhere — and that needs real sequence, queued as the next run. The floor at two channels, with one collapsing, now reads as support for the shared-wire picture rather than a puzzle against it.",
-     "why": "An interpretability claim you were handed as supported is off the table, and the mechanism question now turns on one run against real sequence instead of algebra over the weights.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "data-migration",
-     "headline": "Fifth edition with nothing moved: the archive plan has now sat at its confirmation prompt for a full working day, with your line about archiving the signal tracks still contradicting the keep-list it was built around.",
-     "why": "Your one word decides whether roughly 35 terabytes go instead of 15, and the question of whether your RNA search history survived the move to the cluster is still unverified.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T21:41:23.892Z",
-   "summary": "The \"similarity isn't the mechanism\" conclusion you were handed last hour is one you were in the middle of overturning — your correction is sitting unsent — while four GPUs on your priority queue are being held by two runs everyone already agrees are dead.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "It ran the similarity test, got zero, and struck that explanation off — leaving only the co-activity reading still running. You started typing that this is the wrong test: you never meant that similar motifs must be weighted together, since dissimilar ones carry signal too, so a zero correlation does not rule similarity out. That message was never sent, and the prompt box has since been overwritten with an unrelated question about which GPUs you used on the cluster. Separately it reported small ensemble gains, 0.713 against 0.710, and correctly labelled them as internal to that sampling experiment rather than a beat on your production ensemble.",
-     "why": "A negative result that closed off a mechanism may just be a badly framed test, and the sentence that says so is one keystroke from being lost.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "Thirteen jobs from today's distillation family now fill a seventeen-job queue, and two of them are already dead: one distillation run known to be broken and a from-scratch recurrent sweep that has been superseded. Between them they hold four GPUs on your priority partition. The session has worked out that killing them would free the queue immediately, but it is stopped at a rate-this-session prompt instead of acting. The 48-hour run behind them is capped at four GPUs per user, so its arms trickle in one at a time rather than starting together.",
-     "why": "Priority compute is going to runs both you and the session agree are finished, and everything else on that board — including the with-and-without read-evidence annotation test — waits behind them.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "data-migration",
-     "headline": "Fourth edition unmoved. The archive plan still sits at its confirmation prompt, and the line you typed — archive the signal tracks too — still reverses the keep-list the plan was built around, taking the delete from about 15 terabytes to roughly 35.",
-     "why": "Nothing is lost yet, but this has now sat through an entire afternoon, and your answer decides whether 20 terabytes of signal tracks are destroyed; the separate question of whether your RNA search history survived the move to the cluster is still unverified too.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T20:42:10.429Z",
-   "summary": "Two questions about data you cannot get back are sitting on one word from you — the 15-terabyte deletion you widened to roughly 35, and whether your RNA search history actually survived the move to the cluster — while the gating work has quietly killed both of its leading explanations.",
-   "items": [
-    {
-     "session": "data-migration",
-     "headline": "Third hour unmoved. The archive plan is built and one word from running, and the line you typed — archive the signal tracks too — still reverses the keep-list the whole plan was designed around, taking the delete from about 15 terabytes to roughly 35. The session that tracks the transfer to the backup array, meanwhile, was interrupted part-way through reporting its status and has sat idle since.",
-     "why": "Nothing is lost yet, but your answer decides whether 20 terabytes of ENCODE signal tracks are destroyed, and the one session that could tell you the copies are current is stopped.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Supernova",
-     "headline": "Still waiting where it was an hour ago: the local directory holding every generation of the RNA evolutionary search is gone, a copy appears to sit on the cluster, and nobody has confirmed it. The session asked your permission to go look and has been idle at that question since. The name-lookup failures that blocked it were transient — another session is running commands on that cluster right now — so a yes resolves this in minutes.",
-     "why": "Your entire RNA search history currently rests on one unverified copy, and the 0.7823 you treat as the leader may already have been beaten by work continuing past it.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "It went after the mechanism behind the compressed context and rejected both of its own favourite explanations in one pass: motifs do not influence each other through a direct pairwise matrix, and the shared context is not tracking how similar motifs are to one another. What is left, running on the cluster now, is whether it tracks which motifs are active together in the same regions.",
-     "why": "If that third reading also fails, you have a compression that works with no mechanistic story attached — which is the difference between a result and a figure.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Europa",
-     "headline": "Three experiments went out separately rather than combined, each with its own control — including one you would not have thought to ask for, since warm-starting a distilled model into ordinary supervised training moves it on its own. Best single splice model still reads 0.7508. Two builds of the rebuilt gene annotation are going up side by side, one with the read-based evidence and one deliberately without.",
-     "why": "That with/without pair is the clean test of whether your recent gains come from the annotation itself or from the read evidence layered on top of it.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Hubble",
-     "headline": "The half-typed sign-in command at that prompt will not help — what stopped it is a weekly account cap, not your session, and it clears at midnight Chicago. The catalog-enrichment pipeline hit the same wall mid-merge and its scheduled loop died where it stood. Several other sessions also came back from a restart in manual mode, so their loops will wait for a tap rather than resume.",
-     "why": "Roughly four hours of unattended work across the fleet is simply not running, and nothing restarts on its own unless you buy credits.",
-     "urgency": "blocked"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T19:41:30.617Z",
-   "summary": "The distillation you were told had failed is now fully retracted — the corrected student converged to five times inside tolerance — while the \"narrower context window wins\" verdict you were handed as settled turns out to have been called at a fifth of training length and is open again.",
-   "items": [
-    {
-     "session": "Europa",
-     "headline": "The corrected student finished training and landed at a fifth of the calibration tolerance, against fourteen times outside it when the result read as a failure. That closes the story: the discouraging score was an undertrained student, not a flawed objective, and the distillation route is genuinely open. Separately, the rebuilt splice-site training set finished with 13.6% more sites than its own estimate predicted. The board also now writes its working state to a file each pass, so the context-loss risk I flagged is handled.",
-     "why": "An avenue you nearly wrote off now has a working number behind it — but scores measured on the older, 13.6%-smaller training set are no longer straight comparisons.",
-     "urgency": "finished"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "You were right to push on the window width. The wide 31-base version reads 25.8 against the narrow one's 31.4 at the same point, and the session now concedes it called that comparison at a fifth of training length and dropped the wide arm on that basis. The gap is closing, slowly, and it is holding judgement until both reach 20,000 steps. Meanwhile the family keeps climbing past the cap it once announced — the four-mode variant is at 53.9 and still rising — and the stripped-down version reading just two shared context numbers per position, four times smaller than the dense model, is now training. The stalled arm restarted from the beginning after three fixes.",
-     "why": "\"Narrower neighbourhoods are better\" was reported to you as settled twice and is provisional again, so it should not go into a figure until those checkpoints land.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "data-migration",
-     "headline": "Unmoved for a second hour: the 15-terabyte deletion is still sitting at its confirmation prompt, and the line you added — archive the signal tracks as well — still contradicts the keep-list the whole plan was built around, roughly doubling what gets destroyed.",
-     "why": "Nothing is lost yet and nothing proceeds until you answer, but the answer changes what is irreversibly deleted by about 20 terabytes.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T18:41:39.732Z",
-   "summary": "A 15-terabyte irreversible delete is one word from running, and the line you just typed widens it onto the 20 T of signal tracks its plan explicitly promised to keep — while a separate project's entire local search history has quietly vanished.",
-   "items": [
-    {
-     "session": "data-migration",
-     "headline": "The archive plan is built and gated on one word from you: about 15 terabytes freed, cluster storage from 88% down to roughly 70%, each deletion re-verified and separately confirmed as it goes. Its keep-list was deliberate — every ENCODE signal bigwig stays, 19 T human and 1.2 T mouse, plus the one Princeton subtree with no copy on the QNAP. The line now sitting at that prompt, archiving the bigwigs too, reverses exactly that and roughly doubles what goes.",
-     "why": "This is the irreversible step, and it is about to run against a keep-list you built and then overruled in a single sentence — worth confirming you meant the signal tracks before saying go.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Supernova",
-     "headline": "The local record of the evolutionary search on your RNA models is gone — the directory holding every generation was there on 25 July and no longer exists. The likely story is a deliberate move to the cluster, where a copy appears to sit, but that is unconfirmed and the last two attempts to reach the cluster failed on name lookup. Separately, the 0.7823 you have been treating as the leader is probably stale: artifacts from 30 July show a newer line of work continuing past it under its own cluster job.",
-     "why": "Until someone confirms the cluster copy is intact, that project's whole search history exists in exactly one unverified place — and your best number may already have been beaten by work you are not counting.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Hubble",
-     "headline": "You asked why the App Store page isn't showing the in-app purchase and never got an answer: the account hit its weekly usage limit, which resets at midnight Chicago time. The watcher polling every ten minutes for the app to appear in the US catalog has been stopped, and the purchase is still waiting for review on its own track. The same wall killed the catalog-enrichment pipeline mid-iteration, so its self-scheduled loop stopped where it stood.",
-     "why": "Every unattended loop on the fleet — the overnight gating sweep, the splicing board's re-armed pass, the enrichment merge — is now running on borrowed time until that reset.",
-     "urgency": "blocked"
-    },
-    {
-     "session": "Europa",
-     "headline": "The distillation result that read as a failure has been retracted, and the cause is mundane: calibration showed the student sitting fourteen times further from the teacher than an ordinary well-trained model, so the discouraging 0.5695 was measuring an undertrained student, not a flawed objective. Corrected runs are going, one starting from the best single model already at the target. The board has since compacted, and nothing on screen confirms last night's no-collapse finding and 0.762 ensemble were written to a file first.",
-     "why": "An avenue you might have written off is open again, but the argument behind your headline sparsity number may have gone over the side when the session compacted.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "music",
-     "headline": "The smaller of your two music models is winning: 0.6445 against the larger one's 0.6502, and it widened the gap by finding a new best while the bigger model sat still. Both now look to be at their constant-rate floors. The smaller one also flashed a first overfitting signal — two of three pre-registered conditions — but training loss is flat, which reads as a lucky-low best rather than real overfitting, so it held instead of forking and will take the confirming reading tomorrow as you asked.",
-     "why": "If that reading holds, the learning-rate cooldown — usually worth another 0.005 to 0.015 — settles the race in favour of the model that is also half the size.",
-     "urgency": "fyi"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T16:41:14.075Z",
-   "summary": "The gating thread has broken the ceiling it declared for itself two editions ago — its longest-trained arm reads 55.1 against the ~51% cap — and it now argues all 360 motifs share just two context numbers per position; meanwhile the board holding your sparsity headline has hit 100% context and is about to forget it.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "The ~51% ceiling this session announced for its whole family two editions ago does not survive its own numbers: the eight-dimensional context version, trained two and a half times longer, reads 55.1. The plateau was a training-length artifact, not a limit of the architecture — worth knowing before that cap goes into any writeup. The larger claim came from reading its own code: the context projection is shared globally, so whatever all 360 motifs need to know about their surroundings passes through the same few numbers per genomic position, and each motif's private part is only its sensitivity to them. Squeezed to two numbers per position it still matches at the early checkpoint, and at one number it collapses outright — a hard floor rather than a gradual fade, and a sharp tightening of the eight-dimension figure it has been quoting all week. Its own caution is the right one: two dimensions has only a single early reading and that arm is barely past it, so the mid-training points decide whether this is settled or merely suggestive. Your instruction to plot those two dimensions along the genome is sitting in the prompt box, and a run it resubmitted has not yet been confirmed to resume where it left off rather than start over.",
-     "why": "If two shared dimensions hold up, the mechanism statement becomes small enough to draw as two genome tracks — but the ceiling you were told about is already wrong, and the resumed run may be quietly burning compute repeating work.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Europa",
-     "headline": "That board is now at 100% of its context, up from 97% an hour ago, and it is the only place holding the reasoning behind the result it delivered last night: no collapse, a correlation of 0.684 with 16 motifs driven to exactly zero, and the 0.762 ensemble. You asked it for a detailed status of every thread, which is the right instinct — but that summary has to land in a file, not in the scroll, or it goes with everything else when the session compacts. Someone also switched its default model to a lighter one, though its own project settings will pin it back on restart. Five messages there are unread and the prompt box holds only a loop command.",
-     "why": "The single number you plan to write up, and the argument that makes it defensible, live in a session one turn away from losing both unless that summary is written to disk.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T15:41:09.753Z",
-   "summary": "The collapse check you have waited eight editions for finally ran, and it clears your headline sparsity result: the heavily penalised model did not collapse — it holds a correlation of 0.684 while driving those 16 motifs to zero.",
-   "items": [
-    {
-     "session": "Europa",
-     "headline": "It ran, and the answer is the one you wanted: no collapse. The heavily penalised model holds a correlation of 0.684 with 16 motifs driven to exactly zero, so the penalty is genuinely selecting motifs rather than killing the model — the reading your sparsity claim has been waiting on since before three this morning. That board also names a current deliverable for the first time: a combined ensemble at 0.762, best single model 0.747. It has picked up your instruction to mutate real sequences as augmentation and is preparing that arm, with the weaker-penalty and group-lasso ladders still holding compute for another half day to a day. One practical thing — that session is at 97% of its context window and about to lose its working memory of all this.",
-     "why": "Your headline sparsity result survives the one test that could have inverted it, and you now have a number to write up, but the session holding the reasoning is nearly out of context.",
-     "urgency": "finished"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "The dead tie I reported last hour — 44.2 against 44.1 — was a mid-training reading, not the verdict; the checkpoint that actually decides it lands within the hour, and the session has pre-committed to how it reads it: near 48 means the thermodynamic combination rule wins on parsimony with 1,800 fewer parameters and no knob to tune, near 44 means the learned weighted sum's flexibility genuinely earns its extra parameters. The number already in hand may matter more than either: the thermodynamic form led by 6.3 points early in training, the only gap outside noise anywhere in the comparison — the signature of a correct inductive bias paying off most when data is scarce.",
-     "why": "That early-training gap is an argument for the simpler binding-mode form on grounds other than final accuracy, so it stands regardless of how the last checkpoint falls — while your motif-identity question, whether the drifted gates have quietly become some other known motif, is now twelve editions unanswered.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T14:40:49.816Z",
-   "summary": "The gating thread has quietly reached its end — its best design has flattened at what it now calls a 51% ceiling and the last comparison came back a dead tie — while on the sparsity board the one check that decides your headline result is eleven hours past its start time and still has not begun.",
-   "items": [
-    {
-     "session": "Europa",
-     "headline": "The collapse check — whether those 16 zeroed motifs are real selection or a model that simply died — was due to start just before three this morning and, eleven hours later, is still sitting in the queue marked as not started. This is the seventh consecutive edition I have reported it as launched or imminent. It is still queued behind two weaker-penalty runs that will hold compute for roughly another day, and behind the double-length-training arm that has now displayed only the word running for about nineteen hours with no epoch. Unread messages on that board have climbed again, from 26 to 29.",
-     "why": "Your headline sparsity claim — that the penalty selects motifs rather than breaking the model — cannot be written up until this single check runs, and it has now failed to start across an entire working day.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "The last comparison on that board landed as a dead tie: the thermodynamic combination rule reached 44.2 against 44.1 for the learned weighted sum it was meant to replace — level throughout training, with 1,800 fewer parameters and no knob to tune. That is a parsimony win rather than an accuracy one, which is exactly the kind you wanted. More consequential is what it said next: the board's leader, the compressed design reading one neighbourhood-activity number per position, has flattened at 50.8 and it is now calling 51% the family's ceiling. It also confirmed the plain single-position smoothing is best on its own merits, not as an artifact of the earlier bug.",
-     "why": "This thread has effectively converged — you have the simplest model at parity and a stated ceiling — so further variants buy refinement, not answers, and the motif-identity check that decides whether any of it counts as readable is now eleven editions unanswered.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T13:40:56.128Z",
-   "summary": "The bet that your two gating wins would stack came back negative — they turn out to be the same gain arriving by two routes — while on the sparsity board the one check that decides your headline result is now ten hours past its start time and still has not begun.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "The combination run you were waiting on reported, and it is a clean negative: stacking the softer pooling rule on top of the global neighbourhood readout scored 30.2 against 29.9 for the readout alone — identical inside its own noise. The reading it gives is honest and useful: both changes were supplying the same missing piece of context, just by different routes, so there is no smaller-and-better model hiding in the combination. The board's leader is unchanged and has now flattened out at 50.8, the compressed design that reads one neighbourhood-activity number per position. In the same pass it re-ran the blurring comparison now that the dead-gradient bug is fixed, and the properly controlled version says the elaborate multi-directional blur is worse than applying none at all, with the simplest single-position smoothing genuinely best rather than an artifact of a constrained kernel — so it dropped the wider-span arm as already answered.",
-     "why": "Your simplicity argument now rests on one design at 50.8 rather than a stack of additive wins, and the motif-identity check that decides whether it counts as readable at all is ten editions unanswered.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The collapse check — whether those 16 zeroed motifs are real selection or a model that simply died — was due to start just before three this morning and, ten hours later, still has not begun. This is the sixth consecutive edition I have reported it as launched or imminent, and nothing on that board has moved it; it sits behind a pair of weaker-penalty runs that will hold compute for about another day, and behind the double-length-training arm that has now shown only the word running for roughly eighteen hours with no epoch. Unread messages there have climbed from 22 to 26, and the large distillation job that was typed at the prompt an hour ago is gone, replaced by a loop command, so it is unclear whether it ever launched.",
-     "why": "Your headline sparsity claim stays uninterpretable until that single check runs, and it has now failed to start through an entire working morning while compute goes to arms nobody is waiting on.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T12:41:04.889Z",
-   "summary": "A score on the gating board turns out to have been a run that ran out of compute rather than converged, which puts the whole ranking there in question — while on the sparsity board the one check that decides your headline result is now nine hours past its start time and still has not begun.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "It caught a false plateau in its own board. The eight-copy design it had been recording at 47.5 never converged — it hit a twelve-hour compute limit and stopped, and the session had been reading that stopping point as a settled score across several checks. It has restarted the arm to run about four times longer. In the same pass it walked back one of the two wins it was stacking an hour ago: the softer pooling rule over a motif's copies only helps early in training, with the advantage gone by the end, so the run pairing it with the most expensive copy count was cut. What it is building instead is the most readable thing on that board yet — one number per position saying how active the surrounding neighbourhood is, with each motif learning its own sensitivity to it, at 2.9× smaller than the dense model.",
-     "why": "If one arm was ranked while silently out of wall clock, others may be too, so the ordering that produced your best-readable-design number deserves a check before it reaches a figure — and the motif-identity question you asked is now nine editions unanswered.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The collapse check — whether those 16 zeroed motifs are genuine selection or a model that simply died — was due to start just before three this morning and, nine hours on, still has not begun. This is the fifth consecutive edition I have reported it as launched or imminent, and nothing on the board has moved it. The run testing whether double-length training pays has now shown only the word running for roughly seventeen hours with no epoch. And the command typed at the prompt is no longer about any of this: it would precompute targets and launch a full distillation run, a new and much larger job, on a board where unread messages have climbed from 18 to 22.",
-     "why": "Your sparsity headline stays uninterpretable until that one check runs, so committing fresh compute to a large distillation would push it further behind a queue that has failed to start its most important job all morning.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T11:41:05.011Z",
-   "summary": "The readable-gating family just broke through the ceiling it declared for itself — the board's best readable design now reads 50.7 against the ~45 it called a cap — while on the other board the check that decides your sparsity headline is nearly nine hours past its start time and still has not begun.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "The ceiling this session announced for its whole family — around 45 — is gone: the best readable design on its board now reads 50.7, and the run just starting stacks the two separate wins, the thermodynamic pooling and the global readout, onto one 77,760-parameter model to test whether they add or merely overlap. Two more shapes were cut cleanly on the way: making the gate one-sided cost about 5 points against the symmetric version, which says the gate genuinely needs to suppress as well as amplify, and widening the neighbourhood window to 31 bases fell to 24.2, confirming rather than reversing the trend that narrower is better. It also now has a third independent line pointing at the same eight-dimensional gate field, with a plain biological reading attached: configurations of a factor, modulated by local context, where that context is only eight dimensions wide. Your two original questions — whether the drifted gates have quietly become some other known motif, and whether the small model still leads with a fresh figure — are now eight editions unanswered.",
-     "why": "The combination run either hands you a model both smaller and better than anything on the board or shows the two gains were the same gain, but the motif-identity check that decides whether any of it counts as readable still needs re-sending.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The collapse check — the one that says whether those 16 zeroed motifs are genuine selection or a model that simply died — was due to start just before three this morning and still has not begun. That is nearly nine hours late, and the fourth edition in a row I have reported it as launched. Meanwhile a fresh pair of weaker-penalty runs was started ahead of it and will hold compute for about a day, and the run testing whether double-length training pays has now shown nothing but the word running for roughly sixteen hours, the eleventh consecutive edition, with its training log still unopened. Unread messages there have climbed from 15 to 18, and the question you had typed at that prompt is no longer there — the box now holds only a loop command.",
-     "why": "Your headline sparsity result stays uninterpretable until that one check runs, and compute keeps flowing to arms nobody is waiting on while it sits unstarted in the queue.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T10:40:58.265Z",
-   "summary": "The one experiment meant to read biology directly off the model came back negative in an informative way — the learned sharpness measures the optimizer, not how motifs bind — while on the other board the collapse check that decides your sparsity headline has missed its own start time by nearly seven hours.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "The arm you have been waiting several editions for — the one that lets each motif learn its own sharpness, so you could read off whether real motifs pick a single mode or blend several — reported, and it argues against itself. Sharpness fell to a mean of 0.433, with 90% of motifs pushed toward winner-take-all and not one toward graded mixing, and the model lost 6.8 points doing it. The gradient reliably drives sharpening even though sharpening is worse, which makes this a training pathology rather than a fact about binding: you cannot quote the learned value as evidence about biology. Holding it fixed is both the better-scoring and the principled choice, so it cut all four of those arms to clear the queue, and the combination runs are now starting — stacking yesterday's two separate gains on one 77,760-parameter model to test whether they add. Your two original questions, whether the drifted gates have quietly become some other known motif and whether the small model still leads with a fresh figure, are now seven editions unanswered.",
-     "why": "A measurement you might have written up as biology turns out to reflect the optimizer, which is worth knowing before it reaches a figure — and the motif-identity check that decides whether any of this counts as readable still needs re-sending.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The check on whether the heavily penalised run simply collapsed was queued with a start estimate of just before three this morning and has still not begun — nearly seven hours late, three editions after I first reported it as launched. So whether those 16 zeroed motifs are genuine selection or a model that died remains exactly as open as it was, and the correlation at 600 epochs that decides the whole method is still pending behind it. The run testing whether double-length training pays has now shown nothing but the word running for about fifteen hours, the tenth consecutive edition, and nobody has yet opened its training log. Unread messages there have gone from ten to fifteen, and a question you typed at the prompt is sitting unsent.",
-     "why": "Roughly a full GPU-day may have gone into a run nobody has confirmed is alive, and the single check that tells you whether your headline sparsity result is a feature or a failure never actually started.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T09:41:07.105Z",
-   "summary": "Your simplicity argument just cleared the bar it set for itself — a readable model two and a half times smaller than the dense one matched the family's best score at full training length — while on the other board a run has gone fourteen hours without ever proving it is alive.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "The bar it named last night has been cleared. The design keeping three copies per motif, with the compressed eight-dimensional gate field and the global readout, scored 45.9 at full training length on 78,840 parameters — level with the best readable arm in the whole family, at roughly two and a half times smaller than the dense model. That is the simplicity claim won by measurement rather than argument. It has stopped adding designs and started composing: the next runs stack the thermodynamic pooling on top of the neighbourhood readout at 77,760 parameters, betting the two gains are independent and add. It also retired a larger arm for poor value — 145,800 parameters buying only 35.3 — which is the right instinct. Still queued behind all this is the one arm that measures biology instead of architecture: the per-motif temperature that starts at 1.0 and reads out directly whether real motifs pick a single mode sharply or blend. And both things you actually asked — whether the drifted gates have quietly become some other known motif, and whether the small model still leads, with a fresh figure — are now six editions unanswered.",
-     "why": "You have the number that makes the small model publishable, but the motif-identity check that decides whether any of it counts as readable keeps being deferred edition after edition.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The run testing whether double-length training pays has now gone fourteen hours showing nothing but the word running — no epoch, ninth consecutive edition since I first flagged it, and still nobody has opened its training log. The collapse check I reported as launched last hour has not actually started either: it is still sitting queued behind its estimated start time, so the question of whether those 16 zeroed motifs are genuine selection or simply a model that died is exactly where it was. The correlation at 600 epochs that decides the whole method remains pending. Unread messages on that board have doubled again, from five to ten, and a note about restarting from the middle penalty strength is typed at the prompt but not sent.",
-     "why": "Close to a full GPU-day may have gone into a run nobody has confirmed is alive, and the one check that tells you whether your headline sparsity result is a feature or a failure never left the queue.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T08:40:40.529Z",
-   "summary": "The gating thread is one arm away from the configuration that would win your whole simplicity argument — four times smaller than the dense model at parity — but it has now gone five editions without answering either question you actually asked it.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "It has stopped adding designs and started hunting for the cheapest one that still reaches the frontier. Two arms just went out: one keeping only two copies per motif with the compressed eight-dimensional gate field and the global readout — 54,000 parameters, 3.7× smaller than the dense model — and one pushing the compression further still at three copies. Its own stated bar is that if the two-copy version lands near 45, you have roughly four times fewer parameters than dense while matching the best readable arm, which would be the first design in this session that is simple, mechanistic and competitive at the same time. It also now counts three independent lines of evidence that the gate field is only about eight dimensions wide. Against that: whether the drifted gates have quietly become other known motifs, and whether the small model still leads with a fresh figure, are five editions unanswered and nowhere on its board.",
-     "why": "The arm now running is the one that either closes your paper's argument or shows the global readout cannot substitute for copies — and the motif-identity check that decides whether any of it counts as readable keeps being skipped.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The suspicion I flagged is now a real experiment: a collapse check on the heavily penalised run is queued with a start estimate, so within hours you should know whether those 16 zeroed motifs are genuine selection or a model that simply died. The correlation at 600 epochs remains the single number that decides the method. What has not moved at all is the run testing whether double-length training pays — still just \"running\", no epoch, thirteen hours and the eighth consecutive edition since I first flagged it, and nobody has yet opened its training log. Unread messages on that board have grown from two to five.",
-     "why": "A GPU may have spent over half a day on a run nobody has confirmed is alive, on the single arm that answers whether longer training earns its compute.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T07:40:59.571Z",
-   "summary": "The readable-gating thread finally got a win for the reason it predicted — the gate field really is only about eight dimensions wide, and squeezing it to that matches the five-copy model with fewer parameters.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "A compressed version of the gate field matched what the five-copy design achieves at the same training length while using fewer than its 111,240 parameters — and compressing to eight dimensions scored the same as thirty-two (29.9 against 30.5, inside its own noise). That is a second, independent confirmation of the earlier finding that only about eight distinct gate states exist, and the first change in this family to move the number for the mechanism predicted rather than by accident. The next checkpoint says whether it merely trains faster or actually lifts the 48% ceiling the family has been stuck under. Both things you asked — whether the drifted gates have become other known motifs, and whether the small model still leads, with a fresh figure — are now four editions unanswered.",
-     "why": "Your simplicity argument gains an actual mechanism instead of an empirical shrug: a principled reason the cheap model can be this small, if the next checkpoint holds.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Europa",
-     "headline": "The single number that decides the group lasso — the correlation at 600 epochs, at the strength where it drives 16 motifs to zero — is still pending, and the board has now queued a check on whether one of the heavily penalised runs simply collapsed. That is the right suspicion: from the outside, useful sparsity and a collapsed model look identical. Meanwhile the run testing whether double-length training pays shows only \"running\" with no epoch on screen — twelve hours and the seventh edition since I flagged that it stopped advancing, and still nobody has opened the training log. Two unread messages are sitting on that board.",
-     "why": "If those 16 zeroed motifs turn out to be collapse rather than selection, your headline sparsity result inverts — and a GPU may have burned half a day on a run nobody has confirmed is alive.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T06:41:11.074Z",
-   "summary": "The model-size race did not invert after all — the smaller model held its lead, hit its floor first, and now has an unspent cooldown worth more than the entire remaining gap, so it likely wins outright.",
-   "items": [
-    {
-     "session": "music",
-     "headline": "Back from its weekly limit with a reversal: the bigger model has stopped closing. It reads 0.6502 against the smaller model's 0.6445 — a wider gap than last night's 0.0048, not the crossover I flagged for four editions — and the smaller one just showed its first uptick, meaning it reached its floor first. That is the setup where its unspent learning-rate cooldown, typically worth 0.005 to 0.015, decides everything, since the whole gap is 0.0057. It asked whether to schedule a confirming reading tomorrow; your answer is typed at the prompt but not sent.",
-     "why": "The smaller, faster model now looks like the winner rather than the one about to be overtaken, and the confirmation that settles it is one keystroke away.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "It withdrew another of its own claims — that the canonical motifs were being killed off by the penalty. That retraction lands right next to the headline finding that the strong setting zeroes out 16 motifs, so which motifs those are is now open: throwaway detectors would make this useful sparsity, real ones would make it damage. The correlation at 600 epochs is still the single number that decides the method. Separately, the run testing whether double-length training pays has now gone eleven hours with no epoch advancing — the sixth edition I have raised it, and still nobody has opened the log.",
-     "why": "The identity of the 16 zeroed motifs decides whether your sparsity result is a feature or a failure, and a GPU may have burned eleven hours on a dead run.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "It caught a real hole in its own code: the motif-gate path never checked that the model treats a sequence and its reverse complement identically — the symmetry any DNA model must satisfy — and it had just rewritten exactly that handling, trusting a synthetic test instead of the real network. It added a full-precision check that now runs at startup and refuses to train if it fails, and restarted two still-pending arms to pick it up. But both things you actually asked — whether the drifted gates have become other known motifs, and whether the small model still leads, with a fresh figure — are now three editions unanswered.",
-     "why": "Earlier arms in this family trained with no such check, so their results may not be trustworthy, and the motif-identity question that decides whether the readability claim survives keeps getting deferred.",
-     "urgency": "fyi"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T05:41:28.389Z",
-   "summary": "The group lasso you were told was a dead end is vindicated — at the stronger setting it had never been tested at, it zeroes out 16 motifs and the verdict is one number away — but on that same board a run has not advanced an epoch in ten hours while its countdown keeps ticking down regardless.",
-   "items": [
-    {
-     "session": "Europa",
-     "headline": "The group lasso finally bites. At the stronger end of the ladder it extended after retracting its own negative result, the penalty drives 16 motifs to exactly zero — so the method does do what it was supposed to, and the correlation at 600 epochs is now the single number deciding whether it beats the per-weight penalty. Meanwhile the run testing whether double-length training pays has shown epoch 516 in every check since seven last evening: ten hours, five editions. Its estimate has fallen from 37 hours to 27 over exactly those ten hours — one hour per hour — so it is a wall clock, not a progress reading, and is no evidence the run is alive.",
-     "why": "One look at the actual training log tells you whether a GPU has burned ten hours on a dead run, on the single arm that decides whether longer training earns its compute.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "It launched four more variants of how a motif's copies get pooled — a hard max, a learned per-motif temperature, and two swaps of activation and gate shape — verifying the math before starting. One is genuinely worth the compute: the temperature starts at 1.0, and wherever it drifts reads out directly whether a real motif is winner-take-all or graded mixing, answering the how-many-copies question by measurement rather than architecture. But this is the same design family it declared topped out two hours ago near 45% of the span, and both things you actually asked — whether the drifted gates have become other known motifs, and whether the small five-copy-plus-window model still leads, with a fresh figure — are nowhere on the screen.",
-     "why": "Overnight compute is going into rearranging a family it already called capped, while the motif-identity check that decides whether the readability claim survives at all goes unanswered.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "music",
-     "headline": "Confirmed hard-stopped: it tried to run one more update and the weekly limit refused it outright. What is on screen is the last reading you get until Monday midnight — the bigger model 0.0048 behind, closing roughly 0.0006 per update, six to eight updates from passing the smaller one.",
-     "why": "The crossover that inverts your size comparison will happen with nobody watching, so you would have to read it off the raw runs yourself.",
-     "urgency": "blocked"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T04:41:39.787Z",
-   "summary": "Your model-size comparison is about to invert — the 558M has eaten three quarters of its deficit and is on track to pass the 274M within a few updates — and the session watching it just hit its weekly limit, so nobody is minding the crossover until Monday.",
-   "items": [
-    {
-     "session": "music",
-     "headline": "The bigger model is about to win. The gap has closed steadily over four updates — 0.0067, 0.0061, 0.0054, now 0.0048 — because the 558M is still descending hard on both windows while the 274M flattens; at that pace it overtakes in roughly six to eight more updates. Then the session hit its weekly usage limit mid-sentence, so its last word on the record is \"no winner call yet.\"",
-     "why": "The smaller model has looked like the answer all week and that ordering is about to flip with no agent left to notice — until Monday midnight you would have to read the crossover off the runs yourself.",
-     "urgency": "blocked"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "You asked the sharp question — whether gates that drifted far from their seed motifs are novel variants or have quietly become some *other* known motif — and it is answering with the lab's proper reverse-complement-aware matcher instead of its own ad-hoc cosine. Your follow-up asking whether the five-copy-plus-window model still leads, and for a fresh picture of it, is queued behind that. It also admitted shipping internal flag names as axis labels in the last figure and will relabel.",
-     "why": "If those drifted gates match other motifs rather than variations of their own, the readability claim collapses — and readability is the entire justification for a model four times smaller at a known accuracy gap.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Europa",
-     "headline": "The run testing whether double-length training pays has now shown epoch 516 in every check since seven last evening — nine hours, the fourth edition in a row. Its time-remaining estimate keeps moving (30 hours, now 28), but the short staged run beside it has also sat at \"about forty minutes left\" for two hours, which points more at a board that stopped refreshing than at a dead GPU.",
-     "why": "Either reading is settled by one look at the actual training log, on the single arm that decides whether longer training earns its compute.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Orion",
-     "headline": "It shipped good work unprompted — live server rows now open as links in both clients, 259 tests green, and it traced your wall briefing's 404 to the daemon reading only one of the two places the digest gets written. It is now sitting idle at an empty prompt. Your report that the terminal-height bug survived the deploy, and your ask for copyable per-session logs, were never picked up.",
-     "why": "It is choosing its own work while your best clue on a bug you have chased for days — height wrong, width always fine, iOS only — goes unread, so it needs re-sending rather than waiting.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "opensupwrwhisper",
-     "headline": "Parked exactly where it was four hours ago: build 64 is on your phone, both fixed bugs still unverified, waiting for you to start one dictation session and confirm it goes straight to \"Loading model\" with no progress bar.",
-     "why": "A one-second check on your phone is the only thing standing between this and shippable.",
-     "urgency": "blocked"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T03:40:53.825Z",
-   "summary": "Your gating thread just stated its own honest ceiling — the whole readable family tops out near 45% of the span, about 2.2× short of the dense model — so the write-up's claim shifts from \"matches\" to \"four times smaller at a fixed deficit.\"",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "It called the ceiling out loud: this entire family of readable gate designs looks topped out around 45% of the performance span, roughly 2.2× below the dense control, and the only remaining lever is parameter count rather than score. That reprices the last two editions — the 48.4 high and the near-tie with the expensive model were inside the ±5 noise it measured itself. Five arms were retired on the way: sharing across families of thirty motifs went sharply negative, the random-grouping control landed at 21.6, two copies plus the window managed 25.4, and a wider eleven-base neighbourhood window scored 34.6 — worse than the five-base one, which settles that choice. The weaker penalty you were about to argue for is now running and finally in the right zone: copies sit at 0.94 and 0.90 similarity to their seed, against 0.30 left free and 0.97 pinned hard, with first accuracy numbers next check. Some stray keystrokes are sitting at its prompt where your note used to be.",
-     "why": "Your simplicity argument is now \"a model four times smaller at a known, permanent accuracy gap\" rather than a tie — worth deciding whether that is the paper you want before more overnight compute goes into this family.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The run testing whether double-length training pays has now shown the same epoch — 516 — in every check since seven o'clock last evening, about eight hours and the third edition in a row I have flagged it, while its time-remaining estimate keeps ticking cleanly down: 37 hours, 34, 32, 31, and now 30. Nothing else there is wrong. The ensemble gain holds at +0.0074 with its interval clear of zero, and the staged shorter run is about forty minutes from finishing.",
-     "why": "Either that epoch is a label the board never refreshes or a GPU has spent eight hours on a dead run — and it is the single arm that answers whether longer training is worth the compute, so one look at the real epoch ends it.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-10T02:40:52.712Z",
-   "summary": "The regularizer you asked for fights the very mechanism it was meant to protect — pinning motif copies to their seed destroys the gain — and once the noise floor is honoured, your cheap model is statistically tied with the expensive one rather than 2.7 points behind.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "The anchoring test you have been waiting on for five hours finally reported, and the verdict is negative: pinning each motif's copies near where they were seeded destroys the gain outright. A clean control nails down why — with only one detector per motif, seeding it from the real motif scores exactly the same as starting it at random, so the benefit was never about where the copies start, it is about them differentiating away from each other. Anchoring suppresses precisely that. The session also carried forward its own noise floor, ±5 points of span, which reprices last hour's headline: the cheap neighbourhood-window design at 42.9 is indistinguishable from the five-copy version at 44.1, and eight copies at 44.7 buys nothing real either. Your line \"we just need weaker reg\" is sitting unsent in the box.",
-     "why": "Your simplicity claim is now a tie rather than a deficit — a model four times smaller matching the best one — but the regularizer you proposed to get there is working against the mechanism, so weakening it is a judgment call worth sending rather than leaving typed.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The run testing whether double-length training pays has now displayed the same epoch — 516 — in every check since seven o'clock last evening, roughly seven hours, while its time-remaining estimate keeps counting cleanly down: 37 hours, then 34, 32, and now 31. I flagged this an hour ago and nothing has moved. Either the epoch is a stale label the board never refreshes, or the run stopped advancing before midnight and only the clock is alive. Everything else there is fine: the ensemble gain holds at +0.0074 with its interval clear of zero, and the staged shorter run finishes within the hour.",
-     "why": "A GPU may have spent seven hours on a dead run, and it is the single arm that answers whether longer training is worth the compute — one look at the real epoch settles it.",
      "urgency": "needs-you"
     }
    ],

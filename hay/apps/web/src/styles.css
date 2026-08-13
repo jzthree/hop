@@ -4048,6 +4048,35 @@ button.primary {
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
   padding: 14px 16px;
 }
+/* With a preview open the dialog becomes a reading surface: list + pane,
+   sized like a mail client rather than a popover. The transition is not
+   animated — a width tween on an iframe re-lays the document per frame. */
+.views-panel.with-preview {
+  width: min(1080px, 94vw);
+  max-height: min(84vh, 820px);
+  height: min(84vh, 820px);
+}
+.views-body { display: flex; min-height: 0; flex: 1; gap: 0; }
+.views-panel.with-preview .views-list {
+  flex: 0 0 300px;
+  border-right: 1px solid var(--line);
+  padding-right: 10px;
+  margin-right: 12px;
+}
+.views-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.views-preview-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 0 8px 2px;
+}
+.views-preview-title {
+  font-size: 12.5px; font-weight: 600; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.views-frame {
+  flex: 1; width: 100%; border: 1px solid var(--line); border-radius: 8px;
+  background: #fff;   /* PDFs and pages assume a paper ground before they load */
+}
+
 .views-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .views-head-spacer { flex: 1; }
 .views-badge {
@@ -4105,6 +4134,38 @@ button.primary {
   flex-shrink: 0;
   width: 6px; height: 6px; border-radius: 3px;
   background: var(--accent, #7c5cff);
+}
+.views-row.selected {
+  background: color-mix(in srgb, var(--accent, #7c5cff) 12%, transparent);
+}
+/* The image IS its own thumbnail — one lazy request per visible row. */
+.views-thumb {
+  flex: 0 0 34px; width: 34px; height: 26px;
+  object-fit: cover; border-radius: 4px;
+  background: var(--bg-alt);
+}
+/* Row actions surface on hover; on touch (no hover) they stay visible,
+   because an affordance you cannot discover does not exist. */
+.views-acts { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+@media (hover: hover) {
+  .views-row .views-acts { opacity: 0; }
+  .views-row:hover .views-acts, .views-row.selected .views-acts { opacity: 1; }
+}
+.views-act {
+  border: none; background: none; cursor: pointer;
+  color: var(--ink-muted); text-decoration: none;
+  font-size: 12px; line-height: 1; padding: 4px 5px; border-radius: 5px;
+  font-family: inherit;
+}
+.views-act:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink); }
+.views-act.danger.armed {
+  color: #ff6b6b; font-size: 10.5px; font-weight: 700;
+}
+.views-empty-cmds {
+  margin: 8px 0 2px; padding: 8px 10px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.6;
+  color: var(--ink); background: var(--bg-alt);
+  border-radius: 8px; white-space: pre;
 }
 
 /* The affordances that open it: a topbar/switcher button and a card chip,

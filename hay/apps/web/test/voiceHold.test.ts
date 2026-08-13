@@ -194,4 +194,60 @@ describe("hold-space dictation", () => {
     expect(notices.join(" ")).toMatch(/unreachable/i);
     expect(overlays[overlays.length - 1]).toBe(null);
   });
+
+  it("a recogniser that never ends cannot kill the space bar", () => {
+    // The regression that bit Jian: dictation started, the recogniser never
+    // fired onend, `active` stuck true — and because every space is eaten
+    // while active, the terminal could not type a space AT ALL.
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    expect(hold.isActive()).toBe(true);
+
+    // Release. stop() must finish on our own schedule, not the recogniser's.
+    FakeRecognition.last!.onend = null;      // it simply never calls back
+    hold.handleKey(keyup());
+    expect(hold.isActive()).toBe(false);
+
+    // And the very next space types, as an ordinary space.
+    sent.length = 0;
+    expect(hold.handleKey(keydown())).toBe(true);
+    expect(hold.handleKey(keypress())).toBe(false); // its own hold, in progress
+  });
+
+  it("a space always types even if a hold got stuck with the key up", () => {
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    expect(hold.isActive()).toBe(true);
+
+    // The keyup never arrives (window switch, focus loss, a dropped event).
+    // A FRESH press must still reach the terminal rather than be swallowed.
+    const press = keydown();
+    expect(hold.handleKey(press)).toBe(true);
+    expect(hold.isActive()).toBe(false); // the stuck hold was ended, not honoured
+  });
+
+  it("losing focus mid-hold ends it instead of leaving it armed", () => {
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    expect(hold.isActive()).toBe(true);
+
+    window.dispatchEvent(new Event("blur"));
+    expect(hold.isActive()).toBe(false);
+    // Space works immediately afterwards.
+    expect(hold.handleKey(keydown())).toBe(true);
+  });
+
+  it("a hold cannot outlive the watchdog", () => {
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    expect(hold.isActive()).toBe(true);
+
+    vi.advanceTimersByTime(60000);
+    expect(hold.isActive()).toBe(false) // nothing may hold the mic indefinitely
+  });
+
 });

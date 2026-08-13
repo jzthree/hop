@@ -28,6 +28,45 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
 describe("ViewsPanel", () => {
+  it("a plain click previews IN PLACE; the row stays a real link for modified clicks", async () => {
+    render(<ViewsPanel onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    const row = screen.getByText("Views end-to-end").closest("a") as HTMLAnchorElement;
+    // jsdom's window is 1024 wide — the desk case, where the pane exists.
+    fireEvent.click(row);
+    const frame = document.querySelector("iframe.views-frame") as HTMLIFrameElement;
+    expect(frame).toBeTruthy();
+    expect(frame.getAttribute("src")).toBe("/view/Orion/agent-result.md/inline");
+    // Our own files must NOT be sandboxed — a sandboxed iframe disables the
+    // browser's PDF viewer, which is half of what the pane is for.
+    expect(frame.hasAttribute("sandbox")).toBe(false);
+    // The row keeps its browser meaning: href + target survive for ⌘-click.
+    expect(row.getAttribute("target")).toBe("_blank");
+    // Escape backs out ONE layer — the preview goes, the panel stays.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("iframe.views-frame")).toBeNull();
+    expect(screen.getByText("Views end-to-end")).toBeTruthy();
+  });
+
+  it("delete is two-step, and only the second click calls the API", async () => {
+    render(<ViewsPanel onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    const del = screen.getAllByLabelText("Delete")[0];
+    fireEvent.click(del);
+    // Armed, not deleted: nothing left the browser yet.
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[1]?.method === "DELETE").length).toBe(0);
+    fireEvent.click(screen.getAllByLabelText("Click again to delete")[0]);
+    await waitFor(() => {
+      const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c) => c[1]?.method === "DELETE");
+      expect(calls.length).toBe(1);
+      expect(JSON.parse(calls[0][1].body)).toEqual({ session: "Orion", name: "agent-result.md" });
+    });
+    // The row leaves the list only because the server said ok.
+    await waitFor(() => expect(screen.queryByText("Views end-to-end")).toBeNull());
+  });
+
   it("groups by session, leads with the title, falls back to the filename", async () => {
     render(<ViewsPanel sessions={[{ name: "Orion", displayName: "orion-worker", internalName: "Orion" }]} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
@@ -36,7 +75,11 @@ describe("ViewsPanel", () => {
     expect(screen.getByText("Nebula")).toBeTruthy();
     expect(screen.getByText("views-test.html")).toBeTruthy();
     expect(screen.getByText("MD")).toBeTruthy();
-    expect(screen.getByText("IMG")).toBeTruthy();
+    // Images render as their own thumbnail, not a type tag — the file is the
+    // most honest icon it could have.
+    const thumb = document.querySelector("img.views-thumb") as HTMLImageElement;
+    expect(thumb).toBeTruthy();
+    expect(thumb.getAttribute("loading")).toBe("lazy");
 
     const link = screen.getByText("Views end-to-end").closest("a") as HTMLAnchorElement;
     expect(link.getAttribute("href")).toBe("/view/Orion/agent-result.md/inline");

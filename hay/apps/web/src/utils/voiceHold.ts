@@ -11,6 +11,14 @@
 // - releasing stops; the transcript is TYPED, never submitted
 // - auto-repeat spaces are swallowed; any other key cancels a pending hold
 // - while listening, every space is eaten
+//
+// Swallowing a key here means handling THREE event types, not one. xterm
+// consults this handler from _keyDown AND from _keyPress, and when we refuse
+// a keydown it returns before setting its own _keyDownHandled flag — so the
+// browser still fires keypress, xterm still asks us, and an `undefined`
+// answer there let every auto-repeat land a real space in the composer. That
+// was "holding space keeps typing actual spaces". preventDefault goes with
+// it, so the character never reaches the hidden textarea either.
 
 type RecognitionLike = {
   lang: string;
@@ -41,6 +49,8 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
   const threshold = opts.thresholdMs ?? 550;
   let timer = 0;
   let active = false;
+  /** A hold has begun (space is down) but dictation has not started yet. */
+  let pending = false;
   let spacesTyped = 0;
   let finalText = "";
   let interimText = "";
@@ -58,11 +68,14 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
   };
 
   const start = () => {
+    pending = false;
     if (active) return;
     const Ctor = speechRecognitionCtor();
-    if (!Ctor) return;
+    // Silence here read as "voice randomly does nothing": the space vanished
+    // (or didn't) and no overlay ever appeared, with no reason given.
+    if (!Ctor) { opts.notify("Voice input is not supported in this browser"); return; }
     let r: RecognitionLike;
-    try { r = new Ctor(); } catch { return; }
+    try { r = new Ctor(); } catch { opts.notify("Voice input could not start"); return; }
     active = true;
     finalText = "";
     interimText = "";
@@ -101,7 +114,7 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     r.onend = () => finish(true);
     rec = r;
     opts.setOverlay("");
-    try { r.start(); } catch { finish(false); }
+    try { r.start(); } catch { opts.notify("Voice input could not start"); finish(false); }
   };
 
   const stop = () => {
@@ -115,7 +128,16 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
    *  false — consumed (swallow), true — let the terminal process it,
    *  undefined — not a voice-relevant event; continue with other branches.
    */
-  const handleKey = (ev: { type: string; code: string; key: string; repeat?: boolean; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean }): boolean | undefined => {
+  const handleKey = (ev: {
+    type: string; code: string; key: string; repeat?: boolean;
+    metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean;
+    preventDefault?: () => void;
+  }): boolean | undefined => {
+    /** Refuse the key AND stop the browser acting on it. */
+    const swallow = () => {
+      try { ev.preventDefault?.(); } catch { /* synthetic event in a test */ }
+      return false;
+    };
     // Return, mid-dictation, ENDS it and keeps the words (Jian). Without
     // this the Enter fell through to the terminal while the recogniser was
     // still running: a bare newline hit the composer, and the transcript
@@ -125,30 +147,44 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     if (active && ev.type === "keydown" && (ev.key === "Enter" || ev.code === "Enter"
                                             || ev.code === "NumpadEnter")) {
       stop();
-      return false;
+      return swallow();
     }
-    if (ev.code === "Space" && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey
-        && !!speechRecognitionCtor() && (active || opts.eligible())) {
+    // A keypress carries no `code` in some engines; fall back to the key.
+    const isSpace = ev.code === "Space" || (ev.type === "keypress" && ev.key === " ");
+    if (isSpace && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey
+        && !!speechRecognitionCtor() && (active || pending || opts.eligible())) {
       if (ev.type === "keydown") {
-        if (active) return false; // listening: eat every space
+        if (active) return swallow(); // listening: eat every space
         if (!ev.repeat) {
           window.clearTimeout(timer);
+          pending = true;
           spacesTyped = 1; // this one goes through, for zero latency
           timer = window.setTimeout(start, threshold);
           return true;
         }
-        return false; // swallow auto-repeat while held
+        return swallow(); // swallow auto-repeat while held
+      }
+      // The one that was missing. xterm asks again here, and its own
+      // _keyDownHandled guard is not set for a keydown we refused — so an
+      // `undefined` answer types a space per auto-repeat. The first space is
+      // already emitted by the keydown xterm DID process, so nothing is lost.
+      if (ev.type === "keypress") {
+        return (active || pending) ? swallow() : undefined;
       }
       if (ev.type === "keyup") {
         window.clearTimeout(timer);
+        pending = false;
         spacesTyped = 0;
-        if (active) { stop(); return false; }
+        if (active) { stop(); return swallow(); }
         return true;
       }
       return undefined;
     }
     // Any other keydown cancels a pending (not yet active) hold.
-    if (ev.type === "keydown" && ev.code !== "Space") window.clearTimeout(timer);
+    if (ev.type === "keydown" && ev.code !== "Space") {
+      window.clearTimeout(timer);
+      pending = false;
+    }
     return undefined;
   };
 
@@ -156,6 +192,7 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     window.clearTimeout(timer);
     if (active) { try { rec?.stop(); } catch { /* gone */ } }
     active = false;
+    pending = false;
     rec = null;
     opts.setOverlay(null);
   };

@@ -9246,6 +9246,42 @@ happens until someone clicks it.
             res.end(body || '{"items":[]}');
             return;
         }
+        // Unpublish, from a client. The CLI's --rm covers the agent that
+        // published; the human reading the list on the wall had no way to
+        // clear anything out of it. Files only — a live server's row dies
+        // with the server, and deleting a session someone is running is not
+        // a Views-panel decision.
+        if (req.method === 'DELETE' && parsedUrl.pathname === '/api/views') {
+            const body = await readRequestJson(req);
+            const sess = String(body?.session || '');
+            const name = path.basename(String(body?.name || ''));
+            const viewsRoot = path.resolve(VIEWS_DIR);
+            const target = path.resolve(path.join(viewsRoot, sess, name));
+            const respond = (status, payload) => {
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(payload));
+            };
+            if (!sess || !name || !target.startsWith(viewsRoot + path.sep)
+                || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+                respond(404, { ok: false, error: 'No such view' });
+                return;
+            }
+            const meta = readViewMeta(sess);
+            if (meta[name]?.kind === 'server') {
+                respond(400, { ok: false, error: 'A live server row disappears when the server stops — nothing to delete' });
+                return;
+            }
+            try {
+                fs.rmSync(target);
+                delete meta[name];
+                writeViewMeta(sess, meta);
+                rebuildViewManifest();
+                respond(200, { ok: true });
+            } catch (e) {
+                respond(500, { ok: false, error: e.message });
+            }
+            return;
+        }
         if (req.method === 'GET' && parsedUrl.pathname.startsWith('/assets/view/')) {
             const segs = parsedUrl.pathname.slice('/assets/view/'.length).split('/');
             if (segs.length === 2 && segs[1]) {

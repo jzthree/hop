@@ -283,11 +283,19 @@ const resolveInitialName = () => {
 };
 
 // Stable connection identity: device half persists per browser, tab half per
-// tab. The server evicts a previous connection bearing the same key on
-// attach — a reconnect replaces its own ghost in presence instead of sitting
-// next to it — while two real tabs (different tab halves) coexist.
+// tab — and a PAGE-LOAD nonce on the end, which is the part that actually
+// scopes eviction. The server evicts a previous connection bearing the same
+// key on attach, so a reconnect replaces its own ghost in presence. The
+// ghost is by definition a connection this same page instance made (a
+// network drop sends no close frame; a reload does), so an in-memory nonce
+// matches every ghost that can exist — while "Duplicate Tab" and
+// window.open, which CLONE sessionStorage, get a fresh nonce and coexist.
+// Keying on device.tab alone made two such tabs on one session evict each
+// other on every attach: with immediate reconnect on both sides, that was a
+// full-speed connect-disconnect loop (measured: 557 reconnects in 20s).
 const randomKeyPart = () =>
   (window.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, "").slice(0, 10);
+const surfaceNonce = randomKeyPart();
 const resolveDeviceKey = () => {
   try {
     let device = localStorage.getItem("hop_device_id");
@@ -300,7 +308,7 @@ const resolveDeviceKey = () => {
       tab = randomKeyPart();
       sessionStorage.setItem("hop_tab_id", tab);
     }
-    return `${device}.${tab}`;
+    return `${device}.${tab}.${surfaceNonce}`;
   } catch {
     return ""; // storage unavailable (private mode quota) — no eviction key
   }

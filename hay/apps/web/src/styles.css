@@ -3890,10 +3890,13 @@ button.primary {
   z-index: 120;
   min-width: 190px;
   padding: 5px;
-  border-radius: 11px;
+  border-radius: 10px;
   border: 1px solid var(--line);
   background: var(--panel);
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.3);
+  /* Matched to .switcher-sheet — the two menus must read as one system. */
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    0 12px 32px rgba(0, 0, 0, 0.22);
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -3922,10 +3925,10 @@ button.primary {
   cursor: default;
 }
 .context-menu-item.danger {
-  color: #e5484d;
+  color: var(--err);
 }
 .context-menu-item.danger.active {
-  background: color-mix(in srgb, #e5484d 14%, transparent);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
 }
 .context-menu-item kbd {
   font-family: var(--font-mono);
@@ -3934,7 +3937,7 @@ button.primary {
 }
 .context-menu-separator {
   height: 1px;
-  margin: 4px 6px;
+  margin: 4px 8px;
   background: var(--line);
 }
 
@@ -4103,6 +4106,35 @@ button.primary {
   max-height: min(84vh, 820px);
   height: min(84vh, 820px);
 }
+/* A big monitor earns a bigger page — 1080px of PDF on a 5K display wastes
+   the reason to read at a desk. */
+@media (min-width: 1800px) {
+  .views-panel.with-preview { width: min(1360px, 90vw); height: min(86vh, 1000px); max-height: min(86vh, 1000px); }
+  .views-panel.with-preview .views-list { flex-basis: 340px; }
+}
+/* Full-screen terminal mode: a right dock with no backdrop. The terminal
+   stays visible, live and interactive beside it; width is the reader's own
+   (dragged) choice, set inline. Border-radius 0 — it meets the screen edge. */
+.views-panel.docked {
+  top: 0; right: 0; bottom: 0; left: auto;
+  transform: none;
+  height: 100vh; height: 100dvh;
+  max-height: none;
+  border-radius: 0;
+  border: none;
+  border-left: 1px solid var(--line);
+  box-shadow: -18px 0 55px rgba(0, 0, 0, 0.4);
+  padding: 12px 14px;
+}
+.views-panel.docked:focus { outline: none; }
+.views-dock-handle {
+  position: absolute; left: -4px; top: 0; bottom: 0; width: 9px;
+  cursor: col-resize; z-index: 1;
+  /* Invisible until useful — a painted gutter would read as a border. */
+}
+.views-dock-handle:hover { background: color-mix(in srgb, var(--accent, #7c5cff) 25%, transparent); }
+.views-panel.docked .views-preview { min-height: 0; }
+.views-back { font-size: 16px; font-weight: 700; }
 .views-body { display: flex; min-height: 0; flex: 1; gap: 0; }
 .views-panel.with-preview .views-list {
   flex: 0 0 300px;
@@ -4134,6 +4166,18 @@ button.primary {
   font-family: var(--font-mono);
   font-size: 10.5px; color: var(--ink-muted);
 }
+/* Scope as a two-tab toggle: the session you came from, or the fleet. */
+.views-scope-toggle {
+  display: inline-flex; align-items: center; gap: 1px;
+  background: var(--bg-alt); border-radius: 7px; padding: 2px;
+}
+.views-scope-toggle button {
+  border: none; cursor: pointer; background: none;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--ink-muted); padding: 2px 7px; border-radius: 5px;
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.views-scope-toggle button.on { background: var(--panel); color: var(--ink); }
 .views-close {
   border: none; background: none; cursor: pointer;
   color: var(--ink-muted); font-size: 16px; line-height: 1; padding: 2px 4px;

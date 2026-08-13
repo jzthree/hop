@@ -62,6 +62,16 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
     let reconnectTimer: number | null = null;
     let attempt = 0;
 
+    // The "connecting" label waits out a grace window on RECONNECTS, so a
+    // sub-second drop repaints nothing. First connect shows honestly.
+    let chromeTimer = 0;
+    let everConnected = false;
+    const showConnecting = () => {
+      if (!everConnected) { setStatus("connecting"); return; }
+      window.clearTimeout(chromeTimer);
+      chromeTimer = window.setTimeout(() => setStatus("connecting"), 1200);
+    };
+
     const connect = () => {
       const sep = wsUrl.includes("?") ? "&" : "?";
       const ws = new WebSocket(
@@ -69,8 +79,13 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
           `&cols=${sizeRef.current.cols}&rows=${sizeRef.current.rows}`
       );
       wsRef.current = ws;
-      setStatus("connecting");
-      ws.onopen = () => setStatus("connected");
+      showConnecting();
+      ws.onopen = () => {
+        everConnected = true;
+        attempt = 0; // a healed link earns a fresh immediate retry next time
+        window.clearTimeout(chromeTimer);
+        setStatus("connected");
+      };
       ws.onmessage = (event) => {
         const message = safeParseServerMessage(String(event.data));
         if (!message) return;
@@ -95,6 +110,7 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
           term.write(prelude + message.data + coda, () => term.scrollToBottom());
         } else if (message.type === "session_ended") {
           shouldReconnect = false;
+          window.clearTimeout(chromeTimer);
           setStatus("ended");
         } else if (message.type === "active_size") {
           // Someone else became active — follow the room's elected size. A
@@ -110,9 +126,12 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
       };
       ws.onclose = () => {
         if (!shouldReconnect) return;
-        setStatus("connecting");
+        showConnecting();
+        // Immediate first retry: most drops are a tunnel blip that has
+        // already healed; backoff starts once that retry has failed.
+        const delay = attempt === 0 ? 0 : Math.min(1000 * 2 ** (attempt - 1), 15000);
         attempt += 1;
-        reconnectTimer = window.setTimeout(connect, Math.min(1000 * 2 ** attempt, 15000));
+        reconnectTimer = window.setTimeout(connect, delay);
       };
     };
     connect();
@@ -168,6 +187,7 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
     return () => {
       shouldReconnect = false;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      window.clearTimeout(chromeTimer);
       window.clearTimeout(fitTimer);
       ro.disconnect();
       dataSub.dispose();

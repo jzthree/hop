@@ -368,6 +368,46 @@ const App = () => {
   const [sessionLabel, setSessionLabel] = useState(() => initialRoom);
   const [liveCwd, setLiveCwd] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("idle");
+  // What the CHROME shows. Most drops (a tunnel restart, a laptop waking, an
+  // edge blip) are healed by the immediate reconnect before a human could
+  // read a banner — surfacing them bought nothing but flicker. Once a session
+  // has connected, an outage must OUTLIVE the grace window to be seen;
+  // "ended" and the first connect are real events and show at once. All
+  // reconnect logic stays on the real `status`.
+  const OUTAGE_GRACE_MS = 1200;
+  const [visibleStatus, setVisibleStatus] = useState<ConnectionStatus>("idle");
+  const visibleStatusRef = useRef<ConnectionStatus>("idle");
+  visibleStatusRef.current = visibleStatus;
+  const statusForChromeRef = useRef<ConnectionStatus>("idle");
+  statusForChromeRef.current = status;
+  const hadConnectedRef = useRef(false);
+  const outageTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    const clearOutageTimer = () => {
+      if (outageTimerRef.current !== null) {
+        window.clearTimeout(outageTimerRef.current);
+        outageTimerRef.current = null;
+      }
+    };
+    if (status === "connected" || status === "ended" || status === "idle") {
+      hadConnectedRef.current = status === "connected";
+      clearOutageTimer();
+      setVisibleStatus(status);
+      return;
+    }
+    // connecting / disconnected: the first connect shows honestly; after
+    // that, hold the good face while the immediate retry gets its chance.
+    if (!hadConnectedRef.current) {
+      clearOutageTimer();
+      setVisibleStatus(status);
+      return;
+    }
+    if (outageTimerRef.current !== null) return; // grace runs from OUTAGE start
+    outageTimerRef.current = window.setTimeout(() => {
+      outageTimerRef.current = null;
+      setVisibleStatus(statusForChromeRef.current);
+    }, OUTAGE_GRACE_MS);
+  }, [status]);
   const [presence, setPresence] = useState<PresenceClient[]>([]);
   const [collabMode, setCollabMode] = useState(true);
   const [controllerId, setControllerId] = useState<string | null>(null);
@@ -1151,7 +1191,7 @@ const App = () => {
       const now = Date.now();
       if (now - lastDropToastRef.current > 2000) {
         lastDropToastRef.current = now;
-        showToast("Reconnecting — input buffered");
+        if (visibleStatusRef.current !== "connected") showToast("Reconnecting — input buffered");
       }
       return;
     }
@@ -1456,7 +1496,9 @@ const App = () => {
     const delay = attempt === 0 ? 0 : Math.min(1000 * Math.pow(2, attempt - 1), 30000);
     reconnectAttemptRef.current += 1;
 
-    pushNotice(delay === 0 ? "Reconnecting..." : `Reconnecting in ${Math.round(delay / 1000)}s...`);
+    // The immediate retry stays silent — it usually wins before anyone could
+    // read a notice. Only an outage that earned a backoff narrates itself.
+    if (delay > 0) pushNotice(`Reconnecting in ${Math.round(delay / 1000)}s...`);
 
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = null;
@@ -3867,20 +3909,20 @@ const App = () => {
         >
           {/* Connection state banner — on mobile the footer is hidden, and on
               desktop the footer dot alone is too easy to miss during an outage. */}
-          {status !== "connected" && status !== "idle" && (
+          {visibleStatus !== "connected" && visibleStatus !== "idle" && (
             <div
-              className={`connection-banner${status === "ended" ? " ended" : ""}`}
+              className={`connection-banner${visibleStatus === "ended" ? " ended" : ""}`}
               role="status"
               aria-live="polite"
             >
               <span>
-                {status === "connecting"
+                {visibleStatus === "connecting"
                   ? "Connecting…"
-                  : status === "ended"
+                  : visibleStatus === "ended"
                     ? "Session ended"
                     : "Disconnected — reconnecting…"}
               </span>
-              {(status === "disconnected" || status === "ended") && (
+              {(visibleStatus === "disconnected" || visibleStatus === "ended") && (
                 <button type="button" onClick={() => setReconnectToken((value) => value + 1)}>
                   Reconnect now
                 </button>
@@ -3959,11 +4001,11 @@ const App = () => {
                 <p className="room-cwd" title={liveCwd}>{shortenPath(liveCwd)}</p>
               )}
               <p className="room-meta">
-                {status === "connected"
+                {visibleStatus === "connected"
                   ? "Live"
-                  : status === "connecting"
+                  : visibleStatus === "connecting"
                     ? "Connecting"
-                    : status === "ended"
+                    : visibleStatus === "ended"
                       ? "Ended"
                       : "Offline"}
               </p>
@@ -4023,7 +4065,7 @@ const App = () => {
                 <button type="button" className="quick-btn danger" onClick={handleKillSession}>
                   Kill
                 </button>
-                {(status === "disconnected" || status === "ended") && (
+                {(visibleStatus === "disconnected" || visibleStatus === "ended") && (
                   <button type="button" className="quick-btn primary" onClick={() => setReconnectToken((value) => value + 1)}>
                     Reconnect
                   </button>
@@ -4220,7 +4262,7 @@ const App = () => {
             // evaluated on the hub page (session can be null there), and the
             // pane renderer places it wherever the tree's primary leaf sits.
             const renderPrimarySection = (): ReactElement => (
-              <section inert={switcherOpen} style={switcherOpen ? { visibility: "hidden" } : undefined} className={`terminal${status === "disconnected" || status === "ended" ? " degraded" : ""}`}>
+              <section inert={switcherOpen} style={switcherOpen ? { visibility: "hidden" } : undefined} className={`terminal${visibleStatus === "disconnected" || visibleStatus === "ended" ? " degraded" : ""}`}>
                 <div
                   className="terminal-frame"
                   onClick={() => {
@@ -4282,7 +4324,7 @@ const App = () => {
                       </span>
                     </div>
                   )}
-                  {isMobile && status === "connecting" && (
+                  {isMobile && visibleStatus === "connecting" && (
                     <div className="terminal-loading" role="status" aria-live="polite">
                       <IosSpinner />
                       <span className="terminal-loading-label">Loading session…</span>
@@ -4323,7 +4365,7 @@ const App = () => {
                   <span className="footer-chip">{sessionLabel || session.room}</span>
                   {liveCwd ? <span className="footer-cwd">{liveCwd}</span> : null}
                   <span className="footer-spacer" />
-                  {status === "connected" ? (
+                  {visibleStatus === "connected" ? (
                     <>
                       <button type="button" className="footer-find-toggle" aria-label="Find in terminal" onClick={openSearch}>
                         {isMacPlatform ? "⌘F" : "Ctrl+F"} find
@@ -4353,9 +4395,9 @@ const App = () => {
                         })()}
                       </span>
                     </>
-                  ) : status === "idle" ? (
+                  ) : visibleStatus === "idle" ? (
                     <span>awaiting connection</span>
-                  ) : status === "ended" ? (
+                  ) : visibleStatus === "ended" ? (
                     <>
                       <span className="ended-label">session ended</span>
                       <button
@@ -4369,7 +4411,7 @@ const App = () => {
                   ) : (
                     <>
                       <span className="reconnecting">
-                        ⟳ {status === "connecting" ? "Connecting…" : "Reconnecting…"}
+                        ⟳ {visibleStatus === "connecting" ? "Connecting…" : "Reconnecting…"}
                       </span>
                       <button
                         type="button"

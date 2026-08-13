@@ -12187,22 +12187,43 @@ async function waitForTunnelHealthy(publicUrl, options = {}) {
     };
 }
 
+// Restart only on SUSTAINED failure. One missed probe used to kill the
+// tunnel — and cloudflared self-heals its edge connections, so a probe blip
+// (wifi hiccup, edge 522, laptop waking) usually means the tunnel was busy
+// RECOVERING when we shot it. Worse, the restart's own downtime failed the
+// next probe (HTTP 530), which triggered another restart: the log shows
+// timeout → restart → 530 → restart cascades several times a day, and every
+// one of them dropped every remote websocket on the fleet. Restarting is for
+// a WEDGED cloudflared, which shows up as failure that persists.
+const TUNNEL_HEALTH_FAILURE_THRESHOLD = 3;      // consecutive misses (~90s)
+const TUNNEL_HEALTH_RESTART_GRACE_MS = 90000;   // leave a fresh restart alone
+let tunnelHealthStrikes = 0;
+
 function startTunnelHealthMonitor() {
     if (NO_TUNNEL) return;
     if (tunnelHealthInterval) return;
 
     tunnelHealthInterval = setInterval(async () => {
         if (shuttingDown || !currentPublicUrl) return;
+        // A tunnel we just (re)started is expected to be answering flaky —
+        // probing it into ANOTHER restart was the cascade.
+        if (tunnelStatus.lastRestartAt && Date.now() - tunnelStatus.lastRestartAt < TUNNEL_HEALTH_RESTART_GRACE_MS) return;
 
         const result = await probeTunnelHealth(currentPublicUrl, TUNNEL_HEALTH_TIMEOUT);
         if (!result.ok) {
             const reason = result.error || (result.status ? `HTTP ${result.status}` : 'Unknown error');
+            tunnelHealthStrikes += 1;
             updateTunnelStatus({
                 connected: false,
                 lastEvent: 'unhealthy',
                 lastError: reason
             });
-            log(`[Tunnel] Health check failed: ${reason}. Restarting tunnel...`, YELLOW);
+            if (tunnelHealthStrikes < TUNNEL_HEALTH_FAILURE_THRESHOLD) {
+                log(`[Tunnel] Health check failed (${tunnelHealthStrikes}/${TUNNEL_HEALTH_FAILURE_THRESHOLD}): ${reason}. Watching — cloudflared usually recovers on its own.`, YELLOW);
+                return;
+            }
+            tunnelHealthStrikes = 0;
+            log(`[Tunnel] Health check failed ${TUNNEL_HEALTH_FAILURE_THRESHOLD} times running (${reason}). Restarting tunnel...`, YELLOW);
             if (currentTunnelProc && !currentTunnelProc.killed) {
                 try { currentTunnelProc.kill('SIGTERM'); } catch (err) { }
                 // The 'close' handler will trigger restart
@@ -12210,12 +12231,18 @@ function startTunnelHealthMonitor() {
                 // Cloudflared already dead, restart directly
                 startTunnelWithRestart();
             }
-        } else if (tunnelStatus.lastEvent !== 'healthy') {
-            updateTunnelStatus({
-                connected: true,
-                lastEvent: 'healthy',
-                lastError: null
-            });
+        } else {
+            if (tunnelHealthStrikes > 0) {
+                log(`[Tunnel] Recovered on its own after ${tunnelHealthStrikes} failed check${tunnelHealthStrikes === 1 ? '' : 's'} — no restart needed.`, GREEN);
+            }
+            tunnelHealthStrikes = 0;
+            if (tunnelStatus.lastEvent !== 'healthy') {
+                updateTunnelStatus({
+                    connected: true,
+                    lastEvent: 'healthy',
+                    lastError: null
+                });
+            }
         }
     }, TUNNEL_HEALTH_CHECK_INTERVAL);
 }

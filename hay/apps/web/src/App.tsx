@@ -605,7 +605,7 @@ const App = () => {
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   // Published views (`hop view`). `session` scopes the panel to one session;
   // an object with none open it fleet-wide. Null = closed.
-  const [viewsOpen, setViewsOpen] = useState<{ session?: string } | null>(null);
+  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean } | null>(null);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   // Claude Code titles its process with a bare version number; hop's session
@@ -3662,6 +3662,14 @@ const App = () => {
       const shifted = event.shiftKey;
       const grab = () => { event.preventDefault(); event.stopPropagation(); };
       if (key === "k" && (isMacPlatform ? !shifted : true)) { grab(); setSwitcherOpen((v) => !v); return; }
+      if (isMacPlatform && shifted && key === "v") {
+        grab();
+        setViewsOpen((v) => v ? null
+          : (activeSessionRoomRef.current
+              ? { session: activeSessionRoomRef.current, dock: true }
+              : {}));
+        return;
+      }
       if (key === "j") { grab(); cycleSession(shifted ? -1 : 1); return; }
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
       if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
@@ -3775,7 +3783,10 @@ const App = () => {
               type="button"
               className="topbar-sessions-btn"
               title="Files agents published with hop view"
-              onClick={() => setViewsOpen({})}
+              // DOCKED and scoped: in full-screen mode you almost always want
+              // THIS session's results, read beside the live terminal rather
+              // than over it. The panel's own toggle widens to the fleet.
+              onClick={() => setViewsOpen({ session: session.room, dock: true })}
             >
               Views
               {unseenViewSessions > 0 && <span className="views-chip-dot" aria-label="New views" />}
@@ -4537,6 +4548,7 @@ const App = () => {
                   [isMacPlatform ? "⌘J / ⌘⇧J" : "Ctrl+Shift+J / +⇧", "next / previous session (by name)"],
                   [isMacPlatform ? "⌘," : "Ctrl+Shift+,", "settings drawer"],
                   [isMacPlatform ? "⌘F" : "Ctrl+Shift+F", "find in terminal"],
+                  ...(isMacPlatform ? [["⌘⇧V", "views — results agents published"]] : []),
                   ...(isMacPlatform ? [["⌘+ / ⌘− / ⌘0", "terminal font size"]] : []),
                   ["Ctrl+Shift+C / V", "copy / paste"],
                   ["Shift+PgUp / PgDn", "scrollback"],
@@ -4641,7 +4653,8 @@ const App = () => {
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}
       {viewsOpen && (
-        <ViewsPanel session={viewsOpen.session} sessions={sessions} onClose={() => setViewsOpen(null)} />
+        <ViewsPanel session={viewsOpen.session} sessions={sessions} dock={viewsOpen.dock}
+                    onClose={() => setViewsOpen(null)} />
       )}
     </div>
   );

@@ -36,7 +36,9 @@ describe("ViewsPanel", () => {
     fireEvent.click(row);
     const frame = document.querySelector("iframe.views-frame") as HTMLIFrameElement;
     expect(frame).toBeTruthy();
-    expect(frame.getAttribute("src")).toBe("/view/Orion/agent-result.md/inline");
+    // Rendered documents carry the wall's theme into the iframe — the OS
+    // doesn't know what the wall chose, so the URL has to say.
+    expect(frame.getAttribute("src")).toBe("/view/Orion/agent-result.md/inline?theme=light");
     // Our own files must NOT be sandboxed — a sandboxed iframe disables the
     // browser's PDF viewer, which is half of what the pane is for.
     expect(frame.hasAttribute("sandbox")).toBe(false);
@@ -46,6 +48,41 @@ describe("ViewsPanel", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(document.querySelector("iframe.views-frame")).toBeNull();
     expect(screen.getByText("Views end-to-end")).toBeTruthy();
+  });
+
+  it("docked: preview stacks over the list, and keys are focus-scoped to the panel", async () => {
+    // The dock only exists on wide windows; jsdom defaults to 1024.
+    vi.stubGlobal("innerWidth", 1280);
+    render(<ViewsPanel session="Orion" dock onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    const panel = document.querySelector(".views-panel") as HTMLDivElement;
+    expect(panel.className).toContain("docked");
+    // No backdrop: the terminal beside the dock stays interactive.
+    expect(document.querySelector(".views-backdrop")).toBeNull();
+
+    // A key from OUTSIDE the panel (the terminal) must be ignored — Esc is a
+    // real key in a shell, and answering it here would close a panel the
+    // user wasn't even touching.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector(".views-panel")).toBeTruthy();
+
+    // Click a row: stacked preview replaces the list, with a back control.
+    fireEvent.click(screen.getByText("Views end-to-end").closest("a") as HTMLAnchorElement);
+    expect(document.querySelector("iframe.views-frame")).toBeTruthy();
+    expect(document.querySelector(".views-list")).toBeNull();
+    // Esc FROM the panel backs out one layer: preview → list.
+    fireEvent.keyDown(panel, { key: "Escape" });
+    expect(document.querySelector("iframe.views-frame")).toBeNull();
+    expect(document.querySelector(".views-list")).toBeTruthy();
+  });
+
+  it("scoped open can widen to the fleet without reopening", async () => {
+    render(<ViewsPanel session="Orion" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    // Scoped: the other session's rows are absent.
+    expect(screen.queryByText("shot.png")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "all" }));
+    await waitFor(() => expect(screen.getByText("shot.png")).toBeTruthy());
   });
 
   it("delete is two-step, and only the second click calls the API", async () => {

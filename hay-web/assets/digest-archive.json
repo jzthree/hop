@@ -1,6 +1,68 @@
 {
  "editions": [
   {
+   "generated_at": "2026-08-13T18:41:07.601Z",
+   "summary": "The accessibility project realized the control that decides whether its entire simplification question is even meaningful was never run — and the splicing session has retracted its interpretability result as having measured the wrong thing.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It finally has both variant-effect numbers side by side: the simple gate reads 0.7053 correlation and 0.459 on causality, against 0.7095 and 0.480 for the dense operator it is meant to replace — close, still behind. Then it caught the hole: it never trained the obvious control, the same model with the wide-context branch deleted entirely. That run is now queued. Its own words: if the floor lands near 0.70 and 0.45, the wide-context module contributes almost nothing to variant effects and the whole simplification exercise has been optimizing a stretch of chromosome 10 that the real objective never rewarded. The window is now at 100% of its context.",
+     "why": "Days of gate-versus-dense comparison mean nothing until that floor lands, and the session holding all the reasoning behind them is completely out of room.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Europa",
+     "headline": "It withdrew its own interpretability finding. It had reported load-bearing motif counts — 18 of 40 for the distilled model against 40 of 40 trained from scratch — as the result; after your correction it now states plainly that motif count says nothing about the actual criterion, which is whether the pre-recurrent prediction already looks like splice-site selection with the recurrent layer only refining it. It is measuring that signal directly now and waiting on a cluster job to report. Nothing on its screen shows the from-scratch auxiliary-loss run that was to settle the penalty question, which was due to land about now.",
+     "why": "A number you were given as the interpretability answer should be struck from the record, and the real question is untested until this job returns.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "data-migration",
+     "headline": "A second hour on the same unanswered question. The bulk transfer is still stalled on the flaky UTSW link with its Globus login expiring — detail queries already refuse — and it will not choose between waiting and going to check the transfer endpoint on Nucleus without you. The unfinished half of the permission change you approved is also still open: the setgid bit is not restored on either cluster.",
+     "why": "If the credential lapses while it waits, the transfer needs a manual re-login before anything moves — and without setgid, every file created from here lands private again.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Solstice",
+     "headline": "Third edition with public signups built, tested, deployed and switched off, waiting on the single mail-setup step that needs a Gmail app password. This hour it polished the session action menu instead — grouped actions, destructive ones separated, 115 tests passing — and is offering to do the same to the right-click menu.",
+     "why": "A finished feature has now sat dark overnight for want of a two-minute credential while the session spends its time on presentation work.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-13T17:41:16.623Z",
+   "summary": "The bulk transfer into the lab data tree is stalled with an expiring Globus login and is asking you which way to go — and the simpler operator you green-lit is not yet beating the dense one it is meant to replace.",
+   "items": [
+    {
+     "session": "data-migration",
+     "headline": "The transfer into the lab data tree resumed but is stalled on the flaky UTSW link, and its Globus login is expiring — task status still answers, but event details already refuse without a fresh session. It wants to know whether to watch a few more minutes or go check the transfer endpoint on Nucleus now, which needs the VPN up. It also flags an unfinished piece of the permission change you approved earlier: the setgid bit has not been restored on Randi or Vista.",
+     "why": "An expired credential mid-transfer means a manual re-login before anything moves, and without setgid the group access you opened covers today's files while everything created from here lands private again.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The queue outage cleared and the footprint-shaped variants are training again, but the first read is unfavourable: none of them has cleared the dense operator they are meant to replace, which is sitting at its own ceiling. The sigmoid form at least trains stably; the softplus one looks fragile. With roughly 7.5 points of evaluation noise and only one or two evals per arm, nothing is callable yet. The wide-kernel width sweep and the sparsity-penalty arms are queued behind a 24-job cap with 14 already pending, and the window is at 99% of its context.",
+     "why": "The simpler replacement you approved last night is not yet beating what it displaces, and at one or two evals each the measurement cannot distinguish a bad mechanism from noise.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Meridian",
+     "headline": "The ARM mismatch it diagnosed last night is fixed and shipped: architecture detection, per-architecture launch paths, and a readable error instead of a bare \"failed\". Checks pass on main, the cluster deployment is live and health-verified, and nothing is left uncommitted. Its earlier caveat still stands — your existing conda environments will not run on those nodes.",
+     "why": "Jobs sent to the two ARM queues will now either run or fail with a reason you can act on, but you need environments rebuilt on those nodes before anything actually executes there.",
+     "urgency": "finished"
+    },
+    {
+     "session": "Solstice",
+     "headline": "Public signups have been finished-but-dark since last night, waiting on the one mail setup step that needs a Gmail app password; nothing since shows it run. This hour the session redesigned the session action menu instead — real menu density, grouped actions, destructive ones separated, 115 tests passing.",
+     "why": "A completed feature is sitting switched off for want of a two-minute credential, and the session has moved on to presentation work rather than raising it again.",
+     "urgency": "blocked"
+    }
+   ],
+   "model": "opus"
+  },
+  {
    "generated_at": "2026-08-13T00:41:15.330Z",
    "summary": "Your usage window cleared eleven minutes ago, but nothing restarted itself — the furniture labelling is sitting at an empty prompt where it was killed, and three other sessions are each one line from you away from moving.",
    "items": [
@@ -1368,50 +1430,6 @@
      "headline": "Still stopped, and now about two hours from unsticking itself — the weekly cap that halted the catalog sweep resets at midnight Chicago. The model the session switched itself to in the meantime does not get around that, bills against credits the account doesn't have, and was saved as the default for every new session you open. Your instruction — items with no genuine style tag should not appear in any style filter — is still sitting behind that error, unexecuted.",
      "why": "Nothing restarts on its own: even after the cap clears you have to set the model back, or every new session across the fleet opens on one that errors out immediately.",
      "urgency": "blocked"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T02:40:58.272Z",
-   "summary": "Nothing is running: the catalog sweep is stopped on a usage cap and made things worse by switching to a model that needs credits you don't have, while the gating session has now spent four hours on gate algebra without launching the experiment that settles the mechanism — and the RNA search-history check and the 15-terabyte delete are both still untouched.",
-   "items": [
-    {
-     "session": "room",
-     "headline": "Your answer landed — items with no genuine style tag should disappear from the style filters altogether — but nothing ran. The session tried to sign in, then switched itself to a heavier model and saved that as the default for every new session you open; that model bills against usage credits the account doesn't have, so your instruction to resume the later batches came back as \"usage credits required\" instead of executing. The wall that actually stopped the sweep is the weekly cap, which resets around midnight Chicago, roughly three hours out. Changing models does not get around it.",
-     "why": "The sweep is parked until the reset either way, and the saved default means every new session across the fleet now starts on a model that errors out until you buy credits or set it back.",
-     "urgency": "blocked"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "Another hour of algebra on the gating rule. It has built a variant that folds a motif's own binding score into the quantity it gets divided by, checked the math to seven decimal places, and then flagged the real problem itself: making the gate self-referential compresses its response exactly at the sites where the motif binds most strongly. That is a different model, not a cleaner one. Your question asking how that variant scored is typed in the box but never sent — and the experiment that would settle the mechanism, whether a motif's incoming signal comes from motifs like it or from the same few senders everywhere, is now four editions old and still has not been launched.",
-     "why": "The decisive test keeps getting displaced by variants of the equation, so the mechanism question stays open another night while GPU time goes to the search around it.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T01:41:39.289Z",
-   "summary": "Nothing new broke tonight, but the gating session lost the hour to a hardware mismatch on the spare cluster — and the three questions about data you cannot get back are all exactly where they were at sunset.",
-   "items": [
-    {
-     "session": "Supernova",
-     "headline": "Sixth edition in the same spot, and it has now sat idle through the whole evening. It asked permission to go check the cluster for the copy of your RNA evolutionary search, then compacted itself, so the question is no longer even visible on its screen. The network failure it blamed is long gone — other sessions have been running on that cluster all night — so a yes settles this in minutes.",
-     "why": "Every generation of that search still exists in exactly one copy nobody has laid eyes on, and the 0.7823 you treat as the leader was probably passed by work that continued past it.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "The courtesy move onto your spare cluster cost it the hour. Those machines have 44 GB cards, not the 141 GB ones its batch size was tuned for, so five of the six arms testing a simpler stand-in for the shared-context component died the instant they started. It rescaled by hand and resubmitted, and your instruction to make the launcher read the card's memory and size batches itself is sitting unsent in the prompt box. Second hour now, the experiment that would actually settle the mechanism question — whether a motif's incoming signal comes from motifs like it, or from the same few senders everywhere — is still nowhere on the board.",
-     "why": "An open-ended hunt for a simpler component keeps burning GPU time while the decisive test it designed two hours ago has never been launched.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "room",
-     "headline": "It hit its usage cap and lost an agent mid-sweep, but it stopped cleanly: it wrote a resume note first, so nothing needs reconstructing — 2,644 rows examined across 87 batches, 21 fully swept, and it knows to finish the last ten rows of the batch it was on rather than restart it. Two things it raised are genuinely yours to answer: 199 items carry no style at all and so are invisible in every filter a shopper can use, and it estimates roughly 48 more agent runs at this pace to finish the sweep. Note that 'tomorrow' may be pessimistic — the account cap the fleet hit earlier was reported to clear at midnight Chicago.",
-     "why": "The 199 unstyled items are a live hole in the catalog regardless of what you decide about budget, and the sweep can probably restart tonight rather than waiting a day.",
-     "urgency": "needs-you"
     }
    ],
    "model": "opus"

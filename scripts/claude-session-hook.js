@@ -74,10 +74,29 @@ function sessionsDir() {
   return dir;
 }
 
+// The transcript store is not a workspace. A cwd inside any claude config's
+// projects directory (~/.claude*/projects/<encoded>) means SOMETHING resumed
+// this conversation from where its transcript lives — salvage tooling, a
+// script poking at history — and recording it poisons the whole downstream
+// chain: `hop restore` relaunches there, fork inherits it (the
+// Accessibility-fork incident: forked session opened in
+// ~/.claude/projects/-Users-jianzhou), and each propagates it further.
+function isTranscriptStorePath(cwd) {
+  return /[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(cwd || ""));
+}
+
 function recordSession(dir, hopSession, payload) {
   const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
   if (!sessionId) return;
-  const cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
+  let cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
+  if (isTranscriptStorePath(cwd)) {
+    // Keep the incumbent record's cwd if there is one — the conversation
+    // itself is still real (same or new id), only the location is junk.
+    try {
+      const prev = JSON.parse(fs.readFileSync(path.join(dir, `${hopSession}.json`), "utf8"));
+      if (prev && prev.cwd && !isTranscriptStorePath(prev.cwd)) cwd = prev.cwd;
+    } catch { /* no incumbent to inherit from */ }
+  }
   const record = JSON.stringify({
     sessionId,
     cwd,

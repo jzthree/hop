@@ -273,13 +273,13 @@ function writeViewMeta(session, meta) {
 // ships as one script and a markdown dependency is not worth a node_modules
 // entry. Covers what an agent actually emits in a result: headings, fenced
 // code, lists, tables, quotes, links, emphasis.
-function renderMarkdown(src, title) {
+function renderMarkdown(src, title, theme) {
     const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const blocks = [];
     // Fenced code first, so nothing below rewrites its insides.
     let text = src.replace(/```([\w-]*)\n([\s\S]*?)```/g, (m, lang, body) => {
         blocks.push(`<pre class="code"><code>${esc(body.replace(/\n$/, ''))}</code></pre>`);
-        return ` BLOCK${blocks.length - 1} `;
+        return `\u0000BLOCK${blocks.length - 1}\u0000`;
     });
     text = esc(text);
     const inline = (s) => s
@@ -304,7 +304,7 @@ function renderMarkdown(src, title) {
     const splitRow = (l) => l.replace(/^\||\|$/g, '').split('|');
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        if (/^ BLOCK\d+ $/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
+        if (/^\u0000BLOCK\d+\u0000$/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
         if (!line.trim()) { flushAll(); continue; }
         // A table needs its separator row to be a table at all.
         if (!table && line.includes('|') && /^\s*\|?[\s:-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1] || '')) {
@@ -347,26 +347,45 @@ function renderMarkdown(src, title) {
         }
     }
     flushAll();
-    const body = out.join('\n').replace(/ BLOCK(\d+) /g, (m, i) => blocks[Number(i)]);
+    const body = out.join('\n').replace(/\u0000BLOCK(\d+)\u0000/g, (m, i) => blocks[Number(i)]);
+    return viewPageShell(title, body, theme);
+}
+
+// The page every rendered view lives in. Tokened light AND dark palettes:
+// this page is read INSIDE the wall (an iframe) and the wall has a theme the
+// OS knows nothing about, so the client passes ?theme= and wins outright;
+// with no opinion given, prefers-color-scheme decides. It shipped dark-only
+// first, and a dark page framed by a light wall read as someone else's app.
+function viewPageShell(title, body, theme) {
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const light = '--bg:#fdfdfc;--ink:#22212a;--muted:#6b6878;--accent:#6d4fd0;--panel:#f4f3f8;--line:#e4e2ec;--codebg:#efedf5;';
+    const dark = '--bg:#0b0b12;--ink:#e8e6f0;--muted:#9a93b8;--accent:#a78bfa;--panel:#16151f;--line:#2a2740;--codebg:#201e2e;';
+    const palette = theme === 'light' ? `:root{${light}color-scheme:light}`
+        : theme === 'dark' ? `:root{${dark}color-scheme:dark}`
+        : `:root{${light}color-scheme:light dark}@media (prefers-color-scheme: dark){:root{${dark}}}`;
     return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}</title><style>
-:root { color-scheme: dark; }
-body { margin:0 auto; padding:24px 18px 64px; max-width:46rem; background:#0b0b12; color:#e8e6f0;
+${palette}
+body { margin:0 auto; padding:24px 18px 64px; max-width:46rem; background:var(--bg); color:var(--ink);
   font:16px/1.65 -apple-system,"SF Pro Text",Helvetica,sans-serif; overflow-wrap:break-word; }
 h1,h2,h3,h4 { line-height:1.25; margin:1.6em 0 .5em; }
 h1 { font-size:1.7rem; } h2 { font-size:1.35rem; } h3 { font-size:1.12rem; }
-a { color:#a78bfa; }
-code { font-family:ui-monospace,"SF Mono",monospace; font-size:.87em; background:#201e2e;
+a { color:var(--accent); }
+code { font-family:ui-monospace,"SF Mono",monospace; font-size:.87em; background:var(--codebg);
   padding:.12em .38em; border-radius:6px; }
-pre.code { background:#16151f; border:1px solid #2a2740; border-radius:12px; padding:12px 14px;
+pre.code { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px 14px;
   overflow-x:auto; } pre.code code { background:none; padding:0; font-size:.85rem; }
-blockquote { margin:1em 0; padding:.2em 0 .2em 1em; border-left:3px solid #3a3556; color:#b9b3d0; }
+blockquote { margin:1em 0; padding:.2em 0 .2em 1em; border-left:3px solid var(--line); color:var(--muted); }
 table { border-collapse:collapse; width:100%; margin:1.2em 0; font-size:.93rem; display:block; overflow-x:auto; }
-th,td { border:1px solid #2a2740; padding:7px 10px; text-align:left; }
-th { background:#16151f; }
-hr { border:0; border-top:1px solid #2a2740; margin:2em 0; }
+th,td { border:1px solid var(--line); padding:7px 10px; text-align:left; }
+th { background:var(--panel); position:sticky; top:0; }
+th.num,td.num { text-align:right; font-variant-numeric:tabular-nums;
+  font-family:ui-monospace,"SF Mono",monospace; font-size:.88em; }
+tbody tr:nth-child(even) td { background:color-mix(in srgb, var(--panel) 45%, transparent); }
+hr { border:0; border-top:1px solid var(--line); margin:2em 0; }
 img { max-width:100%; border-radius:10px; }
+.foot { color:var(--muted); font-size:.8rem; margin-top:1.1em; }
 </style></head><body>\n${body}\n</body></html>`;
 }
 
@@ -8308,7 +8327,7 @@ const VIEW_RENDERED = new Set(['.md', '.markdown', '.csv', '.tsv', '.json']);
 /// computed — and delivering it as one long line of commas on a phone is the
 /// "just text" failure with extra steps. Quote-aware because a cell
 /// containing a comma is the normal case in real data, not an edge case.
-function renderDelimited(src, title, delim) {
+function renderDelimited(src, title, delim, theme) {
     const rows = [];
     let row = [], cell = '', quoted = false;
     for (let i = 0; i < src.length; i++) {
@@ -8323,17 +8342,31 @@ function renderDelimited(src, title, delim) {
         else if (c !== '\r') cell += c;
     }
     if (cell.length || row.length) { row.push(cell); rows.push(row); }
-    const body = rows.filter((r) => r.length && !(r.length === 1 && r[0] === ''));
-    if (!body.length) return renderMarkdown('_(empty)_', title);
-    // Markdown's own table syntax, so one renderer styles both — and a cell
-    // holding a pipe would otherwise break the table it lives in.
-    const esc = (s) => String(s).replace(/\|/g, '\\|').trim();
-    const head = body[0].map(esc);
-    const md = [`# ${title}`, '', `| ${head.join(' | ')} |`,
-                `|${head.map(() => '---').join('|')}|`,
-                ...body.slice(1).map((r) => `| ${r.map(esc).join(' | ')} |`),
-                '', `_${body.length - 1} rows_`].join('\n');
-    return renderMarkdown(md, title);
+    const table = rows.filter((r) => r.length && !(r.length === 1 && r[0] === ''));
+    if (!table.length) return viewPageShell(title, '<p class="foot">(empty)</p>', theme);
+    // Straight to HTML rather than through the markdown table syntax: a table
+    // OF DATA earns things prose tables don't need — numeric columns detected
+    // and right-aligned in tabular figures, a sticky header, a row count that
+    // is a caption rather than a sentence (the markdown detour rendered its
+    // footer as the literal text "_3 rows_").
+    const esc = (t) => String(t).trim()
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const head = table[0];
+    const body = table.slice(1);
+    const numeric = head.map((_, col) => {
+        const vals = body.map((r) => String(r[col] ?? '').trim()).filter(Boolean);
+        return vals.length > 0 && vals.every((v) => /^[+-]?[\d,]+(\.\d+)?%?$/.test(v));
+    });
+    const cells = (r, tag) => r.map((c, i) =>
+        `<${tag}${numeric[i] ? ' class="num"' : ''}>${esc(c)}</${tag}>`).join('');
+    const html = [
+        `<h1>${esc(title)}</h1>`,
+        `<table><thead><tr>${cells(head, 'th')}</tr></thead><tbody>`,
+        ...body.map((r) => `<tr>${cells(r, 'td')}</tr>`),
+        '</tbody></table>',
+        `<p class="foot">${body.length} row${body.length === 1 ? '' : 's'} × ${head.length} column${head.length === 1 ? '' : 's'}</p>`
+    ].join('\n');
+    return viewPageShell(title, html, theme);
 }
 
 function startAuthProxy(authEmitter) {
@@ -9211,16 +9244,20 @@ happens until someone clicks it.
                 const file = decodeURIComponent(viewMatch[2]);
                 const caption = readViewMeta(sess)[file]?.title || file;
                 const raw = fs.readFileSync(target, 'utf8');
+                // The embedding client knows its theme; the OS doesn't. An
+                // explicit ?theme= wins; absent, prefers-color-scheme decides.
+                const viewTheme = parsedUrl.query.theme === 'light' ? 'light'
+                    : parsedUrl.query.theme === 'dark' ? 'dark' : null;
                 let html;
-                if (viewExt === '.csv') html = renderDelimited(raw, caption, ',');
-                else if (viewExt === '.tsv') html = renderDelimited(raw, caption, '\t');
+                if (viewExt === '.csv') html = renderDelimited(raw, caption, ',', viewTheme);
+                else if (viewExt === '.tsv') html = renderDelimited(raw, caption, '\t', viewTheme);
                 else if (viewExt === '.json') {
                     // Pretty-printed in a code block: a minified blob is
                     // machine output, and the human opened this to read it.
                     let pretty = raw;
                     try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (e) { }
-                    html = renderMarkdown(`# ${caption}\n\n\`\`\`json\n${pretty}\n\`\`\``, caption);
-                } else html = renderMarkdown(raw, caption);
+                    html = renderMarkdown(`# ${caption}\n\n\`\`\`json\n${pretty}\n\`\`\``, caption, viewTheme);
+                } else html = renderMarkdown(raw, caption, viewTheme);
                 res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
                 res.end(html);
                 return;
@@ -9688,7 +9725,16 @@ happens until someone clicks it.
                     const config = getEffectiveSessionConfig(source) || {};
                     const rec = readClaudeSessionRecord(source);
                     const meta = readClaudeSessionMeta(source);
-                    const cwd = rec?.cwd || meta?.cwd || config.cwd || undefined;
+                    // The record's cwd is preferred because `claude --resume`
+                    // must run where the conversation lives — but it is also
+                    // the most clobber-prone of the three (hook-written on
+                    // every SessionStart). A cwd inside a transcript store
+                    // (~/.claude*/projects/*) is never a real workspace, so a
+                    // poisoned candidate falls through to the durable ones
+                    // rather than sending the fork to live among the
+                    // transcripts (the Accessibility-fork incident).
+                    const plausibleCwd = (c) => c && !/[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(c));
+                    const cwd = [rec?.cwd, meta?.cwd, config.cwd].find(plausibleCwd) || undefined;
 
                     let command;
                     let kind = 'shell';

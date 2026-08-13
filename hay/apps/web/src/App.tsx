@@ -944,8 +944,23 @@ const App = () => {
     }
   };
 
+  // Visit order, most recent first — the alt-tab stack behind ⌘E. Recency of
+  // OUTPUT is the wrong signal here: a session you have never opened can be
+  // the busiest one on the machine, and "go back" must mean where YOU were.
+  // Kept per tab (each tab has its own back-and-forth) and across reloads.
+  const recentRoomsRef = useRef<string[]>((() => {
+    try { return JSON.parse(sessionStorage.getItem("hop_recent_rooms_v1") || "[]"); }
+    catch { return []; }
+  })());
+
   useEffect(() => {
     activeSessionRoomRef.current = session?.room ?? null;
+    const room = session?.room;
+    if (!room) return;
+    const next = [room, ...recentRoomsRef.current.filter((r) => r !== room)].slice(0, 10);
+    recentRoomsRef.current = next;
+    try { sessionStorage.setItem("hop_recent_rooms_v1", JSON.stringify(next)); }
+    catch { /* private mode — the stack just won't survive a reload */ }
   }, [session?.room]);
 
   const shareUrl = useMemo(() => {
@@ -3588,8 +3603,8 @@ const App = () => {
   // Desktop keyboard layer — capture phase so shortcuts win over the focused
   // terminal. ⌘-based (Ctrl+Shift elsewhere) to stay clear of readline/TUI
   // keys, which the terminal must keep receiving untouched.
-  //   ⌘K session palette · ⌘J/⌘⇧J cycle sessions · ⌘, settings ·
-  //   ⌘+/−/0 font size · ⌘/ shortcut help · Esc closes drawer/help
+  //   ⌘K session palette · ⌘E last session (toggles) · ⌘J/⌘⇧J cycle by name ·
+  //   ⌘, settings · ⌘+/−/0 font size · ⌘/ shortcut help · Esc closes drawer/help
   useEffect(() => {
     if (!session || !isEmbeddedInHop()) return;
     const cycleSession = (dir: 1 | -1) => {
@@ -3600,6 +3615,27 @@ const App = () => {
       const cur = list.findIndex((s) => s.name === activeSessionRoomRef.current || s.internalName === activeSessionRoomRef.current);
       const next = list[(cur + dir + list.length) % list.length];
       if (next) switchSessionRef.current?.(next);
+    };
+    // Back and forth between the two sessions you are actually working in,
+    // without a trip through the palette. MRU, so pressing it twice returns
+    // you — the switch itself pushes the room you left to the top of the
+    // stack, which is what makes it a toggle rather than a walk.
+    const jumpToLastSession = () => {
+      const list = sessionsRef.current.filter((s) => s.type !== "port");
+      const cur = activeSessionRoomRef.current;
+      const keyOf = (s: { internalName?: string; name: string }) => s.internalName || s.name;
+      const visited = recentRoomsRef.current
+        .filter((r) => r !== cur)
+        .map((r) => list.find((s) => keyOf(s) === r))
+        .find((s): s is NonNullable<typeof s> => !!s);
+      // Nothing visited yet this tab (a fresh load lands straight in a
+      // session): fall back to the liveliest other session, so the shortcut
+      // does something sensible the very first time it is pressed.
+      const target = visited
+        || [...list]
+          .filter((s) => keyOf(s) !== cur)
+          .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))[0];
+      if (target) switchSessionRef.current?.(target);
     };
     const onKey = (event: KeyboardEvent) => {
       const mod = isMacPlatform
@@ -3621,12 +3657,21 @@ const App = () => {
       if (key === "j") { grab(); cycleSession(shifted ? -1 : 1); return; }
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
       if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
-      if (shifted && key === "e") {
+      if (key === "e") {
         const leaves = paneLeafIds(paneTreeRef.current).filter((id) => id !== "primary");
-        const target = focusedPaneIdRef.current !== "primary"
+        const swapTarget = focusedPaneIdRef.current !== "primary"
           ? focusedPaneIdRef.current
           : (leaves.length === 1 ? leaves[0] : null);
-        if (target) { grab(); paneOpsRef.current.swapPaneWithPrimary(target); }
+        // On a Mac the two are distinct chords (⌘E / ⌘⇧E). Elsewhere the
+        // modifier already includes Shift, so there is only one chord to
+        // give out: panes take it when a pane could actually be swapped.
+        const wantsSwap = isMacPlatform ? shifted : !!swapTarget;
+        if (wantsSwap) {
+          if (swapTarget) { grab(); paneOpsRef.current.swapPaneWithPrimary(swapTarget); }
+          return;
+        }
+        grab();
+        jumpToLastSession();
         return;
       }
       if (key === "]" || key === "[") {
@@ -4480,7 +4525,8 @@ const App = () => {
                 <h3>Keyboard shortcuts</h3>
                 {[
                   [isMacPlatform ? "⌘K" : "Ctrl+Shift+K", "session palette (type to filter, ↑↓, ⏎)"],
-                  [isMacPlatform ? "⌘J / ⌘⇧J" : "Ctrl+Shift+J / +⇧", "next / previous session"],
+                  [isMacPlatform ? "⌘E" : "Ctrl+Shift+E", "back to the last session (press again to return)"],
+                  [isMacPlatform ? "⌘J / ⌘⇧J" : "Ctrl+Shift+J / +⇧", "next / previous session (by name)"],
                   [isMacPlatform ? "⌘," : "Ctrl+Shift+,", "settings drawer"],
                   [isMacPlatform ? "⌘F" : "Ctrl+Shift+F", "find in terminal"],
                   ...(isMacPlatform ? [["⌘+ / ⌘− / ⌘0", "terminal font size"]] : []),

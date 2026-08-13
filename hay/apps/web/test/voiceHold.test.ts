@@ -17,12 +17,32 @@ class FakeRecognition {
   stop() { this.onend?.(); }
 }
 
-// The event shapes xterm actually hands a custom key handler. The keypress is
-// the one the implementation used to ignore.
+// The event shapes xterm actually hands a custom key handler. Measured
+// behavior (both regressions came from assuming otherwise): xterm types a
+// plain printable from the KEYPRESS, which the browser fires only when the
+// keydown was not defaultPrevented.
 const keydown = (opts: Partial<{ repeat: boolean }> = {}) =>
   ({ type: "keydown", code: "Space", key: " ", repeat: false, ...opts, preventDefault: vi.fn() });
 const keypress = () => ({ type: "keypress", code: "Space", key: " ", preventDefault: vi.fn() });
 const keyup = () => ({ type: "keyup", code: "Space", key: " ", preventDefault: vi.fn() });
+
+/** Drive one browser-faithful key sequence: keypress fires only if the
+ *  keydown was not prevented, and "typed" means the keypress reached the
+ *  terminal unrefused — the exact condition under which xterm emits the
+ *  character to the PTY. */
+const pressSpace = (hold: ReturnType<typeof createVoiceHold>, opts: Partial<{ repeat: boolean }> = {}) => {
+  const kd = keydown(opts);
+  const kdVerdict = hold.handleKey(kd);
+  const kdPrevented = (kd.preventDefault as ReturnType<typeof vi.fn>).mock.calls.length > 0;
+  let typed = false;
+  if (!kdPrevented) {
+    const kp = keypress();
+    const kpVerdict = hold.handleKey(kp);
+    const kpPrevented = (kp.preventDefault as ReturnType<typeof vi.fn>).mock.calls.length > 0;
+    typed = kpVerdict !== false && !kpPrevented;
+  }
+  return { kdVerdict, typed };
+};
 
 let sent: string[];
 let notices: string[];
@@ -51,22 +71,34 @@ afterEach(() => {
 });
 
 describe("hold-space dictation", () => {
+  it("an ordinary tap TYPES its space — the keypress passes through", () => {
+    // The second regression, distilled: `pending` is true for the fleeting
+    // moment between keydown and keyup of EVERY normal space, and the
+    // keypress inside that window is the event that actually types. Eating
+    // it made hop unable to type a space at all.
+    const hold = makeHold();
+    const { kdVerdict, typed } = pressSpace(hold);
+    expect(kdVerdict).toBe(true);
+    expect(typed).toBe(true);
+    expect(hold.handleKey(keyup())).toBe(true);
+    // And again — nothing latches.
+    expect(pressSpace(hold).typed).toBe(true);
+  });
+
   it("holding space types exactly one space, not one per auto-repeat", () => {
-    // The reported bug: xterm consults the handler on keypress too, and a
-    // keydown we refused never sets its _keyDownHandled flag — so every
-    // repeat used to fall through and type a real space.
+    // The first regression: swallowed repeat keydowns without preventDefault
+    // let the browser fire their keypresses, which typed a space each.
     const hold = makeHold();
 
     // First press: the space goes through for zero latency.
-    expect(hold.handleKey(keydown())).toBe(true);
+    expect(pressSpace(hold).typed).toBe(true);
 
-    // Auto-repeat, as the OS delivers it: keydown + keypress, over and over.
+    // Auto-repeat, as the OS delivers it. preventDefault on the keydown is
+    // what suppresses the browser's keypress, so `typed` must stay false.
     for (let i = 0; i < 8; i++) {
-      expect(hold.handleKey(keydown({ repeat: true }))).toBe(false);
-      const press = keypress();
-      // A keypress mid-hold is the event that used to leak a real space.
-      expect(hold.handleKey(press)).toBe(false);
-      expect(press.preventDefault).toHaveBeenCalled();
+      const rep = pressSpace(hold, { repeat: true });
+      expect(rep.kdVerdict).toBe(false);
+      expect(rep.typed).toBe(false);
     }
 
     // Nothing was sent to the terminal by the controller itself yet.
@@ -211,8 +243,7 @@ describe("hold-space dictation", () => {
 
     // And the very next space types, as an ordinary space.
     sent.length = 0;
-    expect(hold.handleKey(keydown())).toBe(true);
-    expect(hold.handleKey(keypress())).toBe(false); // its own hold, in progress
+    expect(pressSpace(hold).typed).toBe(true);
   });
 
   it("a space always types even if a hold got stuck with the key up", () => {
@@ -223,8 +254,9 @@ describe("hold-space dictation", () => {
 
     // The keyup never arrives (window switch, focus loss, a dropped event).
     // A FRESH press must still reach the terminal rather than be swallowed.
-    const press = keydown();
-    expect(hold.handleKey(press)).toBe(true);
+    const fresh = pressSpace(hold);
+    expect(fresh.kdVerdict).toBe(true);
+    expect(fresh.typed).toBe(true);
     expect(hold.isActive()).toBe(false); // the stuck hold was ended, not honoured
   });
 
@@ -237,7 +269,7 @@ describe("hold-space dictation", () => {
     window.dispatchEvent(new Event("blur"));
     expect(hold.isActive()).toBe(false);
     // Space works immediately afterwards.
-    expect(hold.handleKey(keydown())).toBe(true);
+    expect(pressSpace(hold).typed).toBe(true);
   });
 
   it("a hold cannot outlive the watchdog", () => {

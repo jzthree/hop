@@ -47,10 +47,18 @@ export type VoiceHoldOptions = {
 
 export const createVoiceHold = (opts: VoiceHoldOptions) => {
   const threshold = opts.thresholdMs ?? 550;
+  const MAX_HOLD_MS = 60000;
   let timer = 0;
+  let watchdog = 0;
   let active = false;
   /** A hold has begun (space is down) but dictation has not started yet. */
   let pending = false;
+  /** Is the space bar physically down right now? The controller may only
+   *  swallow a space while it IS — otherwise any state that got stuck (a
+   *  recogniser that never ended, a keyup lost to a window switch) would eat
+   *  every space forever, and a terminal that cannot type a space is worse
+   *  than dictation that does not start. Fail open, always. */
+  let spaceDown = false;
   let spacesTyped = 0;
   let finalText = "";
   let interimText = "";
@@ -59,7 +67,10 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
   const finish = (sendText: boolean) => {
     if (!active) return;
     active = false;
+    pending = false;
     rec = null;
+    window.clearTimeout(watchdog);
+    window.removeEventListener("blur", onWindowBlur);
     opts.setOverlay(null);
     const text = (finalText || interimText).trim();
     finalText = "";
@@ -113,14 +124,37 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     };
     r.onend = () => finish(true);
     rec = r;
+    armWatchdog();
+    window.addEventListener("blur", onWindowBlur);
     opts.setOverlay("");
     try { r.start(); } catch { opts.notify("Voice input could not start"); finish(false); }
   };
 
   const stop = () => {
     const r = rec;
-    if (r) { try { r.stop(); } catch { finish(true); } }
-    else finish(true);
+    rec = null;
+    try { r?.stop(); } catch { /* already gone */ }
+    // Finish on OUR schedule rather than waiting for the recogniser's onend.
+    // A recogniser that never fires one (it happens: the service drops, the
+    // tab backgrounds, permission is revoked mid-hold) left `active` stuck
+    // true — and since every space is deliberately eaten while active, that
+    // is a terminal that cannot type a space AT ALL. onend arriving later is
+    // harmless; finish() is a no-op once inactive.
+    finish(true);
+  };
+
+  // Last line of defence. Nothing should hold the microphone for a minute,
+  // and no failure mode of this controller may leave the space bar dead.
+  const armWatchdog = () => {
+    window.clearTimeout(watchdog);
+    watchdog = window.setTimeout(() => { if (active) stop(); }, MAX_HOLD_MS);
+  };
+  // Releasing space outside the terminal (window switch mid-hold) means the
+  // keyup never arrives, so end the hold when focus leaves.
+  const onWindowBlur = () => {
+    spaceDown = false;
+    if (active) stop();
+    else { window.clearTimeout(timer); pending = false; }
   };
 
   /**
@@ -154,7 +188,16 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     if (isSpace && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey
         && !!speechRecognitionCtor() && (active || pending || opts.eligible())) {
       if (ev.type === "keydown") {
-        if (active) return swallow(); // listening: eat every space
+        if (active) {
+          // A genuine auto-repeat is the only thing that may be eaten while
+          // listening. `repeat` is the honest signal: a FRESH press cannot be
+          // part of the hold in progress, so the hold is over — whether the
+          // keyup was lost to a window switch or the recogniser wedged. End
+          // it and let the keystroke through; the user is trying to type.
+          if (ev.repeat) return swallow();
+          stop();
+        }
+        spaceDown = true;
         if (!ev.repeat) {
           window.clearTimeout(timer);
           pending = true;
@@ -169,11 +212,13 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
       // `undefined` answer types a space per auto-repeat. The first space is
       // already emitted by the keydown xterm DID process, so nothing is lost.
       if (ev.type === "keypress") {
-        return (active || pending) ? swallow() : undefined;
+        // Only while the key is genuinely held — see spaceDown.
+        return (spaceDown && (active || pending)) ? swallow() : undefined;
       }
       if (ev.type === "keyup") {
         window.clearTimeout(timer);
         pending = false;
+        spaceDown = false;
         spacesTyped = 0;
         if (active) { stop(); return swallow(); }
         return true;
@@ -190,6 +235,8 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
 
   const dispose = () => {
     window.clearTimeout(timer);
+    window.clearTimeout(watchdog);
+    window.removeEventListener("blur", onWindowBlur);
     if (active) { try { rec?.stop(); } catch { /* gone */ } }
     active = false;
     pending = false;

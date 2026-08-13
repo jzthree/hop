@@ -4155,6 +4155,19 @@ button.primary {
   flex: 1; width: 100%; border: 1px solid var(--line); border-radius: 8px;
   background: #fff;   /* PDFs and pages assume a paper ground before they load */
 }
+/* Native media in the pane: the panel's own ground, content fit within. */
+.views-media {
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-alt);
+  overflow: hidden;
+}
+.views-media img, .views-media video {
+  max-width: 100%; max-height: 100%; object-fit: contain;
+}
+.views-media.audio { align-items: center; padding: 24px; }
+.views-media audio { width: 100%; }
 
 .views-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .views-head-spacer { flex: 1; }

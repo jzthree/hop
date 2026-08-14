@@ -4265,6 +4265,7 @@ button.primary {
 .views-act.danger.armed {
   color: #ff6b6b; font-size: 10.5px; font-weight: 700;
 }
+.views-clear { font-size: 10.5px; font-family: var(--font-mono); }
 .views-empty-cmds {
   margin: 8px 0 2px; padding: 8px 10px;
   font-family: var(--font-mono); font-size: 11px; line-height: 1.6;

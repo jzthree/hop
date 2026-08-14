@@ -863,3 +863,59 @@ test('fork falls past a poisoned record cwd to the durable one', async () => {
       { name, internalName: name });
   }
 });
+
+
+// The briefing generator's coverage signal: the server witnesses who was
+// looking at what, and when. Only a HUMAN-viewing attach may stamp it —
+// wall tiles are spectators and terminal-api clients are agents.
+test('a user attach stamps lastUserSeenAt; a monitor tile does not', async () => {
+  const WebSocket = require('ws');
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'seenprobe',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+
+  const entryOf = async () => {
+    const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+    return list.data.sessions.find(s => s.internalName === internal);
+  };
+
+  // The agent-created session: its terminal-api attach must NOT count.
+  const before = await entryOf();
+  assert.equal(before.userAttached, false, `an agent attach is not the user looking: ${JSON.stringify({u: before.userAttached, l: before.lastUserSeenAt})}`);
+
+  // A monitor tile attaches: still not the user.
+  const tile = new WebSocket(`ws://127.0.0.1:${state.port}/ws?room=${internal}&name=wall&source=monitor&replay=0&token=${state.sessionSecret}`);
+  await new Promise((r) => tile.on('open', r));
+  await delay(300);
+  const withTile = await entryOf();
+  assert.equal(withTile.userAttached, false, 'a wall tile is a spectator');
+  assert.equal(withTile.lastUserSeenAt, null, 'no stamp before any human looks');
+  tile.close();
+
+  // The user opens it (a plain web attach): attached now = seen through now.
+  const viewer = new WebSocket(`ws://127.0.0.1:${state.port}/ws?room=${internal}&name=jian&replay=0&token=${state.sessionSecret}`);
+  await new Promise((r) => viewer.on('open', r));
+  await delay(300);
+  const watching = await entryOf();
+  assert.equal(watching.userAttached, true);
+  assert.ok(Math.abs(watching.lastUserSeenAt - Date.now()) < 5000, 'attached reads as seen-through-now');
+
+  // They leave: the detach moment is the high-water mark of what they saw.
+  const closedAt = Date.now();
+  viewer.close();
+  await delay(1600); // past the debounced persist
+  const after = await entryOf();
+  assert.equal(after.userAttached, false);
+  assert.ok(after.lastUserSeenAt >= closedAt - 1000 && after.lastUserSeenAt <= Date.now(),
+    `detach stamped the seen time, got ${after.lastUserSeenAt}`);
+
+  // And the stamp is durable, not a process memory.
+  const onDisk = JSON.parse(await fs.readFile(path.join(hopHome, '.session-seen.json'), 'utf8'));
+  assert.ok(onDisk[internal] >= closedAt - 1000, 'stamp persisted for the hourly generator');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+    { name: 'seenprobe', internalName: internal });
+});

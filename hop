@@ -3966,6 +3966,56 @@ function consumePendingLocalCliClaim(sessionName, claimId) {
     return true;
 }
 
+// ── When did a HUMAN last look at each session? ───────────────────────────
+// The server witnesses every attach, which makes it the one place that can
+// answer device-independently (the web/iOS "seen" markers live per device in
+// local storage). The briefing generator uses this to read exactly what the
+// user has NOT seen. Monitor tiles are spectators and terminal-api clients
+// are agents — neither counts as the user looking.
+const SESSION_SEEN_FILE = path.join(HOME_DIR, '.session-seen.json');
+let sessionSeenStamps = null; // internalName -> epoch ms of last user detach
+const userViewingCounts = new Map(); // internalName -> live user-view connections
+let sessionSeenSaveTimer = null;
+
+function isUserViewingSource(source) {
+    const s = String(source || '');
+    return s !== 'monitor' && !s.startsWith('terminal-api-');
+}
+
+function loadSessionSeenStamps() {
+    if (sessionSeenStamps) return sessionSeenStamps;
+    try {
+        const parsed = JSON.parse(fs.readFileSync(SESSION_SEEN_FILE, 'utf8'));
+        sessionSeenStamps = parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) {
+        sessionSeenStamps = {};
+    }
+    return sessionSeenStamps;
+}
+
+function stampSessionSeen(sessionName) {
+    const stamps = loadSessionSeenStamps();
+    stamps[sessionName] = Date.now();
+    // Debounced: attach/detach can churn (reconnects); one write per second
+    // is plenty for a signal consumed hourly.
+    if (sessionSeenSaveTimer) return;
+    sessionSeenSaveTimer = setTimeout(() => {
+        sessionSeenSaveTimer = null;
+        try { writePrivateFile(SESSION_SEEN_FILE, JSON.stringify(loadSessionSeenStamps(), null, 2)); }
+        catch (e) { /* next stamp retries */ }
+    }, 1000);
+    if (typeof sessionSeenSaveTimer.unref === 'function') sessionSeenSaveTimer.unref();
+}
+
+function getSessionSeenInfo(sessionName) {
+    const attachedNow = (userViewingCounts.get(sessionName) || 0) > 0;
+    // Attached right now means seen-through-now; otherwise the last detach.
+    return {
+        userAttached: attachedNow,
+        lastUserSeenAt: attachedNow ? Date.now() : (loadSessionSeenStamps()[sessionName] || null)
+    };
+}
+
 function noteClientConnected(sessionName, source, claimId = null) {
     if (!sessionName) return;
     if (source === 'local-cli') {
@@ -3977,6 +4027,10 @@ function noteClientConnected(sessionName, source, claimId = null) {
         entry.localCliCount += 1;
     }
     sessionClientSummary.set(sessionName, entry);
+    if (isUserViewingSource(source)) {
+        userViewingCounts.set(sessionName, (userViewingCounts.get(sessionName) || 0) + 1);
+        stampSessionSeen(sessionName);
+    }
 }
 
 function noteClientDisconnected(sessionName, source) {
@@ -3991,6 +4045,14 @@ function noteClientDisconnected(sessionName, source) {
         sessionClientSummary.delete(sessionName);
     } else {
         sessionClientSummary.set(sessionName, entry);
+    }
+    if (isUserViewingSource(source)) {
+        const next = Math.max(0, (userViewingCounts.get(sessionName) || 0) - 1);
+        if (next === 0) userViewingCounts.delete(sessionName);
+        else userViewingCounts.set(sessionName, next);
+        // The detach stamp is the one that matters: the user has seen
+        // everything up to the moment they left.
+        stampSessionSeen(sessionName);
     }
 }
 
@@ -4063,7 +4125,8 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdBy: config?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
             localCliCount,
-            hasLocalCli: clientSummary.hasLocalCli || localCliCount > 0 || s.hasLocalCli === true
+            hasLocalCli: clientSummary.hasLocalCli || localCliCount > 0 || s.hasLocalCli === true,
+            ...getSessionSeenInfo(s.name)
         });
     }
 
@@ -4106,7 +4169,8 @@ function buildSessionEntries(haySessions, opts = {}) {
                 createdBy,
                 agentPermitted: config?.agentPermitted === true,
                 localCliCount: clientSummary.localCliCount,
-                hasLocalCli: clientSummary.hasLocalCli
+                hasLocalCli: clientSummary.hasLocalCli,
+                ...getSessionSeenInfo(name)
             });
         } else {
             const entry = sessionMap.get(name);
@@ -4169,7 +4233,8 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdBy: effective?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
             localCliCount: clientSummary.localCliCount,
-            hasLocalCli: clientSummary.hasLocalCli
+            hasLocalCli: clientSummary.hasLocalCli,
+            ...getSessionSeenInfo(name)
         });
     }
 
@@ -9668,6 +9733,10 @@ happens until someone clicks it.
                 autoStart: s.autoStart,
                 createdAt: s.createdAt,
                 createdBy: s.createdBy || 'user',
+                // The seen witness (see getSessionSeenInfo): device-
+                // independent, for the briefing generator's unseen window.
+                userAttached: s.userAttached === true,
+                lastUserSeenAt: s.lastUserSeenAt || null,
                 // How that was decided — see VIA_HEADER. Lets the UI show a
                 // decisive agent origin ("created via MCP") differently from
                 // an inferred one ("guessed from the CLI's environment").

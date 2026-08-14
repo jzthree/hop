@@ -85,6 +85,26 @@ describe("ViewsPanel", () => {
     await waitFor(() => expect(screen.getByText("shot.png")).toBeTruthy());
   });
 
+  it("clear is two-step, scope-bounded, and leaves live servers alone", async () => {
+    render(<ViewsPanel session="Orion" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    const clear = screen.getByText("clear");
+    fireEvent.click(clear);
+    // Armed, not fired: freeing space is a decision, not a hover accident.
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[1]?.method === "DELETE").length).toBe(0);
+    fireEvent.click(screen.getByText("release the copies?"));
+    await waitFor(() => {
+      const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c) => c[1]?.method === "DELETE");
+      expect(calls.length).toBe(1);
+      // Scoped open clears ONE session's copies, and says all — the daemon
+      // deletes copies only, so the agent's source files cannot be touched.
+      expect(JSON.parse(calls[0][1].body)).toEqual({ session: "Orion", all: true });
+    });
+    await waitFor(() => expect(screen.queryByText("Views end-to-end")).toBeNull());
+  });
+
   it("delete is two-step, and only the second click calls the API", async () => {
     render(<ViewsPanel onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());

@@ -158,6 +158,7 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
   // Two-step delete, disarmed by leaving the row: a browser confirm() dialog
   // over a floating panel reads as a different app interrupting.
   const [armedDelete, setArmedDelete] = useState<string | null>(null);
+  const [armedClear, setArmedClear] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   // Frozen at open. The mark-seen effect below fires the moment the list
   // lands, so reading live storage during render would clear every "new" dot
@@ -316,6 +317,27 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
       setCopied(item.path);
       window.setTimeout(() => setCopied((c) => (c === item.path ? null : c)), 1400);
     }).catch(() => { /* clipboard denied — the ↗ anchor still carries the URL */ });
+  };
+
+  // Clear the current scope's published COPIES. `hop view` copies files into
+  // the daemon's own store, so this releases exactly the space the feature
+  // consumes and cannot touch the agent's originals; live-server rows stay,
+  // because their resource is the running session, not a file.
+  const clearScope = () => {
+    if (!armedClear) { setArmedClear(true); return; }
+    setArmedClear(false);
+    const scope = effectiveScope;
+    fetch("/api/views", {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(scope ? { session: scope, all: true } : { all: true })
+    }).then((r) => {
+      if (!r.ok) return;
+      setItems((cur) => (cur || []).filter((i) => i.kind === "server"
+        || (scope ? i.session.toLowerCase() !== scope.toLowerCase() : false)));
+      setPreview((p) => (p && p.kind !== "server" ? null : p));
+    }).catch(() => { /* rows stay; nothing lied about being cleared */ });
   };
 
   const deleteItem = (item: ViewItem) => {
@@ -521,6 +543,15 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
             </span>
           )}
           <span className="views-head-spacer" />
+          {(items?.some((i) => i.kind !== "server") ?? false) && (
+            <button type="button"
+                    className={"views-act danger views-clear" + (armedClear ? " armed" : "")}
+                    title="Free the space hop's published copies use — source files are never touched"
+                    onMouseLeave={() => setArmedClear(false)}
+                    onClick={clearScope}>
+              {armedClear ? "release the copies?" : "clear"}
+            </button>
+          )}
           <button type="button" className="views-close" aria-label="Close views" onClick={onClose}>×</button>
         </div>
         <div className="views-body">

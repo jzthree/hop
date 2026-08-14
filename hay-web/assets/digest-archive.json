@@ -1,6 +1,192 @@
 {
  "editions": [
   {
+   "generated_at": "2026-08-14T01:41:46.368Z",
+   "summary": "A bug had been silently killing every motif-gate run in the accessibility work — it's fixed and seven arms are finally training — while the labelling loop is confirmed stopped but sitting idle on three decisions it won't make for you.",
+   "items": [
+    {
+     "session": "Accessibility",
+     "headline": "It found and fixed a bug that was silently killing every motif-gate arm, so none of them were actually training; seven are now up — the footprint form, the group-sparsity penalty, and the wide-anchor variant — with the first evals at step 10,000 next to read, against the dense operator's 0.6663 as the bar. It has also taken up the sharper question you raised on screen: whether two runs with the same gate configuration actually learn the same motifs.",
+     "why": "If replicates don't converge on the same motifs, the gallery of gating motifs describes one training run rather than a mechanism — and the control with the wide-context branch deleted, the one that decides whether any of this comparison is meaningful, was due to give its first read about now and hasn't surfaced.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "room",
+     "headline": "Your stop finally took. The labelling loop is confirmed halted with no timer, monitor, or cron left armed to wake it, closing out the two editions where the command never registered. It is now parked on three calls only you can make: whether a commit in this working tree is a stale duplicate of one a parallel session already pushed, whether to sweep the whole nesting queue or only the ~291 rows that matter, and whether to repoint the 290 already-labelled items at their higher-resolution photos at the cost of roughly three batches of relabelling.",
+     "why": "That last question has gone unanswered for four editions, and the session is genuinely idle now rather than working — nothing here moves again without you.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "music",
+     "headline": "The two model sizes look like they are trading places. The smaller 274M run is the one now flattening toward its floor, while the larger 558M still has clear descent left and should not be cooled down yet — so the natural order is to run the smaller model's finishing cooldown first and let the big one grind. In wall-clock the smaller is still ahead by 0.0054; per training step the larger stays about 0.007 better.",
+     "why": "That cooldown is the measurement that actually settles which size wins, it will not start unasked, and both models keep spending GPU hours producing no verdict until it does.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-14T00:41:24.450Z",
+   "summary": "Your usage window has reset — the scheduling session is already running commands again — but nothing else restarted itself, and the two things you typed before the limit hit are still unsent: the stop for the labelling loop and the splice follow-up question.",
+   "items": [
+    {
+     "session": "room",
+     "headline": "The quota is back and the labelling session is reachable again, but the \"stop the loop\" you typed before the limit hit never registered — the refusal is still sitting on screen directly under it. It will now either wake on its own timer and carry on labelling the batches you meant to halt, or sit there doing nothing.",
+     "why": "Neither outcome is what you asked for, and the only fix is retyping the stop before it starts spending freshly restored quota.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "The splice session still has not run the question you asked it two hours ago — how closely the motif stage's own prediction tracks the final one as you vary the strength of the auxiliary loss. That was refused by the limit before a single command ran, and nothing re-sends it, so the window sits on 767,600 tokens of context doing nothing.",
+     "why": "This is the direct confirmation of this afternoon's reversal — that the auxiliary loss, not sparsity or distillation, is what makes the motif stage readable — and it is one retype away from running.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility-fork",
+     "headline": "On your go-ahead it released the jobs stuck in the silent \"launch failed, requeued\" hold and is rerouting them into your own idle capacity, since the cluster it was aiming at has 132 of 160 GPUs draining for a reboot. It now wants two standing tools: a watcher that catches that silent hold by itself — it is what left two accessibility arms secretly not training — and a sampler logging real free capacity every fifteen minutes for a week, so the cluster choice rests on more than today's maintenance window.",
+     "why": "Both are worth having, but this window is at 100% of its context and cannot build them, so they need a fresh session — as do the nine faster-batch accessibility arms still unsent behind all this.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-13T23:41:17.083Z",
+   "summary": "Your usage window is spent again — and it swallowed two things you typed: the \"stop the loop\" in the labelling session and the pre- versus post-recurrent question in the splice session, neither of which ran. Nothing agentic moves until 6:40pm Chicago, about two hours out.",
+   "items": [
+    {
+     "session": "room",
+     "headline": "Your \"stop the loop\" never landed. The labelling session hit the usage limit, and the limit refused both its own scheduled work and your stop command — the screen shows the refusal sitting directly under what you typed. Its checklist still ends by re-arming the timer that wakes it, so when the window clears it is set to resume labelling as if you had never asked it to stop.",
+     "why": "The command has to be reissued after the reset or the loop starts spending your freshly-restored quota on batches you meant to halt.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Europa",
+     "headline": "You logged back in and asked the splice session to check how closely the motif stage's prediction tracks the final one across different strengths of the auxiliary loss — the direct follow-through on the finding it reversed this afternoon. That question hit the same limit before a single command ran. The window is holding 767,600 tokens of context and can answer nothing for about two hours.",
+     "why": "Nothing re-sends the question when the quota clears, so the measurement that would confirm this afternoon's reversal waits on you retyping it.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "This window has not moved in an hour, and the nine arms it promised to submit at the faster per-step batch — the change that would cut their twelve-hour walls for free — still have not gone out, and now cannot until your account window resets. The three that matter are already on the cluster and unaffected: the two gate variants and the control with the wide-context branch deleted, at step 2,500 of 40,001, first real read about two hours away.",
+     "why": "Cluster jobs keep running while agent windows are dead, so the floor experiment that decides whether the whole simplification question is meaningful still lands tonight — but everything queued behind it slips by however long the quota holds.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Orion",
+     "headline": "The desktop side of the terminal app shipped its redesigned Views panel — inline previews, thumbnails, delete — verified live. What it needs now is you on the phone: confirm build 347 closes the keyboard gap at the bottom of the splice session's terminal. The dictation session is waiting on the same kind of check for its build 66, where the larger transcription model is now the default.",
+     "why": "Two finished builds are sitting on your phone unverified, and both changes are visible enough that only you can sign them off.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-13T21:41:25.430Z",
+   "summary": "The splicing session measured the motif stage directly and reversed three of its own claims — the auxiliary loss is the biggest interpretability lever, not a useless one, and distillation produces models that are unreadable, which undercuts the phase you were about to build on it.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "It finally measured what the motif stage predicts before the recurrent layer touches it, and three things it told you flip. The auxiliary loss is the single biggest interpretability lever — the from-scratch run with it scores 0.4459 on site selection ahead of the recurrent layer, against 0.2590 for the weak sparsity penalty and roughly ten times the strong one — so its earlier \"aux buys zero interpretability\" is retracted; that claim came from counting motifs, which measures something else. Your argument for the lower sparsity penalty is now measured rather than eyeballed: the stronger penalty scores 0.0467, a 5.5-fold gap, and its better final correlation is just the recurrent layer covering for a motif stage that barely selects anything. And distillation does not make a model readable — the distilled run lands at 0.0787, below plain training. Sparse motifs and a meaningful motif stage are independent properties, not one.",
+     "why": "The distillation phase as written assumes distilled models are the interpretable ones, and that assumption just failed measurement; the combination that might rescue it — distillation with the auxiliary loss and the small 8-unit recurrent layer — has never been run.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "retro",
+     "headline": "The document-review session is still frozen behind two helpers it will wait on forever. The word-counting one shows the same 20 minutes and 194,000 tokens it showed at midday yesterday — a dead process, not a slow one — and the session has been parked on it across six editions, now holding 596,000 tokens open. The interface work itself is done and it flagged one honest gap: three of the blind controls are condensed summaries rather than raw transcripts, and regenerating them would produce fresh runs, not the originals.",
+     "why": "Only an interrupt from you frees this session, and the condensed controls mean part of the comparison isn't comparing what you think it is.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "room",
+     "headline": "The labelling session caught a systematic flaw in how it writes its own protocol. Its rules listed a cylinder and a cone as examples of a volume test but never the commonest vessel there is, and three labellers independently refused to label a plain hemispherical bowl — one asked in writing. That is the seventh time labellers have read an illustrative list as a complete roster. It also caught itself writing observed outcomes into the rules as evidence they work, so the next reader treats them as binding. Both are rewritten, with the volume clause now a runnable question: is there an inflection, or one monotonic sweep.",
+     "why": "Every label collected under the old wording was produced by people reading examples as an exhaustive list, so the gaps are systematic rather than random — and the same drafting mistake has now recurred seven times.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "opensupwrwhisper",
+     "headline": "The dictation bug it spent the session chasing was never real. Its \"fresh install\" tests were running against leftover state from earlier runs — already-onboarded, already pointed at a retired engine — so the first-run sheet was correctly staying hidden, and the code it added to fix it has been reverted. The accident did confirm the retired-engine cleanup works on genuine stale data. Build 66 is on your phone with the larger transcription model as the default and a first-run fast-versus-recommended choice.",
+     "why": "Nothing was broken, so the diff is small — but the default model changed, and only you can say whether dictation quality on it is acceptable before this goes out free.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-13T20:41:50.107Z",
+   "summary": "The splicing session has retracted the annotation comparison it gave you — the newer build trained on half the budget of the older one, so the answer may be backwards — while the accessibility control that decides whether that whole project has a question is finally running and reports in about two hours.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "It withdrew the annotation comparison. The newer gene build looked slightly worse — 0.7411 against the older one's 0.7425 — but the runs weren't comparable: the new one trained 300 epochs against the old one's 600, so it matched that score on half the budget and is likely the stronger of the two. The \"+0.0038\" gain it quoted earlier was also measured against the wrong baseline; the honest figure is −0.0014, and neither decides anything. It also found the merged annotation you asked it to build already exists — 13.6% more site slots, because the newer build's 17,302 extra genes rescue junctions the old one discarded as orphans. Two matched 600-epoch runs are now launched with a 60-hour wall set from the measured 5.15 min/epoch, so last night's wall-clock deaths shouldn't repeat.",
+     "why": "Every replicate and the distillation phase downstream inherits whichever annotation wins, so that choice was about to be made on numbers that don't support it.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "The control that decides whether the whole simplification question is meaningful — the same model with the wide-context branch deleted — is training at last, an hour in, alongside the two gate variants; the parameter count confirms the mechanism is genuinely live. First real read lands in about 2.3 hours, full runs in twelve. It also caught that these jobs use 10.9 of 95 GB of GPU memory, because the per-step batch is set to 60 against a cap of 300, and verified in the code that raising it changes nothing mathematically. The nine arms still to submit go out at 240, cutting those twelve-hour walls; it won't touch the three running, since a checkpoint refuses to resume if that setting changes and these are preemptible.",
+     "why": "Days of gate-versus-dense comparison mean nothing until that floor lands, and everything queued behind it now runs several times faster for free.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "data-migration",
+     "headline": "Third edition on the same unanswered question, and nothing has moved in three hours. The bulk transfer is still stalled on the flaky UTSW link with its Globus login expiring, and it will not choose between waiting and going to check the transfer endpoint on Nucleus without you. The unfinished half of yesterday's permission change is also still open — setgid is restored on neither cluster.",
+     "why": "If that credential has now lapsed the transfer needs a manual re-login before anything moves, and until setgid is back every file created from here lands private again.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "sequencebrowser",
+     "headline": "It's live. seq.zhoulab.io now serves the browser under its own name with hg38 demo data, which retires the wrong-assembly problem flagged earlier — the coordinates on screen finally match what the selector claims. It also deleted the Cloudflare Pages copy it had made, which was a second public copy of a private repo. Two things left, both its own findings: a track whose remote data fails goes silently blank instead of retrying, and the default landing view is the chr1 centromere, which is mostly gap.",
+     "why": "The domain work you had to do by hand is done; what remains is one silent-failure mode and a poor first impression on a site strangers can already load.",
+     "urgency": "finished"
+    },
+    {
+     "session": "room",
+     "headline": "It declined to repoint 290 already-labelled items at higher-resolution photographs and wants your call. The image address is part of the style fingerprint, so repointing would invalidate every one of those labels and cost roughly three batches of relabelling — to buy resolution on photos that were legible enough to label already. New imports get the better images either way. Separately, one tallying helper has been running 53 minutes on 380,000 tokens.",
+     "why": "A cheap decision to make, and that helper's token appetite is the same pattern that exhausted your account quota before dawn yesterday.",
+     "urgency": "fyi"
+    }
+   ],
+   "model": "opus"
+  },
+  {
+   "generated_at": "2026-08-13T19:41:57.449Z",
+   "summary": "Both model projects are stalled on compute rather than science — the splice arms died at their wall clock and sit un-resubmitted with the interpretability re-measurement queued behind them, while eight of your own H200s idle behind a scan hold.",
+   "items": [
+    {
+     "session": "Europa",
+     "headline": "Its three long training arms ran out of wall-clock time and stopped around epoch 465 of 600. Nothing is lost — each has resume flags and its own save directory, so a resubmit continues rather than restarts — but no resubmit has happened and the window is idle. It now measures a 600-epoch run at roughly 51 hours, so these need a 60-hour request, not the wall they were given. Worse: the pre-recurrent readout, the job replacing the interpretability result it retracted earlier today, is queued behind those same three arms.",
+     "why": "The correction to a result you were handed as final is still unmeasured, and it is waiting on runs that are no longer running.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility",
+     "headline": "Eight H200s in your own lab partition are sitting idle. All three nodes flagged for the security scan have now gone quiet — the last one's job just exited — and one is the 8-GPU H200 machine in the lab queue. It has drafted the message asking for them back, but that message is sitting in the window unsent while its nine relocated training arms compete for other groups' queues.",
+     "why": "One message releases a meaningful chunk of the lab's own capacity to work that is currently queueing behind other people.",
+     "urgency": "needs-you"
+    },
+    {
+     "session": "Accessibility-fork",
+     "headline": "The scheduling window found two accessibility arms that were never actually running — they had been left in a \"launch failed, requeued\" state that holds a job silently — and cleared them. It also found the cluster it was routing to has 132 of 160 GPUs draining for reboot, so thirteen queued jobs will not start for an unknown while, and is moving that work to idle capacity elsewhere. It wants to automate a watcher for the silent-hold state and a week-long capacity sampler; it is at 100% of its context.",
+     "why": "Two arms you believed were training were doing nothing, and this failure repeats until the watcher exists — but this window is out of room to build it.",
+     "urgency": "fyi"
+    },
+    {
+     "session": "Solstice",
+     "headline": "The terminal-switcher disconnects are fixed and deployed: the tunnel monitor was tearing down the whole connection on a single failed probe, and sub-second blips are now hidden while real outages still raise a banner. 117 tests pass and all 24 sessions survived the deploy — reload any open tabs to pick it up. Public signups remain built and switched off for a fourth edition, still waiting on the mail credential and a naming decision.",
+     "why": "The nuisance goes away on reload, but a finished feature has now sat dark a full day for want of a two-minute credential.",
+     "urgency": "blocked"
+    },
+    {
+     "session": "Hubble",
+     "headline": "The App Store window has gone dark. The job polling Apple's catalog every ten minutes for the app to appear was stopped, so nothing is watching for the listing to go live, and the in-app purchase is still in review on its own track — which is why the store page does not show it. The window hit a usage limit mid-answer, and a half-typed \"/logi\" is sitting in the box where you started signing in and walked away.",
+     "why": "Nobody is watching for the launch, and the session can answer nothing until that login is finished.",
+     "urgency": "needs-you"
+    }
+   ],
+   "model": "opus"
+  },
+  {
    "generated_at": "2026-08-13T18:41:07.601Z",
    "summary": "The accessibility project realized the control that decides whether its entire simplification question is even meaningful was never run — and the splicing session has retracted its interpretability result as having measured the wrong thing.",
    "items": [
@@ -1256,180 +1442,6 @@
      "headline": "It caught that the arm it rates as having the most remaining upside — the full run on the rebuilt gene annotation — could never have finished. The work needs roughly sixteen days of training against a queue that kills jobs at forty-eight hours, so it was set to be cut off repeatedly rather than fail in any visible way. It has restarted it on the loader that keeps data in memory, with the progress it had already accumulated intact, and the speedup it measures next pass decides whether that fix was enough. Around it the picture is stable: weakening the sparsity penalty and shrinking the recurrent core are both closed as negatives, and the long-range architecture run is 46 epochs into 600.",
      "why": "Nothing needed from you, but that same forty-eight-hour wall applies to every long job the genomics sessions have queued — including the 600-epoch run still in flight.",
      "urgency": "fyi"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T08:41:00.231Z",
-   "summary": "The subtree you brought from Princeton — the one item with no copy on the backup array — is in its final verification now, with a couple of hours of unattended deletion starting the moment it passes.",
-   "items": [
-    {
-     "session": "data-migration",
-     "headline": "Twenty-one of thirty items are gone, still with zero skips and zero errors, and the job has now reached the Princeton subtree. It is running a silent re-verification of that tree, roughly thirty minutes, and if it passes it goes straight into deleting about 11 terabytes spread over a million small files — a couple of hours, like the last slow directory. The 19 terabytes of human signal tracks are queued behind it and, being a handful of large files, will vanish in moments once reached. After that the run is finished.",
-     "why": "This is the last moment to look at the one dataset the backup array does not hold, and it ends on its own within the half hour whether or not you are awake for it.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "It caught a definition mismatch that may invalidate how many motifs the distilled model appears to have kept. The reporting tool counts a motif as active if its weight mass clears a fixed absolute threshold; the project's own working definition is relative — at least 5% of the largest motif. Those diverge in exactly the case at hand: a distilled model whose weights all shrank in overall scale would drop below the fixed cutoff wholesale, looking like it had pruned motifs, when in fact every motif is doing the same proportional work as before. It is recomputing the counts on the relative criterion now.",
-     "why": "Any claim that distillation thinned the motif repertoire rests on the absolute cutoff and could reverse entirely once the scale-invariant count comes back.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "The gating ladder stands at a global-context variant leading with 61.7 on 47,520 parameters and smooth-maximum pooling at 58.4 and still climbing, against the dense model's 66.6 — but the session itself has gone quiet and is sitting at an empty prompt waiting for a new task. Its own stated plan was to wait for the three newest arms, including your proposal to keep the whole motif and let a sparsity penalty set the width, to produce evaluations past 5,000 steps. Under the two-evals-plus-control rule it just adopted, none of them can be judged yet, and nothing is scheduled to go back and read them.",
-     "why": "Those runs will keep spending cluster time and finish unexamined unless you restart the session on them — and the context it is holding is close to full, so the thread may not survive much longer either way.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T07:41:26.931Z",
-   "summary": "The gating session's reproduction check came back clean — last night's fourteen-point collapse is a real effect, not a restart artifact — and it has finally adopted the evidence standard I have been pressing for, one hour after cancelling seven experiments without it.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "The rerun it owed you landed and it largely exonerates the results. A fresh copy of the plain-summing arm scored 31.2 at 5,000 steps against the original run's 30.6, so the resumed trajectory reproduces and the rise-to-51-then-fall-to-37 pattern is genuine overfitting rather than restart damage. The arms are also now separating far past the noise floor — smooth-maximum pooling at 58.4 against plain summing at 36.8, and a global-context variant leading at 61.7 with only 47,520 parameters, closing on the dense model's 66.6. And it committed out loud to the rule it should have had all along: no verdict on any arm without at least two evaluations plus a matched control.",
-     "why": "The ladder of results survives, but the seven arms it killed an hour ago were all cut on single early scores under the standard it has now abandoned — those questions are closed on evidence it no longer accepts.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "data-migration",
-     "headline": "Two hours on and the counter has not moved: still twenty of thirty items deleted, zero skips, zero errors, still grinding through the same directory of three million small files. The session has now said plainly what comes next — it will check in when that directory clears and the Princeton subtree begins. That is the one subtree flagged as having no copy on the backup array, and it is next in line.",
-     "why": "Your window to look at the un-backed-up Princeton data is the gap between this grind ending and its delete starting, and nothing will wake you when that moment comes.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "Two of the three directions you asked it to push are settled, both negative: weakening the sparsity penalty is a null (0.0002 spread against a 0.00185 noise floor — keep the current setting), and the small recurrent core cannot be shrunk (thirty to forty times worse agreement). The best single model sits at 0.7512, four ten-thousandths above last night. The extra-loss run and the long-range architecture are still going, and the storage repack is complete and verified.",
-     "why": "Those two live runs are now the only remaining shots at moving a number that has been flat for days, and the cheap ideas around it are exhausted.",
-     "urgency": "fyi"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T06:40:58.422Z",
-   "summary": "The gating session just admitted its sweep cannot tell a run that converged from one that simply hit its time limit — and it has now cancelled seven experiments this session on the strength of exactly those numbers.",
-   "items": [
-    {
-     "session": "Accessibility",
-     "headline": "It caught a third arm sitting frozen at its walltime limit and said the quiet part out loud: its sweep reads a run that ran out of clock the same way it reads a run that finished, which is the same mistake that made it misjudge an arm earlier tonight. It then cancelled three more experiments on the basis of their scores anyway — one declared superseded by a smaller model, one called a floor, one called answered — bringing the session's self-inflicted cuts to seven. The upside: the queue is now seven running and nine waiting, and everything waiting is a genuinely new idea, including your own proposal to keep the whole motif, drop the mixing weights, and let a sparsity penalty set the width. Still no sign of the matched-hardware reruns, third edition running.",
-     "why": "Every score it is pruning with may be a truncated run misread as a final answer, so the cuts are being made with the one instrument it just told you is unreliable.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "music",
-     "headline": "The screen is now completely empty — no question, no run status, just an offer to clear its memory. Three editions ago it asked your permission to run the larger model's learning-rate cooldown, the single measurement that decides whether the bigger or the smaller model actually wins; that request has not been answered and is no longer anywhere on screen. Both nine-day runs are unaccounted for on the display, and neither has a real final number without that cooldown.",
-     "why": "Nine days of training on two models is sitting on an unresolved comparison, and the session has stopped asking — nothing restarts this except you typing the question back in.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "data-migration",
-     "headline": "An hour of grinding and the counter has not moved: still twenty of thirty deleted, zero skips, zero errors, still inside the same directory of three million small files. The earlier thirty-five-minute estimate was wrong — this is metadata-bound and simply slow. The practical consequence is good news: the subtree you brought from Princeton, the one flagged as having no copy on the backup array, and the 19 terabytes of signal tracks have not been touched and are still queued behind this.",
-     "why": "The window to look at the un-backed-up Princeton data before it goes is still open, but it closes on its own whenever this file grind ends, most likely while you are asleep.",
-     "urgency": "needs-you"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T05:41:24.184Z",
-   "summary": "The archive delete is two-thirds done with zero skips — nothing has been spared — and the two items you cannot undo are the ones now in flight: the Princeton subtree flagged as having no backup copy, and the 19 terabytes of signal tracks your one added line put back on the list.",
-   "items": [
-    {
-     "session": "data-migration",
-     "headline": "Twenty of thirty items are deleted, zero errors and — the number that matters — zero skips, meaning every item so far passed its pre-delete backup check and none was held back. It is grinding through a directory of three million small files now, roughly thirty-five more minutes for 768 gigabytes. Queued right behind it are the two you would want a second look at: the subtree you brought from Princeton, the one flagged as having no copy on the backup array, and the 19 terabytes of human signal tracks. The signal tracks are a handful of large files, so they go in moments once reached.",
-     "why": "Princeton was the known exception to the backup rule, and it is now minutes from its turn rather than sitting outside the run — the only thing protecting it is a verify step that has to fail closed.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "Both clusters are saturated — no free cards on one, a dozen jobs pending on the other — so the session made room by cancelling four of its own arms, declaring their questions settled because one configuration hit 57.8 against three others at 53 to 55 with fewer parameters. The matched-control reruns that would tell you whether that entire ladder measures the science or the hardware it ran on are still not among the things it lists as waiting to start. What is waiting: the four genuinely new ideas from this round, including your own proposal to keep the whole motif, drop the mixing weights, and let a sparsity penalty decide the effective width.",
-     "why": "It is now pruning experiments using the exact comparison nobody has validated, and your idea is at the back of a queue with no free cards.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "music",
-     "headline": "Parked exactly where it was an hour ago, and now the screen has cleared entirely — the request to run the larger model's learning-rate cooldown, the one measurement that decides whether the bigger or the smaller model actually wins, is no longer visible anywhere on it. Nothing on screen shows the state of either nine-day run, and neither has a real floor until that cooldown happens.",
-     "why": "The comparison I corrected for you last night is still unresolved, and the question that resolves it has now scrolled out of sight rather than being answered.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "Two threads landed cleanly. The storage repack is complete and verified, so the eight-fold bloat that was roughly halving the speed of every job that loads training data is gone across all datasets. And the question of whether the small recurrent component can be shrunk is closed as a firm no: fewer layers or fewer units both cost thirty to forty times worse agreement with the teacher, with a control proving that is real capacity loss rather than the price of retraining. With the earlier finding that the smallest version saves only 27% of parameters, that trade is dead.",
-     "why": "Nothing needed from you — but any plan resting on a cheaper recurrent core should be dropped, and load-speed comparisons from before the repack no longer apply.",
-     "urgency": "finished"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T04:41:44.533Z",
-   "summary": "The verdict I gave you on the music models was premature — the smaller one wins per hour of compute, the larger one per step, and the run that actually decides it is waiting on your yes; meanwhile the delete has cleared a third of its list with the 19 terabytes of signal tracks you added by hand still ahead of it.",
-   "items": [
-    {
-     "session": "music",
-     "headline": "Both runs are healthy at nine days, and the session redid the comparison properly: matched on epochs, the larger model is the better learner by about 0.007, while the smaller one leads on every measure you actually pay for — wall-clock, GPU-hour, and FLOP — sitting at 0.6443 now. Neither number is a real floor, because neither has had its learning-rate cooldown yet, which is usually worth another 0.005 to 0.015. It is asking permission to run the larger model's cooldown, which is the measurement that ends the argument, and has been idle since it asked.",
-     "why": "I told you last night the smaller model had this won; that now depends entirely on which axis you are optimising, and the deciding run is one word away.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "data-migration",
-     "headline": "Nine of thirty items are deleted with zero skips and zero verification failures — the per-item recheck against the backup array is working exactly as designed. What remains is the heavy, irreversible end: the bulk items, the 19 terabytes of human signal tracks, and the Princeton subtree. Two things worth your eye. The signal tracks are the set the original plan promised to keep and that your one added line put back on the delete list. And the Princeton subtree — the one flagged as having no copy on the backup array, which I reported was being left alone — now appears in the remaining work with a slow re-verification rather than sitting outside the run.",
-     "why": "Everything destructive is still in front of this job rather than behind it, and the only thing standing between the one un-backed-up subtree and permanent loss is a verify step that has to fail closed.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "It has launched two more runs — a dropout-style sparsity penalty at two strengths — on exactly the arm that lost fourteen points late in training. The two matched-control reruns that would tell you whether that entire ladder of results measured the hardware rather than the science are still sitting in the queue, unstarted, and your reply asking for a clean rerun on matched cards is no longer in the prompt box. One piece of good news, self-caught: its report that the restart had resumed from step 5,301 was a stale log file it grepped before the new job wrote anything. The checkpoint is intact at step 30,001, and it will confirm against real job IDs rather than pattern-matching this time.",
-     "why": "Fresh compute keeps going into variants built on a comparison nobody has validated, so if the control lands badly it takes tonight's runs down with it.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "room",
-     "headline": "Third edition stopped in the same place, but the weekly cap that halted the catalog sweep clears within the hour. That reset alone changes nothing: the session switched itself to a model that bills against credits this account does not have and saved it as the default for every new session you open, so your instruction — items with no genuine style tag should not appear in any style filter — will keep coming back as a credits error until you set the model back. The 199 items with no style at all are still invisible in every filter a shopper can use.",
-     "why": "The clock unblocks the account but not the session; one setting change is what actually restarts the sweep, and nothing does it for you.",
-     "urgency": "blocked"
-    },
-    {
-     "session": "Bellatrix",
-     "headline": "You asked this one why scrolling keeps failing in the terminal tile, and it has not touched the question — the screen is still the research menu it wrote beforehand, offering you three directions on the read-extent work and waiting for you to pick one. It has been idle at that fork since. It did flag one thing on its way past: the picture it is reasoning from is two to eight days old, and the Vista compute allocation was draining when it last looked.",
-     "why": "Nobody is on the scrolling bug, and that stale note about draining allocation is worth checking given how many jobs the genomics sessions have queued tonight.",
-     "urgency": "fyi"
-    }
-   ],
-   "model": "opus"
-  },
-  {
-   "generated_at": "2026-08-11T03:41:37.575Z",
-   "summary": "The archive delete is finally running and it is about 53 terabytes — three times the plan you first approved — while the only copy of your RNA search history sits unverified on that same storage; separately, the gating arm you were shown at 51 has fallen to 37 with more training.",
-   "items": [
-    {
-     "session": "data-migration",
-     "headline": "After sitting a full working day at its confirmation prompt, the archive-and-reclaim went ahead and is running now: 30 items, roughly 53 terabytes — more than three times the 15 the original plan promised, and well past the ~35 the signal-track line implied. The safeguard you'd want is built in: each item is re-checked against the backup array immediately before its own delete, so nothing goes without a confirmed copy. It is on a 476 GB analysis subtree at the moment, and the two things marked keep — the chromatin model data, and the one Princeton subtree with no backup — are being left alone. Sharing the data and cerebellum run directories with your colleague is done.",
-     "why": "The one thing never checked is the RNA evolutionary search: its only surviving copy is on this same cluster, nobody has laid eyes on it in six editions of asking, and a 53-terabyte sweep is moving through that storage right now.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Accessibility",
-     "headline": "More training is now making the gating results worse, not better. The arm where each motif gates itself peaked at 51.2 around 25,000 steps and then fell steadily to 36.8 by 40,000 — fourteen points — while its training loss kept dropping the whole way. The session checked the obvious excuse and rejected it: this is not damage from the mid-run restart, it is ordinary overfitting, and the gates stay healthy throughout. It also caught a confound of its own making — the two arms it just ranked against each other ran on different machines with different batch sizes, one on the departmental cards and one on the borrowed cluster — so that verdict, and the ladder of runs behind it, may be measuring hardware. A matched control is running. Your reply telling it to rerun both cleanly on the same cards is typed and unsent, the third time this session has stalled that way.",
-     "why": "Every number this project quotes comes from a checkpoint somebody chose, and this arm shows the choice can swing a result by fourteen points — so nothing from this family belongs in a figure until the matched control lands.",
-     "urgency": "needs-you"
-    },
-    {
-     "session": "Europa",
-     "headline": "The storage-format deadline I pressed you on twice is closed with nothing lost. The repack is running across all 26 datasets, four at a time so it doesn't starve the live training jobs, writing new files alongside the originals rather than touching them — no approval needed and nothing at risk. The urgency was a false alarm: the two annotation builds it was racing had already finished, so they simply get repacked with everything else. The splice work behind it is steady — best single model still 0.7508, with the rebuilt annotation and your three push experiments training.",
-     "why": "Once it finishes, every job that loads training data should run roughly twice as fast, and this thread no longer needs you.",
-     "urgency": "fyi"
-    },
-    {
-     "session": "room",
-     "headline": "Still stopped, and now about two hours from unsticking itself — the weekly cap that halted the catalog sweep resets at midnight Chicago. The model the session switched itself to in the meantime does not get around that, bills against credits the account doesn't have, and was saved as the default for every new session you open. Your instruction — items with no genuine style tag should not appear in any style filter — is still sitting behind that error, unexecuted.",
-     "why": "Nothing restarts on its own: even after the cap clears you have to set the model back, or every new session across the fleet opens on one that errors out immediately.",
-     "urgency": "blocked"
     }
    ],
    "model": "opus"

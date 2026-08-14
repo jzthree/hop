@@ -433,6 +433,43 @@ function packagedAssetFallback(relPath) {
     }
 }
 
+// Clear the published COPIES — `hop view` copies files into VIEWS_DIR, so
+// "clear" releases exactly the space this feature consumes and can never
+// touch the agent's originals, which live wherever they were created
+// (Jian: "release any space hop consumes but do not delete the source
+// files"). Live-server rows survive: they weigh nothing and their real
+// resource is the running session, which is not a Views-panel decision.
+function clearViewFiles(onlySession) {
+    let removed = 0, bytes = 0;
+    try {
+        const sessions = onlySession ? [onlySession]
+            : fs.readdirSync(VIEWS_DIR).filter((d) => !d.startsWith('.') && d !== 'manifest.json');
+        for (const sess of sessions) {
+            const dir = path.join(VIEWS_DIR, sess);
+            if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
+            const meta = readViewMeta(sess);
+            for (const f of fs.readdirSync(dir)) {
+                if (f.startsWith('.')) continue;
+                if (meta[f]?.kind === 'server') continue;
+                try {
+                    bytes += fs.statSync(path.join(dir, f)).size;
+                    fs.rmSync(path.join(dir, f));
+                    delete meta[f];
+                    removed += 1;
+                } catch (e) { /* the next file still clears */ }
+            }
+            if (Object.keys(meta).length) writeViewMeta(sess, meta);
+            else {
+                // Nothing left worth a folder: take the sidecar and dir too.
+                try { fs.rmSync(viewMetaPath(sess), { force: true }); } catch (e) { }
+                try { if (!fs.readdirSync(dir).length) fs.rmSync(dir, { recursive: true }); } catch (e) { }
+            }
+        }
+    } catch (e) { /* partial clears still rebuild an honest index */ }
+    rebuildViewManifest();
+    return { removed, bytes };
+}
+
 // Per-session view facts for the sessions list: how many, how recent, and
 // what the newest one is called. Read from the manifest (already a cheap
 // single file) rather than re-scanning, and re-read only when it changes —
@@ -9356,6 +9393,15 @@ happens until someone clicks it.
         if (req.method === 'DELETE' && parsedUrl.pathname === '/api/views') {
             const body = await readRequestJson(req);
             const sess = String(body?.session || '');
+            // Bulk form: {all:true} clears every session's file views;
+            // {session, all:true} clears one session's. Copies only — the
+            // sources the agent published from are not hop's to delete.
+            if (body?.all === true) {
+                const out = clearViewFiles(sess ? path.basename(sess) : null);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, ...out }));
+                return;
+            }
             const name = path.basename(String(body?.name || ''));
             const viewsRoot = path.resolve(VIEWS_DIR);
             const target = path.resolve(path.join(viewsRoot, sess, name));
@@ -13737,6 +13783,7 @@ const HELP_SECTIONS = [
         `hop view --name x.md -    Publish what's on stdin (no temp file needed)`,
         `hop view --list [--all]   What this session has published (--all: the whole fleet)`,
         `hop view --rm <name>      Unpublish one`,
+        `hop view --clear [--all]  Clear published copies — frees hop's space, never touches source files`,
         `hop port <port> [name]    Expose a local web server (live proxy, WebSocket-safe); --standalone to detach`,
     ] },
     { title: 'Maintenance', lines: [
@@ -14800,6 +14847,18 @@ async function main() {
             }
             process.exit(0);
         }
+        if (argv.includes('--clear')) {
+            const everywhere = argv.includes('--all');
+            if (!everywhere && !session) {
+                log('hop view --clear: no session (use --session <name>, or --all for every session).', RED);
+                process.exit(2);
+            }
+            const out = clearViewFiles(everywhere ? null : session);
+            const kb = Math.round(out.bytes / 1024);
+            log(`Cleared ${out.removed} view${out.removed === 1 ? '' : 's'} (${kb} KB) — published copies only; source files untouched.`,
+                out.removed ? GREEN : RESET);
+            process.exit(0);
+        }
         if (removals.length) {
             let gone = 0;
             const meta = readViewMeta(session);
@@ -14820,6 +14879,7 @@ async function main() {
             log('Usage: hop view [--title "what this is"] <file...>', YELLOW);
             log('       hop view --name report.md --title "..." -     (read the file from stdin)', DIM);
             log('       hop view --list [--all]                        hop view --rm <name>', DIM);
+            log('       hop view --clear [--all]     free the published copies (sources are never touched)', DIM);
             log('HTML, PDF, images, video, markdown — anything a browser renders.', DIM);
             process.exit(1);
         }

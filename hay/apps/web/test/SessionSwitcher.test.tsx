@@ -357,3 +357,36 @@ describe("manual folders in the wall", () => {
     expect(screen.getByRole("button", { name: /Search full history for/ })).toBeTruthy();
   });
 });
+
+describe("create colliding with a hidden session", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("explains the invisible holder and reveals it instead of failing mutely", async () => {
+    // The mybot incident, second act: the name is taken by a session the
+    // user cannot SEE (agent-created, loose, other tab). A bare "already in
+    // use" against an empty wall reads as "create silently did nothing".
+    const holder: SwitcherSession = {
+      name: "mybot", displayName: "mybot", internalName: "mybot",
+      active: true, starting: false, createdBy: "agent"
+    };
+    const onNotice = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: "Session name already in use" })
+    })));
+
+    render(<SessionSwitcher {...props} onNotice={onNotice} sessions={[...sessions, holder]} open />);
+    // The holder is genuinely hidden on the default (user) tab.
+    expect(screen.queryByText("mybot")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.change(screen.getByLabelText("New session name"), { target: { value: "mybot" } });
+    fireEvent.submit(screen.getByLabelText("New session name").closest("form")!);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(onNotice).toHaveBeenCalledWith(expect.stringMatching(/already exists.*hidden.*Agent/i));
+    // And the wall now SHOWS it — scope flipped so the answer is on screen.
+    expect(screen.getByText("mybot")).toBeTruthy();
+  });
+});

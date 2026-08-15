@@ -2368,23 +2368,49 @@ export const SessionSwitcher = ({
         // or be an agent-created session they never opened. Name it, say
         // where it lives, and put it on screen — the answer to "it doesn't
         // work" should be the session that was in the way.
+        // Search the WHOLE fleet, not the visible wall: the holder may be
+        // hidden — parked, or an agent-created session on the other tab
+        // (the mybot incident: create "failed", the explanation was a
+        // session the user could not see). A silent 409 with an invisible
+        // cause reads as "it just doesn't work"; the answer must be the
+        // session that was in the way, revealed.
         const taken = res.status === 409
-          ? wallSessions.find((s) => (s.displayName || s.name).toLowerCase() === next.toLowerCase())
+          ? sessions.find((s) => (s.displayName || s.name).toLowerCase() === next.toLowerCase())
           : null;
         if (taken) {
           const home = folders.find((f) => f.id === taken.folderId);
-          onNotice(`"${taken.displayName || taken.name}" already exists${home ? ` in ${home.name}` : ""} — showing it`);
+          const visible = wallSessions.some((s) => sessionKey(s) === sessionKey(taken));
+          const hiddenByOrigin = !visibleSessions.some((s) => sessionKey(s) === sessionKey(taken));
+          const where = taken.parked
+            ? " — it was hidden among the parked sessions"
+            : hiddenByOrigin
+              ? " — it was hidden on the Agent sessions tab"
+              : home ? ` in ${home.name}` : "";
+          onNotice(`"${taken.displayName || taken.name}" already exists${where} — showing it`);
           setCreating(false);
           setCreateDraft("");
           setCreateInFolder(null);
+          // Reveal before focusing: flip whatever filter is hiding it.
+          if (hiddenByOrigin) setOriginScope("all");
+          if (taken.parked) setParkedOpen(true);
           const key = sessionKey(taken);
           setFocusedKey(key);
-          const idx = navIndexByKey.get(key);
-          if (typeof idx === "number") {
-            setKbdIndex(idx);
-            requestAnimationFrame(() => {
-              document.querySelector(`[data-nav-index="${idx}"]`)?.scrollIntoView({ block: "center" });
-            });
+          if (visible) {
+            const idx = navIndexByKey.get(key);
+            if (typeof idx === "number") {
+              setKbdIndex(idx);
+              requestAnimationFrame(() => {
+                document.querySelector(`[data-nav-index="${idx}"]`)?.scrollIntoView({ block: "center" });
+              });
+            }
+          } else {
+            // It enters the wall on the NEXT render (scope/park state just
+            // changed); scroll once the card exists.
+            window.setTimeout(() => {
+              const el = document.querySelector(`[data-session-key="${CSS.escape(key)}"]`)
+                || document.querySelector(`[data-nav-index]`);
+              el?.scrollIntoView({ block: "center" });
+            }, 120);
           }
           return;
         }
@@ -2491,6 +2517,7 @@ export const SessionSwitcher = ({
         role="button"
         tabIndex={0}
         data-nav-index={navIndexByKey.get(key)}
+        data-session-key={key}
         className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}`}
         draggable={draggable}
         onDragStart={draggable ? (e) => { setDragKey(key); e.dataTransfer.effectAllowed = "move"; } : undefined}

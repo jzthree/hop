@@ -182,7 +182,13 @@ export const filterSessionsByOrigin = (
 ) => {
   if (scope === "all") return sessions;
   if (scope === "agent") return sessions.filter((session) => session.createdBy === "agent");
-  return sessions.filter((session) => session.createdBy !== "agent");
+  // The user wall: everything not agent-made — PLUS anything filed in a
+  // folder. Folders are the user's own structure, and an agent only files a
+  // session into one because the user asked for it there ("create mybot
+  // under Softwares", relayed through an agent, landed createdBy=agent and
+  // VANISHED from the default wall — created, filed, invisible). Placement
+  // in user space outranks provenance.
+  return sessions.filter((session) => session.createdBy !== "agent" || !!session.folderId);
 };
 
 /**

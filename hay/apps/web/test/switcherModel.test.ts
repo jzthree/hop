@@ -473,3 +473,28 @@ describe("manual order never moves on its own", () => {
     expect(m.mode === "manual" && m.rows.map((r) => r.name)).toEqual(["c", "a", "b"]);
   });
 });
+
+describe("origin scope vs foldered sessions", () => {
+  const mk = (name: string, extra: Partial<SwitcherSession> = {}): SwitcherSession => ({
+    name, displayName: name, internalName: name, active: true, starting: false,
+    createdBy: "user", ...extra
+  });
+
+  it("a session an agent filed into the user's folder shows on the user wall", () => {
+    // The mybot incident: "create mybot under Softwares", relayed through an
+    // agent, landed createdBy=agent — created, filed, and invisible on the
+    // default tab. Placement in the user's own structure outranks provenance.
+    const sessions = [
+      mk("mine"),
+      mk("mybot", { createdBy: "agent", folderId: "f_soft" }),
+      mk("worker", { createdBy: "agent" })
+    ];
+    const user = filterSessionsByOrigin(sessions, "user").map((s) => s.name);
+    expect(user).toContain("mybot");
+    expect(user).toContain("mine");
+    expect(user).not.toContain("worker"); // loose agent workers stay on their tab
+
+    // The agent tab still lists it — it IS agent-created; no tab lies.
+    expect(filterSessionsByOrigin(sessions, "agent").map((s) => s.name)).toContain("mybot");
+  });
+});

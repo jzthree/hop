@@ -4626,6 +4626,7 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         startup: opts.startup,
         autoStart: opts.autoStart,
         createdBy: opts.createdBy,
+        createdVia: opts.createdVia,
         agentPermitted: opts.agentPermitted,
         workspaceName: opts.workspaceName,
         folderId: opts.folderId,
@@ -10915,6 +10916,10 @@ happens until someone clicks it.
                         startup,
                         autoStart,
                         createdBy: actor,
+                        // How it arrived (mcp/hopa): the mybot hunt dead-
+                        // ended at createdVia null because nothing here ever
+                        // recorded the channel.
+                        createdVia: resolveVia(req),
                         agentPermitted: actor === 'agent',
                         folderId,
                         workspaceName: targetWorkspaceName || null,

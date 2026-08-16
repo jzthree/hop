@@ -1,6 +1,6 @@
 ---
 name: hop-session
-description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers rendering math with hop math, handing over results a terminal cannot render — plots, PDFs, images, rendered markdown write-ups — with hop view (always with --title), exposing a running local web server with hop port, ringing the bell for attention, and phone-friendly output.
+description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers finding your session identity with hop whoami, rendering math with hop math, handing over results a terminal cannot render — plots, PDFs, images, rendered markdown write-ups — with hop view (always with --title), exposing a running local web server with hop port, ringing the bell for attention, and phone-friendly output.
 ---
 
 # Working in a hop terminal

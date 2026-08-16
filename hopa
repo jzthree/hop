@@ -47,6 +47,7 @@ const VERBS = {
   'agents':          { tool: 'hopx_agents_overview', pos: [] },
   'sessions':        { tool: 'hop_list_sessions', pos: [] },
   'info':            { tool: 'hop_server_info', pos: [] },
+  'whoami':          { tool: 'hop_current_session', pos: [] },
   'connect':         { tool: 'connect_server', pos: ['base_url'] },
 
   'term ls':         { tool: 'hop_list_terminals', pos: [] },
@@ -86,6 +87,7 @@ const USAGE = `hopa — agent-facing hop CLI (terminal orchestration; no admin v
 
   hopa                                live overview of agent terminals (same as: hopa agents)
   hopa sessions | info | ledger       list sessions / server info / task ledger
+  hopa whoami                         which hop session this process runs inside (for hop view --session)
 
   hopa term ls                        list terminals
   hopa term new [name] [--cwd P]      create a terminal

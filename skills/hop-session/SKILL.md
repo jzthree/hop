@@ -24,6 +24,30 @@ formula in your response; do not repeat the raw LaTeX next to it. When you
 need the rendered text inside a file or message, capture it:
 `hop math '<latex>'` and copy the command's output verbatim.
 
+## Which session are you in?
+
+Everything below targets a SESSION, and yours is knowable, not guessable:
+
+```bash
+hop whoami            # display name + internal name of this terminal's session
+hop whoami --json     # {"insideHopSession":true,"internalName":"…","displayName":"…"}
+```
+
+Inside a hop terminal, `HOP_SESSION` holds the session's internal name and
+`hop view` targets it automatically. But subprocesses you spawn may have that
+variable deliberately scrubbed (session-identity hygiene), and a renamed
+session's internal name never matches what the human calls it — so when in
+doubt, ask `hop whoami` and pass the answer explicitly:
+
+```bash
+hop view --session "$(hop whoami --json | jq -r .internalName)" --title "…" out.pdf
+```
+
+Over MCP, the same answer is the `hop_current_session` tool; via the agent
+CLI it is `hopa whoami`. If `hop whoami` says you are NOT in a session,
+never guess a target — list candidates (`hop view --list --all`,
+`hop_list_sessions`) or ask.
+
 ## Showing results a terminal cannot render (plots, PDFs, write-ups)
 
 When the deliverable is a plot, a figure, a report, a PDF, an image, or a

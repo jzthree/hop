@@ -3149,6 +3149,11 @@ class HopMCPServer {
         inputSchema: { type: 'object', properties: {} }
       },
       {
+        name: 'hop_current_session',
+        description: 'Which hop session THIS process runs inside — from the HOP_SESSION environment the terminal set, resolved to the display name humans see. This is the name to pass to hop view --session when publishing results, and the honest answer to "where am I?". Absent fields mean the process is not inside a hop terminal.',
+        inputSchema: { type: 'object', properties: {} }
+      },
+      {
         name: 'hop_list_sessions',
         description: 'List Hop sessions and metadata.',
         inputSchema: { type: 'object', properties: {} }
@@ -3681,6 +3686,32 @@ class HopMCPServer {
     if (name === 'hop_server_info') {
       this.refreshStateFileConnection();
       return this.wrapJson(this.getServerInfoPayload());
+    }
+
+    if (name === 'hop_current_session') {
+      // Answerable WITHOUT a daemon: the env fact stands on its own, and an
+      // agent asking "where am I" mid-outage still deserves the truth.
+      const internal = process.env.HOP_SESSION || null;
+      const payload = {
+        insideHopSession: !!internal,
+        internalName: internal,
+        displayName: null,
+        note: internal
+          ? 'Use these names for hop view --session and anywhere a session is addressed.'
+          : 'Not inside a hop terminal (HOP_SESSION unset). Publishing needs an explicit target: hop view --session <name>; hop_list_sessions names the candidates.'
+      };
+      if (internal) {
+        try {
+          this.refreshStateFileConnection();
+          this.ensureConnection();
+          const list = await this.callApi('GET', '/api/sessions');
+          const sessions = Array.isArray(list?.sessions) ? list.sessions : [];
+          const hit = sessions.find((x) => (x.internalName || x.name) === internal)
+            || sessions.find((x) => String(x.internalName || '').toLowerCase() === internal.toLowerCase());
+          if (hit) payload.displayName = hit.displayName || hit.name || null;
+        } catch (e) { /* the env facts still stand */ }
+      }
+      return this.wrapJson(payload);
     }
 
     this.ensureConnection();

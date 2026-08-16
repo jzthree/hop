@@ -13648,7 +13648,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'new',
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
     'mail', 'registration', 'canonical'
 ];
 
@@ -13789,6 +13789,7 @@ const HELP_SECTIONS = [
         `hop view --list [--all]   What this session has published (--all: the whole fleet)`,
         `hop view --rm <name>      Unpublish one`,
         `hop view --clear [--all]  Clear published copies — frees hop's space, never touches source files`,
+        `hop whoami [--json]      Which session this shell is inside — the name hop view targets`,
         `hop port <port> [name]    Expose a local web server (live proxy, WebSocket-safe); --standalone to detach`,
     ] },
     { title: 'Maintenance', lines: [
@@ -14795,6 +14796,38 @@ async function main() {
     // notification. For agents, via the hop-session skill: use it only when
     // blocked and waiting would waste the human's time (a decision, a dead
     // VPN, credentials) — never for routine completions.
+    // hop whoami — which session is this shell inside? The answer an agent
+    // needs before hop view can target anything: HOP_SESSION carries the
+    // INTERNAL name, invisible in any UI once the session is renamed, so
+    // this resolves the display name humans actually see. --json for agents.
+    if (process.argv[2] === 'whoami') {
+        const internal = process.env.HOP_SESSION || '';
+        const asJson = process.argv.includes('--json');
+        if (!internal) {
+            if (asJson) { console.log(JSON.stringify({ insideHopSession: false })); process.exit(1); }
+            log('Not inside a hop session (HOP_SESSION is unset).', YELLOW);
+            log(`Publishing from here needs an explicit target: ${CYAN}hop view --session <name> …${RESET}`, DIM);
+            process.exit(1);
+        }
+        let display = null;
+        const state = isServerRunning();
+        if (state) {
+            try {
+                const res = await fetchSessionList(state);
+                const hit = (res?.sessions || []).find((x) => (x.internalName || x.name) === internal);
+                if (hit) display = hit.displayName || hit.name || null;
+            } catch (e) { /* the env fact still stands */ }
+        }
+        if (asJson) {
+            console.log(JSON.stringify({ insideHopSession: true, internalName: internal, displayName: display }));
+            process.exit(0);
+        }
+        const renamed = display && display !== internal;
+        log(`${BOLD}${display || internal}${RESET}${renamed ? `  ${DIM}(internal: ${internal})${RESET}` : ''}`, GREEN);
+        log(`hop view targets this session automatically; from a scrubbed subprocess, pass ${CYAN}--session ${internal}${RESET}.`, DIM);
+        process.exit(0);
+    }
+
     if (process.argv[2] === 'notify') {
         const msg = process.argv.slice(3).join(' ').trim();
         if (!msg) {

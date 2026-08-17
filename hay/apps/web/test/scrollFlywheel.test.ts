@@ -111,3 +111,143 @@ describe("attachScrollFlywheel", () => {
     dispose();
   });
 });
+
+describe("app-owned trackpad panning", () => {
+  // A term in the state every Claude session runs: alt screen + tracking.
+  const mkAppTerm = () => ({
+    scrolled: [] as number[],
+    scrollLines() { /* app-owned: local scroll must never happen */ },
+    buffer: { active: { type: "alternate", viewportY: 0 } },
+    modes: { mouseTrackingMode: "drag" }
+  });
+
+  let el: HTMLElement;
+  let rafCbs: FrameRequestCallback[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    el = document.createElement("div");
+    document.body.appendChild(el);
+    rafCbs = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => (rafCbs.push(cb), rafCbs.length));
+    vi.stubGlobal("cancelAnimationFrame", () => { rafCbs = []; });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    el.remove();
+  });
+
+  const pan = (deltaY: number, timeStamp: number, extra: Partial<WheelEvent> = {}) => {
+    const e = new Event("wheel", { cancelable: true }) as WheelEvent;
+    Object.defineProperties(e, {
+      deltaY: { value: deltaY },
+      deltaX: { value: (extra as { deltaX?: number }).deltaX ?? 0 },
+      ctrlKey: { value: (extra as { ctrlKey?: boolean }).ctrlKey ?? false },
+      deltaMode: { value: 0 }, // pixel mode, small deltas: a trackpad
+      timeStamp: { value: timeStamp },
+      clientX: { value: 10 },
+      clientY: { value: 10 }
+    });
+    el.dispatchEvent(e);
+    return e;
+  };
+
+  const drainFrames = (frames: number, stepMs = 16) => {
+    let t = performance.now();
+    for (let i = 0; i < frames && rafCbs.length; i++) {
+      const cbs = rafCbs;
+      rafCbs = [];
+      t += stepMs;
+      for (const cb of cbs) cb(t);
+    }
+  };
+
+  it("takes ownership of the raw stream and re-emits paced line steps", () => {
+    const term = mkAppTerm();
+    const dispose = attachScrollFlywheel(el, () => term as never, {
+      linesPerNotch: 4,
+      lineHeightPx: () => 20
+    });
+
+    // Synthetic (our own) wheel events reach the app; count them.
+    let forwarded = 0;
+    el.addEventListener("wheel", (e) => { if (!e.defaultPrevented) forwarded++; });
+
+    // A fast flick: 30 raw events of 15px each (0.75 lines apiece).
+    let cancelled = 0;
+    for (let i = 0; i < 30; i++) {
+      const e = pan(15, i * 8);
+      if (e.defaultPrevented) cancelled++;
+    }
+    expect(cancelled).toBe(30); // every RAW event was consumed, none leaked
+    // Count arrivals per drained frame to verify pacing.
+    let inFrame = 0;
+    let maxPerFrame = 0;
+    el.addEventListener("wheel", (e) => { if (!e.defaultPrevented) inFrame++; });
+    for (let f = 0; f < 40 && rafCbs.length; f++) {
+      inFrame = 0;
+      drainFrames(1);
+      maxPerFrame = Math.max(maxPerFrame, inFrame);
+    }
+
+    // 450px of finger = 22 whole lines, plus a momentum coast on top (the
+    // point of the feature). What must hold: steps flow PACED — at most the
+    // budgeted couple per frame, never the raw flood re-emitted in a burst.
+    expect(forwarded).toBeGreaterThan(10);
+    const budgetPerFrame = 3;
+    expect(maxPerFrame).toBeLessThanOrEqual(budgetPerFrame);
+    expect(term.scrolled.length).toBe(0); // and nothing scrolled locally
+    dispose();
+  });
+
+  it("a slow precise drag lands exactly one step per line crossed", () => {
+    const term = mkAppTerm();
+    const dispose = attachScrollFlywheel(el, () => term as never, {
+      linesPerNotch: 4,
+      lineHeightPx: () => 20
+    });
+    let forwarded = 0;
+    el.addEventListener("wheel", (e) => { if (!e.defaultPrevented) forwarded++; });
+
+    // 5px at a time: three events accumulate 15px — under one line, nothing
+    // moves; the fourth crosses 20px and yields exactly one step.
+    pan(5, 0); pan(5, 30); pan(5, 60);
+    drainFrames(4);
+    expect(forwarded).toBe(0);
+    pan(5, 90);
+    drainFrames(4);
+    expect(forwarded).toBe(1);
+    dispose();
+  });
+
+  it("leaves pinch-zoom and horizontal pans alone", () => {
+    const term = mkAppTerm();
+    const dispose = attachScrollFlywheel(el, () => term as never, {
+      linesPerNotch: 4,
+      lineHeightPx: () => 20
+    });
+    const zoom = pan(15, 0, { ctrlKey: true } as Partial<WheelEvent>);
+    const sideways = pan(3, 20, { deltaX: 40 } as Partial<WheelEvent>);
+    expect(zoom.defaultPrevented).toBe(false);
+    expect(sideways.defaultPrevented).toBe(false);
+    dispose();
+  });
+
+  it("local-scrollback trackpads keep the native feel — untouched", () => {
+    let viewportY = 5000;
+    const term = {
+      scrolled: [] as number[],
+      scrollLines(n: number) { this.scrolled.push(n); viewportY += n; },
+      buffer: { active: { type: "normal", get viewportY() { return viewportY; } } }
+    };
+    const dispose = attachScrollFlywheel(el, () => term as never, {
+      linesPerNotch: 4,
+      lineHeightPx: () => 20
+    });
+    const e = pan(15, 0);
+    expect(e.defaultPrevented).toBe(false); // xterm's own handling stands
+    expect(term.scrolled.length).toBe(0);   // and we add no glide of our own
+    dispose();
+  });
+});

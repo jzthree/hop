@@ -9,10 +9,19 @@
 // trackpad feel.
 //
 // Safety rules (why this is a util and not three lines):
-// - Normal buffer only. On the alternate screen xterm translates wheel to
-//   arrow keys / mouse reports for the app — inertia there would spray
-//   keystrokes into vim/claude/less after the user stopped scrolling.
-// - Discrete wheels only (see isDiscreteWheel) — trackpads keep native feel.
+// - Normal buffer only for LOCAL momentum. On the alternate screen xterm
+//   translates wheel to arrow keys / mouse reports for the app — local
+//   inertia there would spray keystrokes into vim/claude/less after the
+//   user stopped scrolling.
+// - In LOCAL scrollback, discrete wheels only (see isDiscreteWheel) —
+//   trackpads keep the OS's native glide; doubling it felt drunk.
+// - In APP-OWNED scrolling the rule inverts for trackpads: the OS momentum
+//   stream is hundreds of events, each of which xterm turns into a wire
+//   mouse-report costing a network round trip. Forwarded 1:1 it floods a
+//   remote app into scroll LAG (the transcript keeps moving long after the
+//   fingers stop). So there we take ownership: coalesce the stream into
+//   line-sized steps and pace them by the app's own acknowledgements —
+//   instant when local, matched to the link when remote.
 // - A single notch never glides: momentum engages only for a sustained spin
 //   (3+ events in a burst), so precise one-line nudges stay precise.
 // - Any keypress or click kills the glide instantly, and so does hitting
@@ -125,6 +134,8 @@ export const attachScrollFlywheel = (
     appVel = 0;
     appCarry = 0;
     appBurst = 0;
+    panPx = 0;
+    panPending = 0;
   };
 
   const stop = () => { stopLocal(); stopApp(); };
@@ -153,7 +164,15 @@ export const attachScrollFlywheel = (
     appRaf = 0;
     const term = getTerm();
     // Mode flipped (app exited, screen switched) or run out of speed.
-    if (!term || terminalOwnsScrolling(term) || Math.abs(appVel) < 4) return stopApp();
+    if (!term || terminalOwnsScrolling(term)) return stopApp();
+    if (panPending === 0 && Math.abs(appVel) < coastMin()) {
+      // Out of momentum — but a live finger stream may still be mid-gesture
+      // with sub-line px accumulated (a slow precise drag has ~zero
+      // velocity). Park the loop WITHOUT wiping that accumulation; the next
+      // pan event restarts it, and the idle timer sweeps up if none comes.
+      if (appIdle) { appRaf = 0; return; }
+      return stopApp();
+    }
     const dt = lastFrameAt ? Math.min(0.05, (t - lastFrameAt) / 1000) : 0.016;
     lastFrameAt = t;
     // ACK pacing: after each synthetic step, wait for the app to answer
@@ -164,17 +183,95 @@ export const attachScrollFlywheel = (
     const ackAt = opts.lastOutputAt ? opts.lastOutputAt() : Infinity;
     const waitingForAck = lastStepAt > 0 && ackAt < lastStepAt && performance.now() - lastStepAt < 300;
     if (!waitingForAck) {
-      appCarry += Math.abs(appVel) * dt;
-      let steps = Math.trunc(appCarry);
-      appCarry -= steps;
-      if (steps > 0) lastStepAt = performance.now();
-      while (steps-- > 0) dispatchStep();
-      appVel *= Math.exp(-dt / 0.35);
+      if (panPending !== 0) {
+        // Finger-driven steps first: drain the coalesced pan queue at the
+        // capped rate. The queue is bounded by pacing at ENQUEUE time being
+        // impossible (the OS floods), so it is bounded here at spend time.
+        const budget = Math.max(1, Math.trunc(APP_MAX_RATE * dt));
+        const spend = Math.sign(panPending) * Math.min(Math.abs(panPending), budget);
+        panPending -= spend;
+        if (spend !== 0) {
+          lastStepAt = performance.now();
+          if (appProto) appProto.deltaY = Math.sign(spend) * 120;
+          for (let i = 0; i < Math.abs(spend); i++) dispatchStep();
+        }
+      } else {
+        appCarry += Math.abs(appVel) * dt;
+        let steps = Math.trunc(appCarry);
+        appCarry -= steps;
+        if (steps > 0) {
+          lastStepAt = performance.now();
+          if (appProto) appProto.deltaY = Math.sign(appVel) * 120;
+        }
+        while (steps-- > 0) dispatchStep();
+        appVel *= Math.exp(-dt / 0.35);
+      }
     }
     appRaf = requestAnimationFrame(appGlide);
   };
 
+  // ---- App-owned TRACKPAD panning -----------------------------------------
+  // The finger stream is coalesced into whole-line steps and drained by the
+  // same ACK-paced loop the wheel coast uses. panPx carries the sub-line
+  // remainder, so slow precise drags still land exactly one step as they
+  // cross each line boundary.
+  let panPx = 0;
+  let panPending = 0; // signed whole steps waiting to be dispatched
+  let panLastAt = 0;
+  let panMode = false; // last input was a finger stream, not a wheel
+  // A wheel notch coasts from 4 steps/s (its burst gate filters intent). A
+  // finger has no burst gate here, so the bar is a real FLICK: a slow
+  // precise drag carries ~8 steps/s of incidental velocity and must stop
+  // dead the moment the finger does.
+  const PAN_COAST_MIN = 15;
+  const coastMin = () => (panMode ? PAN_COAST_MIN : 4);
+
+  const trackpadPan = (e: WheelEvent) => {
+    panMode = true;
+    appTarget = e.target;
+    // One line's worth of delta per synthetic event, in the pan's direction —
+    // xterm emits one wire report per event regardless of magnitude.
+    appProto = { deltaY: Math.sign(e.deltaY) * 120, clientX: e.clientX, clientY: e.clientY };
+
+    const now = e.timeStamp || performance.now();
+    const gap = now - panLastAt;
+    panLastAt = now;
+    const stepPx = Math.max(1, opts.lineHeightPx());
+    const px = e.deltaMode === 1 ? e.deltaY * stepPx : e.deltaY;
+    // Direction flip: dump everything queued the other way, instantly.
+    if (Math.sign(px) !== Math.sign(panPx + panPending) && (panPx !== 0 || panPending !== 0)) {
+      panPx = 0;
+      panPending = 0;
+      appVel = 0;
+    }
+    if (gap > 250) { panPx = 0; }
+    panPx += px;
+    const steps = Math.trunc(panPx / stepPx);
+    if (steps !== 0) {
+      panPx -= steps * stepPx;
+      panPending += steps;
+    }
+    // Velocity for the post-stream coast, in steps/sec, from the px rate.
+    const rate = (px / stepPx) / (Math.min(Math.max(gap, 8), 200) / 1000);
+    appVel = Math.sign(rate) === Math.sign(appVel) ? 0.5 * rate + 0.5 * appVel : rate;
+    appVel = Math.max(-APP_MAX_RATE, Math.min(APP_MAX_RATE, appVel));
+
+    if (!appRaf) {
+      lastFrameAt = 0;
+      appRaf = requestAnimationFrame(appGlide);
+    }
+    if (appIdle) window.clearTimeout(appIdle);
+    appIdle = window.setTimeout(() => {
+      appIdle = 0;
+      // The OS stream has ended. Whatever is queued keeps draining paced and
+      // the residual velocity decays in the glide loop; if the loop already
+      // parked itself (slow drag, no momentum), sweep the leftovers now.
+      if (!appRaf && panPending === 0 && Math.abs(appVel) < coastMin()) stopApp();
+    }, 120);
+  };
+
   const appWheel = (e: WheelEvent) => {
+    panMode = false;
     appTarget = e.target;
     appProto = { deltaY: e.deltaY, clientX: e.clientX, clientY: e.clientY };
     if (appRaf) { cancelAnimationFrame(appRaf); appRaf = 0; }
@@ -236,8 +333,20 @@ export const attachScrollFlywheel = (
     // still does all the scrolling; we only shape the event rate.
     if (!terminalOwnsScrolling(term)) {
       stopLocal();
-      if (isDiscreteWheel(e)) appWheel(e);
-      else stopApp(); // trackpad: the OS already sends a dense glide
+      // Pinch-zoom and sideways pans are not scrolling — leave them alone.
+      if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      if (isDiscreteWheel(e)) {
+        appWheel(e);
+      } else {
+        // Trackpad: take the stream over entirely. Without this, xterm
+        // forwards every one of the OS's momentum events as its own wire
+        // report and a remote app drowns (scroll lag, overshoot). We
+        // preventDefault + stopPropagation the raw events and re-emit
+        // line-sized, ACK-paced synthetic ones instead.
+        e.preventDefault();
+        e.stopPropagation();
+        trackpadPan(e);
+      }
       return;
     }
     stopApp();
@@ -272,13 +381,15 @@ export const attachScrollFlywheel = (
   };
 
   const kill = () => stop();
-  // CAPTURE phase, but strictly observational (passive: we never
-  // preventDefault). Capture is REQUIRED: when the app is tracking the
+  // CAPTURE phase. Capture is REQUIRED: when the app is tracking the
   // mouse, xterm's own handler calls stopPropagation() on the way out, so a
   // bubble-phase listener on this ancestor never runs at all — which is why
   // the app-scroll shaping below silently did nothing. Observing first lets
   // xterm do exactly what it always did, and lets us add steps around it.
-  el.addEventListener("wheel", onWheel, { capture: true, passive: true });
+  // capture (see below) and NON-passive: the app-owned trackpad branch
+  // preventDefaults the raw stream it replaces. Every other path still never
+  // cancels anything.
+  el.addEventListener("wheel", onWheel, { capture: true, passive: false });
   el.addEventListener("mousedown", kill, true);
   window.addEventListener("keydown", kill, true);
   return () => {

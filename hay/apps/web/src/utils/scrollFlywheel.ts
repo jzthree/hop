@@ -178,12 +178,16 @@ export const attachScrollFlywheel = (
     // Mode flipped (app exited, screen switched) or run out of speed.
     if (!term || terminalOwnsScrolling(term)) return stopApp();
     if (panPending === 0 && Math.abs(appVel) < coastMin()) {
-      // Out of momentum — but a live finger stream may still be mid-gesture
-      // with sub-line px accumulated (a slow precise drag has ~zero
-      // velocity). Park the loop WITHOUT wiping that accumulation; the next
-      // pan event restarts it, and the idle timer sweeps up if none comes.
-      if (appIdle) { appRaf = 0; return; }
-      return stopApp();
+      // Out of momentum. Rest the machinery but PRESERVE the sub-line
+      // accumulation in every case: the quantum is one whole line, and a
+      // slow precise drag only crosses it across many events and pauses —
+      // any wipe on this path is a low-speed dead zone (shipped one twice).
+      // panPx dies only on direction flip, a 2s-still gesture break, a
+      // keypress/click kill, or dispose.
+      appRaf = 0;
+      appVel = 0;
+      appCarry = 0;
+      return;
     }
     const dt = lastFrameAt ? Math.min(0.05, (t - lastFrameAt) / 1000) : 0.016;
     lastFrameAt = t;
@@ -264,7 +268,12 @@ export const attachScrollFlywheel = (
       panPending = 0;
       appVel = 0;
     }
-    if (gap > 250) { panPx = 0; }
+    // The remainder SURVIVES slow pacing: a precise drag emits small
+    // deltas with long gaps, and wiping between them made low-speed
+    // scrolling move nothing at all (the quantum is one line; 3px events
+    // could never reach it). Only a genuinely new gesture — seconds of
+    // stillness — starts from zero.
+    if (gap > 2000) { panPx = 0; }
     panPx += px;
     const steps = Math.trunc(panPx / stepPx);
     if (steps !== 0) {
@@ -295,9 +304,15 @@ export const attachScrollFlywheel = (
     if (appIdle) window.clearTimeout(appIdle);
     appIdle = window.setTimeout(() => {
       appIdle = 0;
-      // The OS stream has ended. Whatever is queued keeps draining paced;
-      // if the loop already parked itself (slow drag), sweep leftovers now.
-      if (!appRaf && panPending === 0 && Math.abs(appVel) < coastMin()) stopApp();
+      // The OS stream paused. Rest the velocity, but PRESERVE the sub-line
+      // remainder — this fires 120ms after every event of a slow drag, and
+      // sweeping panPx here was half of the low-speed dead zone. The next
+      // event continues the accumulation; the 2s gate above decides when a
+      // pause is actually a new gesture.
+      if (!appRaf && panPending === 0 && Math.abs(appVel) < coastMin()) {
+        appVel = 0;
+        appCarry = 0;
+      }
     }, 120);
   };
 

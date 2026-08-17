@@ -296,4 +296,30 @@ describe("app-owned trackpad panning", () => {
     expect(term.scrolled.length).toBe(0);   // and we add no glide of our own
     dispose();
   });
+
+
+  it("low-speed scrolling accumulates linearly — no dead zone", () => {
+    // The regression: slow drags emit small deltas with LONG gaps, and the
+    // accumulator was wiped both by a 250ms gap reset and by the gesture-
+    // idle sweep — so low-speed scrolling moved nothing, ever. Friction
+    // model: linear accumulation at any speed, one step per line crossed.
+    const term = mkAppTerm();
+    const dispose = attachScrollFlywheel(el, () => term as never, {
+      linesPerNotch: 4,
+      lineHeightPx: () => 20
+    });
+    let forwarded = 0;
+    el.addEventListener("wheel", (e) => { if (!e.defaultPrevented) forwarded++; });
+
+    // 5px every 300ms — a deliberate, slow, precise drag. The idle timer
+    // fires between every pair of events.
+    for (let i = 0; i < 4; i++) {
+      pan(5, i * 300);
+      vi.advanceTimersByTime(300); // lets the 120ms idle sweep run
+      drainFrames(2);
+    }
+    // 4 × 5px = 20px = exactly one line: exactly one step, not zero.
+    expect(forwarded).toBe(1);
+    dispose();
+  });
 });

@@ -500,6 +500,45 @@ function viewSummaryBySession() {
     return viewSummaryCache.bySession;
 }
 
+// The log's budget. Jian's design: views are "a size-capped recent log" —
+// one kind of entry, one removal gesture, and the cap does the housekeeping
+// nobody wants to do by hand. Oldest FILE views evict first once the fleet's
+// published bytes exceed the budget; live-server rows weigh nothing and are
+// never evicted. Copies only, as always — sources are not hop's to touch.
+const VIEWS_BUDGET_BYTES = (Number(process.env.HOP_VIEWS_BUDGET_MB) > 0
+    ? Number(process.env.HOP_VIEWS_BUDGET_MB) : 2048) * 1024 * 1024;
+function enforceViewBudget() {
+    try {
+        const files = [];
+        for (const sess of fs.readdirSync(VIEWS_DIR)) {
+            const dir = path.join(VIEWS_DIR, sess);
+            if (sess === 'manifest.json' || sess.startsWith('.')
+                || !fs.statSync(dir).isDirectory()) continue;
+            const meta = readViewMeta(sess);
+            for (const f of fs.readdirSync(dir)) {
+                if (f.startsWith('.')) continue;
+                if (meta[f]?.kind === 'server') continue;
+                const st = fs.statSync(path.join(dir, f));
+                if (st.isFile()) files.push({ sess, f, bytes: st.size, mtime: st.mtimeMs });
+            }
+        }
+        let total = files.reduce((a, b) => a + b.bytes, 0);
+        if (total <= VIEWS_BUDGET_BYTES) return;
+        files.sort((a, b) => a.mtime - b.mtime);
+        for (const it of files) {
+            if (total <= VIEWS_BUDGET_BYTES) break;
+            try {
+                fs.rmSync(path.join(VIEWS_DIR, it.sess, it.f));
+                const meta = readViewMeta(it.sess);
+                delete meta[it.f];
+                writeViewMeta(it.sess, meta);
+                total -= it.bytes;
+                log(`[views] budget: evicted ${it.sess}/${it.f} (${Math.round(it.bytes / 1024)} KB, oldest first)`, DIM);
+            } catch (e) { /* the next candidate still evicts */ }
+        }
+    } catch (e) { /* a failed sweep never blocks a publish */ }
+}
+
 // The virtual folder both `hop view` and `hop port --attached` publish into:
 // clients browse every view through one manifest, REBUILT from a disk scan
 // rather than read-modify-written, so two agents publishing at once cannot
@@ -514,6 +553,7 @@ function viewSummaryBySession() {
 function rebuildViewManifest() {
     try {
         migrateLegacyViews();
+        enforceViewBudget();
         const entries = [];
         for (const sess of fs.readdirSync(VIEWS_DIR)) {
             const dir = path.join(VIEWS_DIR, sess);
@@ -13884,6 +13924,7 @@ const HELP_SECTIONS = [
         `hop view --list [--all]   What this session has published (--all: the whole fleet)`,
         `hop view --rm <name>      Unpublish one`,
         `hop view --clear [--all]  Clear published copies — frees hop's space, never touches source files`,
+        `                          Views auto-evict oldest past the budget (HOP_VIEWS_BUDGET_MB, default 2048)`,
         `hop whoami [--json]      Which session this shell is inside — the name hop view targets`,
         `hop port <port> [name]    Expose a local web server (live proxy, WebSocket-safe); --standalone to detach`,
     ] },

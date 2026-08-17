@@ -5034,21 +5034,40 @@ function claudeConfigRootsForRestore(recConfigDir) {
 // resume; the caller falls back to a plain shell with a visible warning.
 function resolveClaudeTranscriptPath(rec) {
     if (!rec || !rec.sessionId || !rec.cwd) return null;
+    const findIn = (base) => {
+        const file = path.join(base, `${rec.sessionId}.jsonl`);
+        try { fs.accessSync(file); return file; } catch (e) { /* next */ }
+        // Newer layout: a per-session DIRECTORY. Only counts when it holds a
+        // real transcript jsonl: a dir with only subagents/ metadata is a
+        // conversation that never persisted (resume would fail on it).
+        try {
+            const dir = path.join(base, rec.sessionId);
+            if (fs.statSync(dir).isDirectory()) {
+                const jsonl = fs.readdirSync(dir).find((f) => f.endsWith('.jsonl'));
+                if (jsonl) return path.join(dir, jsonl);
+            }
+        } catch (e) { /* next */ }
+        return null;
+    };
     for (const root of claudeConfigRootsForRestore(rec.configDir)) {
         for (const slug of claudeProjectDirCandidates(rec.cwd)) {
-            const base = path.join(root, 'projects', slug);
-            const file = path.join(base, `${rec.sessionId}.jsonl`);
-            try { fs.accessSync(file); return file; } catch (e) { /* next */ }
-            // Newer layout: a per-session DIRECTORY. Only counts when it holds a
-            // real transcript jsonl — a dir with only subagents/ metadata is a
-            // conversation that never persisted (resume would fail on it).
-            try {
-                const dir = path.join(base, rec.sessionId);
-                if (fs.statSync(dir).isDirectory()) {
-                    const jsonl = fs.readdirSync(dir).find((f) => f.endsWith('.jsonl'));
-                    if (jsonl) return path.join(dir, jsonl);
-                }
-            } catch (e) { /* next */ }
+            const hit = findIn(path.join(root, 'projects', slug));
+            if (hit) return hit;
+        }
+    }
+    // The cwd-derived slug is a HINT, not the identity: the session id is
+    // unique across the whole store, and claude itself resumes by id. A
+    // record whose cwd was healed (Accessibility-fork: conversation written
+    // from inside the transcript dir, so its file lives under a doubly-
+    // encoded slug) would otherwise read as "no transcript on this host"
+    // and restore to a bare shell, when the transcript is right there.
+    for (const root of claudeConfigRootsForRestore(rec.configDir)) {
+        const projects = path.join(root, 'projects');
+        let slugs = [];
+        try { slugs = fs.readdirSync(projects); } catch (e) { continue; }
+        for (const slug of slugs) {
+            const hit = findIn(path.join(projects, slug));
+            if (hit) return hit;
         }
     }
     return null;
@@ -5230,7 +5249,19 @@ function restorePlanForSession(entry) {
     // arbiter: when the record disagrees with it, the record is not this
     // room's primary conversation. Reopen a plain shell in the RIGHT place
     // rather than resume the wrong history.
-    const liveCwd = readClaudeSessionMeta(entry.internalName)?.cwd || entry.cwd;
+    // The transcript store is never a workspace (same rule as the hook and
+    // fork): a meta cwd inside ~/.claude*/projects/* means the room's shell
+    // was left standing in the transcript dir at some point (the
+    // Accessibility-fork incident): a poisoned arbiter. Trusting it made
+    // this guard fire against a CORRECT record and drop the room to a plain
+    // shell in the transcript dir, which is how the fork came back as 'zsh
+    // in ~/.claude/projects/-Users-jianzhou' with its conversation gone.
+    const storePath = (c) => /[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(c || ''));
+    const metaCwd = readClaudeSessionMeta(entry.internalName)?.cwd;
+    const liveCwd = (metaCwd && !storePath(metaCwd) ? metaCwd : null)
+        || (entry.cwd && !storePath(entry.cwd) ? entry.cwd : null)
+        || (rec?.cwd && !storePath(rec.cwd) ? rec.cwd : null)
+        || metaCwd || entry.cwd;
     if (rec && rec.sessionId && liveCwd && rec.cwd && rec.cwd !== liveCwd) {
         // The incumbent record disagrees with the room's real directory. The
         // hook parks a rival record at <session>.other.json when it refuses
@@ -8159,7 +8190,11 @@ async function reconcileExternalRuntimeSessionsUncached() {
         // workspaces is a different tree entirely. That is how a session
         // working in ~/Code/nebula-slides came back in the slides tool's
         // agent-home workspace and read as "my session died".
-        if (room.cwd && typeof room.cwd === 'string' && durableMeta && durableMeta.cwd !== room.cwd) {
+        // ...but never persist a shell that wandered INTO the transcript
+        // store (~/.claude*/projects/*): that is not a workspace, and a meta
+        // holding it poisons restore's cwd arbiter (Accessibility-fork).
+        const roomInStore = /[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(room.cwd || ''));
+        if (room.cwd && typeof room.cwd === 'string' && durableMeta && durableMeta.cwd !== room.cwd && !roomInStore) {
             writeClaudeSessionMeta(room.id, { ...durableMeta, internalName: room.id, cwd: room.cwd });
         }
         rememberExternalRuntimeSession(room.id, room.hostPort);

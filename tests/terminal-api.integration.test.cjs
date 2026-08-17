@@ -964,3 +964,60 @@ test('sessions carry an opaque invariant id; renames touch only the label', asyn
       { name: s, internalName: s });
   }
 });
+
+// Restore's cwd arbiter must not trust a durable meta whose cwd sits in the
+// transcript store. The meta is normally the room's last LIVE directory
+// (the arbiter that catches a foreign claude's record) — but a shell left
+// standing in ~/.claude/projects/* poisoned it, the arbiter then fired
+// against the CORRECT record, and Accessibility-fork restored as a bare zsh
+// in the transcript dir with its conversation gone.
+test('restore does not let a transcript-store meta cwd override a good record', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'metapoison', cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const dir = path.join(hopHome, 'claude-sessions');
+  await fs.mkdir(dir, { recursive: true });
+  // Good record: a real conversation, in the real workspace.
+  await fs.writeFile(path.join(dir, `${internal}.json`), JSON.stringify({
+    sessionId: '22222222-3333-4444-5555-666666666666', cwd: tempDir,
+    launchCmd: 'claude', updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+  // Poisoned meta: cwd inside a transcript store.
+  const meta = JSON.parse(await fs.readFile(path.join(dir, `${internal}.meta`), 'utf8').catch(() => '{}'));
+  await fs.writeFile(path.join(dir, `${internal}.meta`), JSON.stringify({
+    ...meta, internalName: internal, cwd: path.join(os.homedir(), '.claude', 'projects', '-Users-x')
+  }), { mode: 0o600 });
+  // Make the transcript "exist" where the record says it lives.
+  const tdir = path.join(os.homedir(), '.claude', 'projects', tempDir.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(tdir, { recursive: true });
+  const tfile = path.join(tdir, '22222222-3333-4444-5555-666666666666.jsonl');
+  await fs.writeFile(tfile, '{"type":"user"}\n');
+
+  const plan = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true });
+  assert.equal(plan.status, 200, JSON.stringify(plan.data));
+  const mine = (plan.data.planned || plan.data.sessions || []).find(p => p.internalName === internal);
+  // It is live, so restore skips it — instead exercise the planner through
+  // a stopped copy: delete the runtime, keep the records, plan again.
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+  await fs.writeFile(path.join(dir, `${internal}.json`), JSON.stringify({
+    sessionId: '22222222-3333-4444-5555-666666666666', cwd: tempDir,
+    launchCmd: 'claude', updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+  await fs.writeFile(path.join(dir, `${internal}.meta`), JSON.stringify({
+    internalName: internal, displayName: 'metapoison',
+    cwd: path.join(os.homedir(), '.claude', 'projects', '-Users-x')
+  }), { mode: 0o600 });
+  const plan2 = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true });
+  const p2 = (plan2.data.restored || []).find(p => p.name === 'metapoison');
+  assert.ok(p2, `planned: ${JSON.stringify(plan2.data).slice(0, 300)}`);
+  // The poisoned meta must not have demoted this to a plain shell.
+  assert.equal(p2.warning, null, `no wrong-conversation warning, got: ${p2.warning}`);
+  assert.match(String(p2.command || ''), /--resume 22222222/, `must resume the conversation, got ${p2.command}`);
+  void mine;
+
+  await fs.rm(tfile, { force: true });
+  await fs.rm(path.join(dir, `${internal}.json`), { force: true });
+  await fs.rm(path.join(dir, `${internal}.meta`), { force: true });
+});

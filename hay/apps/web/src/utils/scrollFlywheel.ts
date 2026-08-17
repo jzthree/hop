@@ -117,6 +117,16 @@ export const attachScrollFlywheel = (
   // for ours.
   const APP_STEPS_PER_NOTCH = 3;
   const APP_MAX_RATE = 90; // steps/sec — fast, still ordered
+  // Remote scrolling physics: every step is a round trip (report up, full
+  // repaint down) and the app repaints ONCE per input batch it drains. So:
+  // batch lines per dispatch in proportion to speed (one repaint moves
+  // several lines instead of one), and keep a small window of unacked
+  // bursts in flight to hide the RTT — serialized one-line-per-RTT was the
+  // jerk. Slow speeds still step one line per burst: precision unharmed.
+  const APP_ACK_WINDOW = 2;   // bursts in flight before we hold
+  const APP_MAX_BURST = 5;    // lines per burst at full speed
+  const burstFor = (vel: number) =>
+    Math.max(1, Math.min(APP_MAX_BURST, Math.round(Math.abs(vel) / 20)));
   let appVel = 0;
   let appCarry = 0;
   let appRaf = 0;
@@ -136,6 +146,7 @@ export const attachScrollFlywheel = (
     appBurst = 0;
     panPx = 0;
     panPending = 0;
+    unacked = 0;
   };
 
   const stop = () => { stopLocal(); stopApp(); };
@@ -160,6 +171,7 @@ export const attachScrollFlywheel = (
   };
 
   let lastStepAt = 0;
+  let unacked = 0; // bursts dispatched with no output seen since
   const appGlide = (t: number) => {
     appRaf = 0;
     const term = getTerm();
@@ -180,30 +192,38 @@ export const attachScrollFlywheel = (
     // the link's real rhythm instead of flooding a slow one. 300ms cap so
     // an app that repaints invisibly (no bytes for us) can't stall the
     // glide forever.
+    // Windowed ACK pacing: any output since the last burst clears the
+    // window (the app is keeping up); otherwise up to APP_ACK_WINDOW bursts
+    // may be in flight before we hold. The 300ms cap keeps an app that
+    // repaints invisibly (no bytes for us) from stalling the glide forever.
     const ackAt = opts.lastOutputAt ? opts.lastOutputAt() : Infinity;
-    const waitingForAck = lastStepAt > 0 && ackAt < lastStepAt && performance.now() - lastStepAt < 300;
+    if (ackAt > lastStepAt) unacked = 0;
+    const waitingForAck = lastStepAt > 0 && unacked >= APP_ACK_WINDOW
+      && performance.now() - lastStepAt < 300;
     if (!waitingForAck) {
       if (panPending !== 0) {
-        // Finger-driven steps first: drain the coalesced pan queue at the
-        // capped rate. The queue is bounded by pacing at ENQUEUE time being
-        // impossible (the OS floods), so it is bounded here at spend time.
-        const budget = Math.max(1, Math.trunc(APP_MAX_RATE * dt));
-        const spend = Math.sign(panPending) * Math.min(Math.abs(panPending), budget);
+        // Finger-driven lines first: drain the coalesced pan queue in
+        // speed-proportional bursts — the app repaints once per burst, so
+        // a burst of 4 costs one round trip where 4 singles cost four.
+        const spend = Math.sign(panPending)
+          * Math.min(Math.abs(panPending), burstFor(appVel || panPending));
         panPending -= spend;
         if (spend !== 0) {
           lastStepAt = performance.now();
+          unacked += 1;
           if (appProto) appProto.deltaY = Math.sign(spend) * 120;
           for (let i = 0; i < Math.abs(spend); i++) dispatchStep();
         }
       } else {
-        appCarry += Math.abs(appVel) * dt;
-        let steps = Math.trunc(appCarry);
-        appCarry -= steps;
+        appCarry += Math.min(APP_MAX_RATE, Math.abs(appVel)) * dt;
+        const steps = Math.min(Math.trunc(appCarry), burstFor(appVel));
         if (steps > 0) {
+          appCarry -= steps;
           lastStepAt = performance.now();
+          unacked += 1;
           if (appProto) appProto.deltaY = Math.sign(appVel) * 120;
+          for (let i = 0; i < steps; i++) dispatchStep();
         }
-        while (steps-- > 0) dispatchStep();
         appVel *= Math.exp(-dt / 0.35);
       }
     }

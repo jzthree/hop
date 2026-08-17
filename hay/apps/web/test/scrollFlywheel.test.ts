@@ -192,11 +192,12 @@ describe("app-owned trackpad panning", () => {
     }
 
     // 450px of finger = 22 whole lines, plus a momentum coast on top (the
-    // point of the feature). What must hold: steps flow PACED — at most the
-    // budgeted couple per frame, never the raw flood re-emitted in a burst.
+    // point of the feature). What must hold: lines flow as bounded BURSTS —
+    // at most one speed-proportional burst per frame (each costing the app
+    // one repaint), never the raw flood re-emitted wholesale.
     expect(forwarded).toBeGreaterThan(10);
-    const budgetPerFrame = 3;
-    expect(maxPerFrame).toBeLessThanOrEqual(budgetPerFrame);
+    const maxBurst = 5; // APP_MAX_BURST
+    expect(maxPerFrame).toBeLessThanOrEqual(maxBurst);
     expect(term.scrolled.length).toBe(0); // and nothing scrolled locally
     dispose();
   });
@@ -218,6 +219,45 @@ describe("app-owned trackpad panning", () => {
     pan(5, 90);
     drainFrames(4);
     expect(forwarded).toBe(1);
+    dispose();
+  });
+
+  it("holds after two unacked bursts when the remote goes silent", () => {
+    // The pipelining contract: bursts fly while output flows; a remote that
+    // stops answering gets at most APP_ACK_WINDOW bursts in flight, then we
+    // hold (until the 300ms stall cap) instead of flooding its input queue.
+    const term = mkAppTerm();
+    let lastOutput = 0; // frozen: the remote never answers
+    // A clock that actually advances: the hold logic compares real
+    // timestamps, and vitest's frozen performance.now() (0) disarms it.
+    let clock = 1000;
+    const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const dispose = attachScrollFlywheel(el, () => term as never, {
+      linesPerNotch: 4,
+      lineHeightPx: () => 20,
+      lastOutputAt: () => lastOutput
+    });
+    let bursts = 0;
+    let prevCount = 0;
+    let count = 0;
+    el.addEventListener("wheel", (e) => { if (!e.defaultPrevented) count++; });
+
+    for (let i = 0; i < 30; i++) { clock += 8; pan(15, clock); }
+    for (let f = 0; f < 15 && rafCbs.length; f++) {
+      prevCount = count;
+      clock += 16;
+      drainFrames(1);
+      if (count > prevCount) bursts++;
+    }
+    expect(bursts).toBe(2); // APP_ACK_WINDOW, not a flood
+
+    // The remote answers: the window clears and bursts resume.
+    lastOutput = clock + 1;
+    prevCount = count;
+    clock += 16;
+    drainFrames(3);
+    expect(count).toBeGreaterThan(prevCount);
+    nowSpy.mockRestore();
     dispose();
   });
 

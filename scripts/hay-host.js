@@ -54,6 +54,31 @@ const FALLBACK_CWD = process.env.HAY_HOST_CWD || process.cwd();
 // Where we stash each room's tail buffer on shutdown so `hop restore` can replay
 // a plain-shell session's last screen. Mirrors the daemon's HOP_HOME (~/.hop2).
 const HOP_HOME = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
+
+// EPHEMERAL homes die with their daemon. Integration tests spawn a daemon in
+// a mkdtemp HOP_HOME, which spawns this host — and a test run killed
+// mid-flight (a timeout, a crash) leaked the host forever: 18 of them were
+// found idling with 242MB after a week of test runs. A host under the OS
+// temp dir polls its daemon's pid from .tunnel-state and exits once it has
+// been gone for two checks. A REAL home never does this: the production
+// host deliberately outlives daemon restarts — that is what keeps sessions
+// alive through deploys.
+if (HOP_HOME.startsWith(os.tmpdir())) {
+  let daemonMissing = 0;
+  setInterval(() => {
+    let pid = null;
+    try { pid = Number(JSON.parse(fs.readFileSync(path.join(HOP_HOME, '.tunnel-state'), 'utf8')).pid); } catch (e) { /* not written yet */ }
+    let alive = false;
+    if (Number.isInteger(pid) && pid > 0) {
+      try { process.kill(pid, 0); alive = true; } catch (e) { /* dead */ }
+    }
+    daemonMissing = alive ? 0 : daemonMissing + 1;
+    if (daemonMissing >= 2) {
+      console.error('[hay-host] ephemeral home and the daemon is gone — exiting');
+      process.exit(0);
+    }
+  }, 30000).unref();
+}
 const BUFFER_DIR = path.join(HOP_HOME, 'session-buffers');
 const CLAUDE_SESSIONS_DIR = path.join(HOP_HOME, 'claude-sessions');
 

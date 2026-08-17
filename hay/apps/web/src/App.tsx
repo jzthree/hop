@@ -1012,6 +1012,41 @@ const App = () => {
     catch { return []; }
   })());
 
+  // ── Stale-bundle self-healing ─────────────────────────────────────────
+  // Deploys replace the hashed bundle, but an open tab reconnects forever on
+  // the code it loaded — every fix shipped "didn't work" until each tab was
+  // manually reloaded (the scroll dead-zone report was a tab three bundles
+  // behind). Poll our own index.html for the bundle it now names; when it
+  // differs from the one running, reload — but only while the tab is HIDDEN
+  // and the terminal has no buffered input, so nobody ever sees it happen.
+  const staleBundleRef = useRef(false);
+  useEffect(() => {
+    let disposed = false;
+    const loadedBundle = (() => {
+      try { return new URL(import.meta.url).pathname.split("/").pop() || null; }
+      catch { return null; }
+    })();
+    if (!loadedBundle) return;
+    const check = async () => {
+      try {
+        const res = await fetch("/", { cache: "no-store" });
+        const html = await res.text();
+        const current = (html.match(/assets\/(index-[^"']+\.js)/) || [])[1];
+        if (!disposed && current && current !== loadedBundle) staleBundleRef.current = true;
+      } catch { /* offline — try again next tick */ }
+    };
+    const maybeReload = () => {
+      if (staleBundleRef.current && document.hidden) window.location.reload();
+    };
+    const interval = window.setInterval(() => { void check().then(maybeReload); }, 5 * 60 * 1000);
+    document.addEventListener("visibilitychange", maybeReload);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", maybeReload);
+    };
+  }, []);
+
   useEffect(() => {
     activeSessionRoomRef.current = session?.room ?? null;
     const room = session?.room;

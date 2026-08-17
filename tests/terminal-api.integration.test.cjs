@@ -491,9 +491,10 @@ test('rename sticks across reconcile ticks and never manufactures a session', as
     name: 'RenameOrigin', type: 'terminal', cwd: tempDir, startRuntime: true
   });
   assert.equal(create.status, 200);
+  const originId = create.data.internalName;
 
   const renamed = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename', {
-    oldName: 'RenameOrigin', newName: 'RenameTarget', internalName: 'RenameOrigin'
+    oldName: 'RenameOrigin', newName: 'RenameTarget', internalName: originId
   });
   assert.equal(renamed.status, 200);
 
@@ -502,7 +503,7 @@ test('rename sticks across reconcile ticks and never manufactures a session', as
   for (let i = 0; i < 4; i++) {
     await delay(1200);
     const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-    const entry = list.data.sessions.find(s => s.internalName === 'RenameOrigin');
+    const entry = list.data.sessions.find(s => s.internalName === originId);
     seen.push(entry ? entry.displayName : '(missing)');
   }
   assert.deepEqual(seen, ['RenameTarget', 'RenameTarget', 'RenameTarget', 'RenameTarget'],
@@ -513,12 +514,12 @@ test('rename sticks across reconcile ticks and never manufactures a session', as
   const after = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
   const byTarget = after.data.sessions.filter(s => s.displayName === 'RenameTarget');
   assert.equal(byTarget.length, 1, 'exactly one session may hold the new name');
-  assert.equal(byTarget[0].internalName, 'RenameOrigin', 'the ORIGINAL session must be the one wearing it');
-  assert.ok(!after.data.sessions.some(s => s.internalName === 'RenameTarget'),
-    'no phantom session may be created under the new name');
+  assert.equal(byTarget[0].internalName, originId, 'the ORIGINAL session must be the one wearing it');
+  assert.ok(!after.data.sessions.some(s => s.displayName === 'RenameOrigin'),
+    'no phantom session may be created under the old name');
 
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
-    { name: 'RenameTarget', internalName: 'RenameOrigin' });
+    { name: 'RenameTarget', internalName: originId });
 });
 
 // Regression: connecting by a name nothing owns must REFUSE, not create.
@@ -561,36 +562,38 @@ test('websocket attach to an unknown session refuses instead of creating one', a
 // with 409 "Session name already in use", with no way to free the name short
 // of restarting the daemon.
 test('a display name freed by a later rename can be reused', async () => {
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+  const one = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
     { name: 'AliasOne', type: 'terminal', cwd: tempDir, startRuntime: true });
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+  const two = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
     { name: 'AliasTwo', type: 'terminal', cwd: tempDir, startRuntime: true });
+  const oneId = one.data.internalName;
+  const twoId = two.data.internalName;
   await delay(600);
 
   // AliasOne: Freed → Final, leaving the alias "Freed" behind.
   for (const [from, to] of [['AliasOne', 'Freed'], ['Freed', 'Final']]) {
     const r = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
-      { oldName: from, newName: to, internalName: 'AliasOne' });
+      { oldName: from, newName: to, internalName: oneId });
     assert.equal(r.status, 200, `rename ${from}→${to} failed: ${JSON.stringify(r.data)}`);
   }
 
   // "Freed" is now worn by nobody, so another session may take it.
   const reuse = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
-    { oldName: 'AliasTwo', newName: 'Freed', internalName: 'AliasTwo' });
+    { oldName: 'AliasTwo', newName: 'Freed', internalName: twoId });
   assert.equal(reuse.status, 200, `a freed name must be reusable, got: ${JSON.stringify(reuse.data)}`);
 
   const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
   const freed = list.data.sessions.filter(s => s.displayName === 'Freed');
   assert.equal(freed.length, 1, 'exactly one session may wear the reused name');
-  assert.equal(freed[0].internalName, 'AliasTwo');
+  assert.equal(freed[0].internalName, twoId);
 
   // A name a LIVE session still wears stays protected.
   const collide = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
-    { oldName: 'Final', newName: 'Freed', internalName: 'AliasOne' });
+    { oldName: 'Final', newName: 'Freed', internalName: oneId });
   assert.equal(collide.status, 409, 'a name in active use must still be refused');
 
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Final', internalName: 'AliasOne' });
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Freed', internalName: 'AliasTwo' });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Final', internalName: oneId });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'Freed', internalName: twoId });
 });
 
 // Regression: folder membership must survive every cache rebuild. The store
@@ -600,8 +603,9 @@ test('a display name freed by a later rename can be reused', async () => {
 // the live-rooms loop) already knew. Nine of eleven folder assignments
 // vanished from the UI after a host cycle while every meta on disk was right.
 test('folder membership survives restore re-registration and a daemon restart', async () => {
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+  const created = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
     { name: 'FolderKeeper', type: 'terminal', cwd: tempDir, startRuntime: true });
+  const keeperId = created.data.internalName;
   await delay(600);
   const folder = await requestJson(state.port, state.sessionSecret, 'POST', '/api/folders', { name: 'KeeperShelf' });
   assert.equal(folder.status, 200, `folder create failed: ${JSON.stringify(folder.data)}`);
@@ -611,7 +615,7 @@ test('folder membership survives restore re-registration and a daemon restart', 
   assert.equal(moved.status, 200, `move failed: ${JSON.stringify(moved.data)}`);
 
   const listedNow = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-  assert.equal(listedNow.data.sessions.find(s => s.internalName === 'FolderKeeper')?.folderId, folderId,
+  assert.equal(listedNow.data.sessions.find(s => s.internalName === keeperId)?.folderId, folderId,
     'freshly moved session must list its folder');
 
   // Restore re-registration recreates cached session definitions — the write
@@ -619,25 +623,26 @@ test('folder membership survives restore re-registration and a daemon restart', 
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', {});
   await delay(1200);
   const afterRestore = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-  assert.equal(afterRestore.data.sessions.find(s => s.internalName === 'FolderKeeper')?.folderId, folderId,
+  assert.equal(afterRestore.data.sessions.find(s => s.internalName === keeperId)?.folderId, folderId,
     'folder membership must survive restore re-registration');
 
   const previousState = state;
   await stopDaemon(true);
   await launchDaemon(previousState);
   const afterRestart = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-  assert.equal(afterRestart.data.sessions.find(s => s.internalName === 'FolderKeeper')?.folderId, folderId,
+  assert.equal(afterRestart.data.sessions.find(s => s.internalName === keeperId)?.folderId, folderId,
     'folder membership must survive a daemon restart');
 
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'FolderKeeper', internalName: 'FolderKeeper' });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'FolderKeeper', internalName: keeperId });
 });
 
 // Session names resolve case-insensitively everywhere a name addresses a
 // session: exact-case wearers win, a UNIQUE folded match resolves, and two
 // sessions differing only by case stay exact-only rather than guessed at.
 test('session names resolve case-insensitively', async () => {
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+  const caseCreate = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
     { name: 'CaseFold', type: 'terminal', cwd: tempDir, startRuntime: true });
+  const caseId = caseCreate.data.internalName;
   await delay(600);
 
   // A by-name API call accepts any casing — no internalName hint given.
@@ -651,20 +656,20 @@ test('session names resolve case-insensitively', async () => {
   assert.equal(caseOnly.status, 200, `case-only rename must be allowed: ${JSON.stringify(caseOnly.data)}`);
 
   const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-  const worn = list.data.sessions.filter(s => s.internalName === 'CaseFold');
+  const worn = list.data.sessions.filter(s => s.internalName === caseId);
   assert.equal(worn.length, 1, 'still exactly one session — folded lookups must never mint twins');
   assert.equal(worn[0].displayName, 'casekept', 'the case-only rename is the worn spelling');
 
   // A name another session wears — in ANY casing — is a collision.
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+  const other = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
     { name: 'CaseOther', type: 'terminal', cwd: tempDir, startRuntime: true });
   await delay(400);
   const collide = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename',
-    { oldName: 'CaseOther', newName: 'CASEKEPT', internalName: 'CaseOther' });
+    { oldName: 'CaseOther', newName: 'CASEKEPT', internalName: other.data.internalName });
   assert.equal(collide.status, 409, 'a differently-cased spelling of a worn name must be refused');
 
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'casekept', internalName: 'CaseFold' });
-  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'CaseOther', internalName: 'CaseOther' });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'casekept', internalName: caseId });
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'CaseOther', internalName: other.data.internalName });
 });
 
 // Regression: an undeclared Bearer-token creation is automation, not a human.
@@ -676,7 +681,7 @@ test('bare token API creations default to agent origin', async () => {
     { name: 'BareTokenProbe', type: 'terminal', cwd: tempDir, startRuntime: true });
   await delay(400);
   const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-  const s = list.data.sessions.find(x => x.internalName === 'BareTokenProbe');
+  const s = list.data.sessions.find(x => x.displayName === 'BareTokenProbe');
   assert.ok(s, 'session exists');
   assert.equal(s.createdBy, 'agent', `undeclared token caller must be agent, got ${s.createdBy}`);
 
@@ -686,7 +691,7 @@ test('bare token API creations default to agent origin', async () => {
     { 'X-Hop-Via': 'cli' });
   await delay(400);
   const list2 = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
-  const s2 = list2.data.sessions.find(x => x.internalName === 'CliUserProbe');
+  const s2 = list2.data.sessions.find(x => x.displayName === 'CliUserProbe');
   assert.equal(s2 && s2.createdBy, 'user', 'CLI-stamped caller stays user');
 
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'BareTokenProbe', internalName: 'BareTokenProbe' });
@@ -918,4 +923,44 @@ test('a user attach stamps lastUserSeenAt; a monitor tile does not', async () =>
 
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
     { name: 'seenprobe', internalName: internal });
+});
+
+// Identity is minted, names are labels. A session's internal id is opaque
+// (s_hex), never derived from the display name, so a rename touches only
+// the label — and a display name that some renamed-away session was BORN
+// with is free for reuse (deriving ids used to make that collide).
+test('sessions carry an opaque invariant id; renames touch only the label', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions', {
+    name: 'projectx', type: 'terminal', startRuntime: true, cwd: tempDir
+  });
+  assert.equal(create.status, 200);
+  assert.equal(create.data.displayName, 'projectx');
+  assert.match(create.data.internalName, /^s_[0-9a-f]{10}$/,
+    `id must be minted, got ${create.data.internalName}`);
+  const id = create.data.internalName;
+  await delay(400);
+
+  // Rename: same id, new label, and the entry the clients render says so.
+  const rename = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename', {
+    oldName: 'projectx', newName: 'projecty'
+  });
+  assert.equal(rename.status, 200, JSON.stringify(rename.data));
+  await delay(400);
+  const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const entry = list.data.sessions.find(s => s.internalName === id);
+  assert.ok(entry, 'the invariant id survives the rename');
+  assert.equal(entry.displayName, 'projecty');
+  assert.equal(entry.name, 'projecty', 'every user-facing name field is the display name');
+
+  // The freed display name is genuinely free — the latent collision.
+  const reuse = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions', {
+    name: 'projectx', type: 'terminal', startRuntime: true, cwd: tempDir
+  });
+  assert.equal(reuse.status, 200, `freed name must be reusable: ${JSON.stringify(reuse.data)}`);
+  assert.notEqual(reuse.data.internalName, id, 'the new session is its own identity');
+
+  for (const s of [id, reuse.data.internalName]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+      { name: s, internalName: s });
+  }
 });

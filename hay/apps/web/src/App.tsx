@@ -366,6 +366,9 @@ const App = () => {
     return null;
   });
   const [sessionLabel, setSessionLabel] = useState(() => initialRoom);
+  // The room's invariant id, as the server reported it in `hello` — the
+  // session.room string is just the display name the page was opened with.
+  const [canonicalRoomId, setCanonicalRoomId] = useState<string | null>(null);
   const [liveCwd, setLiveCwd] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   // What the CHROME shows. Most drops (a tunnel restart, a laptop waking, an
@@ -495,11 +498,19 @@ const App = () => {
     return DEFAULT_SESSION_SWITCH_MODE;
   });
 
+  // The label is DERIVED, never copied: the room key is the session's
+  // invariant id, which equals the display name only until the first rename.
+  // This effect used to write the room key straight into the label, so the
+  // footer (and tab title, share link, bell notification) showed the
+  // pre-rename name forever on any renamed session. The list refresh is the
+  // source of truth; session_renamed messages update it instantly in between.
   useEffect(() => {
-    if (session?.room) {
-      setSessionLabel(session.room);
-    }
-  }, [session?.room]);
+    if (!session?.room) return;
+    const entry = sessions.find((s) =>
+      (s.internalName || s.name) === (canonicalRoomId || session.room)
+      || (s.internalName || s.name) === session.room);
+    setSessionLabel(entry ? (entry.displayName || entry.name) : session.room);
+  }, [session?.room, sessions, canonicalRoomId]);
   const [fontSize, setFontSize] = useState(() => {
     const saved = localStorage.getItem("hay_font_size");
     return saved ? parseInt(saved, 10) : 14;
@@ -1510,6 +1521,8 @@ const App = () => {
 
   const connect = (nextSession: { name: string; room: string }) => {
     const targetRoom = nextSession.room;
+    // A new target invalidates the previous room's id; hello re-supplies it.
+    setCanonicalRoomId(null);
     // Clear any pending reconnect
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current);
@@ -1652,6 +1665,11 @@ const App = () => {
           setClientId(message.clientId);
           setCollabMode(message.collabMode);
           setControllerId(message.controllerId);
+          // The server names the room by its INVARIANT id here. The page
+          // itself only knows the display name it was opened under, which
+          // goes stale on the first rename — this is the durable key the
+          // label derivation matches the session list against.
+          if (message.roomId) setCanonicalRoomId(message.roomId);
           break;
         case "presence":
           // Presence broadcasts arrive on every peer keystroke (typing

@@ -833,6 +833,20 @@ function toInternalSessionName(displayName) {
     return displayName;
 }
 
+// Invariant session id for NEW sessions: opaque, never derived from the
+// display name. Sessions created before this simply keep their original
+// name as their id (the state every rename already produced), so nothing
+// migrates. The id is machine-facing (HOP_SESSION, room keys, record
+// files) and must never be shown to the user; the display name is the
+// only name a human sees, and renaming touches only that.
+function mintSessionInternalName() {
+    let id;
+    do {
+        id = 's_' + crypto.randomBytes(5).toString('hex');
+    } while (hopSessionExists(id) || hasSavedSessionConfig(id));
+    return id;
+}
+
 function toDisplaySessionName(internalName) {
     if (!internalName || typeof internalName !== 'string') return '';
     return stripLegacySessionPrefix(internalName);
@@ -10417,36 +10431,34 @@ happens until someone clicks it.
                     const actorCreatedBy = resolveActor(req) === 'agent' ? 'agent' : 'user';
                     const createdVia = resolveVia(req) || (actorCreatedBy === 'agent' ? 'agent-api' : 'web');
                     const displayName = name;
-                    const internalName = toInternalSessionName(displayName);
-                    if (!internalName || !displayName) {
+                    if (!displayName || !toInternalSessionName(displayName)) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
                         return;
                     }
-                    // Durable origin marker, mirroring the terminal-API path:
-                    // runtime config dies with the daemon, so without this an
-                    // agent session reads as human after the next restart.
-                    if (actorCreatedBy === 'agent') {
-                        const durableOrigin = readClaudeSessionMeta(internalName) || {};
-                        writeClaudeSessionMeta(internalName, {
-                            ...durableOrigin,
-                            internalName,
-                            createdBy: 'agent',
-                            createdVia,
-                            createdAt: durableOrigin.createdAt || new Date().toISOString()
-                        });
-                    }
-
                     if (isDisplayNameInUse(displayName)) {
                         res.writeHead(409, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Session name already in use' }));
                         return;
                     }
-                    if (hasSavedSessionConfig(internalName)) {
-                        res.writeHead(409, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: 'Session internal name already in use' }));
-                        return;
-                    }
+                    // Identity is MINTED, not derived: reusing a display name
+                    // that some renamed-away session was BORN with used to
+                    // collide with that session's internal id.
+                    const internalName = mintSessionInternalName();
+                    // Durable meta is the naming AUTHORITY (docs/
+                    // session-identity.md), and with minted ids it is the
+                    // only place the display name survives a daemon restart:
+                    // runtime config dies with the process, and the id can no
+                    // longer stand in for the name. Written for EVERY create,
+                    // after the refusals so a 409 writes nothing.
+                    writeClaudeSessionMeta(internalName, {
+                        internalName,
+                        displayName,
+                        createdBy: actorCreatedBy,
+                        createdVia,
+                        folderId: folderId || undefined,
+                        createdAt: new Date().toISOString()
+                    });
                     type = (type || 'terminal').toLowerCase();
                     if (type !== 'terminal' && type !== 'port') {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -10548,7 +10560,7 @@ happens until someone clicks it.
                         }
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, name: displayName, type }));
+                    res.end(JSON.stringify({ ok: true, name: displayName, displayName, internalName, type }));
                 } catch (e) {
                     const status = Number.isInteger(e?.status) ? e.status : 500;
                     const message = e?.message || 'Failed to create session';
@@ -10972,7 +10984,9 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'Session name already in use' }));
                         return;
                     }
-                    const internalName = toInternalSessionName(displayName);
+                    // Minted, not derived from the display name (see
+                    // mintSessionInternalName): renames stay label-only.
+                    const internalName = mintSessionInternalName();
                     if (!internalName) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
@@ -11023,12 +11037,19 @@ happens until someone clicks it.
                         folderId,
                         workspaceName: targetWorkspaceName || null
                     });
-                    // Durable origin marker so `hop restore` (which may run after a
-                    // reboot, long after runtime metadata is gone) can keep
-                    // agent-created workers out of the default restore set.
-                    if (actor === 'agent') {
-                        writeClaudeSessionMeta(internalName, { createdBy: 'agent', createdAt: new Date().toISOString() });
-                    }
+                    // Durable meta for EVERY create (naming authority; see
+                    // docs/session-identity.md): with minted ids the display
+                    // name survives restarts nowhere else. createdBy rides
+                    // along so `hop restore` keeps agent workers out of the
+                    // default restore set, as before.
+                    writeClaudeSessionMeta(internalName, {
+                        internalName,
+                        displayName,
+                        createdBy: actor,
+                        createdVia: resolveVia(req),
+                        folderId: folderId || undefined,
+                        createdAt: new Date().toISOString()
+                    });
 
                     const entry = await attachTerminalApiClient(internalName, displayName, {
                         actor,

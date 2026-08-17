@@ -2361,7 +2361,7 @@ export const SessionSwitcher = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: next, type: "terminal", port: null })
       });
-      const data = await res.json().catch(() => ({} as { name?: string; error?: string }));
+      const data = await res.json().catch(() => ({} as { name?: string; displayName?: string; internalName?: string; error?: string }));
       if (!res.ok || !data.name) {
         // A name collision is the common failure, and "already in use" alone
         // leaves the user hunting: the holder may be filed in another folder,
@@ -2425,7 +2425,7 @@ export const SessionSwitcher = ({
         await fetch("/api/sessions/move", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ internalName: data.name, folderId: createInFolder.id })
+          body: JSON.stringify({ internalName: data.internalName || data.name, folderId: createInFolder.id })
         }).catch(() => { /* filing is best-effort; the session exists */ });
         setCreateInFolder(null);
       }
@@ -2433,8 +2433,10 @@ export const SessionSwitcher = ({
       // the exact accidental mode-entry the hotkey inversion removed from
       // clicks. The new tile becomes current and goes live in place as soon
       // as the session reports active.
-      onFocusSession?.({ name: data.name, displayName: data.name, active: false, starting: true, internalName: data.name });
-      setFocusedKey(data.name);
+      // The id is minted server-side now; the display name is what the user
+      // typed. Keys ride on the id, labels on the name.
+      onFocusSession?.({ name: data.displayName || data.name, displayName: data.displayName || data.name, active: false, starting: true, internalName: data.internalName || data.name });
+      setFocusedKey(data.internalName || data.name);
       onRefresh();
     } catch {
       onNotice("Failed to create session");

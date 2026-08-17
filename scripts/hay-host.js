@@ -407,7 +407,13 @@ async function main() {
         const room = watchRoomEnd(rooms.getRoom(roomId, { cols, rows }, existingCwdOr(cwd, FALLBACK_CWD)));
         if (Date.now() - __t0 > 100) console.log(`[hay-host] slow room create (ws) room=${roomId} ${Date.now() - __t0}ms`);
 
-        const replayRaw = Number(wsUrl.searchParams.get('replay'));
+        // ABSENT is not ZERO: Number(null) === 0, and 0 is the explicit
+        // "no snapshot" contract for claim sockets — so every attach that
+        // simply omitted replay= (salvage, CLI reattach) silently got no
+        // screen: the 2026-08-17 host cycle salvaged 23 rooms and captured
+        // nothing, each waiting out a 20s timeout (the 8-minute freeze).
+        const replayParam = wsUrl.searchParams.get('replay');
+        const replayRaw = replayParam === null || replayParam === '' ? NaN : Number(replayParam);
         // The viewer's actual terminal colors (hex, no '#'). TUI apps pick a
         // light or dark theme from the background they're told — so a room
         // must report the background the USER is looking at, not a guess.

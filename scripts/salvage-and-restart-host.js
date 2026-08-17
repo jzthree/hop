@@ -50,7 +50,12 @@ const stripAnsi = (raw) => String(raw)
 
 // Capture one room's snapshot (the ~1.5MB replay tail) over WS.
 const salvageRoom = (port, id) => new Promise((resolve) => {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?room=${encodeURIComponent(id)}&name=salvage&cols=200&rows=50`);
+  // Explicit replay: an ABSENT param read as 0 ("no snapshot") on the host
+  // (Number(null)===0), and every room timed out. source=monitor + nudge=0:
+  // salvage is a spectator — no equal-size wiggle SIGWINCHed into 23 running
+  // claudes, no presence stamp, no seen-witness. Raw tail (above the
+  // serialized ceiling) so the salvaged text is scrollback, not one screen.
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?room=${encodeURIComponent(id)}&name=salvage&source=monitor&replay=1572864&nudge=0&cols=200&rows=50`);
   const timer = setTimeout(() => { try { ws.close(); } catch (e) {} resolve('timeout'); }, 20000);
   ws.on('message', (data) => {
     try {

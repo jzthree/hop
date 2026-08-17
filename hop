@@ -5750,6 +5750,53 @@ function pruneSessionAliasesForSession(internalName, displayName) {
     }
 }
 
+// A dev server proxied under /s/<name>/ usually emits ROOT-ABSOLUTE URLs —
+// /@vite/client, /src/main.tsx, /api/... — which the browser resolves against
+// the tunnel origin, so they arrive with the /s/<name>/ prefix gone, fall
+// through to the hub shell (or the unknown-API 404), and the port page renders
+// blank. The Referer still names the session the page came from, so a request
+// that matched no hop route is sent back to the referring PORT session's
+// server. Top-level navigations are excluded — following a link out of a port
+// page must still land on hop, not be swallowed by the proxy. WebSocket
+// upgrades never carry a path-bearing Referer, so a dev server's HMR socket
+// stays unrescued: the page renders, and vite quietly retries its socket.
+function rescuePortReferral(req, res) {
+    const referer = req.headers.referer || req.headers.referrer || '';
+    const match = /\/s\/([^/?#]+)\//.exec(String(referer));
+    if (!match) return false;
+    let name;
+    try { name = decodeURIComponent(match[1]); } catch { return false; }
+    const config = getEffectiveSessionConfig(name);
+    if (!config || config.type !== 'port' || !config.port) return false;
+    const secFetchMode = String(req.headers['sec-fetch-mode'] || '');
+    const isNavigation = secFetchMode === 'navigate' ||
+        (!secFetchMode && String(req.headers.accept || '').includes('text/html'));
+    if (isNavigation) {
+        // A link INSIDE a proxied app is also root-absolute (/admin/growth),
+        // so following it would land on the hub shell. Rescue navigations too
+        // — but never off hop's own surfaces, so leaving a port page for the
+        // hub keeps working: the landing page and hop-owned prefixes stay
+        // hop's, everything else follows the referring app.
+        const p = url.parse(req.url).pathname || '/';
+        const hubOwned = p === '/' || p === '/sessions' ||
+            ['/assets/', '/view/', '/api/', '/s/', '/ws', '/health', '/oauth', '/media/'].some((prefix) => p.startsWith(prefix));
+        if (hubOwned) return false;
+    }
+    waitForPort(config.port).then((ready) => {
+        if (!ready) {
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end(`Port session "${name}" is not answering on 127.0.0.1:${config.port}.`);
+            return;
+        }
+        const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${config.port}`, ws: false });
+        proxy.web(req, res, {}, () => {
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end(`Port session "${name}" dropped the connection.`);
+        });
+    });
+    return true;
+}
+
 function getSessionSwitcherOverlay() {
     return `
 <style id="hop-session-switcher-style">
@@ -9325,7 +9372,7 @@ happens until someone clicks it.
         // off the end of the path; content-type still comes from the real
         // file name. The legacy /assets/view/<s>/<f> form redirects here, so
         // an edge-cached response is at worst a redirect, never the bytes.
-        const viewMatch = req.method === 'GET'
+        const viewMatch = (req.method === 'GET' || req.method === 'HEAD')
             && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline)?$/);
         if (viewMatch) {
             const viewRoot = path.resolve(VIEWS_DIR);
@@ -9365,10 +9412,48 @@ happens until someone clicks it.
                 res.end(html);
                 return;
             }
+            // Streamed, with Range support. iOS media playback (AVPlayer, and
+            // the player inside WKWebView) opens a video by asking for
+            // `Range: bytes=0-1` and refuses to play at all when the answer
+            // is a 200 with the whole body — which is exactly what
+            // readFileSync produced, and why published .mp4 views spun
+            // forever on the phone. Range also means a 30 MB video no longer
+            // has to fit in the daemon's heap per request.
+            const viewType = STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream';
+            const viewSize = fs.statSync(target).size;
+            const rangeHeader = String(req.headers.range || '');
+            const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+            if (rangeMatch && (rangeMatch[1] || rangeMatch[2])) {
+                let start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : NaN;
+                let end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : NaN;
+                if (Number.isNaN(start)) {           // suffix form: bytes=-N
+                    start = Math.max(0, viewSize - end);
+                    end = viewSize - 1;
+                } else if (Number.isNaN(end) || end >= viewSize) {
+                    end = viewSize - 1;
+                }
+                if (start > end || start >= viewSize) {
+                    res.writeHead(416, { 'Content-Range': `bytes */${viewSize}` });
+                    res.end();
+                    return;
+                }
+                res.writeHead(206, {
+                    'Content-Type': viewType,
+                    'Content-Length': end - start + 1,
+                    'Content-Range': `bytes ${start}-${end}/${viewSize}`,
+                    'Accept-Ranges': 'bytes'
+                });
+                if (req.method === 'HEAD') { res.end(); return; }
+                fs.createReadStream(target, { start, end }).pipe(res);
+                return;
+            }
             res.writeHead(200, {
-                'Content-Type': STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream'
+                'Content-Type': viewType,
+                'Content-Length': viewSize,
+                'Accept-Ranges': 'bytes'
             });
-            res.end(fs.readFileSync(target));
+            if (req.method === 'HEAD') { res.end(); return; }
+            fs.createReadStream(target).pipe(res);
             return;
         }
         // The index. /assets/view/manifest.json is the URL every SHIPPED iOS
@@ -11331,6 +11416,11 @@ happens until someone clicks it.
         // returned 200 HTML, which callers (CLI, agents) misread as success
         // when talking to a daemon older than the endpoint they called.
         if (parsedUrl.pathname.startsWith('/api/')) {
+            // An /api/ path no hop handler claimed may belong to the app
+            // behind a PORT session — its page calls fetch('/api/...') with
+            // the session prefix gone. hop's own endpoints all matched above,
+            // so they keep priority over this rescue.
+            if (rescuePortReferral(req, res)) return;
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: `Unknown API endpoint: ${parsedUrl.pathname} (daemon may need a restart to pick up new endpoints)` }));
             return;
@@ -11344,6 +11434,11 @@ happens until someone clicks it.
             return;
         }
         if (!sessionName) {
+            // Before the hub shell answers: a subresource request referred by
+            // a /s/<name>/ PORT page belongs to that page's server, not to the
+            // hub — this is what keeps an absolute-path dev server (vite and
+            // friends) from rendering a blank page through the proxy.
+            if (rescuePortReferral(req, res)) return;
             // Landing (every device): the app shell in hub mode — the session
             // grid as the page, connected to NOTHING. Opening a session is the
             // user's click, not the server's guess.

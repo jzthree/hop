@@ -243,13 +243,19 @@ describe("app-owned trackpad panning", () => {
     el.addEventListener("wheel", (e) => { if (!e.defaultPrevented) count++; });
 
     for (let i = 0; i < 30; i++) { clock += 8; pan(15, clock); }
+    const inFlight = count; // leading-edge bursts, dispatched inline
+    expect(inFlight).toBeGreaterThan(0);
+    expect(inFlight).toBeLessThanOrEqual(10); // ≤ APP_ACK_WINDOW bursts of ≤5
+
     for (let f = 0; f < 15 && rafCbs.length; f++) {
       prevCount = count;
       clock += 16;
       drainFrames(1);
       if (count > prevCount) bursts++;
     }
-    expect(bursts).toBe(2); // APP_ACK_WINDOW, not a flood
+    // Held: the silent remote gets at most the one stall-cap release, never
+    // the queued flood (22 lines are still waiting).
+    expect(bursts).toBeLessThanOrEqual(1);
 
     // The remote answers: the window clears and bursts resume.
     lastOutput = clock + 1;

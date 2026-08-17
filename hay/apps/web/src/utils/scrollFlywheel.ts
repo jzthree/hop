@@ -116,7 +116,7 @@ export const attachScrollFlywheel = (
   // wire format — whatever it sends for a real notch is exactly what it sends
   // for ours.
   const APP_STEPS_PER_NOTCH = 3;
-  const APP_MAX_RATE = 90; // steps/sec — fast, still ordered
+  const APP_MAX_RATE = 70; // steps/sec — fast, still ordered
   // Remote scrolling physics: every step is a round trip (report up, full
   // repaint down) and the app repaints ONCE per input batch it drains. So:
   // batch lines per dispatch in proportion to speed (one repaint moves
@@ -224,7 +224,7 @@ export const attachScrollFlywheel = (
           if (appProto) appProto.deltaY = Math.sign(appVel) * 120;
           for (let i = 0; i < steps; i++) dispatchStep();
         }
-        appVel *= Math.exp(-dt / 0.35);
+        appVel *= Math.exp(-dt / 0.24);
       }
     }
     appRaf = requestAnimationFrame(appGlide);
@@ -239,12 +239,12 @@ export const attachScrollFlywheel = (
   let panPending = 0; // signed whole steps waiting to be dispatched
   let panLastAt = 0;
   let panMode = false; // last input was a finger stream, not a wheel
-  // A wheel notch coasts from 4 steps/s (its burst gate filters intent). A
-  // finger has no burst gate here, so the bar is a real FLICK: a slow
-  // precise drag carries ~8 steps/s of incidental velocity and must stop
-  // dead the moment the finger does.
-  const PAN_COAST_MIN = 15;
-  const coastMin = () => (panMode ? PAN_COAST_MIN : 4);
+  // Trackpads NEVER self-coast: macOS keeps emitting decaying momentum
+  // events after the fingers lift — that stream IS the coast, and it feeds
+  // the pan queue. Adding our own decay on top gave every flick two glides
+  // stacked, which read as overshoot. Only discrete wheels (no OS momentum)
+  // earn a synthetic coast, from 4 steps/s past their burst gate.
+  const coastMin = () => (panMode ? Infinity : 4);
 
   const trackpadPan = (e: WheelEvent) => {
     panMode = true;
@@ -276,6 +276,18 @@ export const attachScrollFlywheel = (
     appVel = Math.sign(rate) === Math.sign(appVel) ? 0.5 * rate + 0.5 * appVel : rate;
     appVel = Math.max(-APP_MAX_RATE, Math.min(APP_MAX_RATE, appVel));
 
+    // Leading edge dispatches INLINE: a precise first movement must not
+    // wait out an animation frame — latency is what precision feels like.
+    // The rAF loop takes over for everything after, where pacing matters.
+    if (panPending !== 0 && unacked < APP_ACK_WINDOW) {
+      const spend = Math.sign(panPending)
+        * Math.min(Math.abs(panPending), burstFor(appVel || panPending));
+      panPending -= spend;
+      lastStepAt = performance.now();
+      unacked += 1;
+      if (appProto) appProto.deltaY = Math.sign(spend) * 120;
+      for (let i = 0; i < Math.abs(spend); i++) dispatchStep();
+    }
     if (!appRaf) {
       lastFrameAt = 0;
       appRaf = requestAnimationFrame(appGlide);
@@ -283,9 +295,8 @@ export const attachScrollFlywheel = (
     if (appIdle) window.clearTimeout(appIdle);
     appIdle = window.setTimeout(() => {
       appIdle = 0;
-      // The OS stream has ended. Whatever is queued keeps draining paced and
-      // the residual velocity decays in the glide loop; if the loop already
-      // parked itself (slow drag, no momentum), sweep the leftovers now.
+      // The OS stream has ended. Whatever is queued keeps draining paced;
+      // if the loop already parked itself (slow drag), sweep leftovers now.
       if (!appRaf && panPending === 0 && Math.abs(appVel) < coastMin()) stopApp();
     }, 120);
   };
@@ -337,7 +348,7 @@ export const attachScrollFlywheel = (
       term.scrollLines(lines);
       if (term.buffer.active.viewportY === before) return stop(); // hit an edge
     }
-    vel *= Math.exp(-dt / 0.35); // ~350ms decay time-constant
+    vel *= Math.exp(-dt / 0.24); // ~240ms decay: brisk, not a runaway
     raf = requestAnimationFrame(glide);
   };
 
@@ -384,7 +395,7 @@ export const attachScrollFlywheel = (
     const rate = notchLines / (Math.min(Math.max(gap, 30), 200) / 1000);
     // Same direction: blend toward the new rate. Direction flip: hard reset.
     vel = Math.sign(rate) === Math.sign(vel) ? 0.6 * rate + 0.4 * vel : rate;
-    const CAP = 2500; // lines/s — fast, but never a teleport
+    const CAP = 1400; // lines/s — fast, but never a teleport
     vel = Math.max(-CAP, Math.min(CAP, vel));
 
     if (idleTimer) window.clearTimeout(idleTimer);

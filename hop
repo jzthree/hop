@@ -15064,6 +15064,21 @@ async function main() {
             console.log(`View: ${state.url}/view/${encodeURIComponent(session)}/${encodeURIComponent(name)}/inline`);
         }
         if (published.length) writeViewMeta(session, meta);
+        if (published.length) {
+            // Always say WHICH session this acted on, and how that relates
+            // to the terminal it ran in. An agent carried a --session target
+            // three requests past its purpose because nothing in the output
+            // ever said "not the session you are in" — the human asked where
+            // their files were, and they were in the other room.
+            const here = process.env.HOP_SESSION || '';
+            if (here && here === session) {
+                log(`Session: ${session} (this terminal)`, DIM);
+            } else if (here) {
+                log(`Session: ${session} — NOT this terminal (you are in "${here}")`, YELLOW);
+            } else {
+                log(`Session: ${session} (targeted explicitly; not running inside a session)`, DIM);
+            }
+        }
         if (failed === 0 && files.length > 0) {
             // One bell: the view is usually the deliverable the human is
             // waiting on, and the link scrolls away if nothing pings them.

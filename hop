@@ -578,6 +578,18 @@ function rebuildViewManifest() {
                     kind: m.kind === 'server' ? 'server' : 'file',
                     target: m.kind === 'server' ? (m.target || '') : undefined,
                     port: m.kind === 'server' ? m.port : undefined,
+                    // Whether the proxied session behind a server row still
+                    // EXISTS. A row whose session evaporated used to open the
+                    // hop wall (proxy miss → SPA fallback) with no hint why;
+                    // clients can now say "server gone" instead.
+                    live: m.kind === 'server'
+                        ? (() => {
+                            const seg = String(m.target || '').match(/^\/s\/([^/]+)/);
+                            const nm = seg ? decodeURIComponent(seg[1]) : '';
+                            return !!(nm && (sessionStore.sessions[nm]?.type === 'port'
+                                || Object.values(sessionStore.sessions).some((c) => c?.type === 'port' && c?.displayName === nm)));
+                        })()
+                        : undefined,
                     // The extensionless serving path — see the /view route for
                     // why the extension must stay off the URL's end.
                     path: `/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}/inline`,
@@ -601,6 +613,13 @@ const SESSION_SECRET_FILE = path.join(HOME_DIR, '.session_secret');
 // evaporated on every daemon restart. Session MEMBERSHIP is persisted per
 // session in its durable meta, so a folder and its contents survive together.
 const FOLDERS_FILE = path.join(HOME_DIR, 'folders.json');
+// Port sessions (`hop port`, `hop session add --port`) outside a workspace.
+// The daemon boots with NO active workspace, so saveSessionStore() is a
+// no-op and every port definition lived in memory only — each restart
+// forgot them all while their backends kept running, and every Views row
+// pointing at one silently opened the hop wall instead (the proxy route no
+// longer matched, the SPA fallback answered). Same shape as folders.json.
+const PORTS_FILE = path.join(HOME_DIR, 'ports.json');
 const DEFAULT_SECRET_FILE = path.join(HOME_DIR, '.auth_secret');
 const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
 const HOP_CONFIG_FILE = path.join(HOME_DIR, '.config.json');
@@ -1037,6 +1056,7 @@ let sessionStore = initialWorkspaceState.store;
 const runtimeSessionMetadata = new Map();
 // Folders are organization the user authored; they must be there on boot.
 loadFolders();
+loadPorts();
 // internalName -> the display-name claim we last rejected for it, so the
 // collision guard reports each rejection once instead of every reconcile.
 const reportedNameCollisions = new Map();
@@ -1156,10 +1176,13 @@ function setSessionConfig(name, config) {
     const folderId = config?.folderId || null;
     ensureSessionOrder(name, folderId);
     saveSessionStore();
+    if (config?.type === 'port') savePorts();
 }
 
 function deleteSessionConfig(name) {
+    const wasPort = sessionStore.sessions[name]?.type === 'port';
     delete sessionStore.sessions[name];
+    if (wasPort) savePorts();
     removeSessionFromOrder(name);
     saveSessionStore();
     // A deleted session should not be resurrected by `hop restore`, so drop its
@@ -1442,6 +1465,29 @@ function saveFolders() {
             order: sessionStore.order.folders
         }, null, 2));
     } catch (e) { /* best effort: folders are organization, not state */ }
+}
+
+function savePorts() {
+    try {
+        const ports = {};
+        for (const [name, cfg] of Object.entries(sessionStore.sessions)) {
+            if (cfg?.type === 'port') ports[name] = cfg;
+        }
+        writePrivateFile(PORTS_FILE, JSON.stringify({ ports }, null, 1));
+    } catch (e) { /* the in-memory definition still serves this run */ }
+}
+
+function loadPorts() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(PORTS_FILE, 'utf8'));
+        for (const [name, cfg] of Object.entries(raw.ports || {})) {
+            if (!cfg || cfg.type !== 'port' || !Number.isInteger(cfg.port)) continue;
+            // A workspace-defined port outranks the ledger's copy.
+            if (sessionStore.sessions[name]) continue;
+            sessionStore.sessions[name] = cfg;
+            ensureSessionOrder(name, cfg.folderId || null);
+        }
+    } catch (e) { /* no ports yet */ }
 }
 
 function loadFolders() {

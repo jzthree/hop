@@ -539,6 +539,26 @@ function enforceViewBudget() {
     } catch (e) { /* a failed sweep never blocks a publish */ }
 }
 
+// Does the proxied session behind a Views server row still exist? Answered
+// from the ports ledger on disk (plus the in-memory store, when this is the
+// daemon), so the CLI and the daemon agree.
+function portSessionIsKnown(target) {
+    const seg = String(target || '').match(/^\/s\/([^/]+)/);
+    const nm = seg ? decodeURIComponent(seg[1]) : '';
+    if (!nm) return false;
+    const matches = (cfg, key) => cfg?.type === 'port' && (key === nm || cfg.displayName === nm);
+    for (const [key, cfg] of Object.entries(sessionStore?.sessions || {})) {
+        if (matches(cfg, key)) return true;
+    }
+    try {
+        const raw = JSON.parse(fs.readFileSync(PORTS_FILE, 'utf8'));
+        for (const [key, cfg] of Object.entries(raw.ports || {})) {
+            if (matches(cfg, key)) return true;
+        }
+    } catch (e) { /* no ledger yet */ }
+    return false;
+}
+
 // The virtual folder both `hop view` and `hop port --attached` publish into:
 // clients browse every view through one manifest, REBUILT from a disk scan
 // rather than read-modify-written, so two agents publishing at once cannot
@@ -582,14 +602,11 @@ function rebuildViewManifest() {
                     // EXISTS. A row whose session evaporated used to open the
                     // hop wall (proxy miss → SPA fallback) with no hint why;
                     // clients can now say "server gone" instead.
-                    live: m.kind === 'server'
-                        ? (() => {
-                            const seg = String(m.target || '').match(/^\/s\/([^/]+)/);
-                            const nm = seg ? decodeURIComponent(seg[1]) : '';
-                            return !!(nm && (sessionStore.sessions[nm]?.type === 'port'
-                                || Object.values(sessionStore.sessions).some((c) => c?.type === 'port' && c?.displayName === nm)));
-                        })()
-                        : undefined,
+                    // Read from the ports LEDGER, not sessionStore: the
+                    // manifest is rebuilt inside the `hop view` CLI process
+                    // as often as inside the daemon, and the CLI's store is
+                    // empty — every server row read dead from there.
+                    live: m.kind === 'server' ? portSessionIsKnown(m.target) : undefined,
                     // The extensionless serving path — see the /view route for
                     // why the extension must stay off the URL's end.
                     path: `/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}/inline`,
@@ -10570,7 +10587,15 @@ happens until someone clicks it.
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));
                             return;
                         }
-                        const existingConfig = getEffectiveSessionConfig(internalName);
+                        // NOT getEffectiveSessionConfig: that synthesizes
+                        // type:'terminal' from durable meta when nothing else
+                        // exists — and this create already wrote its own meta
+                        // above, so a brand-new port session saw ITSELF and
+                        // refused with "Terminal session already exists".
+                        // Every `hop port` with a fresh name failed this way.
+                        // Only a saved or runtime TERMINAL config is a real
+                        // collision.
+                        const existingConfig = getSessionConfig(internalName) || getRuntimeSessionMetadata(internalName);
                         if (existingConfig && existingConfig.type === 'terminal') {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: 'Terminal session already exists with this name' }));

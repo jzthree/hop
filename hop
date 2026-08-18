@@ -9653,8 +9653,11 @@ happens until someone clicks it.
                 return;
             }
             const meta = readViewMeta(sess);
-            if (meta[name]?.kind === 'server') {
-                respond(400, { ok: false, error: 'A live server row disappears when the server stops — nothing to delete' });
+            // A LIVE server row is not a file to delete — it dies with its
+            // server. A DEAD one (session gone, backend forgotten) is exactly
+            // the stale entry a human wants to clear, so it goes.
+            if (meta[name]?.kind === 'server' && portSessionIsKnown(meta[name]?.target)) {
+                respond(400, { ok: false, error: 'This server is still running — its row disappears when it stops' });
                 return;
             }
             try {

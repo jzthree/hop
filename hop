@@ -3041,10 +3041,14 @@ const landingShell = (title, inner) => `<!DOCTYPE html>
 
 /** The public front door: what hop is, and the form to ask for a subdomain. */
 function renderLandingPage(landingHost, config) {
-    const domain = escapeHtml(landingHost);
+    // Users live FLAT under the base domain with a hop- prefix (see
+    // userHostnameFor); the landing host is only where signup happens.
+    const baseDomain = getBaseDomain() || landingHost;
+    const domain = escapeHtml(baseDomain);
+    const example = escapeHtml(userHostnameFor('you') || `hop-you.${baseDomain}`);
     const emailDomain = escapeHtml(config.allowedEmailDomain);
     const adminLink = config.adminSubdomain
-        ? `<p class="muted">Already have a subdomain? <a href="https://${escapeHtml(config.adminSubdomain)}.${domain}">Sign in</a>.</p>`
+        ? `<p class="muted">Already have a subdomain? <a href="https://${escapeHtml(userHostnameFor(config.adminSubdomain))}">Sign in</a>.</p>`
         : '';
     return landingShell('hop — a terminal you can reach from anywhere', `
     <h1>hop</h1>
@@ -3054,7 +3058,7 @@ function renderLandingPage(landingHost, config) {
     URL. Long-running jobs keep running when you close the laptop; you pick them back up on
     the train. Agents get their own sessions you can watch live.</p>
 
-    <p>Register here and you get <code>you.${domain}</code> pointed at the hop running on
+    <p>Register here and you get <code>${example}</code> pointed at the hop running on
     your machine. Nothing of yours runs on anyone else's computer, and no one else can reach
     your sessions — you set your own password and 2FA on first launch.</p>
 
@@ -3088,7 +3092,7 @@ function renderLandingPage(landingHost, config) {
       <li>Install hop on the machine whose terminals you want to reach.</li>
       <li>Run it with the credentials we send you.</li>
       <li>Set a password and scan the 2FA code it prints.</li>
-      <li>Open <code>you.${domain}</code> from anywhere.</li>
+      <li>Open <code>${example}</code> from anywhere.</li>
     </ol>
 
     <div class="foot">${adminLink}</div>
@@ -3096,14 +3100,14 @@ function renderLandingPage(landingHost, config) {
     <script>
       // JSON, not the HTML-escaped copy: entities are not decoded inside a
       // script element, so &quot; would arrive literally.
-      var HOST = ${JSON.stringify(String(landingHost || ''))};
+      var HOST = ${JSON.stringify(String(baseDomain || ''))};
       var sub = document.getElementById('subdomain');
       var preview = document.getElementById('preview');
       var msg = document.getElementById('msg');
       var go = document.getElementById('go');
       function paint() {
         var v = sub.value.trim().toLowerCase();
-        preview.textContent = v ? v + '.' + HOST : '';
+        preview.textContent = v ? 'hop-' + v + '.' + HOST : '';
       }
       sub.addEventListener('input', paint); paint();
       document.getElementById('f').addEventListener('submit', async function (e) {
@@ -3143,7 +3147,7 @@ function renderNoticePage(title, bodyHtml) {
 
 /** The page an approved registrant lands on to collect their credentials. */
 function renderClaimPage(registration, token, landingHost) {
-    const host = escapeHtml(registration.hostname || `${registration.subdomain}.${landingHost}`);
+    const host = escapeHtml(registration.hostname || userHostnameFor(registration.subdomain) || `${registration.subdomain}.${landingHost}`);
     const dl = `/claim/credentials.json?token=${encodeURIComponent(token)}`;
     return landingShell('Your hop subdomain is ready', `
     <h1>You're approved</h1>
@@ -3220,6 +3224,18 @@ function getBaseDomain() {
 }
 
 // Get subdomain prefix (e.g., hop.example.com -> hop)
+// A registered user's hostname. FLAT under the base domain with a hop-
+// prefix (hop-alice.zhoulab.io), not nested under the landing host
+// (alice.hop.zhoulab.io): Cloudflare's universal certificate covers ONE
+// label below the zone, so a nested name resolves and then fails TLS -
+// discovered live 2026-08-12 with jianzhou.hop.zhoulab.io. The prefix
+// keeps hop users out of the zone's other names (ssh-nas.zhoulab.io).
+// Legacy users (kat.zhoulab.io) predate the prefix and keep their name.
+function userHostnameFor(username) {
+    const baseDomain = getBaseDomain();
+    return baseDomain ? `hop-${String(username).toLowerCase()}.${baseDomain}` : null;
+}
+
 function getSubdomainPrefix() {
     const config = getDomainConfig();
     if (!config || !config.hostname) return 'hop';
@@ -3260,7 +3276,7 @@ async function addUser(username) {
     }
 
     const tunnelName = `hop-${username}`;
-    const hostname = `${username}.${prefix}.${baseDomain}`;
+    const hostname = userHostnameFor(username);
     let tunnelCreatedByUs = false;
 
     log(`\n${BOLD}Adding user: ${username}${RESET}\n`, CYAN);
@@ -9049,10 +9065,10 @@ function startAuthProxy(authEmitter) {
                     }
                     const link = `https://${landingHost}/verify?token=${encodeURIComponent(result.token)}`;
                     try {
-                        await sendRegistrationMail(result.email, `Confirm your ${result.subdomain}.${landingHost} request`,
+                        await sendRegistrationMail(result.email, `Confirm your ${userHostnameFor(result.subdomain)} request`,
 `Hello,
 
-You asked for ${result.subdomain}.${landingHost}.
+You asked for ${userHostnameFor(result.subdomain)}.
 
 Confirm this address to send the request on to the admin:
 
@@ -15714,7 +15730,7 @@ async function main() {
             log(`\n${BOLD}Self-service registration:${RESET} ${config.enabled ? `${GREEN}on${RESET}` : `${YELLOW}off${RESET}`}`, RESET);
             log(`  Landing page:  ${landingHost ? `https://${landingHost}` : '(no custom domain — run hop domain <host>)'}`, RESET);
             log(`  Open to:       ${config.allowedEmailDomain} addresses`, RESET);
-            log(`  Admin host:    ${config.adminSubdomain ? `${config.adminSubdomain}.${landingHost}` : '(not set)'}`, RESET);
+            log(`  Admin host:    ${config.adminSubdomain ? userHostnameFor(config.adminSubdomain) : '(not set)'}`, RESET);
             log(`  Mail:          ${getMailConfig() ? `${GREEN}configured${RESET}` : `${RED}not configured — signups will be refused${RESET}`}`, RESET);
             const waiting = landingHost ? getRegistrationStore().pending().length : 0;
             log(`  Waiting:       ${waiting} request${waiting === 1 ? '' : 's'}${waiting ? ` (${CYAN}hop user pending${RESET})` : ''}`, RESET);
@@ -15777,7 +15793,7 @@ async function main() {
             // The admin's subdomain is by definition where the admin's own
             // clients belong, so make it canonical too — otherwise every
             // device would sit on the soon-to-be-public hostname.
-            const canonical = `${name}.${landingHost}`;
+            const canonical = userHostnameFor(name);
             saveHopConfig({ ...getHopConfig(), canonicalHost: canonical });
             log(`\n${GREEN}✓ Admin subdomain is ${name}.${RESET}`, GREEN);
             log(`  Reserved from public signup, and set as the canonical host for your clients.`, DIM);

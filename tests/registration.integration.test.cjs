@@ -195,7 +195,10 @@ test('the landing host serves a public signup page instead of the login gate', a
   const res = await request('GET', '/');
   assert.equal(res.status, 200);
   assert.match(res.body, /Request a subdomain/);
-  assert.match(res.body, new RegExp(LANDING_HOST));
+  // Users live FLAT under the base domain with a hop- prefix — one label
+  // below the zone, inside Cloudflare's universal certificate. The example
+  // hostname on the page must show that shape, not <you>.<landing host>.
+  assert.match(res.body, /hop-you\.example\.com/);
   assert.match(res.body, /uchicago\.edu/);
   // The point of the change: no credential prompt for a stranger.
   assert.ok(!/Security Check/.test(res.body), 'must not be the login page');
@@ -227,7 +230,7 @@ test('a valid request is recorded and mailed a confirmation link', async () => {
 
   const mail = smtp.messages[smtp.messages.length - 1];
   assert.match(mail.to, /alice@uchicago\.edu/);
-  assert.match(mail.subject, /alice\.hoptest\.example\.com/);
+  assert.match(mail.subject, /hop-alice\.example\.com/, 'mail names the FLAT hostname');
   const link = (/https:\/\/\S+\/verify\?token=\S+/.exec(mail.text) || [])[0];
   assert.ok(link, `the email carries a verification link:\n${mail.text}`);
 

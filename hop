@@ -1212,6 +1212,8 @@ function deleteSessionConfig(name) {
 function getSessionDisplayName(name) {
     const config = getEffectiveSessionConfig(name);
     if (config?.displayName) return config.displayName;
+    const metaLabel = readClaudeSessionMeta(name)?.displayName;
+    if (metaLabel) return metaLabel;
     return toDisplaySessionName(name);
 }
 
@@ -2547,6 +2549,30 @@ const RESUME_PROMPT_RE = /Resuming the full session|Resume from summary|Resume f
 // Claude Code's own chrome — proof the app is up even when the room reports
 // the wrapper shell as its foreground process (argv launch).
 const CLAUDE_UI_RE = /bypass permissions on|shift\+tab to cycle|Welcome back|esc to interrupt|\? for shortcuts/i;
+// Claude Code's workspace-trust dialog ("Quick safety check: is this a
+// project you created or one you trust?"). It precedes everything else -
+// the resume prompt included - whenever the config root holds no
+// acceptance for the directory (an explicit false, even one an older
+// claude wrote, beats a trusted ancestor). Restore could not see it: not
+// chrome, not a resume prompt, so the session read as "never started" and
+// sat at the dialog for two weeks (lightscope, Neptune). Whitespace-
+// tolerant because the grid text can run words together across wraps.
+const TRUST_PROMPT_RE = /Quick\s*safety\s*check|Yes,?\s*I\s*trust\s*this\s*folder|Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust/i;
+// The directory the dialog is asking about, so an answer is only ever given
+// for the workspace the session was launched in - never for wherever a
+// shell happened to wander.
+function trustDialogWorkspace(screenText) {
+    const m = /Accessing\s*workspace:?\s*(\/[^\s\u2502\u2500]+)/i.exec(String(screenText || ''));
+    return m ? m[1].replace(/\/+$/, '') : null;
+}
+function samePath(a, b) {
+    const norm = (p) => {
+        let v = String(p || '').replace(/\/+$/, '');
+        try { v = fs.realpathSync(v); } catch (e) { /* keep as-is */ }
+        return v;
+    };
+    return !!a && !!b && norm(a) === norm(b);
+}
 function getResumeMode() {
     const mode = String(getHopConfig().resume_mode || '').toLowerCase();
     return mode === 'summary' || mode === 'ask' ? mode : 'full';
@@ -5455,9 +5481,114 @@ async function restoreSavedSessions(opts = {}) {
     });
 }
 
-async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = false } = {}) {
+// Is this live room safe to tear down and relaunch? Only a room with
+// nothing in it: an idle shell showing its prompt, or a claude that never
+// got past a startup dialog (workspace trust, resume choice) - both are
+// what a failed restore leaves behind. Anything else (a running program,
+// claude chrome, a blank screen still booting) is someone's work.
+async function roomIsRedoable(entry) {
+    const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'login', 'nu', 'xonsh']);
+    const fg = String(entry?.foregroundProcess || '').replace(/^-/, '').trim();
+    let text = '';
+    try {
+        const grid = await getRoomGridPreviewShared(entry.internalName);
+        text = String(grid?.text || '');
+    } catch (e) { return { ok: false, reason: 'screen unavailable' }; }
+    if (TRUST_PROMPT_RE.test(text)) return { ok: true, reason: 'parked at the workspace-trust dialog' };
+    if (RESUME_PROMPT_RE.test(text)) return { ok: true, reason: 'parked at the resume prompt' };
+    if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: 'claude is running' };
+    if (fg && !SHELLS.has(fg.toLowerCase())) return { ok: false, reason: `${fg} is running` };
+    // The grid text can carry stray control bytes a shell left on: ESC c
+    // (reset), CSI sequences, and a trailing SGR mouse-report fragment
+    // ("...% 35;11;17M") from an app that had mouse tracking on — angler
+    // came back with exactly that and its real prompt was misread as "no
+    // prompt". Strip them before judging the last line.
+    const clean = (l) => l
+        .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, '') // OSC
+        .replace(/\u001b[\[\]][0-9;?]*[A-Za-z]/g, '')                   // CSI
+        .replace(/\u001bc/g, '')                                        // full reset
+        .replace(/\u001b[=>]/g, '')
+        .replace(/[0-9;]+[Mm]\s*$/, '')                                 // trailing mouse report
+        .trimEnd();
+    const lines = text.split('\n').map(clean).filter((l) => l.trim() !== '');
+    const last = lines.length ? lines[lines.length - 1] : '';
+    if (!/[%$#❯>]\s*$/.test(last)) return { ok: false, reason: 'no idle shell prompt on screen' };
+    return { ok: true, reason: 'idle shell' };
+}
+// Resolve the names a user typed (display or internal, any case) against
+// everything restore knows about - WITHOUT inventing a session for an
+// unknown name (the resolveSessionInternalName trap).
+function resolveRestoreTargets(names, snapshot) {
+    const known = new Map(); // lower-cased candidate -> internalName
+    const add = (internalName) => {
+        if (!internalName) return;
+        known.set(String(internalName).toLowerCase(), internalName);
+        const display = getSessionDisplayName(internalName);
+        if (display) known.set(String(display).toLowerCase(), internalName);
+        const metaLabel = readClaudeSessionMeta(internalName)?.displayName;
+        if (metaLabel) known.set(String(metaLabel).toLowerCase(), internalName);
+    };
+    for (const e of snapshot.entries) if (e && e.type === 'terminal') add(e.internalName);
+    for (const rec of listClaudeSessionRecords()) add(rec.internalName);
+    for (const meta of listClaudeSessionMetas()) add(meta.internalName);
+    const resolved = new Set();
+    const unknown = [];
+    for (const raw of names) {
+        const hit = known.get(String(raw || '').trim().toLowerCase());
+        if (hit) resolved.add(hit); else unknown.push(String(raw));
+    }
+    return { resolved, unknown };
+}
+async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = false, only = null } = {}) {
     const snapshot = await listAllSessionEntriesRuntimeFirst();
     const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
+    // Targeted redo (`hop restore <name>...`): the named sessions are planned
+    // even when live - a failed restore leaves a LIVE room (bare shell,
+    // parked dialog), which is exactly what a fleet restore skips, so the
+    // only remedy used to be "open it and run its command by hand". A live
+    // target is torn down first, and only when roomIsRedoable says it holds
+    // nothing; the hook record and durable meta survive the teardown (only
+    // an explicit delete removes them), so the standard plan then applies.
+    const skipped = [];
+    let onlySet = null;
+    if (Array.isArray(only) && only.length) {
+        const { resolved, unknown } = resolveRestoreTargets(only, snapshot);
+        for (const name of unknown) skipped.push({ name, reason: 'no such session' });
+        onlySet = resolved;
+        for (const internalName of resolved) {
+            if (!live.has(internalName)) continue;
+            const entry = snapshot.entries.find((e) => e.internalName === internalName);
+            const verdict = await roomIsRedoable(entry);
+            const display = getSessionDisplayName(internalName) || internalName;
+            if (!verdict.ok) {
+                skipped.push({ name: display, reason: `busy — ${verdict.reason}` });
+                onlySet.delete(internalName);
+                continue;
+            }
+            if (dryRun) { live.delete(internalName); continue; }
+            // Snapshot the restore records before the close. A host that
+            // predates ?preserve=1 deletes them on session_end; rewrite
+            // whatever went missing so the plan below still sees them.
+            const backups = {};
+            for (const ext of ['json', 'turn', 'meta']) {
+                const f = path.join(CLAUDE_SESSIONS_DIR, `${internalName}.${ext}`);
+                try { backups[f] = fs.readFileSync(f); } catch (e) { /* absent */ }
+            }
+            const closed = await terminateExternalHaySession(internalName, { preserveRecords: true });
+            for (const [f, buf] of Object.entries(backups)) {
+                try { fs.accessSync(f); } catch (e) {
+                    try { writePrivateFile(f, buf, 0o600); } catch (e2) { /* best effort */ }
+                }
+            }
+            if (!closed) {
+                skipped.push({ name: display, reason: 'could not close the old room' });
+                onlySet.delete(internalName);
+                continue;
+            }
+            log(`  ${display}: closed the ${verdict.reason} left by the last restore`, DIM);
+            live.delete(internalName);
+        }
+    }
     const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !live.has(e.internalName));
     // Primary source: the SessionStart-hook records. Add any recorded session that
     // isn't already live or covered by the store, so restore works even though the
@@ -5503,17 +5634,19 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     // the machine with dozens of resumed fleet/verifier terminals.
     const isAgentCreated = (e) =>
         e.createdBy === 'agent' || readClaudeSessionMeta(e.internalName)?.createdBy === 'agent';
-    const skippedAgents = includeAgents ? [] : candidates.filter(isAgentCreated).map((e) => e.displayName || e.internalName);
+    const skippedAgents = (includeAgents || onlySet) ? [] : candidates.filter(isAgentCreated).map((e) => e.displayName || e.internalName);
     // Archived sessions were stopped ON PURPOSE, resumable on demand — a
     // fleet restore must not resurrect them (they'd sit running, hidden,
     // burning a claude session each). Opening one from the parked section
     // still resumes it any time.
-    const keptUnarchived = (includeAgents ? candidates : candidates.filter((e) => !isAgentCreated(e)))
-        .filter((e) => {
-            const archived = getEffectiveSessionConfig(e.internalName)?.archived === true
-                || readClaudeSessionMeta(e.internalName)?.archived === true;
-            return !archived;
-        });
+    const keptUnarchived = onlySet
+        ? candidates.filter((e) => onlySet.has(e.internalName)) // named explicitly: no filters
+        : (includeAgents ? candidates : candidates.filter((e) => !isAgentCreated(e)))
+            .filter((e) => {
+                const archived = getEffectiveSessionConfig(e.internalName)?.archived === true
+                    || readClaudeSessionMeta(e.internalName)?.archived === true;
+                return !archived;
+            });
     const kept = keptUnarchived;
     const planned = kept.map((e) => {
         const plan = restorePlanForSession(e);
@@ -5538,6 +5671,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     if (dryRun) {
         return {
             restored: planned.map((p) => ({ name: p.displayName, command: p.command, cwd: p.cwd, replay: p.replay, warning: p.warning })),
+            skipped,
             count: planned.length,
             skippedAgents,
             dryRun: true
@@ -5637,7 +5771,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 try {
                     const grid = await getRoomGridPreviewShared(job.plan.internalName);
                     const text = String(grid?.text || '');
-                    if (RESUME_PROMPT_RE.test(text) || CLAUDE_UI_RE.test(text)) {
+                    if (RESUME_PROMPT_RE.test(text) || CLAUDE_UI_RE.test(text) || TRUST_PROMPT_RE.test(text)) {
                         job.state = 'verify';
                         job.since = Date.now();
                         continue;
@@ -5678,12 +5812,14 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                     try {
                         const grid = await getRoomGridPreviewShared(job.plan.internalName);
                         const text = String(grid?.text || '');
-                        screenSaysRunning = RESUME_PROMPT_RE.test(text) || CLAUDE_UI_RE.test(text);
+                        screenSaysRunning = RESUME_PROMPT_RE.test(text) || CLAUDE_UI_RE.test(text) || TRUST_PROMPT_RE.test(text);
                     } catch (e) { /* host busy — try again next tick */ }
                 }
                 if (running || screenSaysRunning) {
-                    const key = resumeChoiceKey(getResumeMode());
-                    if (!key) { finish('resumed'); continue; }
+                    // Always watch for prompts: even in resume_mode="ask"
+                    // (where the resume choice is left to a human) the trust
+                    // dialog is ours to answer - it is hop that put claude
+                    // back in this directory.
                     job.state = 'answer-prompt';
                     job.since = Date.now();
                     continue;
@@ -5707,8 +5843,25 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                     const grid = await getRoomGridPreviewShared(job.plan.internalName);
                     screen = String(grid?.text || '');
                 } catch (e) { continue; }
+                if (TRUST_PROMPT_RE.test(screen) && !job.trustAnswered) {
+                    // Answer only for the workspace this session was launched
+                    // in. A dialog naming any other directory is not ours to
+                    // wave through - leave it on screen and say so.
+                    const asked = trustDialogWorkspace(screen);
+                    if (asked && samePath(asked, job.plan.cwd)) {
+                        try { sendTerminalInput(job.entry, '1\r'); } catch (e) { finish('write-failed'); continue; }
+                        log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: accepted workspace trust for ${asked}`, DIM);
+                        job.trustAnswered = true;
+                        job.since = Date.now();
+                    } else {
+                        log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: claude is asking to trust ${asked || 'an unknown directory'}, not ${job.plan.cwd} — left for you to answer`, YELLOW);
+                        finish('trust-prompt');
+                    }
+                    continue;
+                }
                 if (!RESUME_PROMPT_RE.test(screen)) continue;
                 const key = resumeChoiceKey(getResumeMode());
+                if (!key) { finish('resumed'); continue; } // resume_mode="ask": a human picks
                 try { sendTerminalInput(job.entry, `${key}\r`); } catch (e) { /* fall through */ }
                 log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: resumed full session`, DIM);
                 finish('resumed-answered');
@@ -5719,7 +5872,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
         outcomes.set(job.plan.internalName, 'timeout');
         try { closeTerminalApiEntry(job.entry.id); } catch (e) { /* ignore */ }
     }
-    const failed = [...outcomes.entries()].filter(([, s]) => s === 'never-started' || s === 'timeout' || s === 'write-failed');
+    const failed = [...outcomes.entries()].filter(([, s]) => s === 'never-started' || s === 'timeout' || s === 'write-failed' || s === 'trust-prompt');
     if (failed.length) {
         log(`${failed.length} session(s) did not come back up:`, YELLOW);
         for (const [name, status] of failed) log(`  ${getSessionDisplayName(name) || name} (${status})`, YELLOW);
@@ -5728,6 +5881,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     return {
         outcomes: Object.fromEntries(outcomes),
         restored: planned.map((p) => ({ name: p.displayName, command: p.command, cwd: p.cwd, replay: p.replay, warning: p.warning })),
+        skipped,
         count: planned.length,
         skippedAgents,
         dryRun: false
@@ -8391,11 +8545,16 @@ async function waitForExternalHaySessionClosed(sessionName, hostPort = null, tim
     return Array.isArray(finalRooms) && !finalRooms.some((room) => room && room.id === sessionName);
 }
 
-async function terminateExternalHaySession(sessionName) {
+async function terminateExternalHaySession(sessionName, { preserveRecords = false } = {}) {
     if (!isExternalTerminalBackend() || !sessionName) return true;
     const hostPort = getExternalHayHostPortForSession(sessionName);
+    // preserveRecords: closing to RELAUNCH (targeted restore), not to end.
+    // The host deletes a room's restore records on session_end unless told
+    // to keep them; the ws-kill fallback below has no such channel, so it
+    // must never be the path for a relaunch-close.
+    const q = preserveRecords ? '?preserve=1' : '';
     try {
-        const response = await callExternalHayHostApi(`/rooms/${encodeURIComponent(sessionName)}`, 'DELETE', null, 1500);
+        const response = await callExternalHayHostApi(`/rooms/${encodeURIComponent(sessionName)}${q}`, 'DELETE', null, 1500);
         if (response && response.status >= 200 && response.status < 300) {
             const closed = await waitForExternalHaySessionClosed(sessionName, hostPort);
             if (closed && activeSessions[sessionName]) {
@@ -8405,6 +8564,10 @@ async function terminateExternalHaySession(sessionName) {
         }
     } catch (e) { }
 
+    // The DELETE failed. For a relaunch-close, do NOT fall back to ws-kill:
+    // it cannot preserve records, so tearing down here would destroy exactly
+    // what the relaunch needs. Report failure and let the caller skip it.
+    if (preserveRecords) return false;
     let ws;
     try {
         ws = new WebSocket(buildExternalHayWsUrl(sessionName, {
@@ -10899,7 +11062,8 @@ happens until someone clicks it.
                     const parsed = body ? JSON.parse(body) : {};
                     const result = await restoreSavedSessions({
                         dryRun: parsed.dryRun === true,
-                        includeAgents: parsed.includeAgents === true
+                        includeAgents: parsed.includeAgents === true,
+                        only: Array.isArray(parsed.only) ? parsed.only.filter((n) => typeof n === 'string').slice(0, 200) : null
                     });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(result));
@@ -14080,6 +14244,7 @@ const HELP_SECTIONS = [
     ] },
     { title: 'Restore', lines: [
         `hop restore [--dry-run] [--agents]  Recreate your saved sessions, resuming claude conversations (--agents includes agent-created ones)`,
+        `hop restore <name>...     Redo just those sessions — even live ones, if they hold only an idle shell or a startup dialog`,
         `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
         `hop claude-hook status|remove   Check or remove the hook`,
@@ -14831,6 +14996,9 @@ async function main() {
     if (process.argv[2] === 'restore') {
         const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
         const includeAgents = process.argv.includes('--agents');
+        // `hop restore <name>...` redoes just those, live or not (see
+        // restoreSavedSessionsUnlocked's targeted path).
+        const only = process.argv.slice(3).filter((a) => !a.startsWith('-'));
         let state = isServerRunning();
         if (!state) {
             // Start the daemon on demand so `hop restore` is a one-command recovery
@@ -14845,7 +15013,7 @@ async function main() {
         }
         let res;
         try {
-            res = await callLocalApi(state, '/api/sessions/restore', 'POST', { dryRun, includeAgents });
+            res = await callLocalApi(state, '/api/sessions/restore', 'POST', { dryRun, includeAgents, only: only.length ? only : undefined });
         } catch (e) {
             log(`Restore request failed: ${e.message}`, RED);
             process.exit(1);
@@ -14856,8 +15024,10 @@ async function main() {
         }
         const items = Array.isArray(res.data?.restored) ? res.data.restored : [];
         const skippedAgents = Array.isArray(res.data?.skippedAgents) ? res.data.skippedAgents : [];
+        const skippedTargets = Array.isArray(res.data?.skipped) ? res.data.skipped : [];
+        for (const sk of skippedTargets) log(`  ${YELLOW}•${RESET} ${sk.name}  ${DIM}skipped: ${sk.reason}${RESET}`, RESET);
         if (items.length === 0) {
-            log(`No saved sessions to restore.`, YELLOW);
+            log(only.length ? `Nothing to redo.` : `No saved sessions to restore.`, YELLOW);
             if (skippedAgents.length > 0) {
                 log(`(${skippedAgents.length} agent-created session(s) skipped — ${CYAN}hop restore --agents${RESET} to include)`, DIM);
             }

@@ -126,6 +126,10 @@ let shuttingDown = false;
 // When a room ends for good, drop its `hop restore` sources: the SessionStart
 // hook record (+ turn counter + origin marker) and any stale replay buffer.
 const watchedRooms = new WeakSet();
+// Room ids the daemon is closing in order to RELAUNCH (targeted `hop
+// restore <name>`): their records must survive the close, exactly as they
+// survive a host shutdown. Consumed once, on the next session_end.
+const preserveRecordsOnClose = new Set();
 function watchRoomEnd(room) {
     if (!room || typeof room.on !== 'function' || watchedRooms.has(room)) return room;
     watchedRooms.add(room);
@@ -133,6 +137,9 @@ function watchRoomEnd(room) {
         if (shuttingDown) return;
         const id = String(room.id || '');
         if (!/^[A-Za-z0-9_.-]+$/.test(id)) return; // never let an id escape the dirs
+        // A relaunch-close keeps everything (records + buffer): the daemon is
+        // about to bring this same session back with `claude --resume`.
+        if (preserveRecordsOnClose.delete(id)) return;
         for (const file of [
             path.join(CLAUDE_SESSIONS_DIR, `${id}.json`),
             path.join(CLAUDE_SESSIONS_DIR, `${id}.turn`),
@@ -364,6 +371,10 @@ async function main() {
             }
             try {
                 const exists = typeof rooms.hasRoom === 'function' ? rooms.hasRoom(roomId) : false;
+                // ?preserve=1: close but keep the restore records — the daemon
+                // is relaunching this session, not ending it. Armed before
+                // closeRoom so it is set when session_end fires synchronously.
+                if (/[?&]preserve=1(&|$)/.test(String(req.url || ''))) preserveRecordsOnClose.add(roomId);
                 rooms.closeRoom(roomId);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, existed: exists }));

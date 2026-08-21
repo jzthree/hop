@@ -141,6 +141,49 @@ test('a different conversation in a different cwd is parked, not recorded', () =
   assert.equal(parked.sessionId, 'sess-2', 'the stranger is parked alongside');
 });
 
+// Run the hook the way claude runs it: as a child of the claude process, so
+// the argv walk (ps on the parent) sees a real command line. A script named
+// `claude` under node is what the walk recognises ("node .../claude ...").
+const runHookUnderFakeClaude = (home, session, payload, claudeArgs) => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'hop-fake-claude-'));
+  const fake = path.join(bin, 'claude');
+  fs.writeFileSync(fake, [
+    'const { execFileSync } = require("node:child_process");',
+    `execFileSync(${JSON.stringify(process.execPath)}, [${JSON.stringify(HOOK)}], { input: process.env.HOOK_PAYLOAD, stdio: ["pipe", "inherit", "inherit"] });`
+  ].join('\n'));
+  execFileSync(process.execPath, [fake, ...claudeArgs], {
+    env: { ...process.env, HOP_HOME: home, HOP_SESSION: session, CLAUDE_CODE_SESSION_ID: '', HOOK_PAYLOAD: JSON.stringify(payload) }
+  });
+};
+
+test('a headless claude in the room\'s own directory never takes over the record', () => {
+  // room, 2026-08-19: a furniture-classifier `claude -p ... --no-session-
+  // persistence` spawned by the room's own conversation, in the room's own
+  // cwd, overwrote the record. Same cwd, so the parked-rival rule did not
+  // apply; no transcript, so restore reopened a plain shell two days later.
+  const home = freshHome();
+  runHookUnderFakeClaude(home, 'alpha', {
+    hook_event_name: 'SessionStart', session_id: 'real-1',
+    cwd: '/Users/someone/Code/project', source: 'startup'
+  }, ['--dangerously-skip-permissions']);
+  const before = readRecord(home, 'alpha');
+  assert.equal(before.sessionId, 'real-1');
+  assert.match(before.launchCmd, /--dangerously-skip-permissions/, 'the argv walk works for the real claude');
+
+  runHookUnderFakeClaude(home, 'alpha', {
+    hook_event_name: 'SessionStart', session_id: 'helper-1',
+    cwd: '/Users/someone/Code/project', source: 'startup'
+  }, ['--dangerously-skip-permissions', '-p', '--output-format', 'stream-json', '--no-session-persistence']);
+  assert.equal(readRecord(home, 'alpha').sessionId, 'real-1', 'the helper did not clobber the record');
+  assert.equal(fs.existsSync(path.join(home, 'claude-sessions', 'alpha.other.json')), false, 'nor was it parked as a rival');
+
+  // Its Stops are not the user's turns either.
+  runHookUnderFakeClaude(home, 'alpha', { hook_event_name: 'Stop', session_id: 'helper-1' }, ['-p']);
+  assert.equal(fs.existsSync(path.join(home, 'claude-sessions', 'alpha.turn')), false, 'no turn counted for a headless run');
+  runHookUnderFakeClaude(home, 'alpha', { hook_event_name: 'Stop', session_id: 'real-1' }, ['--dangerously-skip-permissions']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'claude-sessions', 'alpha.turn'), 'utf8')).sessionId, 'real-1');
+});
+
 test('outside hop the hook is a no-op', () => {
   const home = freshHome();
   execFileSync(process.execPath, [HOOK], {

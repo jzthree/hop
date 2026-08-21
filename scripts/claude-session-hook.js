@@ -67,6 +67,27 @@ function claudeLaunchCmd() {
   return null;
 }
 
+// A headless claude (`-p`/`--print`, stream-json piping, --no-session-
+// persistence) is tooling, never the terminal's conversation: a classifier
+// the room's own claude shells out to, a batch job, a test. It has nothing
+// to resume - with --no-session-persistence there is no transcript at all -
+// and its Stops are not the user's turns. The nested-claude guards cannot
+// see it when it runs in the room's OWN directory (the parked-rival rule
+// keys on a different cwd): on 2026-08-19 a furniture-classifier `claude
+// -p ... --no-session-persistence` spawned inside the `room` session took
+// over its record, and two days later `hop restore` found "no transcript
+// on this host" and reopened a plain shell over a live conversation.
+function isHeadlessLaunch(cmd) {
+  if (typeof cmd !== "string" || !cmd) return false;
+  const tokens = cmd.split(/\s+/);
+  for (const t of tokens) {
+    if (t === "-p" || t === "--print") return true;
+    if (t === "--no-session-persistence") return true;
+    if (/^--(input|output)-format(=|$)/.test(t)) return true;
+  }
+  return false;
+}
+
 function sessionsDir() {
   const home = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
   const dir = path.join(home, "claude-sessions");
@@ -85,7 +106,7 @@ function isTranscriptStorePath(cwd) {
   return /[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(cwd || ""));
 }
 
-function recordSession(dir, hopSession, payload) {
+function recordSession(dir, hopSession, payload, launchCmd) {
   const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
   if (!sessionId) return;
   let cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
@@ -123,7 +144,7 @@ function recordSession(dir, hopSession, payload) {
     configDir: process.env.CLAUDE_CONFIG_DIR || null,
     // Resolved argv of the running claude (flags survive even when they came
     // from a shell alias, which a rebuilt/prefixed command would not expand).
-    launchCmd: claudeLaunchCmd(),
+    launchCmd,
     updatedAt: new Date().toISOString()
   });
   // One file per hop session avoids concurrent-write races between sessions.
@@ -192,6 +213,12 @@ function main() {
   const ownSessionId = typeof payload.session_id === "string" ? payload.session_id : "";
   if (parentSessionId && ownSessionId && parentSessionId !== ownSessionId) return;
 
+  // Third guard, for the case neither env check can see: a headless claude
+  // in the room's own directory. Its argv tells the truth even when its
+  // environment does not. Neither recorded nor counted.
+  const launchCmd = claudeLaunchCmd();
+  if (isHeadlessLaunch(launchCmd)) return;
+
   const event = typeof payload.hook_event_name === "string" ? payload.hook_event_name : "";
   const dir = sessionsDir();
   // Only the main agent's Stop bumps the turn counter. SubagentStop (a Task-tool
@@ -200,7 +227,7 @@ function main() {
   if (event === "Stop") {
     bumpTurn(dir, hopSession, payload);
   } else {
-    recordSession(dir, hopSession, payload); // SessionStart (default)
+    recordSession(dir, hopSession, payload, launchCmd); // SessionStart (default)
   }
 }
 

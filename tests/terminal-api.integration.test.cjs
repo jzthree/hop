@@ -1071,6 +1071,63 @@ test('restore trusts the transcript store over a drifted record cwd', async () =
   await fs.rm(path.join(dir, `${internal}.meta`), { force: true });
 });
 
+// `hop restore <name>`: a failed restore leaves a LIVE room (bare shell or a
+// parked dialog), which is exactly what a fleet restore skips. The targeted
+// form plans named sessions even when live — but only tears down a room
+// that holds nothing.
+test('targeted restore redoes an idle live shell, refuses a busy one, reports an unknown name', async () => {
+  const sid = '55555555-6666-7777-8888-999999999999';
+  const dir = path.join(hopHome, 'claude-sessions');
+  await fs.mkdir(dir, { recursive: true });
+  const tdir = path.join(os.homedir(), '.claude', 'projects', tempDir.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(tdir, { recursive: true });
+  const tfile = path.join(tdir, `${sid}.jsonl`);
+  await fs.writeFile(tfile, '{"type":"user"}\n');
+
+  const idle = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'redo-idle', cwd: tempDir }, agentHeaders);
+  const busy = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'redo-busy', cwd: tempDir }, agentHeaders);
+  assert.equal(idle.status, 200); assert.equal(busy.status, 200);
+  const idleName = idle.data.sessionName, busyName = busy.data.sessionName;
+  for (const n of [idleName, busyName]) {
+    await fs.writeFile(path.join(dir, `${n}.json`), JSON.stringify({ sessionId: sid, cwd: tempDir, launchCmd: 'claude', updatedAt: new Date().toISOString() }), { mode: 0o600 });
+  }
+  // Occupy the busy one with a long-running foreground program.
+  await requestJson(state.port, state.sessionSecret, 'POST', `/api/terminals/${busy.data.id}/write`, { data: 'sleep 300\n' }, agentHeaders);
+
+  // The idle shell needs a moment to paint its prompt; the busy one a moment
+  // to exec sleep. Poll the dry run until both verdicts are in.
+  let plan, p, sk;
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    plan = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true, only: ['redo-idle', 'REDO-BUSY', 'no-such-thing'] });
+    assert.equal(plan.status, 200, JSON.stringify(plan.data));
+    p = (plan.data.restored || []).find(x => x.name === 'redo-idle');
+    sk = (plan.data.skipped || []).find(x => x.name === 'redo-busy');
+    if (p && sk) break;
+    await delay(500);
+  }
+  assert.ok(p, `the idle live shell is planned: ${JSON.stringify(plan.data).slice(0, 400)}`);
+  assert.match(String(p.command || ''), /--resume 55555555/);
+  assert.ok(sk, `the busy one is skipped: ${JSON.stringify(plan.data.skipped)}`);
+  assert.match(sk.reason, /busy/);
+  const unknown = (plan.data.skipped || []).find(x => x.name === 'no-such-thing');
+  assert.ok(unknown && /no such session/.test(unknown.reason), 'an unknown name is reported, never invented');
+  // A fleet dry run (no `only`) still skips BOTH — they are live.
+  const fleet = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true });
+  assert.ok(!(fleet.data.restored || []).some(x => x.name === 'redo-idle' || x.name === 'redo-busy'), 'fleet restore leaves live rooms alone');
+  // Dry run touched nothing: both rooms are still live.
+  const after = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const names = (after.data.sessions || []).filter(x => x.live).map(x => x.internalName);
+  assert.ok(names.includes(idleName) && names.includes(busyName), 'dry run never tears a room down');
+
+  for (const n of [idleName, busyName]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: n, internalName: n });
+    await fs.rm(path.join(dir, `${n}.json`), { force: true });
+    await fs.rm(path.join(dir, `${n}.meta`), { force: true });
+  }
+  await fs.rm(tfile, { force: true });
+});
+
 // ...and a record that genuinely belongs elsewhere is still refused: the
 // transcript lives under the RECORD's directory, not the room's.
 test('restore still refuses a record whose transcript lives in another directory', async () => {

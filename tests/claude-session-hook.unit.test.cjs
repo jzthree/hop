@@ -93,6 +93,36 @@ test('a legitimate cwd change for the same conversation still updates', () => {
   assert.equal(readRecord(home, 'alpha').cwd, '/Users/someone/Code/other');
 });
 
+test('a compaction never moves the conversation — its current shell directory is not its home', () => {
+  // angler, 2026-08-21: launched in ~, the conversation's Bash tool cd'd
+  // into a project, then it compacted. The compact SessionStart reports
+  // claude's CURRENT directory, the hook recorded it, and restore compared
+  // that against the room's real directory (~), concluded the record was a
+  // foreign claude's, and threw a 975-turn conversation away.
+  const home = freshHome();
+  runHook(home, 'alpha', {
+    hook_event_name: 'SessionStart', session_id: 'sess-1',
+    cwd: '/Users/someone', source: 'startup'
+  });
+  runHook(home, 'alpha', {
+    hook_event_name: 'SessionStart', session_id: 'sess-1',
+    cwd: '/Users/someone/Code/wandered-into', source: 'compact'
+  });
+  const rec = readRecord(home, 'alpha');
+  assert.equal(rec.cwd, '/Users/someone', 'compact keeps the launch directory');
+  assert.equal(rec.source, 'compact', 'the event itself is still recorded');
+  assert.equal(rec.sessionId, 'sess-1');
+});
+
+test('a compaction with no incumbent still records — something is better than nothing', () => {
+  const home = freshHome();
+  runHook(home, 'alpha', {
+    hook_event_name: 'SessionStart', session_id: 'sess-1',
+    cwd: '/Users/someone/Code/project', source: 'compact'
+  });
+  assert.equal(readRecord(home, 'alpha').cwd, '/Users/someone/Code/project');
+});
+
 test('a different conversation in a different cwd is parked, not recorded', () => {
   // The pre-existing nested-claude guard, pinned so the new guard cannot
   // have loosened it.

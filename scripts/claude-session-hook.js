@@ -89,13 +89,29 @@ function recordSession(dir, hopSession, payload) {
   const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
   if (!sessionId) return;
   let cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
+  // The payload's cwd is claude's CURRENT directory, which follows the
+  // conversation's own shell: a claude launched in ~ whose Bash tool cd'd
+  // into ~/Code/x reports ~/Code/x from then on. That is fine for a launch
+  // (`startup`: a fresh process stands where it was started) and poison for
+  // a compaction, which is the same process, mid-flight, wherever its shell
+  // has wandered. Recording the drifted directory on compact made `hop
+  // restore` compare it against the room's real directory, conclude the
+  // record belonged to some OTHER claude, and drop the room to a plain
+  // shell — a 975-turn conversation discarded as an intruder (angler,
+  // 2026-08-21). A conversation's home never moves: keep the incumbent's.
+  const incumbent = () => {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, `${hopSession}.json`), "utf8")); }
+    catch { return null; }
+  };
+  if (payload.source === "compact") {
+    const prev = incumbent();
+    if (prev && prev.cwd && !isTranscriptStorePath(prev.cwd)) cwd = prev.cwd;
+  }
   if (isTranscriptStorePath(cwd)) {
     // Keep the incumbent record's cwd if there is one — the conversation
     // itself is still real (same or new id), only the location is junk.
-    try {
-      const prev = JSON.parse(fs.readFileSync(path.join(dir, `${hopSession}.json`), "utf8"));
-      if (prev && prev.cwd && !isTranscriptStorePath(prev.cwd)) cwd = prev.cwd;
-    } catch { /* no incumbent to inherit from */ }
+    const prev = incumbent();
+    if (prev && prev.cwd && !isTranscriptStorePath(prev.cwd)) cwd = prev.cwd;
   }
   const record = JSON.stringify({
     sessionId,

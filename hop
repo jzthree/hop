@@ -5111,23 +5111,40 @@ function claudeConfigRootsForRestore(recConfigDir) {
 // `claude -p` that inherited HOP_SESSION) — resuming that would fail with
 // "No conversation found" in the restored terminal. Verify before planning a
 // resume; the caller falls back to a plain shell with a visible warning.
+// A transcript for one session id under one project directory, in either
+// store layout: <base>/<id>.jsonl, or the newer per-session DIRECTORY -
+// which only counts when it holds a real transcript jsonl (a dir with only
+// subagents/ metadata is a conversation that never persisted; resume would
+// fail on it).
+function findClaudeTranscriptIn(base, sessionId) {
+    const file = path.join(base, `${sessionId}.jsonl`);
+    try { fs.accessSync(file); return file; } catch (e) { /* next */ }
+    try {
+        const dir = path.join(base, sessionId);
+        if (fs.statSync(dir).isDirectory()) {
+            const jsonl = fs.readdirSync(dir).find((f) => f.endsWith('.jsonl'));
+            if (jsonl) return path.join(dir, jsonl);
+        }
+    } catch (e) { /* next */ }
+    return null;
+}
+// Was this conversation LAUNCHED in `cwd`? Claude files a transcript under
+// the slug of the directory it started in, and never moves it - so the
+// store, not the record's cwd field, is the authority on a conversation's
+// home. The record's cwd can drift (the hook re-recorded claude's current
+// directory on compaction, which follows the conversation's own shell).
+function claudeTranscriptLivesUnder(rec, cwd) {
+    if (!rec || !rec.sessionId || !cwd) return false;
+    for (const root of claudeConfigRootsForRestore(rec.configDir)) {
+        for (const slug of claudeProjectDirCandidates(cwd)) {
+            if (findClaudeTranscriptIn(path.join(root, 'projects', slug), rec.sessionId)) return true;
+        }
+    }
+    return false;
+}
 function resolveClaudeTranscriptPath(rec) {
     if (!rec || !rec.sessionId || !rec.cwd) return null;
-    const findIn = (base) => {
-        const file = path.join(base, `${rec.sessionId}.jsonl`);
-        try { fs.accessSync(file); return file; } catch (e) { /* next */ }
-        // Newer layout: a per-session DIRECTORY. Only counts when it holds a
-        // real transcript jsonl: a dir with only subagents/ metadata is a
-        // conversation that never persisted (resume would fail on it).
-        try {
-            const dir = path.join(base, rec.sessionId);
-            if (fs.statSync(dir).isDirectory()) {
-                const jsonl = fs.readdirSync(dir).find((f) => f.endsWith('.jsonl'));
-                if (jsonl) return path.join(dir, jsonl);
-            }
-        } catch (e) { /* next */ }
-        return null;
-    };
+    const findIn = (base) => findClaudeTranscriptIn(base, rec.sessionId);
     for (const root of claudeConfigRootsForRestore(rec.configDir)) {
         for (const slug of claudeProjectDirCandidates(rec.cwd)) {
             const hit = findIn(path.join(root, 'projects', slug));
@@ -5312,7 +5329,7 @@ function rebuildClaudeLaunch(launchCmd) {
 // (where claude started), since `claude --resume` resolves the conversation from
 // that project directory.
 function restorePlanForSession(entry) {
-    const rec = readClaudeSessionRecord(entry.internalName);
+    let rec = readClaudeSessionRecord(entry.internalName);
     // Wrong-conversation guard. The SessionStart hook records whichever claude
     // starts inside a room, and its nested-claude check keys on
     // CLAUDE_CODE_SESSION_ID — which hop deliberately SCRUBS when it spawns
@@ -5341,6 +5358,22 @@ function restorePlanForSession(entry) {
         || (entry.cwd && !storePath(entry.cwd) ? entry.cwd : null)
         || (rec?.cwd && !storePath(rec.cwd) ? rec.cwd : null)
         || metaCwd || entry.cwd;
+    if (rec && rec.sessionId && liveCwd && rec.cwd && rec.cwd !== liveCwd) {
+        // Disagreement is not proof. The record's cwd is whatever claude
+        // reported at its LAST SessionStart, and a compaction reports the
+        // conversation's current shell directory - so a claude launched in
+        // ~ whose Bash tool cd'd into ~/Code/x records ~/Code/x, while the
+        // room (correctly) still lives in ~. Calling that "another claude"
+        // discarded a 975-turn conversation (angler, 2026-08-21). The store
+        // settles it: if this id's transcript is filed under the ROOM's
+        // directory, the conversation was launched here and is this room's.
+        // Heal the record so nothing downstream (fork, search, the next
+        // restore) re-litigates it, and resume from where it truly lives.
+        if (claudeTranscriptLivesUnder(rec, liveCwd)) {
+            rec = { ...rec, cwd: liveCwd, healedFrom: rec.cwd };
+            writeClaudeSessionRecord(entry.internalName, rec); // best effort; the plan below no longer depends on it
+        }
+    }
     if (rec && rec.sessionId && liveCwd && rec.cwd && rec.cwd !== liveCwd) {
         // The incumbent record disagrees with the room's real directory. The
         // hook parks a rival record at <session>.other.json when it refuses
@@ -5504,7 +5537,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     });
     if (dryRun) {
         return {
-            restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay, warning: p.warning })),
+            restored: planned.map((p) => ({ name: p.displayName, command: p.command, cwd: p.cwd, replay: p.replay, warning: p.warning })),
             count: planned.length,
             skippedAgents,
             dryRun: true
@@ -5694,7 +5727,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     }
     return {
         outcomes: Object.fromEntries(outcomes),
-        restored: planned.map((p) => ({ name: p.displayName, command: p.command, replay: p.replay, warning: p.warning })),
+        restored: planned.map((p) => ({ name: p.displayName, command: p.command, cwd: p.cwd, replay: p.replay, warning: p.warning })),
         count: planned.length,
         skippedAgents,
         dryRun: false

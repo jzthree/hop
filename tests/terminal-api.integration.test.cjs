@@ -1021,3 +1021,88 @@ test('restore does not let a transcript-store meta cwd override a good record', 
   await fs.rm(path.join(dir, `${internal}.json`), { force: true });
   await fs.rm(path.join(dir, `${internal}.meta`), { force: true });
 });
+
+// The other way the arbiter misfired (angler, 2026-08-21): the META was
+// right and the RECORD's cwd had drifted — a compaction re-recorded the
+// conversation's current shell directory. The store is the authority on
+// where a conversation was launched: a transcript filed under the room's
+// own directory means the record is this room's, whatever its cwd says.
+test('restore trusts the transcript store over a drifted record cwd', async () => {
+  const sid = '33333333-4444-5555-6666-777777777777';
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'drifted', cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const dir = path.join(hopHome, 'claude-sessions');
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+  await fs.mkdir(dir, { recursive: true });
+  const wandered = path.join(tempDir, 'wandered-into');
+  await fs.mkdir(wandered, { recursive: true });
+  // Record: right conversation, cwd drifted to where its shell wandered.
+  await fs.writeFile(path.join(dir, `${internal}.json`), JSON.stringify({
+    sessionId: sid, cwd: wandered, source: 'compact',
+    launchCmd: 'claude --dangerously-skip-permissions', updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+  // Meta: the room's real, live directory — where claude was launched.
+  await fs.writeFile(path.join(dir, `${internal}.meta`), JSON.stringify({
+    internalName: internal, displayName: 'drifted', cwd: tempDir
+  }), { mode: 0o600 });
+  // The transcript is filed under the ROOM's directory, as claude does.
+  const tdir = path.join(os.homedir(), '.claude', 'projects', tempDir.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(tdir, { recursive: true });
+  const tfile = path.join(tdir, `${sid}.jsonl`);
+  await fs.writeFile(tfile, '{"type":"user"}\n');
+
+  const plan = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true });
+  const p = (plan.data.restored || []).find(x => x.name === 'drifted');
+  assert.ok(p, `planned: ${JSON.stringify(plan.data).slice(0, 300)}`);
+  assert.equal(p.warning, null, `the record is this room's, got: ${p.warning}`);
+  assert.match(String(p.command || ''), /--resume 33333333/, `must resume, got ${p.command}`);
+  assert.match(String(p.command || ''), /--dangerously-skip-permissions/, 'flags survive the heal');
+  assert.equal(p.cwd, tempDir, 'resumes from where the conversation truly lives, not where the shell wandered');
+  // And the record is healed on disk, so fork/search/the next restore agree.
+  const healed = JSON.parse(await fs.readFile(path.join(dir, `${internal}.json`), 'utf8'));
+  assert.equal(healed.cwd, tempDir);
+  assert.equal(healed.healedFrom, wandered);
+
+  await fs.rm(tfile, { force: true });
+  await fs.rm(path.join(dir, `${internal}.json`), { force: true });
+  await fs.rm(path.join(dir, `${internal}.meta`), { force: true });
+});
+
+// ...and a record that genuinely belongs elsewhere is still refused: the
+// transcript lives under the RECORD's directory, not the room's.
+test('restore still refuses a record whose transcript lives in another directory', async () => {
+  const sid = '44444444-5555-6666-7777-888888888888';
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'foreign', cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const dir = path.join(hopHome, 'claude-sessions');
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+  const elsewhere = path.join(tempDir, 'agent-workspace');
+  await fs.mkdir(elsewhere, { recursive: true });
+  await fs.writeFile(path.join(dir, `${internal}.json`), JSON.stringify({
+    sessionId: sid, cwd: elsewhere, source: 'startup', launchCmd: 'claude', updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+  await fs.writeFile(path.join(dir, `${internal}.meta`), JSON.stringify({
+    internalName: internal, displayName: 'foreign', cwd: tempDir
+  }), { mode: 0o600 });
+  const tdir = path.join(os.homedir(), '.claude', 'projects', elsewhere.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(tdir, { recursive: true });
+  const tfile = path.join(tdir, `${sid}.jsonl`);
+  await fs.writeFile(tfile, '{"type":"user"}\n');
+
+  const plan = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true });
+  const p = (plan.data.restored || []).find(x => x.name === 'foreign');
+  assert.ok(p, `planned: ${JSON.stringify(plan.data).slice(0, 300)}`);
+  assert.match(String(p.warning || ''), /another claude/, 'a genuinely foreign record is still refused');
+  assert.equal(p.command, null);
+  assert.equal(p.cwd, tempDir, 'and the room reopens in its OWN directory');
+
+  await fs.rm(tfile, { force: true });
+  await fs.rm(path.join(dir, `${internal}.json`), { force: true });
+  await fs.rm(path.join(dir, `${internal}.meta`), { force: true });
+});

@@ -1075,6 +1075,41 @@ test('restore trusts the transcript store over a drifted record cwd', async () =
 // parked dialog), which is exactly what a fleet restore skips. The targeted
 // form plans named sessions even when live — but only tears down a room
 // that holds nothing.
+// After a restore, the reconciler records what each claude session should
+// become and exposes anything it can't converge via a health endpoint. A
+// real restore of a claude session isn't exercised here (no claude binary),
+// but the plumbing — recording, and the health surface — is.
+test('restore records reconciler expectations and exposes a health surface', async () => {
+  // A restore of purely plain-shell sessions records NOTHING to reconcile
+  // (a shell is its own converged state), and health starts clean.
+  const health0 = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions/restore/health');
+  assert.equal(health0.status, 200, JSON.stringify(health0.data));
+  assert.ok(Array.isArray(health0.data.needsAttention), 'health always answers a needsAttention array');
+
+  // Seed the reconcile file directly with a needs-attention entry (what the
+  // sweep writes when a session came up then exited N times) and confirm the
+  // health endpoint surfaces it with its reason and a redo command.
+  const reconcileFile = path.join(hopHome, '.restore-reconcile.json');
+  await fs.writeFile(reconcileFile, JSON.stringify({ sessions: {
+    ghosty: { internalName: 'ghosty', displayName: 'ghosty', status: 'needs-attention',
+      reason: 'came up then exited 3x — likely a self-completing session',
+      command: 'claude --resume abcd', recordedAt: Date.now() },
+    fine: { internalName: 'fine', displayName: 'fine', status: 'converged', recordedAt: Date.now() },
+    settling: { internalName: 'settling', displayName: 'settling', status: 'pending', recordedAt: Date.now() }
+  }}), { mode: 0o600 });
+
+  const health = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions/restore/health');
+  assert.equal(health.status, 200);
+  assert.equal(health.data.needsAttention.length, 1, 'only the needs-attention entry is reported');
+  assert.equal(health.data.needsAttention[0].name, 'ghosty');
+  assert.match(health.data.needsAttention[0].reason, /self-completing/);
+  assert.match(health.data.needsAttention[0].command, /--resume abcd/);
+  assert.equal(health.data.converged, 1, 'converged ones are counted, not listed');
+  assert.deepEqual(health.data.pending, ['settling'], 'still-settling ones are named');
+
+  await fs.rm(reconcileFile, { force: true });
+});
+
 test('targeted restore redoes an idle live shell, refuses a busy one, reports an unknown name', async () => {
   const sid = '55555555-6666-7777-8888-999999999999';
   const dir = path.join(hopHome, 'claude-sessions');

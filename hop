@@ -4943,6 +4943,30 @@ function sendTerminalResize(entry, cols, rows) {
 const CLAUDE_SESSIONS_DIR = path.join(HOME_DIR, 'claude-sessions');
 const CLAUDE_HOOK_SCRIPT = path.join(__dirname, 'scripts', 'claude-session-hook.js');
 
+// The per-turn completion counter the agent bumps once each time it finishes a
+// turn — Claude via its Stop hook (scripts/claude-session-hook.js), Codex via
+// its `notify` handler (parity). {sessionId, count, at}. Turning a finished
+// response into a phone notification (opt-in per session) rides this: no new
+// stream, no PTY write, just a number the sessions poll already carries.
+function readTurnCount(internalName) {
+    try {
+        const c = JSON.parse(fs.readFileSync(
+            path.join(CLAUDE_SESSIONS_DIR, `${internalName}.turn`), 'utf8')).count;
+        return Number.isInteger(c) && c >= 0 ? c : 0;
+    } catch (e) { return 0; }
+}
+
+// How many turns have completed SINCE the human armed notify-on-finish for this
+// session — added to bellSeq so each finish reads as a fresh bell the phone
+// surfaces (dedupe + seen-marks already handle "one finish, one alert").
+// Baselined at arm time (notifyBaseTurn) so arming a long-lived session does
+// not fire a single notification for its entire back history.
+function finishBump(internalName, config) {
+    if (!config || config.notifyOnFinish !== true) return 0;
+    const base = Number.isInteger(config.notifyBaseTurn) ? config.notifyBaseTurn : 0;
+    return Math.max(0, readTurnCount(internalName) - base);
+}
+
 // The hay-host writes each room's tail buffer here on graceful shutdown; on
 // restore we replay a plain-shell session's buffer as the new room's seed so it
 // reopens on its last screen, then a fresh shell starts in the same dir.
@@ -5481,13 +5505,220 @@ async function restoreSavedSessions(opts = {}) {
     });
 }
 
+// ---- restore reconciler ---------------------------------------------------
+// A single restore fires once and reports success the moment it sees claude
+// paint a frame. That is not the same as "correctly restored": a resumed
+// claude can exit seconds later (a loop that completes), a trust/resume
+// dialog can go unanswered, or a session can land on a bare shell in a race
+// - and nothing re-drives it. This reconciler closes that gap. After a
+// restore, it records what each session SHOULD become, then a bounded,
+// windowed sweep keeps checking until every session is verified running its
+// expected claude - re-driving the unambiguous failures and escalating the
+// rest to a human, rather than depending on someone re-running restore.
+const RESTORE_RECONCILE_FILE = path.join(HOME_DIR, '.restore-reconcile.json');
+// Active only for a window after a restore, so it converges a freshly
+// restarted fleet without ever fighting normal use later.
+const RECONCILE_WINDOW_MS = 15 * 60 * 1000;
+// Re-drives per session before we stop and ask a human. A session that
+// needs more than this is not failing to LAUNCH - it is exiting on its own
+// (a self-completing loop), which resurrection cannot fix.
+const RECONCILE_MAX_REDRIVES = 3;
+// Leave a just-driven session alone long enough to boot claude and paint.
+const RECONCILE_SETTLE_MS = 45 * 1000;
+
+function readRestoreReconcile() {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(RESTORE_RECONCILE_FILE, 'utf8'));
+        return parsed && typeof parsed === 'object' && parsed.sessions ? parsed : { sessions: {} };
+    } catch (e) { return { sessions: {} }; }
+}
+function writeRestoreReconcile(state) {
+    try { writePrivateFile(RESTORE_RECONCILE_FILE, JSON.stringify(state), 0o600); } catch (e) { /* best effort */ }
+}
+// Record post-restore expectations for the sessions that were planned to run
+// a claude conversation. Plain-shell restores are excluded: a shell IS its
+// converged state, so there is nothing to verify or re-drive.
+function recordRestoreExpectations(planned) {
+    const now = Date.now();
+    const state = readRestoreReconcile();
+    for (const p of planned || []) {
+        if (!p || !p.internalName || !p.command) continue; // no claude command → nothing to converge
+        state.sessions[p.internalName] = {
+            internalName: p.internalName,
+            displayName: p.displayName || p.internalName,
+            sessionId: (/--resume\s+([A-Za-z0-9-]+)/.exec(p.command) || [])[1] || null,
+            command: p.command,
+            cwd: p.cwd,
+            expectClaude: true,
+            recordedAt: now,
+            deadline: now + RECONCILE_WINDOW_MS,
+            redrives: 0,
+            lastDriveAt: 0,
+            status: 'pending'
+        };
+    }
+    writeRestoreReconcile(state);
+}
+// One reconcile pass. Shares the resume-sweep cadence. For each pending
+// expectation: converged (claude up) → drop; a dialog → let the resume
+// sweep / a re-drive handle it; a bare shell → re-drive (bounded); a busy
+// non-shell → the user is doing something, leave it; past deadline or out
+// of re-drives → escalate ('needs-attention') and stop.
+// The screen and the pty foreground process are BOTH unreliable signals for
+// "is this session's claude alive": an argv-launched claude runs in a
+// non-job-control subshell, so node-pty reports the WRAPPER shell (zsh), and
+// the grid preview can read empty for a settled, idle claude. The process
+// table is the ground truth. A claude resumed a specific conversation runs
+// with `--resume <sessionId>` in its argv; if such a process is alive, the
+// session is up — no matter what the screen or foreground name say. This is
+// what stops the reconciler from nagging (or, guarded elsewhere, re-driving)
+// a claude that has been running fine for an hour (angler, lightscope).
+let claudeProcListCache = { at: 0, text: '' };
+function claudeProcessRunning(sessionId) {
+    if (!sessionId) return false;
+    const now = Date.now();
+    if (now - claudeProcListCache.at > 3000) {
+        try {
+            // One cheap snapshot of every claude argv, cached for a few
+            // seconds so a whole sweep costs one ps, not one per session.
+            claudeProcListCache = { at: now, text: execFileSync('ps', ['-axo', 'command'], { encoding: 'utf8', timeout: 4000 }) };
+        } catch (e) { claudeProcListCache = { at: now, text: '' }; }
+    }
+    const lines = claudeProcListCache.text.split('\n');
+    const idInResume = new RegExp(`--resume(=|\\s+)${sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+    for (const line of lines) {
+        if (!/(^|\/|\s)claude[\w.-]*(\s|$)/.test(line)) continue; // an actual claude process
+        if (/\bps\b.*-axo|grep\b/.test(line)) continue;           // not our own probe
+        if (idInResume.test(line)) return true;
+    }
+    return false;
+}
+
+let restoreReconcileBusy = false;
+async function sweepRestoreReconcile() {
+    if (shuttingDown || restoreReconcileBusy) return;
+    const state = readRestoreReconcile();
+    const names = Object.keys(state.sessions || {});
+    if (!names.length) return;
+    restoreReconcileBusy = true;
+    try {
+        const now = Date.now();
+        let snapshot;
+        try { snapshot = await listAllSessionEntriesRuntimeFirst(); }
+        catch (e) { return; }
+        const byName = new Map((snapshot.entries || []).map((e) => [e.internalName, e]));
+        let changed = false;
+        for (const name of names) {
+            const exp = state.sessions[name];
+            if (!exp || exp.status === 'needs-attention' || exp.status === 'converged') continue;
+            const entry = byName.get(name);
+            // Gone from the fleet entirely (deleted/killed): stop tracking.
+            if (!entry) { delete state.sessions[name]; changed = true; continue; }
+            let text = '';
+            try {
+                const grid = await getRoomGridPreviewShared(name);
+                text = String(grid?.text || '');
+            } catch (e) { continue; } // host busy — retry next tick
+            // Ground truth first: is THIS conversation's claude process alive?
+            // The screen and foreground name lie for argv-launched sessions.
+            const procUp = claudeProcessRunning(exp.sessionId);
+            const running = !isShellProcName(entry.foregroundProcess);
+            const claudeUp = procUp || running || CLAUDE_UI_RE.test(text);
+            if (claudeUp) {
+                exp.status = 'converged';
+                exp.convergedAt = now;
+                changed = true;
+                log(`[reconcile] ${exp.displayName}: verified running`, DIM);
+                continue;
+            }
+            // A dialog: the resume sweep answers resume prompts already; the
+            // trust dialog we answer here (only for this session's own cwd).
+            if (TRUST_PROMPT_RE.test(text)) {
+                const asked = trustDialogWorkspace(text);
+                if (asked && samePath(asked, exp.cwd)) {
+                    try {
+                        const e2 = await attachTerminalApiClient(name, exp.displayName, { actor: 'system', label: 'reconcile' });
+                        try { sendTerminalInput(e2, '1\r'); } finally { try { closeTerminalApiEntry(e2.id); } catch (e) {} }
+                        log(`[reconcile] ${exp.displayName}: accepted workspace trust`, DIM);
+                    } catch (e) { /* try again next tick */ }
+                    continue;
+                }
+                // Trust dialog for some OTHER directory — not ours to answer.
+                exp.status = 'needs-attention';
+                exp.reason = `claude is asking to trust ${asked || 'a directory'}, not ${exp.cwd}`;
+                changed = true;
+                continue;
+            }
+            if (RESUME_PROMPT_RE.test(text)) continue; // resume sweep owns this
+            // A busy non-shell foreground we did not recognise as claude: the
+            // user is running something. Consider it converged-enough and stop.
+            if (running) { exp.status = 'converged'; changed = true; continue; }
+            // Bare shell: the failure we exist to fix. Re-drive, bounded.
+            if (now - exp.lastDriveAt < RECONCILE_SETTLE_MS) continue; // give the last drive time
+            if (now >= exp.deadline || exp.redrives >= RECONCILE_MAX_REDRIVES) {
+                exp.status = 'needs-attention';
+                exp.reason = exp.redrives >= RECONCILE_MAX_REDRIVES
+                    ? `came up then exited ${exp.redrives}x — likely a self-completing session, resume it yourself if you want it running`
+                    : 'never came up as claude within the restore window';
+                changed = true;
+                log(`[reconcile] ${exp.displayName}: needs attention — ${exp.reason}`, YELLOW);
+                continue;
+            }
+            // Only re-drive an IDLE shell prompt (never type over a booting
+            // screen): reuse the same positive-prompt check restore uses.
+            const cleaned = stripTerminalNoise(text);
+            const lines = cleaned.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
+            const last = lines.length ? lines[lines.length - 1] : '';
+            if (!/[%$#\u276f>]\s*$/.test(last)) continue; // not an idle prompt yet
+            try {
+                const e2 = await attachTerminalApiClient(name, exp.displayName, { actor: 'system', label: 'reconcile' });
+                const cmd = exp.command.endsWith('\n') ? exp.command : `${exp.command}\n`;
+                try { sendTerminalInput(e2, cmd); } finally { try { closeTerminalApiEntry(e2.id); } catch (e) {} }
+                exp.redrives += 1;
+                exp.lastDriveAt = now;
+                changed = true;
+                log(`[reconcile] ${exp.displayName}: re-driving restore (attempt ${exp.redrives}/${RECONCILE_MAX_REDRIVES})`, CYAN);
+            } catch (e) { /* next tick */ }
+        }
+        // Retire the whole file once nothing is pending and the window has
+        // passed, so the sweep goes quiet during normal use.
+        const stillPending = Object.values(state.sessions).some((e) => e.status === 'pending');
+        const anyRecent = Object.values(state.sessions).some((e) => now - e.recordedAt < RECONCILE_WINDOW_MS);
+        if (!stillPending && !anyRecent) {
+            // Keep only needs-attention entries (for reporting); drop the rest.
+            for (const [k, v] of Object.entries(state.sessions)) {
+                if (v.status !== 'needs-attention') { delete state.sessions[k]; changed = true; }
+            }
+        }
+        if (changed) writeRestoreReconcile(state);
+    } finally {
+        restoreReconcileBusy = false;
+    }
+}
+// Shared shell-name test (the restore verify loop has its own copy inline;
+// this is the reusable one the reconciler and redoable-check use).
+const RECONCILE_SHELL_NAMES = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'login', 'nu', 'xonsh']);
+function isShellProcName(proc) {
+    const pc = String(proc || '').replace(/^-/, '').trim();
+    return !pc || RECONCILE_SHELL_NAMES.has(pc.toLowerCase());
+}
+// Strip the escape/OSC/mouse noise a shell can leave on the grid before we
+// judge whether the last line is an idle prompt.
+function stripTerminalNoise(text) {
+    return String(text || '')
+        .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, '')
+        .replace(/\u001b[\[\]][0-9;?]*[A-Za-z]/g, '')
+        .replace(/\u001bc/g, '')
+        .replace(/\u001b[=>]/g, '')
+        .replace(/[0-9;]+[Mm](?=\s*$)/gm, '');
+}
+
 // Is this live room safe to tear down and relaunch? Only a room with
 // nothing in it: an idle shell showing its prompt, or a claude that never
 // got past a startup dialog (workspace trust, resume choice) - both are
 // what a failed restore leaves behind. Anything else (a running program,
 // claude chrome, a blank screen still booting) is someone's work.
 async function roomIsRedoable(entry) {
-    const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'login', 'nu', 'xonsh']);
     const fg = String(entry?.foregroundProcess || '').replace(/^-/, '').trim();
     let text = '';
     try {
@@ -5497,7 +5728,7 @@ async function roomIsRedoable(entry) {
     if (TRUST_PROMPT_RE.test(text)) return { ok: true, reason: 'parked at the workspace-trust dialog' };
     if (RESUME_PROMPT_RE.test(text)) return { ok: true, reason: 'parked at the resume prompt' };
     if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: 'claude is running' };
-    if (fg && !SHELLS.has(fg.toLowerCase())) return { ok: false, reason: `${fg} is running` };
+    if (fg && !isShellProcName(fg)) return { ok: false, reason: `${fg} is running` };
     // The grid text can carry stray control bytes a shell left on: ESC c
     // (reset), CSI sequences, and a trailing SGR mouse-report fragment
     // ("...% 35;11;17M") from an app that had mouse tracking on — angler
@@ -5878,6 +6109,9 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
         for (const [name, status] of failed) log(`  ${getSessionDisplayName(name) || name} (${status})`, YELLOW);
         log(`Open one and run its command by hand, or re-run ${CYAN}hop restore${RESET}.`, RESET);
     }
+    // Hand the claude sessions to the reconciler: verifying they STAY up
+    // (and re-driving the ones that don't) is its job, not this one-shot's.
+    recordRestoreExpectations(planned);
     return {
         outcomes: Object.fromEntries(outcomes),
         restored: planned.map((p) => ({ name: p.displayName, command: p.command, cwd: p.cwd, replay: p.replay, warning: p.warning })),
@@ -10222,7 +10456,11 @@ happens until someone clicks it.
                 cwd: s.cwd,
                 foregroundProcess: s.foregroundProcess,
                 lastActivityAt: s.lastActivityAt,
-                bellSeq: s.bellSeq,
+                // For sessions armed with notify-on-finish, each completed turn
+                // adds to bellSeq so the phone treats a finished response like a
+                // bell (dedupe/seen-marks make it one alert per finish). Plain
+                // sessions are unaffected — finishBump returns 0.
+                bellSeq: s.bellSeq + finishBump(s.internalName, getEffectiveSessionConfig(s.internalName)),
                 lastBellAt: s.lastBellAt,
                 shell: s.shell,
                 env: s.env,
@@ -10248,6 +10486,9 @@ happens until someone clicks it.
                 taglineAt: getEffectiveSessionConfig(s.internalName)?.taglineAt || undefined,
                 parked: getEffectiveSessionConfig(s.internalName)?.parked === true || undefined,
                 archived: getEffectiveSessionConfig(s.internalName)?.archived === true || undefined,
+                // Per-session "alert me when the agent finishes a turn" — the
+                // phone shows a toggle from this and POSTs /api/sessions/notify.
+                notifyOnFinish: getEffectiveSessionConfig(s.internalName)?.notifyOnFinish === true || undefined,
                 agentPermitted: s.agentPermitted === true,
                 hasLocalCli: !!s.hasLocalCli,
                 localCliCount: s.localCliCount || 0
@@ -10389,6 +10630,51 @@ happens until someone clicks it.
                     writeClaudeSessionMeta(resolved, { ...durable, internalName: resolved, parked: on || undefined, archived: on ? durable.archived : undefined });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, parked: on }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
+        // API: Notify-on-finish — arm/disarm a per-session alert when the
+        // agent finishes a turn. Server-side (not per-device) so any client can
+        // set it and the sessions poll carries it back everywhere; the finish
+        // itself becomes attention via finishBump() reading the turn counter.
+        // notifyBaseTurn baselines at arm time so arming does not replay the
+        // whole back history as one alert.
+        if (parsedUrl.pathname === '/api/sessions/notify' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', () => {
+                try {
+                    const { name, internalName, notifyOnFinish } = JSON.parse(body);
+                    const resolved = resolveSessionInternalName(name, internalName);
+                    if (!resolved) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const savedConfig = getSessionConfig(resolved);
+                    const config = getEffectiveSessionConfig(resolved);
+                    if (!config || config.type === 'port') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not a terminal' }));
+                        return;
+                    }
+                    const on = notifyOnFinish === true;
+                    const next = {
+                        ...config,
+                        notifyOnFinish: on || undefined,
+                        // Baseline the counter on ARM, clear it on disarm.
+                        notifyBaseTurn: on ? readTurnCount(resolved) : undefined,
+                        updatedAt: new Date().toISOString()
+                    };
+                    if (savedConfig) setSessionConfig(resolved, next);
+                    else rememberRuntimeSessionMetadata(resolved, next);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, notifyOnFinish: on }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -11054,6 +11340,18 @@ happens until someone clicks it.
         }
 
         // API: Restore saved sessions (recreate rooms + resume claude conversations)
+        if (parsedUrl.pathname === '/api/sessions/restore/health' && req.method === 'GET') {
+            const state = readRestoreReconcile();
+            const sessions = Object.values(state.sessions || {});
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                needsAttention: sessions.filter((e) => e.status === 'needs-attention')
+                    .map((e) => ({ name: e.displayName, internalName: e.internalName, reason: e.reason, command: e.command })),
+                pending: sessions.filter((e) => e.status === 'pending').map((e) => e.displayName),
+                converged: sessions.filter((e) => e.status === 'converged').length
+            }));
+            return;
+        }
         if (parsedUrl.pathname === '/api/sessions/restore' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -14245,6 +14543,7 @@ const HELP_SECTIONS = [
     { title: 'Restore', lines: [
         `hop restore [--dry-run] [--agents]  Recreate your saved sessions, resuming claude conversations (--agents includes agent-created ones)`,
         `hop restore <name>...     Redo just those sessions — even live ones, if they hold only an idle shell or a startup dialog`,
+        `hop restore --health      Show sessions the reconciler could not bring back on its own, and why`,
         `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
         `hop claude-hook status|remove   Check or remove the hook`,
@@ -14996,10 +15295,30 @@ async function main() {
     if (process.argv[2] === 'restore') {
         const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
         const includeAgents = process.argv.includes('--agents');
+        const healthOnly = process.argv.includes('--health');
         // `hop restore <name>...` redoes just those, live or not (see
         // restoreSavedSessionsUnlocked's targeted path).
         const only = process.argv.slice(3).filter((a) => !a.startsWith('-'));
         let state = isServerRunning();
+        // `hop restore --health`: what the reconciler could not converge on
+        // its own, and why — the sessions that need a human decision.
+        if (healthOnly) {
+            if (!state) { log(`Hop is not running.`, YELLOW); process.exit(0); }
+            const hres = await callLocalApi(state, '/api/sessions/restore/health', 'GET');
+            const h = hres?.data || {};
+            const na = Array.isArray(h.needsAttention) ? h.needsAttention : [];
+            if (!na.length) {
+                log(`All restored sessions are healthy${h.converged ? ` (${h.converged} verified)` : ''}.`, GREEN);
+                if (Array.isArray(h.pending) && h.pending.length) log(`  ${DIM}(${h.pending.length} still settling)${RESET}`, RESET);
+                process.exit(0);
+            }
+            log(`${na.length} session(s) need your attention:`, YELLOW);
+            for (const it of na) {
+                log(`  ${YELLOW}⚠${RESET} ${it.name}  ${DIM}${it.reason}${RESET}`, RESET);
+                log(`      ${DIM}redo: ${CYAN}hop restore ${it.name}${RESET}`, RESET);
+            }
+            process.exit(0);
+        }
         if (!state) {
             // Start the daemon on demand so `hop restore` is a one-command recovery
             // after a reboot (no need to run `hop` first).
@@ -15048,6 +15367,7 @@ async function main() {
         }
         if (!dryRun) {
             log(`\nDone. Attach with ${CYAN}hop attach <name>${RESET} or open the web session manager.`, RESET);
+            log(`${DIM}Verifying they stay up… ${CYAN}hop restore --health${RESET}${DIM} shows any that need you.${RESET}`, RESET);
         } else {
             log(`\n(dry run — re-run without --dry-run to apply)`, DIM);
         }
@@ -17198,6 +17518,16 @@ async function main() {
         };
         setTimeout(runResumeSweep, 5000).unref?.();
         setInterval(runResumeSweep, 30000).unref?.();
+
+        // Restore reconciler: verifies restored sessions actually STAY up as
+        // their expected claude and re-drives the ones that don't. Same
+        // cadence as the resume sweep; both are cheap no-ops when idle (the
+        // reconcile file is empty outside a post-restore window).
+        const runRestoreReconcile = () => {
+            sweepRestoreReconcile().catch((e) => log(`[reconcile] error: ${e && e.message}`, YELLOW));
+        };
+        setTimeout(runRestoreReconcile, 12000).unref?.();
+        setInterval(runRestoreReconcile, 30000).unref?.();
     }
 
     if (DAEMON_FLAG) {

@@ -95,6 +95,19 @@ const byAttentionThenRecency = (a: SwitcherSession, b: SwitcherSession) => {
   return activity(b) - activity(a);
 };
 
+// A STABLE wall order for the tail: ports sink to the bottom, everything
+// else sorts by name. Recency deliberately plays NO part here — the tail is
+// where a session must stay put so the eye (and muscle memory) finds it
+// where it last was. Recency lives in the hero zone and in the per-row
+// freshness cue instead, so the wall reads as a map with a heat overlay
+// rather than a leaderboard that reshuffles on every reopen.
+const byStableWallOrder = (a: SwitcherSession, b: SwitcherSession) => {
+  const aPort = a.type === "port" ? 1 : 0;
+  const bPort = b.type === "port" ? 1 : 0;
+  if (aPort !== bPort) return aPort - bPort;
+  return (a.displayName || a.name).localeCompare(b.displayName || b.name);
+};
+
 /** Shorten a path for grouping/display: home dir becomes ~. */
 const shortenForGroup = (cwdPath: string) => {
   const homeMatch = cwdPath.match(/^(\/(?:Users|home)\/[^/]+)(\/.*)?$/);
@@ -344,14 +357,16 @@ export const buildSwitcherModel = (
       if (hero.length < HERO_MIN) pushHero(s);
     });
 
-  // The tail continues the SAME ordering as the hero cards: recency. It used
-  // to be grouped by workdir, which quietly turned the bottom half of Recent
-  // into a directory view — answering a question the mode had not been asked,
-  // and duplicating what Project mode exists to do. Recent is now recency all
-  // the way down, and a session's position means one thing everywhere in it.
+  // The tail holds STILL. The hero above it is the recency-and-attention
+  // zone — current, bells, the most-recent few — and that small set is where
+  // reordering is allowed and expected. Below it, the bulk of the wall sorts
+  // by a stable key so a session stays where the user last saw it across
+  // reopens; "what changed" is carried by the per-row freshness cue, not by
+  // the row's position. (Attention sessions are already lifted into the hero,
+  // so nothing urgent is stranded in a stably-sorted tail.)
   const tail = sessions
     .filter((s) => !heroKeys.has(sessionKey(s)))
-    .sort(byAttentionThenRecency);
+    .sort(byStableWallOrder);
   const groups = tail.length > 0 ? [{ label: "", rows: tail }] : [];
 
   return { mode: "tiers", hero, groups, currentInHero: current !== null };

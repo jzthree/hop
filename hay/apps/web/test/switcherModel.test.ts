@@ -55,7 +55,7 @@ describe("buildSwitcherModel", () => {
     expect(model.hero).toHaveLength(7); // current + all six bells
   });
 
-  it("continues the tail in recency order — Recent never groups by directory", () => {
+  it("holds the tail in a STABLE order — recency lives in the hero, not the tail", () => {
     const sessions = [
       mk({ name: "me", lastActivityAt: 1000 }),
       mk({ name: "a1", lastActivityAt: 990 }),
@@ -68,12 +68,16 @@ describe("buildSwitcherModel", () => {
     ];
     const model = buildSwitcherModel(sessions, "me", "");
     if (model.mode !== "tiers") throw new Error("expected tiers");
+    // The hero is the recency-and-attention zone: current + the most recent.
     expect(model.hero.map((s) => s.name)).toEqual(["me", "a1", "a2", "a3"]);
-    // One unlabeled continuation, not per-directory sections: grouping by
-    // workdir is what Project mode is for, and mixing it into Recent made a
-    // card's position mean two different things in one view.
+    // One unlabeled continuation, not per-directory sections (grouping by
+    // workdir is Project mode's job).
     expect(model.groups.map((g) => g.label)).toEqual([""]);
-    expect(model.groups[0].rows.map((s) => s.name)).toEqual(["web", "misc", "hop-old", "hop-older"]);
+    // The tail no longer reshuffles by recency — it sorts by name (ports
+    // last) so a session stays where the eye last found it across reopens.
+    // `web` has the HIGHEST activity of the tail but is a port, so it sinks;
+    // the rest are alphabetical regardless of how recently they ran.
+    expect(model.groups[0].rows.map((s) => s.name)).toEqual(["hop-old", "hop-older", "misc", "web"]);
   });
 
   it("filter mode flattens and ranks attention first", () => {

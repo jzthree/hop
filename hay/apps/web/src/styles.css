@@ -2187,6 +2187,7 @@ button.primary {
 }
 
 .switcher-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -2201,6 +2202,38 @@ button.primary {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+}
+
+/* Freshness bar: recency read as COLOUR, in place, so the wall can hold a
+   stable order and still show what just changed. A left-edge bar in the same
+   green that means "alive"; its opacity (set inline) decays from full to
+   nothing over ~10 minutes. Bright = just now, faint = a while ago, gone =
+   stale. Sits under the content, inside the card's rounded clip. */
+.switcher-card-fresh {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 12px 0 0 12px;
+  background: linear-gradient(
+    to bottom,
+    #22a06b,
+    color-mix(in srgb, #22a06b 55%, transparent)
+  );
+  pointer-events: none;
+}
+/* A session active RIGHT NOW gets a soft pulse on top of the static bar, so
+   "happening this second" still reads differently from "recent". */
+.switcher-card.active-now .switcher-card-fresh {
+  animation: fresh-pulse 1.8s ease-in-out infinite;
+}
+@keyframes fresh-pulse {
+  0%, 100% { filter: brightness(1); box-shadow: 0 0 4px 0 color-mix(in srgb, #22a06b 60%, transparent); }
+  50% { filter: brightness(1.35); box-shadow: 0 0 7px 1px color-mix(in srgb, #22a06b 75%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .switcher-card.active-now .switcher-card-fresh { animation: none; }
 }
 
 .switcher-card.current {

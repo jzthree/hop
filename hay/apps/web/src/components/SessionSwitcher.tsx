@@ -2508,6 +2508,14 @@ export const SessionSwitcher = ({
     // Window comfortably exceeds the 10s relative-time tick so a busy
     // session's glow holds steady rather than flickering between polls.
     const activeNow = !current && now - (s.lastActivityAt || 0) < 12000;
+    // Freshness: recency the eye can read WITHOUT the row moving. A left-edge
+    // bar whose intensity decays from full (just active) to nothing over
+    // ~10 minutes — bright means "just now", faint means "a while ago",
+    // absent means stale. This is what lets the wall hold a stable order and
+    // still answer "what changed" at a glance. The bar re-renders on the same
+    // ~10s tick as the relative-time labels, so it fades smoothly on its own.
+    const freshLevel = current ? 0
+      : Math.max(0, 1 - (now - (s.lastActivityAt || 0)) / 600000);
     // Manual mode: cards are draggable to reorder. The focused tile drags
     // from its header only (see dragArmKey) so its terminal keeps the
     // pointer for text selection; every other card drags from anywhere.
@@ -2559,6 +2567,14 @@ export const SessionSwitcher = ({
         }}
         {...pressHandlers(s)}
       >
+        {freshLevel > 0.02 && (
+          <span
+            className="switcher-card-fresh"
+            style={{ opacity: 0.2 + 0.8 * freshLevel }}
+            aria-hidden="true"
+            title={`Active ${relativeTime(s.lastActivityAt || 0, now) || "recently"}`}
+          />
+        )}
         <div
           className={`switcher-card-head${sortMode === "manual" && isFocusedCard ? " drag-handle" : ""}`}
           onPointerDown={sortMode === "manual" && isFocusedCard ? () => setDragArmKey(key) : undefined}

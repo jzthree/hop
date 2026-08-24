@@ -2903,12 +2903,25 @@ function getRegistrationConfig() {
     try {
         stored = JSON.parse(fs.readFileSync(REGISTRATION_FILE, 'utf8')) || {};
     } catch (e) { /* absent or corrupt: defaults below */ }
+    // How identity is proven. 'smtp' (default) mails a confirmation link;
+    // 'cloudflare-access' trusts a verified Access JWT at CLAIM time instead,
+    // so no mail is ever sent and signup stays open (no Access seat is spent
+    // until an approved user actually claims). accessTeam/accessAudience feed
+    // the JWT verifier; preapprovedEmails auto-advance a signup past the
+    // admin queue (the admin's own lab).
+    const gate = stored.emailGate === 'cloudflare-access' ? 'cloudflare-access' : 'smtp';
     const value = {
         enabled: stored.enabled === true,
         allowedEmailDomain: stored.allowedEmailDomain || 'uchicago.edu',
         // Where the admin's own hop lives once the bare host becomes the
         // landing page. Purely for the "sign in" link and the approval mail.
-        adminSubdomain: stored.adminSubdomain || null
+        adminSubdomain: stored.adminSubdomain || null,
+        emailGate: gate,
+        accessTeam: typeof stored.accessTeam === 'string' ? stored.accessTeam.trim() : null,
+        accessAudience: typeof stored.accessAudience === 'string' ? stored.accessAudience.trim() : null,
+        preapprovedEmails: Array.isArray(stored.preapprovedEmails)
+            ? stored.preapprovedEmails.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean)
+            : []
     };
     registrationConfigCache = { at: Date.now(), value };
     return value;
@@ -2917,6 +2930,30 @@ function getRegistrationConfig() {
 function saveRegistrationConfig(config) {
     writePrivateFile(REGISTRATION_FILE, JSON.stringify(config, null, 2));
     registrationConfigCache = { at: 0, value: null }; // a deliberate change lands now
+}
+// The whole registration surface asks this instead of re-deriving the mode.
+function registrationUsesAccessGate() {
+    return getRegistrationConfig().emailGate === 'cloudflare-access';
+}
+function isPreapprovedEmail(email) {
+    const addr = String(email || '').trim().toLowerCase();
+    return !!addr && getRegistrationConfig().preapprovedEmails.includes(addr);
+}
+const { verifyAccessJwt } = require('./lib/cf-access');
+// Pull and verify the Access identity off an inbound request. The token
+// rides in the Cf-Access-Jwt-Assertion header (or the CF_Authorization
+// cookie). Returns { ok, email } — the email is BELIEVED only after the
+// signature/issuer/expiry/audience all check out.
+async function verifiedAccessEmail(req) {
+    const cfg = getRegistrationConfig();
+    if (!cfg.accessTeam) return { ok: false, error: 'Access team is not configured (hop registration access-team <name>)' };
+    let token = req.headers['cf-access-jwt-assertion'];
+    if (!token) {
+        const cookie = req.headers['cookie'] || '';
+        const m = /(?:^|;\s*)CF_Authorization=([^;]+)/.exec(cookie);
+        if (m) token = decodeURIComponent(m[1]);
+    }
+    return verifyAccessJwt(token, { teamDomain: cfg.accessTeam, audience: cfg.accessAudience || null });
 }
 
 function getMailConfig() {
@@ -3107,6 +3144,14 @@ function renderLandingPage(landingHost, config) {
           <label for="fullName">Name <span class="muted" style="font-weight:400">(optional)</span></label>
           <input id="fullName" name="fullName" maxlength="120" placeholder="Ada Lovelace">
         </div>
+        <div class="field">
+          <label for="department">Department</label>
+          <input id="department" name="department" maxlength="120" placeholder="Human Genetics">
+        </div>
+        <div class="field">
+          <label for="areaOfExpertise">Area of expertise</label>
+          <input id="areaOfExpertise" name="areaOfExpertise" maxlength="300" placeholder="single-cell genomics, ML">
+        </div>
         <button type="submit" id="go">Request subdomain</button>
         <div id="msg"></div>
       </form>
@@ -3145,15 +3190,23 @@ function renderLandingPage(landingHost, config) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               subdomain: sub.value, email: document.getElementById('email').value,
-              fullName: document.getElementById('fullName').value
+              fullName: document.getElementById('fullName').value,
+              department: document.getElementById('department').value,
+              areaOfExpertise: document.getElementById('areaOfExpertise').value
             })
           });
           var data = await res.json();
           if (data.ok) {
-            document.getElementById('f').innerHTML =
-              '<p class="ok">Check your inbox. We sent a confirmation link to ' +
-              (data.email || 'your address').replace(/[<>&]/g, '') +
-              '. Click it and your request goes to the admin.</p>';
+            var addr = (data.email || 'your address').replace(/[<>&]/g, '');
+            var note;
+            if (data.status === 'preapproved') {
+              note = 'You\'re approved. Your subdomain is being set up now — sign in here again in a minute to collect your credentials.';
+            } else if (data.status === 'pending_approval') {
+              note = 'Request received for ' + addr + '. The admin approves by hand, so it may take a day. Sign in here once approved to collect your credentials.';
+            } else {
+              note = 'Check your inbox. We sent a confirmation link to ' + addr + '. Click it and your request goes to the admin.';
+            }
+            document.getElementById('f').innerHTML = '<p class="ok">' + note + '</p>';
           } else {
             msg.className = 'err'; msg.textContent = data.error || 'Something went wrong.';
             go.disabled = false; go.textContent = 'Request subdomain';
@@ -3424,7 +3477,9 @@ function listPendingRegistrations() {
             const when = r.verifiedAt ? new Date(r.verifiedAt).toLocaleString() : 'unknown';
             log(`  ${BOLD}${r.subdomain}${RESET}`, GREEN);
             log(`    Email:     ${r.email}${r.fullName ? `  (${r.fullName})` : ''}`, RESET);
-            log(`    Confirmed: ${when}`, RESET);
+            if (r.department) log(`    Dept:      ${r.department}`, RESET);
+            if (r.areaOfExpertise) log(`    Expertise: ${r.areaOfExpertise}`, RESET);
+            log(`    ${r.verifiedVia === 'cloudflare-access' ? 'Requested:' : 'Confirmed:'} ${when}`, RESET);
             log(`    Approve:   ${CYAN}hop user approve ${r.subdomain}${RESET}`, RESET);
             log('');
         }
@@ -3453,7 +3508,7 @@ async function approveRegistration(subdomain) {
         log(`"${name}" is ${REGISTRATION_STATUS_LABEL[entry.status] || entry.status} — nothing to approve.`, YELLOW);
         process.exit(1);
     }
-    if (!getMailConfig()) {
+    if (!registrationUsesAccessGate() && !getMailConfig()) {
         log(`Mail is not configured, so they could never be told. Run: hop mail setup`, RED);
         process.exit(1);
     }
@@ -3481,6 +3536,15 @@ async function approveRegistration(subdomain) {
     }
 
     const landingHost = getLandingHostname();
+    if (registrationUsesAccessGate()) {
+        // No link to send: the credential page is behind Cloudflare Access,
+        // so the approved user signs in (proving the same @-address) and the
+        // page hands them exactly their own bundle. Nothing to email, leak,
+        // or expire.
+        log(`\n${GREEN}✓ Approved. ${entry.email} can collect credentials at${RESET}`, GREEN);
+        log(`  https://${landingHost}/claim  ${DIM}(they sign in via Access as ${entry.email})${RESET}`, CYAN);
+        return;
+    }
     const claimUrl = `https://${landingHost}/claim?token=${encodeURIComponent(approval.token)}`;
     try {
         await sendRegistrationMail(entry.email, `Your ${provisioned.hostname} is ready`,
@@ -6281,6 +6345,94 @@ function removeClaudeHook() {
     } catch (e) {
         return { ok: false, error: e.message };
     }
+}
+
+// ---- Codex notify install/remove (~/.codex/config.toml) --------------------
+// Codex's turn-completion twin of the Claude Stop hook. Codex allows exactly
+// ONE `notify` program, so we install a WRAPPER (scripts/codex-notify-hook.js)
+// that bumps the same .turn counter AND forwards to whatever notify was already
+// there (e.g. Codex Computer Use) via "--chain <orig...>". TOML is edited
+// line-by-line — `notify` is a top-level key, and we touch only that one line —
+// so the rest of the user's config is never reserialized (and mangled).
+const CODEX_NOTIFY_SCRIPT = path.join(__dirname, 'scripts', 'codex-notify-hook.js');
+function getCodexConfigPath() {
+    return path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
+}
+function tomlStr(s) { return JSON.stringify(String(s)); } // basic TOML string ≈ JSON string for our paths
+function parseNotifyElements(line) {
+    const m = line.match(/^notify\s*=\s*(\[.*\])\s*$/);
+    if (!m) return null;
+    const els = [];
+    const re = /"((?:\\.|[^"\\])*)"/g;
+    let mm;
+    while ((mm = re.exec(m[1])) !== null) {
+        try { els.push(JSON.parse('"' + mm[1] + '"')); } catch (e) { els.push(mm[1]); }
+    }
+    return els;
+}
+// The top-level notify line (before the first [table]); -1 if none up there.
+function findTopLevelNotifyIndex(lines) {
+    for (let i = 0; i < lines.length; i++) {
+        if (/^\s*\[/.test(lines[i])) return -1;
+        if (/^notify\s*=/.test(lines[i])) return i;
+    }
+    return -1;
+}
+function codexNotifyIsOurs(els) {
+    return Array.isArray(els) && els.some((e) => typeof e === 'string' && e.includes('codex-notify-hook.js'));
+}
+function codexNotifyStatus() {
+    const p = getCodexConfigPath();
+    let text;
+    try { text = fs.readFileSync(p, 'utf8'); } catch (e) { return { path: p, exists: false, installed: false }; }
+    const lines = text.split('\n');
+    const idx = findTopLevelNotifyIndex(lines);
+    const els = idx >= 0 ? parseNotifyElements(lines[idx]) : null;
+    return { path: p, exists: true, installed: codexNotifyIsOurs(els), notify: els };
+}
+function installCodexNotify() {
+    const p = getCodexConfigPath();
+    if (!fs.existsSync(CODEX_NOTIFY_SCRIPT)) return { ok: false, error: `notify script missing: ${CODEX_NOTIFY_SCRIPT}` };
+    let text = '';
+    try { text = fs.readFileSync(p, 'utf8'); } catch (e) { text = ''; }
+    const lines = text.length ? text.split('\n') : [];
+    const idx = findTopLevelNotifyIndex(lines);
+    const existing = idx >= 0 ? parseNotifyElements(lines[idx]) : null;
+    if (codexNotifyIsOurs(existing)) return { ok: true, already: true, path: p };
+    const wrapper = [process.execPath, CODEX_NOTIFY_SCRIPT];
+    const chain = (existing && existing.length) ? ['--chain', ...existing] : [];
+    const newLine = `notify = [${[...wrapper, ...chain].map(tomlStr).join(', ')}]`;
+    if (idx >= 0) {
+        lines[idx] = newLine;
+    } else {
+        let insertAt = lines.findIndex((l) => /^\s*\[/.test(l));
+        if (insertAt < 0) insertAt = lines.length;
+        lines.splice(insertAt, 0, newLine);
+    }
+    try {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, lines.join('\n'));
+        return { ok: true, already: false, path: p, chained: (existing && existing.length) ? existing : null };
+    } catch (e) { return { ok: false, error: e.message }; }
+}
+function removeCodexNotify() {
+    const p = getCodexConfigPath();
+    let text;
+    try { text = fs.readFileSync(p, 'utf8'); } catch (e) { return { ok: true, already: true, path: p }; }
+    const lines = text.split('\n');
+    const idx = findTopLevelNotifyIndex(lines);
+    const els = idx >= 0 ? parseNotifyElements(lines[idx]) : null;
+    if (!codexNotifyIsOurs(els)) return { ok: true, already: true, path: p };
+    const ci = els.indexOf('--chain');
+    const restored = ci >= 0 ? els.slice(ci + 1) : [];
+    if (restored.length) lines[idx] = `notify = [${restored.map(tomlStr).join(', ')}]`;
+    else lines.splice(idx, 1);
+    try {
+        if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, lines.join('\n'));
+        return { ok: true, already: false, path: p, restored: restored.length ? restored : null };
+    } catch (e) { return { ok: false, error: e.message }; }
 }
 
 // Resolve display name aliases (follows rename chain)
@@ -9474,9 +9626,12 @@ function startAuthProxy(authEmitter) {
                         res.end(JSON.stringify({ ok: false, error: 'Malformed request.' }));
                         return;
                     }
-                    // Refuse before writing anything if mail is dead: a
-                    // registration nobody can confirm is just a parked name.
-                    if (!getMailConfig()) {
+                    const accessGate = registrationUsesAccessGate();
+                    // SMTP mode refuses before writing anything if mail is dead:
+                    // a registration nobody can confirm is just a parked name.
+                    // Access mode needs no mail at all — identity is proven by
+                    // the Access login at CLAIM time, so signup stays open.
+                    if (!accessGate && !getMailConfig()) {
                         log(`[registration] refused ${payload.subdomain || '?'} — mail is not configured`, YELLOW);
                         res.writeHead(503, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ ok: false, error: 'Registration is temporarily unavailable. Try again later.' }));
@@ -9486,11 +9641,40 @@ function startAuthProxy(authEmitter) {
                         subdomain: payload.subdomain,
                         email: payload.email,
                         fullName: payload.fullName,
-                        ip: getClientIp(req)
+                        department: payload.department,
+                        areaOfExpertise: payload.areaOfExpertise,
+                        ip: getClientIp(req),
+                        skipEmailVerification: accessGate
                     });
                     if (!result.ok) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ ok: false, error: result.error, field: result.field }));
+                        return;
+                    }
+                    if (accessGate) {
+                        // No email to confirm. A preapproved address (the admin's
+                        // own lab) is provisioned right away by spawning the
+                        // tested `hop user approve` in its OWN process — addUser
+                        // calls process.exit, so it must never run in the daemon.
+                        // Everyone else waits in the admin's queue.
+                        if (isPreapprovedEmail(result.email)) {
+                            try {
+                                const child = spawn(process.argv[0], [__filename, 'user', 'approve', result.subdomain], {
+                                    detached: true, stdio: 'ignore',
+                                    env: { ...process.env, HOP_HOME: HOME_DIR }
+                                });
+                                child.unref();
+                                log(`[registration] ${result.subdomain} (${result.email}) preapproved — provisioning`, GREEN);
+                            } catch (e) {
+                                log(`[registration] preapprove provisioning failed to start for ${result.subdomain}: ${e.message}`, YELLOW);
+                            }
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: true, email: result.email, status: 'preapproved' }));
+                            return;
+                        }
+                        log(`[registration] ${result.subdomain} requested by ${result.email} — awaiting approval (hop user pending)`, CYAN);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: true, email: result.email, status: 'pending_approval' }));
                         return;
                     }
                     const link = `https://${landingHost}/verify?token=${encodeURIComponent(result.token)}`;
@@ -9547,28 +9731,48 @@ happens until someone clicks it.
 
             // Collect credentials after approval.
             if (parsedUrl.pathname === '/claim' && req.method === 'GET') {
-                const token = String(parsedUrl.query.token || '');
-                const result = store.resolveClaim(token);
                 setNoCache(res);
-                if (!result.ok) {
-                    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-                    res.end(renderNoticePage('That link did not work', `<p>${escapeHtml(result.error)}</p>`));
-                    return;
-                }
-                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(renderClaimPage(result.registration, token, landingHost));
+                (async () => {
+                    // Access mode: the page itself is behind Cloudflare Access,
+                    // so identity is proven by the verified JWT, not a token.
+                    // Match that email to its approved registration.
+                    const result = registrationUsesAccessGate()
+                        ? await (async () => {
+                            const id = await verifiedAccessEmail(req);
+                            if (!id.ok) return { ok: false, error: id.error };
+                            return store.resolveClaimByEmail(id.email);
+                        })()
+                        : store.resolveClaim(String(parsedUrl.query.token || ''));
+                    if (!result.ok) {
+                        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+                        res.end(renderNoticePage('That link did not work', `<p>${escapeHtml(result.error)}</p>`));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                    res.end(renderClaimPage(result.registration, parsedUrl.query.token || '', landingHost));
+                })().catch((e) => {
+                    log(`[registration] claim page error: ${e.message}`, RED);
+                    try { res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(renderNoticePage('Something went wrong', '<p>Try again.</p>')); } catch (e2) {}
+                });
                 return;
             }
 
             if (parsedUrl.pathname === '/claim/credentials.json' && req.method === 'GET') {
-                const result = store.resolveClaim(String(parsedUrl.query.token || ''));
                 setNoCache(res);
-                if (!result.ok) {
-                    res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: result.error }));
-                    return;
-                }
-                const exportFile = path.join(HOME_DIR, 'exports', result.registration.subdomain, 'credentials.json');
+                (async () => {
+                    const result = registrationUsesAccessGate()
+                        ? await (async () => {
+                            const id = await verifiedAccessEmail(req);
+                            if (!id.ok) return { ok: false, error: id.error };
+                            return store.resolveClaimByEmail(id.email);
+                        })()
+                        : store.resolveClaim(String(parsedUrl.query.token || ''));
+                    if (!result.ok) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: result.error }));
+                        return;
+                    }
+                    const exportFile = path.join(HOME_DIR, 'exports', result.registration.subdomain, 'credentials.json');
                 let contents = null;
                 try { contents = fs.readFileSync(exportFile); } catch (e) { contents = null; }
                 if (!contents) {
@@ -9577,15 +9781,19 @@ happens until someone clicks it.
                     res.end(JSON.stringify({ error: 'Credentials are not ready. Contact the admin.' }));
                     return;
                 }
-                // Consumed only once the bytes are actually on their way.
-                store.markClaimed(result.registration.subdomain);
-                log(`[registration] ${result.registration.subdomain} claimed its credentials`, GREEN);
-                res.writeHead(200, {
-                    'Content-Type': 'application/json',
-                    'Content-Disposition': 'attachment; filename="credentials.json"',
-                    'Content-Length': contents.length
+                    // Consumed only once the bytes are actually on their way.
+                    store.markClaimed(result.registration.subdomain);
+                    log(`[registration] ${result.registration.subdomain} claimed its credentials`, GREEN);
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Content-Disposition': 'attachment; filename="credentials.json"',
+                        'Content-Length': contents.length
+                    });
+                    res.end(contents);
+                })().catch((e) => {
+                    log(`[registration] claim download error: ${e.message}`, RED);
+                    try { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Something went wrong.' })); } catch (e2) {}
                 });
-                res.end(contents);
                 return;
             }
 
@@ -14424,7 +14632,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
     'mail', 'registration', 'canonical'
 ];
 
@@ -14514,6 +14722,10 @@ const HELP_SECTIONS = [
         `hop registration disable  Go back to a login-only landing host`,
         `hop registration domain <d>    Restrict signups to an email domain`,
         `hop registration admin <sub>   Reserve your own subdomain`,
+        `hop registration mode <m>      Identity gate: smtp | cloudflare-access (no email)`,
+        `hop registration access-team <t>  Your Cloudflare Access team (for cloudflare-access mode)`,
+        `hop registration access-aud <a>   Pin tokens to your Access application (recommended)`,
+        `hop registration preapprove <email>  Auto-approve a signup (your lab); list | remove <email>`,
         `hop mail setup            Configure SMTP (needed to send confirmations)`,
         `hop mail test <address>   Send a test message`,
     ] },
@@ -15399,6 +15611,37 @@ async function main() {
         process.exit(0);
     }
 
+    // `hop codex-notify [install|remove|status]` — the Codex twin of the Claude
+    // Stop hook, so "notify me when it finishes" works for Codex sessions too.
+    // Installs a WRAPPER into ~/.codex/config.toml that chains to any existing
+    // notify (Computer Use), so nothing already there breaks.
+    if (process.argv[2] === 'codex-notify') {
+        const sub = process.argv[3] || 'status';
+        if (sub === 'install') {
+            const r = installCodexNotify();
+            if (!r.ok) { log(`Failed to install codex notify: ${r.error}`, RED); process.exit(1); }
+            if (r.already) { log(`Codex notify wrapper already installed (${r.path}).`, RESET); process.exit(0); }
+            log(`${GREEN}Installed${RESET} Codex notify wrapper → ${r.path}`, RESET);
+            if (r.chained) log(`Chained to your existing notify (${r.chained.join(' ')}), which keeps working. Backup: ${r.path}.hop-backup`, DIM);
+            else log(`No previous notify to chain. Backup (if any): ${r.path}.hop-backup`, DIM);
+            log(`Codex turn-completions now feed hop's finish notifications. Restart any running codex to pick up the config.`, DIM);
+            process.exit(0);
+        }
+        if (sub === 'remove') {
+            const r = removeCodexNotify();
+            if (!r.ok) { log(`Failed to remove codex notify: ${r.error}`, RED); process.exit(1); }
+            if (r.already) { log(`Codex notify wrapper was not installed.`, RESET); process.exit(0); }
+            log(`${GREEN}Removed${RESET} Codex notify wrapper from ${r.path}`, RESET);
+            if (r.restored) log(`Restored your original notify: ${r.restored.join(' ')}`, DIM);
+            process.exit(0);
+        }
+        const st = codexNotifyStatus();
+        if (!st.exists) log(`${YELLOW}!${RESET} No Codex config (${st.path}). Run ${CYAN}hop codex-notify install${RESET} once Codex is set up.`, RESET);
+        else if (st.installed) log(`${GREEN}✓${RESET} Codex notify wrapper installed (${st.path})`, RESET);
+        else log(`${YELLOW}!${RESET} Codex notify wrapper not installed (${st.path}). Run ${CYAN}hop codex-notify install${RESET} for finish notifications on Codex.`, RESET);
+        process.exit(0);
+    }
+
     // `agent-skill` installs Hop's bundled instructions for Claude and Codex.
     // Keep `claude-skill` as the narrower backward-compatible command.
     if (process.argv[2] === 'agent-skill' || process.argv[2] === 'claude-skill') {
@@ -16254,7 +16497,15 @@ async function main() {
             log(`  Landing page:  ${landingHost ? `https://${landingHost}` : '(no custom domain — run hop domain <host>)'}`, RESET);
             log(`  Open to:       ${config.allowedEmailDomain} addresses`, RESET);
             log(`  Admin host:    ${config.adminSubdomain ? userHostnameFor(config.adminSubdomain) : '(not set)'}`, RESET);
-            log(`  Mail:          ${getMailConfig() ? `${GREEN}configured${RESET}` : `${RED}not configured — signups will be refused${RESET}`}`, RESET);
+            if (config.emailGate === 'cloudflare-access') {
+                log(`  Identity gate: ${GREEN}Cloudflare Access${RESET} (no email sent)`, RESET);
+                log(`  Access team:   ${config.accessTeam ? `${config.accessTeam}` : `${RED}not set — hop registration access-team <name>${RESET}`}`, RESET);
+                log(`  Access aud:    ${config.accessAudience ? `set` : `${YELLOW}not set (recommended — pins tokens to your app)${RESET}`}`, RESET);
+                log(`  Preapproved:   ${config.preapprovedEmails.length} address${config.preapprovedEmails.length === 1 ? '' : 'es'}`, RESET);
+            } else {
+                log(`  Identity gate: email confirmation (SMTP)`, RESET);
+                log(`  Mail:          ${getMailConfig() ? `${GREEN}configured${RESET}` : `${RED}not configured — signups will be refused${RESET}`}`, RESET);
+            }
             const waiting = landingHost ? getRegistrationStore().pending().length : 0;
             log(`  Waiting:       ${waiting} request${waiting === 1 ? '' : 's'}${waiting ? ` (${CYAN}hop user pending${RESET})` : ''}`, RESET);
             log('');
@@ -16266,7 +16517,18 @@ async function main() {
                 log(`Set a custom domain first: hop domain <hostname>`, RED);
                 process.exit(1);
             }
-            if (!getMailConfig()) {
+            if (config.emailGate === 'cloudflare-access') {
+                if (!config.accessTeam) {
+                    log(`Set your Cloudflare Access team first: hop registration access-team <name>`, RED);
+                    process.exit(1);
+                }
+                if (!config.accessAudience) {
+                    log(`${YELLOW}No Access application audience set — tokens won't be pinned to your app.${RESET}`, YELLOW);
+                    log(`Strongly recommended: ${CYAN}hop registration access-aud <AUD-tag>${RESET}`, RESET);
+                    const go = await promptYesNo(`Enable without it? (y/N) `);
+                    if (!go) process.exit(0);
+                }
+            } else if (!getMailConfig()) {
                 log(`Configure mail first, or every signup is refused: hop mail setup`, RED);
                 process.exit(1);
             }
@@ -16327,7 +16589,64 @@ async function main() {
             process.exit(0);
         }
 
-        log(`Usage: hop registration [status|enable|disable|domain <d>|admin <sub>]`, RED);
+        if (subcommand === 'mode') {
+            const value = String(process.argv[4] || '').toLowerCase();
+            if (value !== 'smtp' && value !== 'cloudflare-access') {
+                log(`Usage: hop registration mode <smtp|cloudflare-access>`, RED);
+                log(`  smtp             — mail a confirmation link (needs hop mail setup)`, DIM);
+                log(`  cloudflare-access — no email; Cloudflare Access proves identity at claim`, DIM);
+                process.exit(1);
+            }
+            saveRegistrationConfig({ ...config, emailGate: value });
+            log(`\n${GREEN}✓ Identity gate: ${value}.${RESET}`, GREEN);
+            if (value === 'cloudflare-access') {
+                log(`No email is sent. Set your team: ${CYAN}hop registration access-team <name>${RESET}`, RESET);
+                log(`Then put an Access app with an @${config.allowedEmailDomain} policy over ${CYAN}hop-*.${getBaseDomain() || 'your-domain'}${RESET} and the claim path.`, DIM);
+            }
+            process.exit(0);
+        }
+
+        if (subcommand === 'access-team') {
+            const value = String(process.argv[4] || '').trim();
+            if (!value) { log(`Usage: hop registration access-team <team>   (e.g. "yourlab" for yourlab.cloudflareaccess.com)`, RED); process.exit(1); }
+            saveRegistrationConfig({ ...config, accessTeam: value });
+            log(`\n${GREEN}✓ Access team: ${value}${RESET}  (keys: https://${value.includes('.') ? value : value + '.cloudflareaccess.com'}/cdn-cgi/access/certs)`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'access-aud') {
+            const value = String(process.argv[4] || '').trim();
+            if (!value) { log(`Usage: hop registration access-aud <AUD-tag>   (from the Access application's Overview)`, RED); process.exit(1); }
+            saveRegistrationConfig({ ...config, accessAudience: value });
+            log(`\n${GREEN}✓ Access application audience pinned.${RESET} Tokens for any other app are now refused.`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'preapprove') {
+            const action = String(process.argv[4] || '').toLowerCase();
+            const list = config.preapprovedEmails.slice();
+            if (action === 'list' || !action) {
+                if (!list.length) { log(`No preapproved addresses. Add your lab: ${CYAN}hop registration preapprove <email>${RESET}`, YELLOW); process.exit(0); }
+                log(`\n${BOLD}Preapproved (auto-approved on signup):${RESET}`, RESET);
+                for (const e of list) log(`  ${GREEN}•${RESET} ${e}`, RESET);
+                process.exit(0);
+            }
+            if (action === 'remove') {
+                const email = String(process.argv[5] || '').trim().toLowerCase();
+                const next = list.filter((e) => e !== email);
+                saveRegistrationConfig({ ...config, preapprovedEmails: next });
+                log(next.length === list.length ? `${YELLOW}${email} was not on the list.${RESET}` : `${GREEN}✓ Removed ${email}.${RESET}`, RESET);
+                process.exit(0);
+            }
+            // Otherwise treat argv[4] as an email (or several) to add.
+            const toAdd = process.argv.slice(4).map((e) => String(e).trim().toLowerCase()).filter(Boolean);
+            const merged = Array.from(new Set([...list, ...toAdd]));
+            saveRegistrationConfig({ ...config, preapprovedEmails: merged });
+            log(`\n${GREEN}✓ Preapproved ${toAdd.join(', ')}.${RESET} They skip your queue and are provisioned on signup.`, GREEN);
+            process.exit(0);
+        }
+
+        log(`Usage: hop registration [status|enable|disable|domain <d>|admin <sub>|mode <m>|access-team <t>|access-aud <a>|preapprove <email>]`, RED);
         process.exit(1);
     }
 

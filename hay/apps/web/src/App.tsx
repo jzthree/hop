@@ -1953,6 +1953,32 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, terminalReady, reconnectToken]);
 
+  // Reconnect watchdog — the guarantee that a live session never stays
+  // stranded in a non-connected state. scheduleReconnect's loop bails
+  // (correctly) in a few edge cases: a room-ref mismatch when a switch was
+  // gated behind the open wall, or a retry timer cleared by a superseding
+  // connect that then no-op'd. Individually right, together they can leave
+  // the socket dead with nothing driving a retry — the "stuck reconnecting
+  // until you refresh" symptom. This notices a session that SHOULD be up but
+  // has no live/connecting socket and no pending retry, and kicks a fresh
+  // connect through the normal effect (reconnectToken) — a refresh's recovery
+  // without the refresh. It NEVER fires while a socket is open/connecting or a
+  // retry is already scheduled, so it cannot cause a connect storm.
+  useEffect(() => {
+    if (!session || !terminalReady) return;
+    const id = window.setInterval(() => {
+      if (switcherOpenRef.current) return;          // the wall owns the socket while it's up
+      if (!shouldReconnectRef.current) return;      // session ended / leaving on purpose
+      const st = statusForChromeRef.current;
+      if (st === "connected" || st === "ended") return;
+      const ws = wsRef.current;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      if (reconnectTimerRef.current !== null) return; // a retry is already pending
+      setReconnectToken((value) => value + 1);      // stranded → drive a fresh connect
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [session, terminalReady]);
+
   useEffect(() => {
     if (!session || !containerRef.current || termRef.current) {
       return;

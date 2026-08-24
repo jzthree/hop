@@ -123,8 +123,16 @@ function existingCwdOr(cwd, fallback) {
 // kill) are truly over and must not be resurrected.
 let shuttingDown = false;
 
-// When a room ends for good, drop its `hop restore` sources: the SessionStart
-// hook record (+ turn counter + origin marker) and any stale replay buffer.
+// When a room ends, the ONLY thing safe to drop is the transient replay
+// buffer. The restore records (.json SessionStart, .turn counter, .meta) are
+// deliberately KEPT: a PTY exit is not consent to forget the conversation —
+// it may be a crash, a SIGKILL, an app closing, or a relaunch-teardown, and
+// deleting the records made the session unrestorable (hopboard, 2026-08-24:
+// a killed shell nuked its own records, then reopened as a bare shell with
+// its conversation orphaned). Records are removed in exactly ONE place now:
+// an EXPLICIT user delete, daemon-side (removeClaudeSessionRecord). A stale
+// record for a truly-finished session is harmless — restore re-checks
+// liveness and the transcript, and the user can delete what they don't want.
 const watchedRooms = new WeakSet();
 // Room ids the daemon is closing in order to RELAUNCH (targeted `hop
 // restore <name>`): their records must survive the close, exactly as they
@@ -137,17 +145,14 @@ function watchRoomEnd(room) {
         if (shuttingDown) return;
         const id = String(room.id || '');
         if (!/^[A-Za-z0-9_.-]+$/.test(id)) return; // never let an id escape the dirs
-        // A relaunch-close keeps everything (records + buffer): the daemon is
-        // about to bring this same session back with `claude --resume`.
+        // A relaunch-close keeps even the buffer: the daemon is about to bring
+        // this same session back with `claude --resume`.
         if (preserveRecordsOnClose.delete(id)) return;
-        for (const file of [
-            path.join(CLAUDE_SESSIONS_DIR, `${id}.json`),
-            path.join(CLAUDE_SESSIONS_DIR, `${id}.turn`),
-            path.join(CLAUDE_SESSIONS_DIR, `${id}.meta`),
-            path.join(BUFFER_DIR, `${id}.raw`)
-        ]) {
-            try { fs.unlinkSync(file); } catch (e) { /* best effort */ }
-        }
+        // Restore records are NEVER deleted here — only the stale replay
+        // buffer. See the note on watchedRooms above: a room ending is not a
+        // request to forget its conversation; that is an explicit delete's
+        // job, daemon-side.
+        try { fs.unlinkSync(path.join(BUFFER_DIR, `${id}.raw`)); } catch (e) { /* best effort */ }
     });
     return room;
 }

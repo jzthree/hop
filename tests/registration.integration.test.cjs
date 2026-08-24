@@ -298,6 +298,51 @@ test('turning registration off restores the login gate on the landing host', asy
   }
 });
 
+test('Cloudflare-Access mode: signup is open, sends NO email, and queues with dept/expertise', async () => {
+  // Flip the live daemon into Access mode. No SMTP is touched; a request is
+  // accepted straight into the admin's queue (identity is proven later, at
+  // claim, by Access — not by us mailing a link).
+  try {
+    await writeJson('.registration.json', {
+      enabled: true, allowedEmailDomain: 'uchicago.edu', adminSubdomain: 'admin',
+      emailGate: 'cloudflare-access', accessTeam: 'testteam', accessAudience: 'aud-1'
+    });
+    await until(async () => /Area of expertise/.test((await request('GET', '/')).body),
+      'the Access-mode signup form (with the new fields) to be served');
+
+    const before = smtp.messages.length;
+    const res = await request('POST', '/api/register', { body: {
+      subdomain: 'grace', email: 'grace@uchicago.edu',
+      department: 'Human Genetics', areaOfExpertise: 'single-cell genomics'
+    }});
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.ok, true);
+    assert.equal(res.json.status, 'pending_approval', 'lands in the queue, not pending_email');
+
+    // No email was sent — the whole point.
+    await delay(400);
+    assert.equal(smtp.messages.length, before, 'Access mode sends nothing');
+
+    const saved = readRegistry().grace;
+    assert.ok(saved, 'the request is stored');
+    assert.equal(saved.status, 'pending_approval');
+    assert.equal(saved.verifiedVia, 'cloudflare-access');
+    assert.equal(saved.department, 'Human Genetics');
+    assert.equal(saved.areaOfExpertise, 'single-cell genomics');
+    assert.ok(!saved.verifyTokenHash, 'no email token is minted');
+
+    // The claim endpoint refuses without a verified Access token (no JWT on
+    // this request), rather than leaking anything.
+    const claim = await request('GET', '/claim/credentials.json');
+    assert.equal(claim.status, 400, 'no Access identity → no bundle');
+  } finally {
+    await writeJson('.registration.json', { enabled: true, allowedEmailDomain: 'uchicago.edu', adminSubdomain: 'admin' });
+    // The daemon caches registration config for ~1s; wait it out so the
+    // SMTP-mode tests that follow don't observe the stale Access mode.
+    await delay(1200);
+  }
+});
+
 test('signups are refused outright when mail cannot be sent', async () => {
   try {
     await until(async () => /Request a subdomain/.test((await request('GET', '/')).body),

@@ -61,6 +61,40 @@ test('a submission holds the name, and the raw token is returned exactly once', 
   assert.equal(store.isAvailable('alice').ok, false);
 });
 
+test('Access mode: a submission skips email and lands straight in the queue', () => {
+  const store = tmpStore();
+  const res = store.submit({
+    subdomain: 'bob', email: 'Bob@uchicago.edu',
+    department: 'Human Genetics', areaOfExpertise: 'single-cell',
+    skipEmailVerification: true
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.token, null, 'no verify token is minted when email is not the gate');
+  assert.equal(res.status, 'pending_approval');
+  const saved = store.get('bob');
+  assert.equal(saved.status, 'pending_approval', 'no pending_email hop — the admin can act now');
+  assert.equal(saved.verifiedVia, 'cloudflare-access');
+  assert.equal(saved.department, 'Human Genetics');
+  assert.equal(saved.areaOfExpertise, 'single-cell');
+  assert.ok(!saved.verifyTokenHash, 'no email token exists to leak');
+  assert.equal(store.isAvailable('bob').ok, false, 'the name is held');
+});
+
+test('resolveClaimByEmail hands the bundle to the PROVEN email, and only when approved', () => {
+  const store = tmpStore();
+  store.submit({ subdomain: 'carol', email: 'carol@uchicago.edu', skipEmailVerification: true });
+  // Not approved yet → refused.
+  assert.equal(store.resolveClaimByEmail('carol@uchicago.edu').ok, false);
+  store.approve('carol');
+  // Approved → the right email gets it, case-insensitively.
+  const ok = store.resolveClaimByEmail('Carol@UChicago.edu');
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.registration.subdomain, 'carol');
+  // A DIFFERENT authenticated email must never receive carol's bundle.
+  assert.equal(store.resolveClaimByEmail('mallory@uchicago.edu').ok, false);
+  assert.equal(store.resolveClaimByEmail('').ok, false);
+});
+
 test('verification is single-use, idempotent for double clicks, and expires', () => {
   const store = tmpStore();
   const { token } = store.submit({ subdomain: 'alice', email: 'alice@uchicago.edu' });

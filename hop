@@ -5094,6 +5094,57 @@ function readClaudeSessionRecord(internalName) {
         return null;
     }
 }
+// The conversation id from the Stop-hook's turn counter. The SessionStart
+// record (.json) and the turn counter (.turn) are written by the SAME hook
+// but on different events, so a session can lose one and keep the other —
+// mybot came back a bare shell with a .turn naming its conversation but no
+// .json for restore to key on. This is the second, independent witness.
+function readTurnSessionId(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    try {
+        const t = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.turn`), 'utf8'));
+        return typeof t.sessionId === 'string' && t.sessionId ? t.sessionId : null;
+    } catch (e) { return null; }
+}
+// Find a transcript for a bare session id across every claude config root,
+// returning which root (= the CLAUDE_CONFIG_DIR to resume under) holds it.
+function findClaudeTranscriptById(sessionId) {
+    if (!sessionId) return null;
+    for (const root of claudeConfigRootsForRestore(null)) {
+        const projects = path.join(root, 'projects');
+        let slugs = [];
+        try { slugs = fs.readdirSync(projects); } catch (e) { continue; }
+        for (const slug of slugs) {
+            const hit = findClaudeTranscriptIn(path.join(projects, slug), sessionId);
+            if (hit) return { file: hit, configDir: root === path.join(os.homedir(), '.claude') ? null : root };
+        }
+    }
+    return null;
+}
+// When a session has NO SessionStart record but its .turn still names a
+// conversation whose transcript exists, rebuild a record from it so restore
+// resumes the real conversation instead of dropping to a bare shell. The
+// rebuilt record is persisted (best effort) so the next restore, fork, and
+// search all agree. cwd comes from the caller (the room's real directory).
+function recoverRecordFromTurn(internalName, cwd) {
+    const sessionId = readTurnSessionId(internalName);
+    if (!sessionId) return null;
+    const found = findClaudeTranscriptById(sessionId);
+    if (!found) return null;
+    const configPrefix = found.configDir
+        ? `CLAUDE_CONFIG_DIR='${found.configDir.replace(/'/g, `'\\''`)}' ` : '';
+    const rec = {
+        sessionId,
+        cwd: cwd || undefined,
+        source: 'resume',
+        configDir: found.configDir,
+        launchCmd: `${configPrefix}claude --dangerously-skip-permissions --resume ${sessionId}`,
+        updatedAt: new Date().toISOString(),
+        recoveredFrom: 'turn-counter'
+    };
+    writeClaudeSessionRecord(internalName, rec); // best effort; plan below does not depend on it
+    return rec;
+}
 
 // The rival record the hook parks when a differently-rooted claude tries to
 // take over a session (see scripts/claude-session-hook.js).
@@ -5444,6 +5495,19 @@ function rebuildClaudeLaunch(launchCmd) {
 // that project directory.
 function restorePlanForSession(entry) {
     let rec = readClaudeSessionRecord(entry.internalName);
+    // No SessionStart record, but the turn counter may still name this room's
+    // conversation (the two are written independently). Recover a record from
+    // it when the transcript is real — otherwise this room would drop to a
+    // bare shell over a live conversation (the mybot case). The recovered
+    // record's cwd is the room's own directory, never a transcript-store path.
+    if (!rec) {
+        const storePath = (c) => /[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(c || ''));
+        const metaCwd = readClaudeSessionMeta(entry.internalName)?.cwd;
+        const safeCwd = (metaCwd && !storePath(metaCwd) ? metaCwd : null)
+            || (entry.cwd && !storePath(entry.cwd) ? entry.cwd : null) || metaCwd || entry.cwd;
+        const recovered = recoverRecordFromTurn(entry.internalName, safeCwd);
+        if (recovered) rec = recovered;
+    }
     // Wrong-conversation guard. The SessionStart hook records whichever claude
     // starts inside a room, and its nested-claude check keys on
     // CLAUDE_CODE_SESSION_ID — which hop deliberately SCRUBS when it spawns

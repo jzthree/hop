@@ -1163,6 +1163,44 @@ test('targeted restore redoes an idle live shell, refuses a busy one, reports an
   await fs.rm(tfile, { force: true });
 });
 
+// A session can lose its SessionStart record (.json) yet keep the turn
+// counter (.turn), which still names its conversation — mybot came back a
+// bare shell for exactly this reason. Restore recovers the record from the
+// turn when the transcript is real, instead of dropping to a plain shell.
+test('restore recovers a resume from the turn counter when the .json record is gone', async () => {
+  const sid = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+  const dir = path.join(hopHome, 'claude-sessions');
+  await fs.mkdir(dir, { recursive: true });
+  // A live session with a meta (cwd) and a turn (sessionId) — but NO .json.
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'turnonly', cwd: tempDir }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+  await fs.rm(path.join(dir, `${internal}.json`), { force: true });
+  await fs.writeFile(path.join(dir, `${internal}.meta`), JSON.stringify({ internalName: internal, displayName: 'turnonly', cwd: tempDir }), { mode: 0o600 });
+  await fs.writeFile(path.join(dir, `${internal}.turn`), JSON.stringify({ sessionId: sid, count: 5, at: new Date().toISOString() }), { mode: 0o600 });
+  // The transcript exists under the default root, the cwd's slug.
+  const tdir = path.join(os.homedir(), '.claude', 'projects', tempDir.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(tdir, { recursive: true });
+  const tfile = path.join(tdir, `${sid}.jsonl`);
+  await fs.writeFile(tfile, '{"type":"user"}\n');
+
+  const plan = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true });
+  const p = (plan.data.restored || []).find(x => x.name === 'turnonly');
+  assert.ok(p, `planned: ${JSON.stringify(plan.data).slice(0, 300)}`);
+  assert.match(String(p.command || ''), /--resume 66666666/, `must resume via the turn's id, not a bare shell (got ${p.command})`);
+  assert.equal(p.cwd, tempDir);
+  // And the .json is rebuilt so the next restore/fork/search agree.
+  const rebuilt = JSON.parse(await fs.readFile(path.join(dir, `${internal}.json`), 'utf8'));
+  assert.equal(rebuilt.sessionId, sid);
+  assert.equal(rebuilt.recoveredFrom, 'turn-counter');
+
+  await fs.rm(tfile, { force: true });
+  await fs.rm(path.join(dir, `${internal}.json`), { force: true });
+  await fs.rm(path.join(dir, `${internal}.meta`), { force: true });
+  await fs.rm(path.join(dir, `${internal}.turn`), { force: true });
+});
+
 // ...and a record that genuinely belongs elsewhere is still refused: the
 // transcript lives under the RECORD's directory, not the room's.
 test('restore still refuses a record whose transcript lives in another directory', async () => {

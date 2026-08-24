@@ -454,6 +454,14 @@ const App = () => {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [sessionsError, setSessionsError] = useState(false);
+  // The desktop twin of the iOS swipe filmstrip: an on-demand HUD showing the
+  // recency ring centred on the current session, target lit, that appears
+  // while you cycle (⌘J/⌘L held / two-finger swipe) and commits on release — like
+  // ⌘Tab. Frozen ring so neighbours don't reshuffle mid-cycle (same rule as
+  // the iOS swipe order). Ref mirror for the keyup/wheel listeners.
+  const [switchHud, setSwitchHud] = useState<{ ring: SessionInfo[]; index: number } | null>(null);
+  const switchHudRef = useRef<{ ring: SessionInfo[]; index: number } | null>(null);
+  switchHudRef.current = switchHud;
   // Server-owned folders (Manual mode). Kept in App because the sessions
   // fetch already carries them.
   const [folders, setFolders] = useState<Array<{ id: string; name: string }>>([]);
@@ -3706,19 +3714,43 @@ const App = () => {
   // Desktop keyboard layer — capture phase so shortcuts win over the focused
   // terminal. ⌘-based (Ctrl+Shift elsewhere) to stay clear of readline/TUI
   // keys, which the terminal must keep receiving untouched.
-  //   ⌘K session palette · ⌘E last session (toggles) · ⌘J/⌘⇧J cycle by name ·
+  //   ⌘K session palette · ⌘E last session (toggles) · ⌘J/⌘L cycle left/right ·
   //   ⌘, settings · ⌘+/−/0 font size · ⌘/ shortcut help · Esc closes drawer/help
   useEffect(() => {
     if (!session || !isEmbeddedInHop()) return;
-    const cycleSession = (dir: 1 | -1) => {
-      const list = [...sessionsRef.current]
+    // ── Desktop switch HUD (the swipe filmstrip's desktop twin) ────────────
+    // Recency ring, FROZEN when the HUD opens so neighbours don't reshuffle
+    // mid-cycle. Stepping only moves the lit target; the switch is DEFERRED to
+    // commit (modifier release / wheel settle) — one navigation, ⌘Tab-style,
+    // instead of the old switch-per-press.
+    const hudRing = (): SessionInfo[] =>
+      [...sessionsRef.current]
         .filter((s) => s.type !== "port")
-        .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
-      if (list.length < 2) return;
-      const cur = list.findIndex((s) => s.name === activeSessionRoomRef.current || s.internalName === activeSessionRoomRef.current);
-      const next = list[(cur + dir + list.length) % list.length];
-      if (next) switchSessionRef.current?.(next);
+        .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+    const hudStep = (dir: 1 | -1) => {
+      const open = switchHudRef.current;
+      if (open) {
+        setSwitchHud({ ring: open.ring, index: Math.min(open.ring.length - 1, Math.max(0, open.index + dir)) });
+        return;
+      }
+      const ring = hudRing();
+      if (ring.length < 2) return;
+      const curKey = activeSessionRoomRef.current;
+      const cur = ring.findIndex((s) => s.name === curKey || s.internalName === curKey);
+      const start = cur < 0 ? 0 : cur;
+      setSwitchHud({ ring, index: Math.min(ring.length - 1, Math.max(0, start + dir)) });
     };
+    const hudCommit = () => {
+      const open = switchHudRef.current;
+      setSwitchHud(null);
+      if (!open) return;
+      const target = open.ring[open.index];
+      const curKey = activeSessionRoomRef.current;
+      if (target && target.name !== curKey && target.internalName !== curKey) {
+        switchSessionRef.current?.(target);
+      }
+    };
+    const hudCancel = () => setSwitchHud(null);
     // Back and forth between the two sessions you are actually working in,
     // without a trip through the palette. MRU, so pressing it twice returns
     // you — the switch itself pushes the room you left to the top of the
@@ -3745,6 +3777,12 @@ const App = () => {
         ? event.metaKey && !event.ctrlKey && !event.altKey
         : event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey;
       if (!mod) {
+        if (event.key === "Escape" && switchHudRef.current) {
+          event.preventDefault();
+          event.stopPropagation();
+          hudCancel();
+          return;
+        }
         if (event.key === "Escape" && (drawerOpenRef.current || shortcutHelpRef.current)) {
           event.preventDefault();
           event.stopPropagation();
@@ -3765,7 +3803,10 @@ const App = () => {
               : {}));
         return;
       }
-      if (key === "j") { grab(); cycleSession(shifted ? -1 : 1); return; }
+      // ⌘J / ⌘L step the switch HUD left / right (J is left of L on the
+      // keyboard), committing on ⌘ release — no Shift needed for the reverse.
+      if (key === "j") { grab(); hudStep(-1); return; }
+      if (key === "l") { grab(); hudStep(1); return; }
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
       if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
       if (key === "e") {
@@ -3813,7 +3854,42 @@ const App = () => {
       }
     };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    // Release the hold modifier (⌘ on mac, Ctrl elsewhere) → land on the lit
+    // target, ⌘Tab-style. Any keyup counts: the modifier's own release AND
+    // releasing it while another key is up both leave the flag false.
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (!switchHudRef.current) return;
+      if (!(isMacPlatform ? event.metaKey : event.ctrlKey)) hudCommit();
+    };
+    window.addEventListener("keyup", onKeyUp, true);
+    // Two-finger horizontal swipe = the literal parity with the phone swipe.
+    // Horizontal-dominant wheel only; ignore vertical scroll, pinch, and any
+    // scrollable panel/field; preventDefault so the browser's back/forward
+    // swipe never fires. Steps per 60pt of travel, settles into a commit.
+    let wheelAccum = 0;
+    let wheelTimer: number | null = null;
+    const onWheel = (event: WheelEvent) => {
+      if (!session) return;
+      const el = event.target as Element | null;
+      if (el?.closest(".switcher-scroll, .views-panel, .drawer, input, textarea, [contenteditable]")) return;
+      if (Math.abs(event.deltaX) <= Math.abs(event.deltaY) * 1.3) return;
+      event.preventDefault();
+      wheelAccum += event.deltaX;
+      while (Math.abs(wheelAccum) >= 60) {
+        const dir: 1 | -1 = wheelAccum > 0 ? 1 : -1;
+        wheelAccum -= dir * 60;
+        hudStep(dir);
+      }
+      if (wheelTimer) window.clearTimeout(wheelTimer);
+      wheelTimer = window.setTimeout(() => { wheelAccum = 0; hudCommit(); }, 320);
+    };
+    window.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("wheel", onWheel, true);
+      if (wheelTimer) window.clearTimeout(wheelTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
@@ -3832,6 +3908,36 @@ const App = () => {
 
   return (
     <div className="app">
+      {switchHud && (() => {
+        const curKey = session?.room ?? sessionLabel;
+        const SLOT = 152; // card 140 + gap 12; must match .switch-hud CSS
+        return (
+          <div className="switch-hud" aria-hidden="true">
+            <div className="switch-hud-window">
+              <div className="switch-hud-strip"
+                   style={{ transform: `translateX(-${switchHud.index * SLOT + 70}px)` }}>
+                {switchHud.ring.map((s, i) => {
+                  const key = s.internalName || s.name;
+                  const isTarget = i === switchHud.index;
+                  const isCurrent = key === curKey;
+                  return (
+                    <div key={key}
+                         className={"switch-hud-card"
+                                    + (isTarget ? " is-target" : "")
+                                    + (isCurrent ? " is-current" : "")}>
+                      <span className="switch-hud-name">{s.displayName || s.name}</span>
+                      {isCurrent && <span className="switch-hud-now">now</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="switch-hud-hint">
+              {isMacPlatform ? "⌘J / ⌘L step · release ⌘ to switch" : "Ctrl+Shift+J / +L step · release to switch"} · esc cancels
+            </div>
+          </div>
+        );
+      })()}
       <header className="topbar">
         <div className="brand">
           <div>
@@ -4640,7 +4746,7 @@ const App = () => {
                 {[
                   [isMacPlatform ? "⌘K" : "Ctrl+Shift+K", "session palette (type to filter, ↑↓, ⏎)"],
                   [isMacPlatform ? "⌘E" : "Ctrl+Shift+E", "back to the last session (press again to return)"],
-                  [isMacPlatform ? "⌘J / ⌘⇧J" : "Ctrl+Shift+J / +⇧", "next / previous session (by name)"],
+                  [isMacPlatform ? "⌘J / ⌘L" : "Ctrl+Shift+J / +L", "previous / next session (left / right)"],
                   [isMacPlatform ? "⌘," : "Ctrl+Shift+,", "settings drawer"],
                   [isMacPlatform ? "⌘F" : "Ctrl+Shift+F", "find in terminal"],
                   ...(isMacPlatform ? [["⌘⇧V", "views — results agents published"]] : []),

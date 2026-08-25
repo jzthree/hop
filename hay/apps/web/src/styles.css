@@ -112,6 +112,16 @@
   box-sizing: border-box;
 }
 
+/* Always reserve the page scrollbar's gutter. Without this, content behind a
+   fixed, CENTERED overlay (the session switcher) toggling the body scrollbar
+   narrows the viewport ~15px and the overlay visibly jumps left and back —
+   "the top row with the search box bounces left and right" (Jian). Reserving
+   the gutter keeps the viewport width constant whether or not a scrollbar is
+   present. No effect on mobile, where the body is overflow:hidden. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -2171,6 +2181,9 @@ button.primary {
 .switcher-scroll {
   flex: 1;
   overflow-y: auto;
+  /* Reserve the inner scrollbar too, so the wall's own content doesn't shift
+     left/right as sessions poll in and out across the overflow threshold. */
+  scrollbar-gutter: stable;
   -webkit-overflow-scrolling: touch;
   padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
 }
@@ -4103,6 +4116,88 @@ button.primary {
 .digest-item.read .digest-headline { color: var(--ink-muted); font-weight: 500; }
 .digest-why { font-size: 11.5px; color: var(--ink-muted); }
 
+/* ── Briefing archive: scroll every edition (seen or not), or toggle to a
+   by-session view where each session collapses to its newest briefing. ── */
+.digest-head { gap: 8px; }
+.digest-unseen {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+  color: var(--accent, #7c5cff);
+  background: color-mix(in srgb, var(--accent, #7c5cff) 16%, transparent);
+  border-radius: 999px; padding: 1px 7px;
+}
+.digest-modes { margin-left: auto; display: inline-flex; gap: 2px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  border-radius: 999px; padding: 2px; }
+.digest-mode {
+  border: none; background: none; cursor: pointer;
+  font-size: 11px; font-weight: 600; color: var(--ink-muted);
+  padding: 3px 9px; border-radius: 999px; line-height: 1.4;
+}
+.digest-mode.on { background: var(--panel); color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
+.digest-dismiss { margin-left: 0; }
+
+/* The archive scrolls WITHIN the card so a week of briefings never grows it
+   past a glanceable height. */
+.digest-scroll {
+  display: flex; flex-direction: column;
+  max-height: min(46vh, 420px); overflow-y: auto;
+  margin: 0 -4px; padding: 0 4px;
+}
+.digest-edition, .digest-session {
+  border-top: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.digest-edition:first-child, .digest-session:first-child { border-top: none; }
+/* Unseen editions/sessions carry an accent rail so the eye finds them while
+   scrolling a long archive. */
+.digest-edition.unseen, .digest-session.unseen {
+  box-shadow: inset 2px 0 0 var(--accent, #7c5cff);
+}
+.digest-edition-head, .digest-session-head {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  text-align: left; border: none; background: none; cursor: pointer;
+  padding: 7px 4px; border-radius: 8px;
+}
+.digest-edition-head:hover, .digest-session-head:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.digest-when {
+  font-family: var(--font-mono); font-size: 10px; color: var(--ink-muted);
+  white-space: nowrap; flex-shrink: 0;
+}
+.digest-edition-summary {
+  font-size: 12.5px; font-weight: 550; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.digest-caret { margin-left: auto; color: var(--ink-muted); font-size: 10px; flex-shrink: 0; }
+.digest-count {
+  font-size: 10px; font-weight: 700; color: var(--ink-muted);
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
+  border-radius: 999px; padding: 0 6px; flex-shrink: 0;
+}
+.digest-session-head .digest-headline {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+  font-weight: 550;
+}
+.digest-session.unseen .digest-session-head .digest-headline { font-weight: 650; }
+/* Expanded session thread: the whole run of briefings for one session. */
+.digest-thread { display: flex; flex-direction: column; gap: 4px; padding: 0 4px 8px 12px; }
+.digest-open-session {
+  align-self: flex-start; border: none; background: none; cursor: pointer;
+  font-size: 11px; font-weight: 600; color: var(--accent, #7c5cff);
+  padding: 2px 0; margin-bottom: 2px;
+}
+.digest-thread-item {
+  display: grid; grid-template-columns: 52px 1fr; gap: 4px 8px; align-items: baseline;
+  padding: 3px 0;
+}
+.digest-thread-item .digest-when { grid-row: 1; }
+.digest-thread-item .digest-headline { grid-column: 2; }
+.digest-thread-item .digest-why { grid-column: 2; }
+.digest-thread-item.needs .digest-headline { color: #e5484d; }
+.digest-thread-item.blocked .digest-headline { color: #e79d13; }
+.digest-thread-item.done .digest-headline { color: #30a46c; }
+
 /* ── Views: the index of what agents published with `hop view`. Layered above
    the switcher (600) and its sheets (620) because it opens FROM them. ── */
 .views-backdrop {
@@ -4326,4 +4421,85 @@ button.primary {
 .switcher-chip.views.fresh {
   background: color-mix(in srgb, var(--accent, #7c5cff) 22%, transparent);
   color: var(--accent, #7c5cff);
+}
+
+/* Desktop session-switch HUD — the swipe filmstrip's desktop twin. On-demand:
+   appears while cycling (⌘J held) or two-finger swiping, current centred,
+   target lit, fades on commit. Non-interactive; the gesture drives it. */
+.switch-hud {
+  position: fixed;
+  top: 15%;
+  left: 0;
+  right: 0;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+}
+.switch-hud-window {
+  position: relative;
+  width: min(88vw, 780px);
+  height: 60px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 13%, #000 87%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 13%, #000 87%, transparent);
+}
+.switch-hud-strip {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  display: flex;
+  gap: 12px;
+  transition: transform 0.14s ease-out;
+}
+.switch-hud-card {
+  width: 140px;
+  height: 56px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--ink-muted);
+  transform: scale(0.9);
+  transition: transform 0.14s ease-out, background 0.14s, color 0.14s;
+}
+.switch-hud-card.is-target {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  transform: scale(1.06);
+  box-shadow: var(--shadow);
+}
+.switch-hud-card.is-current:not(.is-target) {
+  border-color: var(--accent);
+}
+.switch-hud-name {
+  max-width: 116px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 13px;
+}
+.switch-hud-now {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  opacity: 0.75;
+}
+.switch-hud-hint {
+  font-size: 11px;
+  color: var(--ink-muted);
+  background: var(--bg-alt);
+  border: 1px solid var(--line);
+  padding: 4px 12px;
+  border-radius: 999px;
 }

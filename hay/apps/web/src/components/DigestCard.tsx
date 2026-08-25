@@ -153,8 +153,23 @@ export const DigestCard = ({ sessions, onOpen }: {
 
   if (!editions.length) return null;
   const stamp = editions[0].generated_at || "";
-  if (dismissed === stamp) return null;
   const unseenCount = editions.filter((e) => e.generated_at && !seen.has(e.generated_at)).length;
+  // Dismissing is not throwing away — like hop-ios's swipe-to-archive, the
+  // briefing stays one tap away. When dismissed, collapse to a slim recall
+  // bar instead of vanishing, so a hidden briefing is always recoverable
+  // (not just when a newer edition lands).
+  if (dismissed === stamp) {
+    return (
+      <button
+        className="digest-recall"
+        onClick={() => { setDismissed(""); try { localStorage.removeItem(DISMISS_KEY); } catch { /* ok */ } }}
+      >
+        <span className="digest-badge">✦ Briefing</span>
+        {unseenCount > 0 && <span className="digest-unseen">{unseenCount} new</span>}
+        <span className="digest-recall-hint">show</span>
+      </button>
+    );
+  }
 
   const openItem = (session: string) => {
     const t = find(session);

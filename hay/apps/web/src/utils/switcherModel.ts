@@ -105,7 +105,8 @@ const byStableWallOrder = (a: SwitcherSession, b: SwitcherSession) => {
   const aPort = a.type === "port" ? 1 : 0;
   const bPort = b.type === "port" ? 1 : 0;
   if (aPort !== bPort) return aPort - bPort;
-  return (a.displayName || a.name).localeCompare(b.displayName || b.name);
+  return (a.displayName || a.name).localeCompare(b.displayName || b.name)
+    || sessionKey(a).localeCompare(sessionKey(b));
 };
 
 /** Shorten a path for grouping/display: home dir becomes ~. */
@@ -221,7 +222,8 @@ const groupByProject = (sessions: SwitcherSession[], stable = false): SwitcherGr
     else groupMap.set(label, [s]);
   }
   const byName = (a: SwitcherSession, b: SwitcherSession) =>
-    (a.displayName || a.name).localeCompare(b.displayName || b.name);
+    (a.displayName || a.name).localeCompare(b.displayName || b.name)
+      || sessionKey(a).localeCompare(sessionKey(b));
   return Array.from(groupMap.entries())
     .map(([label, rows]) => ({ label, rows: rows.sort(stable ? byName : byAttentionThenRecency) }))
     .sort((a, b) => {
@@ -247,7 +249,8 @@ const groupByProject = (sessions: SwitcherSession[], stable = false): SwitcherGr
 const orderManually = (sessions: SwitcherSession[], manualOrder: string[]): SwitcherSession[] => {
   const rank = new Map(manualOrder.map((key, i) => [key, i]));
   const byName = (a: SwitcherSession, b: SwitcherSession) =>
-    (a.displayName || a.name).localeCompare(b.displayName || b.name);
+    (a.displayName || a.name).localeCompare(b.displayName || b.name)
+      || sessionKey(a).localeCompare(sessionKey(b));
   return [...sessions].sort((a, b) => {
     const ra = rank.get(sessionKey(a));
     const rb = rank.get(sessionKey(b));

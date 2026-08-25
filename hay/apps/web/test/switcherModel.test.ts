@@ -178,6 +178,27 @@ describe("buildSwitcherModel", () => {
     expect(model.rows.map((s) => s.name)).toEqual(["second", "first", "brandnew"]);
   });
 
+  it("manual mode is STABLE for unplaced duplicate-named sessions when the live list reorders", () => {
+    // The regression: two sessions with the SAME display name but different
+    // internal names, neither dragged yet. byName tied them, and the tie broke
+    // to the LIVE LIST's order — so ordinary activity (which reorders the
+    // incoming list) silently reshuffled the manual wall. The tie now breaks
+    // on the immutable key, so order never depends on the list's order.
+    const a = mk({ name: "Canopus", internalName: "Canopus" });
+    const b = mk({ ...{ name: "Canopus" }, internalName: "s_edcf929389" });
+    const c = mk({ name: "beta", internalName: "beta" });
+    const order = (list: SwitcherSession[]) => {
+      const m = buildSwitcherModel(list, null, "", "manual", []); // nothing dragged
+      if (m.mode !== "manual") throw new Error("expected manual");
+      return m.rows.map((s) => s.internalName);
+    };
+    const forward = order([a, b, c]);
+    const reversed = order([c, b, a]);        // the same sessions, list reordered by "activity"
+    expect(forward).toEqual(reversed);        // manual order must not follow the list
+    // And it is the deterministic name-then-key order, both times.
+    expect(forward).toEqual(["beta", "Canopus", "s_edcf929389"]);
+  });
+
   it("a filter query overrides PROJECT grouping, but manual keeps the user's order", () => {
     const sessions = [mk({ name: "alpha" }), mk({ name: "beta" })];
     // Project mode: a query flattens the groups into a ranked list.

@@ -10,7 +10,7 @@ import {
   type ClientMessage
 } from "hay-shared";
 import { activityLabel, sortPresence } from "./utils/presence";
-import { createOptimisticEcho } from "./utils/optimisticEcho";
+import { createOptimisticEcho, hasActiveOtherTypist } from "./utils/optimisticEcho";
 import { attachScrollFlywheel } from "./utils/scrollFlywheel";
 import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSearch";
 import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
@@ -656,6 +656,17 @@ const App = () => {
   const pendingInputRef = useRef<Array<{ room: string; data: string; at: number }>>([]);
   // Presence re-render throttle (see the "presence" message handler).
   const presenceThrottleRef = useRef<number | null>(null);
+  // Per-peer "last observed typing" — refreshed on every presence frame that
+  // shows a peer typing. A live typist keeps advancing it (presence fires per
+  // keystroke); a ghost that dropped mid-type stops, so its flag ages out
+  // instead of pinning local echo off forever. See hasActiveOtherTypist.
+  const typingLastSeenRef = useRef<Map<string, number>>(new Map());
+  // Fresh mirrors of the echo-gating state, read at KEYSTROKE time (not from a
+  // possibly-stale render), so a silent ghost never keeps echo disabled once
+  // its typing flag has gone stale — no re-render is needed to recover.
+  const presenceRef = useRef<PresenceClient[]>([]);
+  const collabModeRef = useRef(true);
+  const controllerIdRef = useRef<string | null>(null);
   const presencePendingRef = useRef<PresenceClient[] | null>(null);
   const activeSessionRoomRef = useRef<string | null>(null);
   // Set each render once switchSession exists (defined later); the keyboard
@@ -1089,10 +1100,18 @@ const App = () => {
   // now (presence carries the flag), and drops the instant one starts. A
   // sub-second overlap before presence propagates is absorbed by the
   // reconciler's guards (complex-chunk passthrough, two-strike clear).
-  const othersTyping = presence.some((c) => c.id !== clientId && c.typing);
-  const optimisticActive =
-    LATENCY_COMP && status === "connected" && !othersTyping
-    && (collabMode ? true : controllerId === clientId);
+  // Keep the keystroke-time mirrors current every render.
+  presenceRef.current = presence;
+  collabModeRef.current = collabMode;
+  controllerIdRef.current = controllerId;
+  // The single source of truth for "should local echo be on", evaluated from
+  // refs so it can be recomputed at keystroke time. A peer only suppresses
+  // echo if we've seen them typing RECENTLY (ghosts age out).
+  const echoEnabledNow = () =>
+    LATENCY_COMP && statusForChromeRef.current === "connected"
+    && !hasActiveOtherTypist(presenceRef.current, clientIdRef.current, typingLastSeenRef.current, Date.now())
+    && (collabModeRef.current ? true : controllerIdRef.current === clientIdRef.current);
+  const optimisticActive = echoEnabledNow();
 
   useEffect(() => {
     if (optimisticPrevRef.current && !optimisticActive) {
@@ -1249,7 +1268,7 @@ const App = () => {
       }
       return;
     }
-    const echoed = optimisticEchoRef.current.onInput(sanitized, optimisticActive);
+    const echoed = optimisticEchoRef.current.onInput(sanitized, echoEnabledNow());
     if (echoed) {
       writeToTerminal(echoed);
     }
@@ -1719,6 +1738,19 @@ const App = () => {
           // indicator) — re-rendering the whole app tree per remote key is
           // wasted main-thread time while output streams. Leading update for
           // immediacy, then at most one trailing update per 300ms window.
+          // Refresh each typing peer's "last seen" from the RAW frame (before
+          // the render throttle) so a live typist never ages out; a ghost that
+          // stopped sending does. Prune peers no longer present.
+          {
+            const now = Date.now();
+            const seen = typingLastSeenRef.current;
+            const ids = new Set<string>();
+            for (const c of message.clients) {
+              ids.add(c.id);
+              if (c.typing) seen.set(c.id, now);
+            }
+            for (const id of [...seen.keys()]) if (!ids.has(id)) seen.delete(id);
+          }
           if (presenceThrottleRef.current === null) {
             setPresence(message.clients);
             presenceThrottleRef.current = window.setTimeout(() => {

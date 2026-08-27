@@ -12,6 +12,35 @@ export type OptimisticEcho = {
 
 const DEFAULT_MAX_PENDING_MS = 800;
 
+// Optimistic echo is disabled while ANOTHER client is typing (two people into
+// one PTY would make the local echo mismatch the interleaved server echo). The
+// trap: a client that set typing=true and then vanished — a dropped tab, a
+// crashed phone, a ghost lingering in presence before eviction — leaves its
+// flag stuck true, and that silently turns local echo OFF for everyone else,
+// so every keystroke then waits a full round-trip and typing feels laggy.
+//
+// A REAL typist refreshes their presence on every keystroke, so their "last
+// seen typing" timestamp keeps advancing; a ghost stops refreshing and goes
+// stale. So a peer only counts as actively typing if we've seen their typing
+// flag RECENTLY. `lastSeenTyping` maps peer id -> the last time we observed
+// them typing (refreshed in the presence handler). Ghosts age out; live
+// typists never do.
+export const STALE_TYPING_MS = 6000;
+export function hasActiveOtherTypist(
+  clients: Array<{ id: string; typing?: boolean }>,
+  selfId: string | null,
+  lastSeenTyping: Map<string, number>,
+  now: number,
+  staleMs: number = STALE_TYPING_MS
+): boolean {
+  return clients.some(
+    (c) =>
+      c.id !== selfId &&
+      !!c.typing &&
+      now - (lastSeenTyping.get(c.id) ?? 0) < staleMs
+  );
+}
+
 const isPrintable = (char: string) => {
   const code = char.charCodeAt(0);
   return code >= 0x20 && code <= 0x7e;

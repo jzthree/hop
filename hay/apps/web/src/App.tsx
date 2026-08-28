@@ -667,6 +667,7 @@ const App = () => {
   const presenceRef = useRef<PresenceClient[]>([]);
   const collabModeRef = useRef(true);
   const controllerIdRef = useRef<string | null>(null);
+  const clientIdRef = useRef<string | null>(null);
   const presencePendingRef = useRef<PresenceClient[] | null>(null);
   const activeSessionRoomRef = useRef<string | null>(null);
   // Set each render once switchSession exists (defined later); the keyboard
@@ -1399,7 +1400,6 @@ const App = () => {
   // clientId, so "is this size ours" is an identity check, never a size
   // comparison (comparing sizes is how a follower gets fooled into thinking
   // an adopted grid is its own).
-  const clientIdRef = useRef<string | null>(null);
   // Who owns the shared size right now, per the latest active_size.
   const activeOwnerRef = useRef<string | null>(null);
   // Non-null while a PEER owns the size in fit mode: the local terminal is

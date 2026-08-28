@@ -2917,6 +2917,14 @@ function getRegistrationConfig() {
         // landing page. Purely for the "sign in" link and the approval mail.
         adminSubdomain: stored.adminSubdomain || null,
         emailGate: gate,
+        // Where the signup page is served. Default: the bare custom domain
+        // (turning hop.zhoulab.io itself into the front door, which forces the
+        // admin to move their own clients to a subdomain). Set to a SEPARATE
+        // hostname (hop-setup.zhoulab.io) to keep the bare domain as the
+        // admin's untouched instance — signup lives on its own host, no
+        // client migration. The host must route to this daemon either way.
+        landingHost: typeof stored.landingHost === 'string' && stored.landingHost.trim()
+            ? stored.landingHost.trim().toLowerCase() : null,
         accessTeam: typeof stored.accessTeam === 'string' ? stored.accessTeam.trim() : null,
         accessAudience: typeof stored.accessAudience === 'string' ? stored.accessAudience.trim() : null,
         preapprovedEmails: Array.isArray(stored.preapprovedEmails)
@@ -3017,8 +3025,20 @@ function redeemHandoffToken(token) {
 let landingHostCache = { at: 0, value: null };
 function getLandingHostname() {
     if (Date.now() - landingHostCache.at < REGISTRATION_CACHE_MS) return landingHostCache.value;
-    const domain = getDomainConfig();
-    const value = domain && domain.hostname ? String(domain.hostname).toLowerCase() : null;
+    // A configured landingHost wins — it lets signup live on a SEPARATE host
+    // (hop-setup.zhoulab.io) so the bare domain stays the admin's instance.
+    // Falls back to the bare custom domain when unset (the front-door model).
+    let value = null;
+    try {
+        const stored = JSON.parse(fs.readFileSync(REGISTRATION_FILE, 'utf8')) || {};
+        if (typeof stored.landingHost === 'string' && stored.landingHost.trim()) {
+            value = stored.landingHost.trim().toLowerCase();
+        }
+    } catch (e) { /* fall through to the domain default */ }
+    if (!value) {
+        const domain = getDomainConfig();
+        value = domain && domain.hostname ? String(domain.hostname).toLowerCase() : null;
+    }
     landingHostCache = { at: Date.now(), value };
     return value;
 }
@@ -14786,6 +14806,7 @@ const HELP_SECTIONS = [
         `hop registration disable  Go back to a login-only landing host`,
         `hop registration domain <d>    Restrict signups to an email domain`,
         `hop registration admin <sub>   Reserve your own subdomain`,
+        `hop registration landing <host>  Serve signup on a SEPARATE host (keeps the bare domain your instance)`,
         `hop registration mode <m>      Identity gate: smtp | cloudflare-access (no email)`,
         `hop registration access-team <t>  Your Cloudflare Access team (for cloudflare-access mode)`,
         `hop registration access-aud <a>   Pin tokens to your Access application (recommended)`,
@@ -16558,7 +16579,7 @@ async function main() {
 
         if (!subcommand || subcommand === 'status') {
             log(`\n${BOLD}Self-service registration:${RESET} ${config.enabled ? `${GREEN}on${RESET}` : `${YELLOW}off${RESET}`}`, RESET);
-            log(`  Landing page:  ${landingHost ? `https://${landingHost}` : '(no custom domain — run hop domain <host>)'}`, RESET);
+            log(`  Landing page:  ${landingHost ? `https://${landingHost}` : '(no custom domain — run hop domain <host>)'}${config.landingHost ? `  ${DIM}(separate host; ${escapeHtml((getDomainConfig()||{}).hostname||'the bare domain')} stays your instance)${RESET}` : ''}`, RESET);
             log(`  Open to:       ${config.allowedEmailDomain} addresses`, RESET);
             log(`  Admin host:    ${config.adminSubdomain ? userHostnameFor(config.adminSubdomain) : '(not set)'}`, RESET);
             if (config.emailGate === 'cloudflare-access') {
@@ -16653,6 +16674,32 @@ async function main() {
             process.exit(0);
         }
 
+        if (subcommand === 'landing') {
+            const value = String(process.argv[4] || '').trim().toLowerCase();
+            if (!value) {
+                log(`Usage: hop registration landing <hostname>   (e.g. hop-setup.zhoulab.io)`, RED);
+                log(`       hop registration landing clear         (serve signup on the bare domain instead)`, DIM);
+                log(`\nA SEPARATE host keeps ${CYAN}${(getDomainConfig()||{}).hostname || 'your domain'}${RESET} as your own instance — no client migration.`, RESET);
+                process.exit(1);
+            }
+            if (value === 'clear' || value === 'none') {
+                const next = { ...config }; delete next.landingHost; saveRegistrationConfig(next);
+                log(`\n${GREEN}✓ Signup will serve on the bare domain (${(getDomainConfig()||{}).hostname || '?'}).${RESET}`, GREEN);
+                log(`  ${YELLOW}Note: this is the front-door model — your own clients must move to a subdomain.${RESET}`, RESET);
+                process.exit(0);
+            }
+            const baseDomain = getBaseDomain();
+            if (baseDomain && !value.endsWith(baseDomain)) {
+                log(`\n${YELLOW}Heads up: ${value} is not under ${baseDomain} — make sure it routes to this daemon.${RESET}`, YELLOW);
+            }
+            saveRegistrationConfig({ ...config, landingHost: value });
+            log(`\n${GREEN}✓ Signup page will serve on ${value}.${RESET}  ${DIM}${(getDomainConfig()||{}).hostname || 'your bare domain'} stays your instance.${RESET}`, GREEN);
+            log(`\nMake it resolve (points at this same daemon):`, RESET);
+            log(`  ${CYAN}cloudflared tunnel route dns ${(getDomainConfig() || {}).tunnelName || 'hop'} ${value}${RESET}`, RESET);
+            log(`Then put a Cloudflare Access app (@${config.allowedEmailDomain} policy) over ${CYAN}${value}${RESET} and the claim path, and ${CYAN}hop registration enable${RESET}.`, DIM);
+            process.exit(0);
+        }
+
         if (subcommand === 'mode') {
             const value = String(process.argv[4] || '').toLowerCase();
             if (value !== 'smtp' && value !== 'cloudflare-access') {
@@ -16710,7 +16757,7 @@ async function main() {
             process.exit(0);
         }
 
-        log(`Usage: hop registration [status|enable|disable|domain <d>|admin <sub>|mode <m>|access-team <t>|access-aud <a>|preapprove <email>]`, RED);
+        log(`Usage: hop registration [status|enable|disable|domain <d>|admin <sub>|landing <host>|mode <m>|access-team <t>|access-aud <a>|preapprove <email>]`, RED);
         process.exit(1);
     }
 

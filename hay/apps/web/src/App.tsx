@@ -1110,6 +1110,15 @@ const App = () => {
   // echo if we've seen them typing RECENTLY (ghosts age out).
   const echoEnabledNow = () =>
     LATENCY_COMP && statusForChromeRef.current === "connected"
+    // NOT on the alternate screen. A full-screen TUI (Claude Code's composer,
+    // vim, less) repaints on every keystroke, and that redraw IS the echo —
+    // an optimistic char painted first then overwritten by the redraw is a
+    // visible flicker ("rendered wrong, then changes"), for no latency win the
+    // app's own fast repaint doesn't already give. Optimistic echo belongs to
+    // the SHELL, where the terminal echoes char-by-char with no redraw to
+    // fight. (Reconcile's TUI guard still protects any in-flight echo when the
+    // app flips to alt-screen mid-keystroke.)
+    && !remoteAltScreenRef.current
     && !hasActiveOtherTypist(presenceRef.current, clientIdRef.current, typingLastSeenRef.current, Date.now())
     && (collabModeRef.current ? true : controllerIdRef.current === clientIdRef.current);
   const optimisticActive = echoEnabledNow();

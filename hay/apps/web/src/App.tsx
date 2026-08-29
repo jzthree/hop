@@ -231,6 +231,10 @@ const paneTreeHasPrimary = (n: PaneNode): boolean =>
   n.kind === "leaf" ? n.session === null : paneTreeHasPrimary(n.a) || paneTreeHasPrimary(n.b);
 
 const LATENCY_COMP = true;
+// A WebSocket handshake normally completes in well under a second. One still
+// CONNECTING after this long has hung (a stalled tunnel upgrade) and must be
+// aborted and retried — it will never resolve itself.
+const STUCK_CONNECTING_MS = 8000;
 const AUTO_FIT_ON_TYPE = true;
 
 type SessionSwitchMode = "page" | "instant";
@@ -610,6 +614,7 @@ const App = () => {
   const viewModeRef = useRef(viewMode);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
+  const connectStartedAtRef = useRef<number>(0);
   const shouldReconnectRef = useRef(true);
   const connectNonceRef = useRef(0);
   const userScrolledUpRef = useRef(false);
@@ -1689,6 +1694,10 @@ const App = () => {
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    // When this socket began CONNECTING — the watchdog uses it to catch a
+    // handshake that hangs (accepted TCP, WS upgrade never completes through
+    // the tunnel): it fires no open/close/error, so nothing else can notice.
+    connectStartedAtRef.current = Date.now();
 
     ws.addEventListener("open", () => {
       if (connectionNonce !== connectNonceRef.current || activeSessionRoomRef.current !== targetRoom) {
@@ -2013,7 +2022,14 @@ const App = () => {
       const st = statusForChromeRef.current;
       if (st === "connected" || st === "ended") return;
       const ws = wsRef.current;
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      if (ws && ws.readyState === WebSocket.OPEN) return;   // healthy, leave it
+      // A socket wedged in CONNECTING past the deadline is a hung upgrade —
+      // it will never fire open/close/error on its own. Abort it so a fresh
+      // connect can run; a handshake that hasn't hung yet is still given time.
+      if (ws && ws.readyState === WebSocket.CONNECTING) {
+        if (Date.now() - connectStartedAtRef.current < STUCK_CONNECTING_MS) return;
+        try { ws.close(); } catch { /* aborting the hung upgrade */ }
+      }
       if (reconnectTimerRef.current !== null) return; // a retry is already pending
       setReconnectToken((value) => value + 1);      // stranded → drive a fresh connect
     }, 2500);

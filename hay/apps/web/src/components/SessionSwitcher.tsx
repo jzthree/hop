@@ -1467,6 +1467,10 @@ export const SessionSwitcher = ({
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState("");
+  // What a new session boots into: a plain shell, or straight into an agent.
+  // Maps to the create API's `startup` command.
+  const [createType, setCreateType] = useState<"terminal" | "claude" | "codex">("terminal");
+  const startupFor = (t: "terminal" | "claude" | "codex") => (t === "claude" ? "claude" : t === "codex" ? "codex" : "");
   // When set, the next created session is filed here (the folder header's +).
   const [createInFolder, setCreateInFolder] = useState<SwitcherFolder | null>(null);
   const [, setTick] = useState(0);
@@ -2359,7 +2363,7 @@ export const SessionSwitcher = ({
       const res = await fetch("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: next, type: "terminal", port: null })
+        body: JSON.stringify({ name: next, type: "terminal", port: null, startup: startupFor(createType) })
       });
       const data = await res.json().catch(() => ({} as { name?: string; displayName?: string; internalName?: string; error?: string }));
       if (!res.ok || !data.name) {
@@ -2921,6 +2925,18 @@ export const SessionSwitcher = ({
               autoFocus
               aria-label="New session name"
             />
+            <div className="switcher-create-type" role="radiogroup" aria-label="Session type">
+              {(["terminal", "claude", "codex"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  role="radio"
+                  aria-checked={createType === t}
+                  className={"create-type" + (createType === t ? " on" : "")}
+                  onClick={() => setCreateType(t)}
+                >{t === "terminal" ? "Terminal" : t === "claude" ? "Claude" : "Codex"}</button>
+              ))}
+            </div>
             <button type="submit">Create</button>
             <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); setCreateInFolder(null); }}>✕</button>
           </form>

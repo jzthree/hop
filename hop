@@ -11315,7 +11315,13 @@ happens until someone clicks it.
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo } = JSON.parse(body);
+                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo, startup } = JSON.parse(body);
+                    // A new session can boot straight into an app instead of a
+                    // bare shell: the web New picker sends startup='claude' /
+                    // 'codex' (or empty for a plain terminal). Bounded, and
+                    // persisted so restore relaunches the same app.
+                    const launchCmd = typeof startup === 'string' && startup.trim()
+                        ? startup.trim().slice(0, 400) : null;
                     // Sessions created by an agent-marked request (X-Hop-Actor,
                     // set by MCP/hopa and by the CLI under a claude env) land
                     // in the agent bucket instead of impersonating the human.
@@ -11450,7 +11456,13 @@ happens until someone clicks it.
                         } else if (isExternalTerminalBackend()) {
                             await ensureExternalRuntimeSession(internalName, cwd, displayName, {
                                 folderId: targetFolderId,
-                                saveDefinition: false,
+                                // Persist the launch so `hop restore` brings the
+                                // app back, not a bare shell. Plain terminals stay
+                                // runtime-only as before.
+                                saveDefinition: !!launchCmd,
+                                startup: launchCmd || undefined,
+                                command: launchCmd || undefined,
+                                autoStart: launchCmd ? true : undefined,
                                 createdBy: actorCreatedBy,
                                 createdVia
                             });

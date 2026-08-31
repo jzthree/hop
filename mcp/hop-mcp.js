@@ -3600,7 +3600,7 @@ class HopMCPServer {
           properties: {
             name: { type: 'string', description: 'Session name for the subagent terminal (default: auto-named).' },
             cwd: { type: 'string', description: 'Working directory for the terminal.' },
-            agent: { type: 'string', enum: ['claude', 'codex', 'gemini', 'custom'], description: 'Agent CLI preset (default: claude, launched with the Sonnet model alias in autonomous permission mode). Use custom with command=... for anything else.' },
+            agent: { type: 'string', enum: ['claude', 'codex', 'gemini', 'custom'], description: 'Agent CLI preset (default: claude, launched with the Opus model alias — override via HOP_SPAWN_CLAUDE_MODEL or args — in autonomous permission mode). Use custom with command=... for anything else.' },
             command: { type: 'string', description: 'Override the launch command (required when agent=custom).' },
             args: { type: 'string', description: 'Extra CLI arguments appended to the launch command (e.g. "--model opus").' },
             permission_mode: { type: 'string', enum: ['acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'manual', 'plan'], description: 'Claude worker permission mode (default: bypassPermissions so delegated tasks cannot park on an approval prompt). Set manual or another Claude mode for restricted workers. Ignored by other presets and explicit command overrides.' },
@@ -6017,12 +6017,15 @@ class HopMCPServer {
         return { content: [{ type: 'text', text: `Error: unknown agent preset "${preset}". Use claude, codex, gemini, or custom with command=...` }], isError: true };
       }
       // Claude's account-dependent default can open a post-submit usage-credit
-      // chooser instead of running the task. The stable Sonnet alias avoids
-      // that blocking interstitial; callers can explicitly select another
-      // model through args="--model ...".
+      // chooser instead of running the task; pinning a stable alias avoids
+      // that blocking interstitial. Opus, not sonnet: the sonnet default
+      // silently downgraded a whole roomscroll worker fleet the user believed
+      // was opus (2026-08-31). Callers can still select another model through
+      // args="--model ..." or the HOP_SPAWN_CLAUDE_MODEL env var.
       const extraArgs = typeof args.args === 'string' ? args.args.trim() : '';
       if (preset === 'claude' && !/(?:^|\s)--model(?:\s|=|$)/.test(extraArgs)) {
-        command += ' --model sonnet';
+        const defaultModel = (process.env.HOP_SPAWN_CLAUDE_MODEL || 'opus').trim();
+        command += ` --model ${defaultModel}`;
       }
       if (preset === 'claude' && !/(?:^|\s)(?:--permission-mode(?:\s|=|$)|--dangerously-skip-permissions(?:\s|$))/.test(extraArgs)) {
         const permissionMode = typeof args.permission_mode === 'string' && args.permission_mode

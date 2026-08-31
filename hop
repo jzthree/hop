@@ -773,6 +773,14 @@ const hayHostProbeFailures = createFailureTracker({
 });
 const HAY_HOST_DAEMON_STALL_THRESHOLD_MS = 2000;
 const HAY_HOST_DAEMON_STALL_HOLD_MS = HAY_HOST_UNRESPONSIVE_WINDOW_MS;
+// A machine drowning in load starves EVERY event loop, so probe timeouts then
+// mean "the box is overloaded", not "the host is hung" — and the daemon's own
+// stall detector can miss it, because the daemon does far less work per tick
+// than the host (2026-08-31: loadavg 112 starved the host for minutes while
+// the daemon kept passing its stall check; the watchdog killed the host and
+// every one of ~36 live claude sessions with it). While 1-min loadavg per
+// core is at/above this, probe failures never restart the host.
+const HAY_HOST_LOAD_GUARD_PER_CORE = 2;
 let lastDaemonEventLoopStall = { at: 0, driftMs: 0 };
 if (DAEMON_FLAG) {
     const intervalMs = 1000;
@@ -8445,6 +8453,7 @@ async function ensureExternalHayHostReadyOnce() {
     }
 
     let stateCleared = false;
+    let watchdogKilledLiveHost = false;
     if (existing && isProcessAlive(existing.pid)) {
         // Generous timeout: a host mid-GC or briefly saturated is SLOW, not
         // dead — and "restarting" it kills every live PTY. Only a host that
@@ -8468,6 +8477,14 @@ async function ensureExternalHayHostReadyOnce() {
             writeHayHostStateFile(existing);
             return existing;
         }
+        const load1 = os.loadavg()[0];
+        const cores = os.cpus().length || 1;
+        if (load1 / cores >= HAY_HOST_LOAD_GUARD_PER_CORE) {
+            log(`[Hay] Host ${existing.pid} is slow while system load is ${load1.toFixed(1)} across ${cores} cores. Load-induced starvation, not a hang — resetting the watchdog window and keeping the host alive.`, YELLOW);
+            hayHostProbeFailures.reset();
+            writeHayHostStateFile(existing);
+            return existing;
+        }
 
         // Every await above gives another process a chance to publish a new host.
         // Never apply a destructive decision to a state generation we no longer
@@ -8485,6 +8502,7 @@ async function ensureExternalHayHostReadyOnce() {
 
         log(`[Hay] Host ${existing.pid} (port ${existing.port}) unresponsive for ${Math.round(failure.failingForMs / 1000)}s (${failure.count} failed probes). Restarting it.`, YELLOW);
         hayHostProbeFailures.reset();
+        watchdogKilledLiveHost = true;
         const stopped = await stopExternalHayHostProcess(existing);
         if (!stopped) {
             throw new Error(`Hay host ${existing.pid} did not stop; refusing to spawn a rival`);
@@ -8629,6 +8647,20 @@ async function ensureExternalHayHostReadyOnce() {
 
     writeHayHostStateFile(started);
     child.unref();
+    if (watchdogKilledLiveHost) {
+        // The old host's PTYs — and every claude running inside them — died
+        // with it. Re-drive the fleet the way `hop restore` would instead of
+        // waiting for a human to notice dead shells (2026-08-31: a watchdog
+        // restart silently orphaned ~36 claude sessions). The delay lets the
+        // new host finish its own startup reconcile first; the restore
+        // reconciler then converges stragglers for 15 minutes.
+        log('[Hay] The watchdog killed a host with live sessions — auto-restoring saved sessions in 5s. Agent-created sessions are excluded; `hop restore --agents` brings those back.', YELLOW);
+        setTimeout(() => {
+            restoreSavedSessions({}).catch((e) => {
+                log(`[Hay] Auto-restore after the watchdog restart failed: ${e?.message || e}. Run \`hop restore\` by hand.`, RED);
+            });
+        }, 5000).unref();
+    }
     return started;
 
     } finally {

@@ -891,6 +891,32 @@ function mintSessionInternalName() {
     return id;
 }
 
+/**
+ * The display name a session may actually show.
+ *
+ * A rename can leave a session claiming a name that ANOTHER session owns as
+ * its internal id — rename Altair to "Accessibility", then a real
+ * Accessibility room appears. Two sessions answering to one name are
+ * indistinguishable in the UI and ambiguous to address (a rename lands on
+ * whichever one the resolver reaches first), so the room that OWNS the name
+ * keeps it and the borrower falls back to its own.
+ *
+ * This must run wherever a display name is RESOLVED, not only where runtime
+ * metadata is refreshed: getEffectiveSessionConfig gives the durable meta the
+ * final word, so a guard applied during reconcile alone was overwritten on the
+ * very next read — six colliding pairs still rendered as duplicates in every
+ * client on 2026-09-01. Pass `liveIds` when the caller already has the room
+ * list; otherwise the live-room check is per name.
+ */
+function resolveDisplayNameClaim(internalName, claimed, liveIds = null) {
+    const own = toDisplaySessionName(internalName) || internalName;
+    if (!claimed) return own;
+    if (claimed === internalName) return claimed;
+    const owner = toInternalSessionName(claimed) || claimed;
+    const taken = liveIds ? liveIds.has(owner) : hopSessionExists(owner);
+    return taken ? own : claimed;
+}
+
 function toDisplaySessionName(internalName) {
     if (!internalName || typeof internalName !== 'string') return '';
     return stripLegacySessionPrefix(internalName);
@@ -1160,14 +1186,14 @@ function getEffectiveSessionConfig(name) {
     if (!base) {
         return {
             type: 'terminal',
-            displayName: durable.displayName,
+            displayName: resolveDisplayNameClaim(name, durable.displayName),
             folderId: durable.folderId,
             createdBy: durable.createdBy,
             cwd: durable.cwd
         };
     }
     const merged = { ...base };
-    if (durable.displayName) merged.displayName = durable.displayName;
+    if (durable.displayName) merged.displayName = resolveDisplayNameClaim(name, durable.displayName);
     if (durable.folderId !== undefined) merged.folderId = durable.folderId || null;
     if (durable.createdBy) merged.createdBy = durable.createdBy;
     if (durable.tagline) merged.tagline = durable.tagline;
@@ -9050,10 +9076,21 @@ async function reconcileExternalRuntimeSessionsUncached() {
         return { rooms: [], runtimeAvailable: false };
     }
 
+    // Every live room id, collected BEFORE the walk below. The display-name
+    // collision guard asks whether a claimed name is some OTHER room's id, and
+    // filling this set as we went made that answer depend on iteration order:
+    // a session whose claim collided with a room listed LATER kept the name,
+    // so two sessions answered to it. That is ambiguous to address, and a
+    // rename then landed on whichever one the resolver reached first
+    // (2026-09-01: room s_e15f120ce7 claimed "Solstice" from index 0 while the
+    // room actually NAMED Solstice sat at index 1, so renaming "Solstice" to
+    // "hop" retitled the wrong session and the card kept showing the old name).
     const runtimeIds = new Set();
     for (const room of rooms) {
+        if (room && room.id) runtimeIds.add(room.id);
+    }
+    for (const room of rooms) {
         if (!room || !room.id) continue;
-        runtimeIds.add(room.id);
         const savedConfig = getSessionConfig(room.id);
         const runtimeConfig = getRuntimeSessionMetadata(room.id);
         const durableMeta = readDurableIdentity(room.id); // mtime-cached — reconcile runs constantly
@@ -9085,7 +9122,7 @@ async function reconcileExternalRuntimeSessionsUncached() {
                 // store/runtime entry here let a stale in-memory name undo a
                 // rename on the very next tick.
                 const claimed = durableMeta?.displayName || savedConfig?.displayName || runtimeConfig?.displayName;
-                if (claimed && claimed !== room.id && runtimeIds.has(toInternalSessionName(claimed) || claimed)) {
+                if (claimed && resolveDisplayNameClaim(room.id, claimed, runtimeIds) !== claimed) {
                     // Log the rejection once per claim, not once per tick: an
                     // unresolvable claim (the user renamed to a name another
                     // live session owns) repeats forever otherwise, and 30+

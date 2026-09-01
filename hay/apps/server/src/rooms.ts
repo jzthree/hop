@@ -247,6 +247,8 @@ export class Room extends EventEmitter {
   private pty: IPty;
   private readonly initialCwd: string;
   private liveCwd: string;
+  /** The shell reports its own cwd, so the lsof fallback is unnecessary here. */
+  private osc7Seen = false;
   private foregroundProcess = "";
   private lastActivityAt = now(); // ms of the most recent PTY output
   // Terminal bells (BEL outside escape sequences) rung by the app — agents and
@@ -822,10 +824,11 @@ export class Room extends EventEmitter {
       }
 
       // The shell reports its own cwd, so the lsof fallback has nothing left to
-      // add for this room — retire its timer. Most rooms run a shell that emits
-      // OSC 7, so this is what keeps the global probe budget for the few that
-      // genuinely need it.
-      this.stopCwdPolling();
+      // add for this room. Retire the PROBE, not the timer: the same tick also
+      // samples the foreground process name, and stopping it outright froze
+      // that for every OSC 7 room — the session manager then showed whatever
+      // was running when the room started, forever.
+      this.osc7Seen = true;
 
       if (cwdPath && cwdPath !== this.liveCwd) {
         if (DEBUG_STATE) {
@@ -869,6 +872,7 @@ export class Room extends EventEmitter {
       if (typeof fg === "string" && fg) {
         this.foregroundProcess = fg.replace(/^-/, ""); // strip login-shell "-zsh" dash
       }
+      if (this.osc7Seen) return; // cwd comes from the shell itself
       if (process.platform === "darwin") {
         runGatedCwdProbe(pid, updateCwd);
       } else if (process.platform === "linux") {
@@ -1378,17 +1382,16 @@ export class Room extends EventEmitter {
 
   getSummary(): RoomSummary {
     const localCliCount = [...this.clients.values()].filter((client) => client.source === "local-cli").length;
-    // Read the foreground process name fresh (cheap getter) so the session
-    // manager reflects what's running now; fall back to the last polled sample.
-    let foregroundProcess = this.foregroundProcess;
-    try {
-      const live = (this.pty as unknown as { process?: string }).process;
-      if (typeof live === "string" && live) {
-        foregroundProcess = live.replace(/^-/, "");
-      }
-    } catch {
-      /* keep the polled fallback */
-    }
+    // The foreground process name comes from the poll tick, never from a live
+    // read here. node-pty's `.process` getter is a synchronous native call, and
+    // /rooms summarizes EVERY room in one request — 57 of them on this host —
+    // so the "cheap getter" it was billed as cost one blocking syscall per room
+    // per request, several times a minute. That is a request-path cost the
+    // terminal websockets share, and it tracked the host's multi-second
+    // event-loop stalls (2026-09-01: /rooms at 155-817ms with stalls to match,
+    // which is what made scrolling judder). The polled sample is the same
+    // getter read on a jittered timer, so nothing is lost but the stall.
+    const foregroundProcess = this.foregroundProcess;
     return {
       id: this.id,
       cwd: this.initialCwd,

@@ -3536,8 +3536,23 @@ button.primary {
   font-size: 11px; font-weight: 600; color: var(--ink-muted);
   padding: 4px 9px; border-radius: 6px; line-height: 1.3;
 }
-.create-type.on { background: var(--panel); color: var(--ink);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
+.create-type:hover:not(.on) {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+/* The selected mode decides what the new session RUNS, so it has to read at a
+   glance. The old treatment was a --panel pill with a black box-shadow: in
+   dark mode that is #1d1d21 on a faintly lightened track with an invisible
+   shadow, so "which one is on" came down to ink vs ink-muted text. Accent
+   fill, the same signal every other selected control in the app uses. */
+.create-type.on {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.create-type:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .switcher-create-row input {
   flex: 1;
   min-width: 0;

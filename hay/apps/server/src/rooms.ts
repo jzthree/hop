@@ -8,6 +8,40 @@ import type { PtyFactory } from "./pty";
 import { createScreenGrid, loadScreenGridDeps, screenGridsAvailable } from "./screenGrid";
 import type { ScreenGrid } from "./screenGrid";
 
+/**
+ * Darwin `lsof` probes are rate-limited process-wide, not per room.
+ *
+ * Each room polls its own cwd on its own timer, so the cost of the fallback
+ * scales with the number of live rooms — and `lsof` on macOS is not a cheap
+ * syscall but a process that stats every mount, blocking uninterruptibly when
+ * any of them is slow. At ~150 rooms the 15s timers align into bursts of ~150
+ * concurrent `lsof`s, each holding a 5s timeout; every one of them counts
+ * toward the load average. That is how this host drove the machine to a
+ * 1-minute load of 367 across 18 cores on 2026-09-01, starving its own event
+ * loop until the watchdog restarted it and killed every session inside.
+ *
+ * A small global ceiling keeps the fallback a fallback. Probes that arrive
+ * while the gate is full are DROPPED, not queued: this is a best-effort poll
+ * that repeats every 15s anyway, and a queue would just rebuild the burst.
+ */
+const MAX_CONCURRENT_CWD_PROBES = 4;
+let activeCwdProbes = 0;
+
+function runGatedCwdProbe(pid: number, onCwd: (cwdPath: string) => void) {
+  if (activeCwdProbes >= MAX_CONCURRENT_CWD_PROBES) return;
+  activeCwdProbes++;
+  execFile("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeout: 5000 }, (err, stdout) => {
+    activeCwdProbes--;
+    if (err || !stdout) return;
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("n/")) {
+        onCwd(line.slice(1));
+        return;
+      }
+    }
+  });
+}
+
 export type SocketAdapter = {
   send: (data: string) => void;
   onMessage: (handler: (data: string) => void) => void;
@@ -787,6 +821,12 @@ export class Room extends EventEmitter {
         return;
       }
 
+      // The shell reports its own cwd, so the lsof fallback has nothing left to
+      // add for this room — retire its timer. Most rooms run a shell that emits
+      // OSC 7, so this is what keeps the global probe budget for the few that
+      // genuinely need it.
+      this.stopCwdPolling();
+
       if (cwdPath && cwdPath !== this.liveCwd) {
         if (DEBUG_STATE) {
           console.log(`[hay] room=${this.id} cwd=${cwdPath}`);
@@ -830,15 +870,7 @@ export class Room extends EventEmitter {
         this.foregroundProcess = fg.replace(/^-/, ""); // strip login-shell "-zsh" dash
       }
       if (process.platform === "darwin") {
-        execFile("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeout: 5000 }, (err, stdout) => {
-          if (err || !stdout) return;
-          for (const line of stdout.split("\n")) {
-            if (line.startsWith("n/")) {
-              updateCwd(line.slice(1));
-              break;
-            }
-          }
-        });
+        runGatedCwdProbe(pid, updateCwd);
       } else if (process.platform === "linux") {
         readlink(`/proc/${pid}/cwd`, (err, target) => {
           if (err || !target) return;
@@ -847,9 +879,13 @@ export class Room extends EventEmitter {
       }
     };
 
-    this.cwdPollTimer = setInterval(poll, intervalMs);
+    // Jitter both the phase and the period: identical timers started together
+    // (a `hop restore` brings up dozens of rooms at once) stay in lockstep for
+    // the life of the host, turning a per-room poll into a synchronized burst.
+    const jitteredInterval = intervalMs + Math.floor(Math.random() * intervalMs);
+    this.cwdPollTimer = setInterval(poll, jitteredInterval);
     // Initial poll with a generous delay to not interfere with startup
-    setTimeout(poll, 3000);
+    setTimeout(poll, 3000 + Math.floor(Math.random() * intervalMs));
   }
 
   stopCwdPolling() {

@@ -3797,6 +3797,117 @@ function isServerRunning() {
     }
 }
 
+// --- Daemon singleton ------------------------------------------------------
+//
+// One HOP_HOME must have exactly one daemon. Two daemons both probe the same
+// detached hay host and both run its watchdog, so the older one can decide the
+// host is hung and restart it — killing every PTY, and every claude inside
+// them, that the other daemon is happily serving. Not theoretical: on
+// 2026-08-31 and again on 2026-09-01 a daemon started Aug 21 (orphaned by a
+// double-start race, then invisible to `hop stop`, which only ever kills the
+// one pid the state file names) restarted a live host twice, taking ~36 claude
+// sessions with it each time — while the current daemon was correctly holding
+// off under the load guard.
+
+/**
+ * Other `hop --daemon` processes serving THIS HOP_HOME.
+ *
+ * Matched on the resolved script path plus the HOP_HOME each process actually
+ * runs with — read from its own environment, since two daemons for two homes
+ * share a command line — so a daemon for a different home is never touched.
+ */
+function listRivalHopDaemons() {
+    let out;
+    try {
+        // -E appends each process's environment to its command, which is the
+        // only way to recover HOP_HOME. Own-user processes only, which is all
+        // we could signal anyway.
+        out = execFileSync('ps', ['-axEo', 'pid=,command='], {
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024 * 1024
+        });
+    } catch (e) {
+        return [];
+    }
+    const defaultHome = path.join(os.homedir(), '.hop2');
+    const rivals = [];
+    for (const line of out.split('\n')) {
+        const match = line.match(/^\s*(\d+)\s+(.*)$/);
+        if (!match) continue;
+        const pid = Number(match[1]);
+        const command = match[2];
+        if (pid === process.pid) continue;
+        if (!command.includes(__filename)) continue;
+        // Only the flag as its own word, and only before the environment dump
+        // starts, so a stray `--daemon` inside some env value can't match.
+        const commandOnly = command.split(/\s+[A-Za-z_][A-Za-z0-9_]*=/)[0];
+        if (!/(?:^|\s)--daemon(?:\s|$)/.test(commandOnly)) continue;
+        const homeMatch = command.match(/(?:^|\s)HOP_HOME=(\S*)/);
+        const home = homeMatch ? homeMatch[1] : defaultHome;
+        if (path.resolve(home) !== path.resolve(HOME_DIR)) continue;
+        rivals.push(pid);
+    }
+    return rivals;
+}
+
+/**
+ * The daemon that owns this HOP_HOME, when that is someone other than us.
+ *
+ * A daemon whose pid the state file no longer names has been superseded. It
+ * may keep serving what it already holds, but it must not make decisions that
+ * reach across process boundaries — above all, restarting the shared hay host.
+ */
+function getSupersedingDaemon() {
+    if (!DAEMON_FLAG) return null;
+    let state;
+    try {
+        state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    } catch (e) {
+        return null; // No readable record: nobody outranks us.
+    }
+    if (!state || !Number.isInteger(state.pid)) return null;
+    if (state.pid === process.pid) return null;
+    if (!isProcessAlive(state.pid)) return null;
+    return state;
+}
+
+/**
+ * Make this process the only daemon for HOME_DIR.
+ *
+ * Runs before the daemon publishes itself in the state file. Whoever is there
+ * first is either the pid of record (a `hop start` over a running daemon) or an
+ * orphan from an older race; either way it must not outlive this startup.
+ * SIGTERM first so it runs its own cleanup — which deliberately leaves the
+ * detached hay host and its sessions alone — and SIGKILL only for one that
+ * ignores it.
+ */
+async function evictRivalHopDaemons() {
+    const rivals = new Set(listRivalHopDaemons());
+    try {
+        const recorded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        if (recorded && Number.isInteger(recorded.pid) && recorded.pid !== process.pid
+            && isProcessAlive(recorded.pid)) {
+            rivals.add(recorded.pid);
+        }
+    } catch (e) { /* no readable record: the process sweep is the whole answer */ }
+    if (!rivals.size) return;
+
+    const pids = [...rivals];
+    log(`[Daemon] ${pids.length} other daemon(s) already serving ${HOME_DIR} (pid ${pids.join(', ')}). Retiring them — two daemons fight over the hay host and one eventually restarts it out from under the other.`, YELLOW);
+    for (const pid of pids) {
+        try { process.kill(pid, 'SIGTERM'); } catch (e) { }
+    }
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && pids.some((pid) => isProcessAlive(pid))) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    for (const pid of pids) {
+        if (!isProcessAlive(pid)) continue;
+        log(`[Daemon] Daemon ${pid} ignored SIGTERM; forcing it down.`, YELLOW);
+        try { process.kill(pid, 'SIGKILL'); } catch (e) { }
+    }
+}
+
 function isValidSessionSecret(secret) {
     if (typeof secret !== 'string') return false;
     const trimmed = secret.trim();
@@ -8467,6 +8578,17 @@ async function ensureExternalHayHostReadyOnce() {
         const failure = hayHostProbeFailures.recordFailure(existing.pid);
         if (!failure.shouldRestart) {
             log(`[Hay] Host ${existing.pid} (port ${existing.port}) slow: probe timed out (${failure.count}/${HAY_HOST_UNRESPONSIVE_PROBES} over ${Math.round(failure.failingForMs / 1000)}s). Keeping it alive.`, YELLOW);
+            writeHayHostStateFile(existing);
+            return existing;
+        }
+        const superseding = getSupersedingDaemon();
+        if (superseding) {
+            // Not our host to restart. See the daemon-singleton block above:
+            // this daemon has been superseded, and the host it is probing is
+            // being served by daemon `superseding.pid`. Its probe timeouts say
+            // nothing about that host's health to anyone but itself.
+            log(`[Hay] Host ${existing.pid} looks unresponsive, but daemon ${superseding.pid} — not this one — owns ${HOME_DIR}. A superseded daemon must never restart the shared host; standing down.`, YELLOW);
+            hayHostProbeFailures.reset();
             writeHayHostStateFile(existing);
             return existing;
         }
@@ -15918,6 +16040,16 @@ async function main() {
             catch (e) { bad(`state file is corrupt: ${STATE_FILE}`); }
         }
 
+        // A second daemon is silent until the day it restarts the hay host and
+        // kills every session — and `hop stop` can't reach it, because the
+        // state file names only one pid. Surface it while it is still harmless.
+        const daemonPids = listRivalHopDaemons();
+        if (daemonPids.length > 1) {
+            bad(`${daemonPids.length} daemons are running for ${HOME_DIR} (pid ${daemonPids.join(', ')}) — only one may supervise the hay host. Kill the extras, or restart with hop stop && hop, which now retires them.`);
+        } else if (daemonPids.length === 1) {
+            ok('exactly one daemon for this HOP_HOME');
+        }
+
         const running = isServerRunning();
         if (running) {
             const result = await probeTunnelHealth(running.url, TUNNEL_HEALTH_TIMEOUT);
@@ -17935,6 +18067,14 @@ async function main() {
     }
 
     loadAuthSecret();
+
+    // Claiming the state file only tells FUTURE hop processes to stand down; it
+    // does nothing about a daemon already running for this home, which would go
+    // on supervising the same hay host from behind a record that no longer
+    // names it. Retire those first, so the claim below is true.
+    if (DAEMON_FLAG) {
+        await evictRivalHopDaemons();
+    }
 
     // Write state file early to prevent race condition where multiple daemons spawn
     // Other hop processes will see this and wait instead of spawning another daemon

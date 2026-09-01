@@ -1471,6 +1471,24 @@ export const SessionSwitcher = ({
   // Maps to the create API's `startup` command.
   const [createType, setCreateType] = useState<"terminal" | "claude" | "codex">("terminal");
   const startupFor = (t: "terminal" | "claude" | "codex") => (t === "claude" ? "claude" : t === "codex" ? "codex" : "");
+  // Rendered by BOTH create forms. submitCreate has always sent createType, but
+  // only the top-bar form let you set it, so creating a session inside a folder
+  // silently produced whatever was last chosen — a plain terminal by default,
+  // with no way to ask for claude or codex from the ＋ on a folder.
+  const createTypePicker = () => (
+    <div className="switcher-create-type" role="radiogroup" aria-label="Session type">
+      {(["terminal", "claude", "codex"] as const).map((t) => (
+        <button
+          key={t}
+          type="button"
+          role="radio"
+          aria-checked={createType === t}
+          className={"create-type" + (createType === t ? " on" : "")}
+          onClick={() => setCreateType(t)}
+        >{t === "terminal" ? "Terminal" : t === "claude" ? "Claude" : "Codex"}</button>
+      ))}
+    </div>
+  );
   // When set, the next created session is filed here (the folder header's +).
   const [createInFolder, setCreateInFolder] = useState<SwitcherFolder | null>(null);
   const [, setTick] = useState(0);
@@ -2925,18 +2943,7 @@ export const SessionSwitcher = ({
               autoFocus
               aria-label="New session name"
             />
-            <div className="switcher-create-type" role="radiogroup" aria-label="Session type">
-              {(["terminal", "claude", "codex"] as const).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  role="radio"
-                  aria-checked={createType === t}
-                  className={"create-type" + (createType === t ? " on" : "")}
-                  onClick={() => setCreateType(t)}
-                >{t === "terminal" ? "Terminal" : t === "claude" ? "Claude" : "Codex"}</button>
-              ))}
-            </div>
+            {createTypePicker()}
             <button type="submit">Create</button>
             <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); setCreateInFolder(null); }}>✕</button>
           </form>
@@ -3034,6 +3041,7 @@ export const SessionSwitcher = ({
                           autoFocus
                           aria-label={"New session name in " + folder.name}
                         />
+                        {createTypePicker()}
                         <button type="submit">Create</button>
                         <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); setCreateInFolder(null); }}>✕</button>
                       </form>

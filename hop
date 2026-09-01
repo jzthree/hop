@@ -5595,6 +5595,34 @@ const CLAUDE_VALUE_FLAGS = new Set([
     '--append-system-prompt', '--settings', '--mcp-config', '--agents',
     '--effort', '--betas', '--session-id'
 ]);
+// The conversation a `--fork-session` launch forked FROM.
+//
+// Only meaningful together with --fork-session: in a plain `--resume <id>` the
+// id names the conversation itself, which is not a parent to fall back to.
+function forkParentSessionId(launchCmd) {
+    const raw = typeof launchCmd === 'string' ? launchCmd : '';
+    if (!/(?:^|\s)--fork-session(?:\s|=|$)/.test(raw)) return null;
+    const m = raw.match(/(?:^|\s)(?:--resume(?:=|\s+)|-r\s+)([A-Za-z0-9-]{8,})/);
+    return m ? m[1] : null;
+}
+
+/**
+ * Drop `--fork-session` from a rebuilt launch command.
+ *
+ * Forking is a one-time act, not a standing property of the session: the
+ * recorded id IS the forked conversation. Resuming it with the flag still
+ * attached forks AGAIN and mints yet another id, so every restore orphans the
+ * previous fork and any fork killed before its first turn loses its whole tail
+ * (2026-09-01: Accessibility-fork's id churned on each restore, and a host
+ * restart left the newest id with no transcript at all).
+ */
+function stripForkSessionFlag(command) {
+    return String(command || '')
+        .replace(/(?:^|\s)--fork-session(?=\s|$)/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+}
+
 function rebuildClaudeLaunch(launchCmd) {
     const raw = typeof launchCmd === 'string' ? launchCmd.trim() : '';
     if (!raw) return null;
@@ -5709,12 +5737,33 @@ function restorePlanForSession(entry) {
             warning: `recorded conversation started in ${rec.cwd} but this session's last directory was ${liveCwd} — that record belongs to another claude; opening a plain shell here instead`
         };
     }
+    // Set only when the fork recovery below fires, so the rebuilt command keeps
+    // its --fork-session: we are resuming the PARENT and must not write into
+    // the parent's conversation.
+    let reforkFromParent = false;
     if (rec && rec.sessionId && !claudeTranscriptExists(rec)) {
-        return {
-            command: null,
-            cwd: rec.cwd || entry.cwd,
-            warning: `recorded claude conversation ${String(rec.sessionId).slice(0, 8)}… has no transcript on this host — opening a plain shell instead`
-        };
+        // A fork whose own transcript never landed is not a lost session.
+        // `--fork-session` mints a new conversation id at launch and claude
+        // only writes that transcript once a turn completes, so a fork killed
+        // before its first turn — a host restart, a crash — always leaves a
+        // recorded id with nothing behind it. The conversation it forked from
+        // is still on disk, and re-forking reproduces exactly what the
+        // recorded command produced the first time. Dropping to a plain shell
+        // here threw away the parent history too, which is the part that
+        // mattered (2026-09-01: Accessibility-fork came back as a bare shell,
+        // stranding a 2.3MB parent conversation).
+        const parentId = forkParentSessionId(rec.launchCmd);
+        if (parentId && parentId !== rec.sessionId
+            && claudeTranscriptExists({ ...rec, sessionId: parentId })) {
+            rec = { ...rec, sessionId: parentId, reforkedFrom: rec.sessionId };
+            reforkFromParent = true;
+        } else {
+            return {
+                command: null,
+                cwd: rec.cwd || entry.cwd,
+                warning: `recorded claude conversation ${String(rec.sessionId).slice(0, 8)}… has no transcript on this host — opening a plain shell instead`
+            };
+        }
     }
     if (rec && rec.sessionId) {
         // Preserve the original launch command's FLAGS (--dangerously-skip-
@@ -5741,6 +5790,9 @@ function restorePlanForSession(entry) {
             base = fromArgv;
             isClaudeLaunch = true;
         }
+        // The fork already happened; this id is its result. Only a deliberate
+        // re-fork of a parent (above) still needs the flag.
+        if (!reforkFromParent) base = stripForkSessionFlag(base);
         // Config-dir prefix: needed for a bare `claude` against a wrapper
         // config; a wrapper command (claude-fable) sets it itself. A null
         // configDir means the DEFAULT root — pin that explicitly too

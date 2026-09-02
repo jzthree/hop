@@ -345,6 +345,32 @@ describe("manual folders in the wall", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("hides the briefing while a query is typed in manual mode", async () => {
+    // The briefing was gated on model.mode !== "filter", but manual mode
+    // answers a query with mode "manual" (narrow-in-place), never "filter" —
+    // so in the folder layout the briefing stayed on top of every search.
+    const edition = { generated_at: "2026-09-01T00:00:00Z", summary: "fleet is fine", items: [] };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () => (String(url).includes("digest-archive") ? { editions: [edition] } : edition)
+    })));
+    try {
+      render(<SessionSwitcher {...props} sessions={withFolder} folders={folders} open />);
+      fireEvent.click(screen.getByRole("button", { name: "Manual" }));
+      expect(await screen.findByText("fleet is fine")).toBeTruthy();
+      const input = document.querySelector(".switcher-top input") as HTMLInputElement
+        || document.querySelector("input") as HTMLInputElement;
+      fireEvent.change(input, { target: { value: "insid" } });
+      expect(screen.queryByText("fleet is fine")).toBeNull();
+      expect(screen.getByText("inside")).toBeTruthy();
+      // Clearing the query remounts the card, which refetches — hence async.
+      fireEvent.change(input, { target: { value: "" } });
+      expect(await screen.findByText("fleet is fine")).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("a query in manual mode still offers the full-history search", () => {
     // Manual keeps its own render branch under a query (narrow-in-place), so
     // the search tail — content hits + the deep button — must ride along or

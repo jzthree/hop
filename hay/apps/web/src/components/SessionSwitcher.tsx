@@ -1547,6 +1547,8 @@ export const SessionSwitcher = ({
   // than reshuffling the wall.
   const frozenOrderRef = useRef<{ mode: "tiers" | "project"; hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
   useEffect(() => { if (!open) frozenOrderRef.current = null; }, [open]);
+  // A non-empty query, whichever render branch the model picks for it.
+  const searching = filter.trim().length > 0;
   const model = useMemo(() => {
     // A filter query searches EVERYTHING (parked included); the browsing
     // wall shows only unparked sessions.
@@ -2952,8 +2954,12 @@ export const SessionSwitcher = ({
       <div className="switcher-scroll" ref={scrollRef} onContextMenu={openWallMenu}>
         {/* The host agent's briefing — same digest.json the phone renders.
             Hidden while filtering: search is about one session, the briefing
-            is about the fleet. */}
-        {model.mode !== "filter" && (
+            is about the fleet. Keyed on the QUERY, not on model.mode: manual
+            mode answers a query with mode "manual" (narrow-in-place, so the
+            folders survive), never "filter", so a mode check left the
+            briefing sitting on top of every search result in the folder
+            layout. */}
+        {!searching && (
           <DigestCard sessions={sessions} onOpen={handleTap} />
         )}
         {model.mode === "filter" ? (
@@ -3096,7 +3102,7 @@ export const SessionSwitcher = ({
             ))}
           </>
         )}
-        {model.mode !== "filter" && parkedSessions.length > 0 && (
+        {!searching && parkedSessions.length > 0 && (
           <section className="switcher-group switcher-parked">
             <button
               type="button"

@@ -8847,17 +8847,31 @@ async function ensureExternalHayHostReadyOnce() {
 
     writeHayHostStateFile(started);
     child.unref();
-    if (watchdogKilledLiveHost) {
-        // The old host's PTYs — and every claude running inside them — died
-        // with it. Re-drive the fleet the way `hop restore` would instead of
-        // waiting for a human to notice dead shells (2026-08-31: a watchdog
-        // restart silently orphaned ~36 claude sessions). The delay lets the
-        // new host finish its own startup reconcile first; the restore
-        // reconciler then converges stragglers for 15 minutes.
-        log('[Hay] The watchdog killed a host with live sessions — auto-restoring saved sessions in 5s. Agent-created sessions are excluded; `hop restore --agents` brings those back.', YELLOW);
+    // This host REPLACES one: a record of the previous host was still on
+    // file when we got here. Its PTYs — and every claude running inside them
+    // — died with it, however it died. Re-drive the fleet the way `hop
+    // restore` would instead of waiting for a human to notice dead shells.
+    //
+    // Keyed on the prior record, not on who did the killing. The first
+    // version fired only after a WATCHDOG kill, which left every other death
+    // — a crash, an OOM, a reboot, a deliberate `kill` — to a human, and the
+    // one time it mattered (2026-09-01: host restarted by hand to deploy a
+    // fix) the restore that was supposed to follow never ran, because the
+    // shell it was queued in lived inside the host that had just died. The
+    // fleet sat empty until the user noticed. Deliberate teardown is still
+    // honored: `hop stop --all` clears the record, so there is nothing to
+    // replace and nothing is resurrected; the same goes for first boot.
+    //
+    // The delay lets the new host finish its own startup reconcile first;
+    // the restore reconciler then converges stragglers for 15 minutes.
+    if (existing) {
+        const why = watchdogKilledLiveHost
+            ? 'The watchdog killed a host with live sessions'
+            : `Host ${existing.pid} is gone (not stopped by hop) and has been replaced`;
+        log(`[Hay] ${why} — auto-restoring saved sessions in 5s. Agent-created sessions are excluded; \`hop restore --agents\` brings those back.`, YELLOW);
         setTimeout(() => {
             restoreSavedSessions({}).catch((e) => {
-                log(`[Hay] Auto-restore after the watchdog restart failed: ${e?.message || e}. Run \`hop restore\` by hand.`, RED);
+                log(`[Hay] Auto-restore after the host replacement failed: ${e?.message || e}. Run \`hop restore\` by hand.`, RED);
             });
         }, 5000).unref();
     }

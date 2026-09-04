@@ -14,6 +14,7 @@ import { createOptimisticEcho, hasActiveOtherTypist } from "./utils/optimisticEc
 import { attachScrollFlywheel } from "./utils/scrollFlywheel";
 import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSearch";
 import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
+import { tabTitle } from "./utils/tabTitle";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -3287,13 +3288,15 @@ const App = () => {
     return { bell, output };
   }, [sessions, session?.room]);
 
-  // Tab title: session name, with a dot when the attached session rang a bell
-  // while hidden or another session has an unseen bell.
+  // Tab title: "<session> · hop", or "hop" on the hub, with a dot when the
+  // attached session rang a bell while hidden or another session has an
+  // unseen bell. Keyed on `session`, not the label alone: with no session
+  // open the label still holds the placeholder id minted for a would-be new
+  // room, which is not a name.
   useEffect(() => {
-    const base = sessionLabel || session?.room || "hop";
     const alert = titleAlert || otherAttention.bell;
-    document.title = `${alert ? "● " : ""}${base}`;
-  }, [titleAlert, otherAttention.bell, sessionLabel, session?.room]);
+    document.title = tabTitle(session ? (sessionLabel || session.room) : null, alert);
+  }, [titleAlert, otherAttention.bell, sessionLabel, session]);
 
   // Notify for bells in other sessions: the 5s poll flips bellUnseen false→true
   // when a session rings while unwatched. The seq map dedupes so a session that

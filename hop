@@ -914,7 +914,19 @@ function resolveDisplayNameClaim(internalName, claimed, liveIds = null) {
     if (claimed === internalName) return claimed;
     const owner = toInternalSessionName(claimed) || claimed;
     const taken = liveIds ? liveIds.has(owner) : hopSessionExists(owner);
-    return taken ? own : claimed;
+    if (!taken) return claimed;
+    // The borrower yields the name, but a minted id ("s_f131c76e88") is not
+    // a name a person can use: nine of those appeared in the wall at once
+    // when `hop restore` brought back legacy rooms whose ids were the astro
+    // names newer sessions had since been given (2026-09-04). Keep the name
+    // it was given and mark WHICH one this is — unique, stable, and no
+    // lookups, which matters because this runs inside every config read.
+    return isMintedSessionId(internalName) ? `${claimed} (${internalName.slice(2, 6)})` : own;
+}
+
+/** A machine-minted session id (see mintSessionInternalName), never a name. */
+function isMintedSessionId(internalName) {
+    return /^s_[0-9a-f]{10}$/.test(String(internalName || ''));
 }
 
 function toDisplaySessionName(internalName) {

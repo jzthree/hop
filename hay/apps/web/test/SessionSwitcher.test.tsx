@@ -425,8 +425,32 @@ describe("manual folders in the wall", () => {
   });
 });
 
+describe("file drop on a wall card", () => {
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("uploads to that session instead of being swallowed by the reorder handlers", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.includes("digest")) return { ok: false, json: async () => null };
+      return { ok: true, json: async () => ({ path: "/Users/me/.hop2/uploads/x/notes.txt" }) };
+    }));
+    render(<SessionSwitcher {...props} open />);
+    const card = document.querySelector(".switcher-card[data-session-key]") as HTMLElement;
+    const key = card.getAttribute("data-session-key")!;
+    const file = new File(["hi"], "notes.txt", { type: "text/plain" });
+    const dataTransfer = { types: ["Files"], files: [file], items: [], dropEffect: "none" };
+    fireEvent.dragOver(card, { dataTransfer });
+    expect(card.className).toContain("file-drop");
+    fireEvent.drop(card, { dataTransfer });
+    await vi.waitFor(() => expect(calls.some((u) => u.startsWith(`/api/sessions/upload?name=${encodeURIComponent(key)}&filename=notes.txt`))).toBe(true));
+    await vi.waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(expect.stringContaining("/Users/me/.hop2/uploads/x/notes.txt")));
+  });
+});
+
 describe("create form working directory", () => {
-  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; localStorage.removeItem("hay_create_cwd"); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; try { localStorage.setItem("hay_create_cwd", ""); } catch { /* stubbed storage */ } });
 
   it("completes directories from the daemon and sends the chosen one with the create", async () => {
     const calls: Array<{ url: string; body: string | null }> = [];
@@ -453,8 +477,8 @@ describe("create form working directory", () => {
     await vi.waitFor(() => expect(calls.some((c) => c.url === "/api/sessions" && c.body)).toBe(true));
     const create = JSON.parse(calls.find((c) => c.url === "/api/sessions" && c.body)!.body!);
     expect(create).toMatchObject({ name: "fresh", cwd: "~/Code/hop2/" });
-    // Remembered for the next create.
-    expect(localStorage.getItem("hay_create_cwd")).toBe("~/Code/hop2/");
+    // Remembered for the next create — written once the create succeeds.
+    await vi.waitFor(() => expect(localStorage.getItem("hay_create_cwd")).toBe("~/Code/hop2/"));
   });
 
   it("offers the directories of recent sessions before anything is typed", () => {

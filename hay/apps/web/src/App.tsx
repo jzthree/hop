@@ -4530,7 +4530,15 @@ const App = () => {
                     e.preventDefault();
                     dragDepthRef.current = 0;
                     setDropActive(false);
+                    // iOS Safari delivers a Files-app drop through items,
+                    // with `files` empty; desktop browsers fill both.
                     const files = Array.from(e.dataTransfer?.files || []);
+                    if (files.length === 0) {
+                      for (const item of Array.from(e.dataTransfer?.items || [])) {
+                        const f = item.kind === "file" ? item.getAsFile() : null;
+                        if (f) files.push(f);
+                      }
+                    }
                     if (files.length > 0) {
                       void uploadDroppedFiles(files);
                       return;

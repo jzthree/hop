@@ -425,6 +425,55 @@ describe("manual folders in the wall", () => {
   });
 });
 
+describe("create form working directory", () => {
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; localStorage.removeItem("hay_create_cwd"); });
+
+  it("completes directories from the daemon and sends the chosen one with the create", async () => {
+    const calls: Array<{ url: string; body: string | null }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      calls.push({ url: u, body: init?.body ? String(init.body) : null });
+      if (u.startsWith("/api/fs/complete")) {
+        return { ok: true, json: async () => ({ home: "/Users/me", dir: "/Users/me/Code", entries: [{ name: "hop2", path: "/Users/me/Code/hop2" }] }) };
+      }
+      if (u.includes("digest")) return { ok: false, json: async () => null };
+      return { ok: true, json: async () => ({ ok: true, name: "fresh", internalName: "s_fresh" }) };
+    }));
+    render(<SessionSwitcher {...props} open />);
+    fireEvent.click(screen.getAllByRole("button", { name: "New session" })[0]);
+    fireEvent.change(screen.getByLabelText("New session name"), { target: { value: "fresh" } });
+    const cwd = screen.getByLabelText("Working directory") as HTMLInputElement;
+    fireEvent.change(cwd, { target: { value: "~/Code/ho" } });
+    // Suggestions are shortened to ~ and completing a directory descends into it.
+    const option = await screen.findByRole("option", { name: "~/Code/hop2" });
+    expect(calls.some((c) => c.url === "/api/fs/complete?q=" + encodeURIComponent("~/Code/ho"))).toBe(true);
+    fireEvent.mouseDown(option);
+    expect(cwd.value).toBe("~/Code/hop2/");
+    fireEvent.submit(cwd.closest("form")!);
+    await vi.waitFor(() => expect(calls.some((c) => c.url === "/api/sessions" && c.body)).toBe(true));
+    const create = JSON.parse(calls.find((c) => c.url === "/api/sessions" && c.body)!.body!);
+    expect(create).toMatchObject({ name: "fresh", cwd: "~/Code/hop2/" });
+    // Remembered for the next create.
+    expect(localStorage.getItem("hay_create_cwd")).toBe("~/Code/hop2/");
+  });
+
+  it("offers the directories of recent sessions before anything is typed", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, json: async () => null })));
+    const withCwd: SwitcherSession[] = [
+      { name: "a", displayName: "a", internalName: "a", active: true, starting: false, createdBy: "user", cwd: "/Users/me/Code/one", lastActivityAt: 2 },
+      { name: "b", displayName: "b", internalName: "b", active: true, starting: false, createdBy: "user", cwd: "/Users/me/Code/two", lastActivityAt: 1 }
+    ];
+    render(<SessionSwitcher {...props} sessions={withCwd} open />);
+    fireEvent.click(screen.getAllByRole("button", { name: "New session" })[0]);
+    const cwd = screen.getByLabelText("Working directory") as HTMLInputElement;
+    fireEvent.focus(cwd);
+    const options = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(options).toEqual(["~/Code/one", "~/Code/two"]);
+    fireEvent.mouseDown(screen.getByRole("option", { name: "~/Code/one" }));
+    expect(cwd.value).toBe("~/Code/one");
+  });
+});
+
 describe("create colliding with a hidden session", () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 

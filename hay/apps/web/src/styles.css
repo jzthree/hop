@@ -3535,8 +3535,59 @@ button.primary {
 
 .switcher-create-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 0 16px 10px;
+}
+/* Working directory: its own full-width line under name + type, with the
+   completion list floating below it. */
+.switcher-create-cwd {
+  position: relative;
+  flex-basis: 100%;
+  min-width: 0;
+}
+.switcher-create-cwd input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.cwd-suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 12px 32px rgba(0, 0, 0, 0.22);
+}
+.cwd-suggest-label {
+  padding: 4px 8px 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+.switcher-create-row .cwd-suggest button {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.switcher-create-row .cwd-suggest button.on,
+.switcher-create-row .cwd-suggest button:hover {
+  background: var(--bg-alt);
 }
 /* New-session launch-type picker: Terminal / Claude / Codex, a small
    segmented control in the create row. Maps to the create API's startup. */

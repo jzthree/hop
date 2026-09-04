@@ -11573,6 +11573,17 @@ happens until someone clicks it.
             req.on('end', async () => {
                 try {
                     let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo, startup } = JSON.parse(body);
+                    // The web create form takes the directory as the user
+                    // typed it, ~ included; the host only checks that the
+                    // path exists, so an unexpanded ~ silently fell back to
+                    // home. Expand it here, once, for every caller.
+                    if (typeof cwd === 'string') {
+                        const t = cwd.trim();
+                        cwd = t === '' ? undefined
+                            : t === '~' ? os.homedir()
+                            : t.startsWith('~/') ? path.join(os.homedir(), t.slice(2))
+                            : t;
+                    }
                     // A new session can boot straight into an app instead of a
                     // bare shell: the web New picker sends startup='claude' /
                     // 'codex' (or empty for a plain terminal). Bounded, and
@@ -11901,6 +11912,40 @@ happens until someone clicks it.
         }
 
         // API: Restore saved sessions (recreate rooms + resume claude conversations)
+        if (parsedUrl.pathname === '/api/fs/complete' && req.method === 'GET') {
+            // Directory completion for the create form's working-directory
+            // field. Directories only: the last segment of `q` is a prefix
+            // (case-insensitive), everything before it must already exist. A
+            // leading ~ is the home directory and a relative path resolves
+            // under it, matching what a shell would do with the same text.
+            // Dot-directories appear only once the prefix itself starts with a
+            // dot, the way tab completion behaves.
+            const sp = parsedUrl.searchParams || new URLSearchParams(parsedUrl.search || '');
+            const q = String(sp.get('q') || '').trim();
+            const home = os.homedir();
+            const trailing = q.endsWith('/');
+            const expanded = q === '' || q === '~' ? home + '/'
+                : q.startsWith('~/') ? path.join(home, q.slice(2)) + (trailing ? '/' : '')
+                : q.startsWith('/') ? q
+                : path.join(home, q) + (trailing ? '/' : '');
+            const dir = expanded.endsWith('/') ? expanded.replace(/\/+$/, '') || '/' : path.dirname(expanded);
+            const prefix = expanded.endsWith('/') ? '' : path.basename(expanded).toLowerCase();
+            const entries = [];
+            try {
+                for (const name of fs.readdirSync(dir)) {
+                    if (!name.toLowerCase().startsWith(prefix)) continue;
+                    if (name.startsWith('.') && !prefix.startsWith('.')) continue;
+                    const full = path.join(dir, name);
+                    try { if (!fs.statSync(full).isDirectory()) continue; } catch (e) { continue; }
+                    entries.push({ name, path: full });
+                    if (entries.length >= 40) break;
+                }
+            } catch (e) { /* not a directory, or unreadable: no completions */ }
+            entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ home, dir, entries }));
+            return;
+        }
         if (parsedUrl.pathname === '/api/sessions/restore/health' && req.method === 'GET') {
             const state = readRestoreReconcile();
             const sessions = Object.values(state.sessions || {});

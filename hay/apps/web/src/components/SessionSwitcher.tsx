@@ -14,6 +14,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
+import { CwdField } from "./CwdField";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
 import { createVoiceHold, isClaudeSurface } from "../utils/voiceHold";
 import {
@@ -1488,6 +1489,19 @@ export const SessionSwitcher = ({
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState("");
+  // Where the new session starts. Remembered across creates: several
+  // sessions in a row usually belong to the same project.
+  const [createCwd, setCreateCwd] = useState(() => {
+    try { return localStorage.getItem("hay_create_cwd") || ""; } catch { return ""; }
+  });
+  const recentCwds = useMemo(() => {
+    const seen = new Set<string>();
+    return [...sessions]
+      .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))
+      .map((s) => (s.cwd || "").replace(/^\/Users\/[^/]+(?=\/|$)/, "~"))
+      .filter((c) => c && !seen.has(c) && seen.add(c))
+      .slice(0, 8);
+  }, [sessions]);
   // What a new session boots into: a plain shell, or straight into an agent.
   // Maps to the create API's `startup` command.
   const [createType, setCreateType] = useState<"terminal" | "claude" | "codex">("terminal");
@@ -2404,7 +2418,7 @@ export const SessionSwitcher = ({
       const res = await fetch("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: next, type: "terminal", port: null, startup: startupFor(createType) })
+        body: JSON.stringify({ name: next, type: "terminal", port: null, startup: startupFor(createType), cwd: createCwd.trim() || undefined })
       });
       const data = await res.json().catch(() => ({} as { name?: string; displayName?: string; internalName?: string; error?: string }));
       if (!res.ok || !data.name) {
@@ -2433,7 +2447,8 @@ export const SessionSwitcher = ({
               : home ? ` in ${home.name}` : "";
           onNotice(`"${taken.displayName || taken.name}" already exists${where} — showing it`);
           setCreating(false);
-          setCreateDraft("");
+          try { localStorage.setItem("hay_create_cwd", createCwd.trim()); } catch { /* ok */ }
+      setCreateDraft("");
           setCreateInFolder(null);
           // Reveal before focusing: flip whatever filter is hiding it.
           if (hiddenByOrigin) setOriginScope("all");
@@ -2969,6 +2984,7 @@ export const SessionSwitcher = ({
             {createTypePicker()}
             <button type="submit">Create</button>
             <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); setCreateInFolder(null); }}>✕</button>
+            <CwdField value={createCwd} onChange={setCreateCwd} recent={recentCwds} />
           </form>
         )}
       </div>
@@ -3071,6 +3087,7 @@ export const SessionSwitcher = ({
                         {createTypePicker()}
                         <button type="submit">Create</button>
                         <button type="button" onClick={() => { setCreating(false); setCreateDraft(""); setCreateInFolder(null); }}>✕</button>
+                        <CwdField value={createCwd} onChange={setCreateCwd} recent={recentCwds} />
                       </form>
                     )}
                     {rows.length === 0 ? (

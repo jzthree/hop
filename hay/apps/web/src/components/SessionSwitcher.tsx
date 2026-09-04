@@ -15,6 +15,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { CwdField } from "./CwdField";
+import { pasteableUploadPaths } from "../utils/fileDrop";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
 import { createVoiceHold, isClaudeSurface } from "../utils/voiceHold";
 import {
@@ -348,7 +349,9 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender }: {
+  /** The wall keeps a registry of live tiles' input senders (file drops). */
+  onSender?: (send: ((data: string) => void) | null) => void;
   wsBase: string; room: string; userName: string; theme: object | undefined;
   live: boolean; claudeApp: boolean; claimSize: boolean; activeCols?: number; activeRows?: number;
   onFullscreen: () => void; onUnfocus: () => void; onNotice: (m: string) => void;
@@ -962,6 +965,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       };
     };
     connect();
+    // Registered below, once the sender exists.
     sendInputRef.current = (data: string) => {
       // A keystroke INTO this tile is a genuine user action on it — per the
       // size-ownership model, it should take the size and fit the tile it
@@ -999,6 +1003,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       }
       ws.send(JSON.stringify({ type: "input", data }));
     };
+    onSender?.(sendInputRef.current);
     const hiddenReconnect = { hiddenAt: 0 };
     const onVisibility = () => {
       if (document.hidden) { hiddenReconnect.hiddenAt = Date.now(); return; }
@@ -1032,6 +1037,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       window.removeEventListener("focus", onWindowFocus);
       try { ws?.close(); } catch { /* closing */ }
       sendInputRef.current = null;
+      onSender?.(null);
       term.options.disableStdin = true;
       term.options.cursorBlink = false;
       window.clearTimeout(downChromeTimer);
@@ -1299,6 +1305,55 @@ export const SessionSwitcher = ({
   };
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
+  // A file dragged over a card: that card is the drop target (upload).
+  const [fileDropKey, setFileDropKey] = useState<string | null>(null);
+  const tileSendersRef = useRef(new Map<string, (data: string) => void>());
+  const isFileDrag = (dt: DataTransfer | null) =>
+    !!dt && (Array.from(dt.types || []).includes("Files") || Array.from(dt.items || []).some((i) => i.kind === "file"));
+  // iOS Safari delivers a Files-app drop through items, with `files` empty;
+  // desktop browsers fill both.
+  const filesFrom = (dt: DataTransfer | null): File[] => {
+    const files = Array.from(dt?.files || []);
+    if (files.length === 0) {
+      for (const item of Array.from(dt?.items || [])) {
+        const f = item.kind === "file" ? item.getAsFile() : null;
+        if (f) files.push(f);
+      }
+    }
+    return files;
+  };
+  // Drop on a card = upload to THAT session, same endpoint the full-screen
+  // terminal uses. The card's reorder handlers used to preventDefault a file
+  // drop and do nothing with it — on a phone, where the wall is the whole
+  // UI, that was "drag and drop does nothing". A live tile gets the paths
+  // typed into it; anything else gets told where the file landed.
+  const uploadFilesTo = async (s: SwitcherSession, files: File[]) => {
+    if (files.length === 0) return;
+    const key = sessionKey(s);
+    onNotice(files.length === 1 ? `Uploading ${files[0].name} to ${s.displayName}…` : `Uploading ${files.length} files to ${s.displayName}…`);
+    const landed: string[] = [];
+    for (const file of files) {
+      try {
+        const res = await fetch(`/api/sessions/upload?name=${encodeURIComponent(key)}&filename=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+        const data = await res.json().catch(() => null) as { path?: string; error?: string } | null;
+        if (!res.ok) { onNotice(data?.error || `Upload failed (${res.status})`); return; }
+        if (data?.path) landed.push(String(data.path));
+      } catch {
+        onNotice("Upload failed");
+        return;
+      }
+    }
+    if (landed.length === 0) return;
+    const paste = pasteableUploadPaths(landed);
+    const send = tileSendersRef.current.get(key);
+    if (send) {
+      send(paste);
+      onNotice(landed.length === 1 ? `Uploaded to ${landed[0]}` : `Uploaded ${landed.length} files — paths pasted`);
+    } else {
+      try { await navigator.clipboard?.writeText(paste); } catch { /* no clipboard: the notice still names the path */ }
+      onNotice(`Uploaded to ${landed.join(", ")} — path copied; open ${s.displayName} to paste it`);
+    }
+  };
   const [menu, setMenu] = useState<MenuRequest>(null);
 
   // The wall's own background: the actions that create things, plus the view
@@ -2447,8 +2502,7 @@ export const SessionSwitcher = ({
               : home ? ` in ${home.name}` : "";
           onNotice(`"${taken.displayName || taken.name}" already exists${where} — showing it`);
           setCreating(false);
-          try { localStorage.setItem("hay_create_cwd", createCwd.trim()); } catch { /* ok */ }
-      setCreateDraft("");
+          setCreateDraft("");
           setCreateInFolder(null);
           // Reveal before focusing: flip whatever filter is hiding it.
           if (hiddenByOrigin) setOriginScope("all");
@@ -2479,6 +2533,7 @@ export const SessionSwitcher = ({
       }
       setCreating(false);
       setCreateDraft("");
+      try { localStorage.setItem("hay_create_cwd", createCwd.trim()); } catch { /* per-device convenience only */ }
       if (createInFolder) {
         // File it first: the move endpoint is the one place membership is
         // persisted durably.
@@ -2588,16 +2643,37 @@ export const SessionSwitcher = ({
         tabIndex={0}
         data-nav-index={navIndexByKey.get(key)}
         data-session-key={key}
-        className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}`}
+        className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}${fileDropKey === key ? " file-drop" : ""}`}
         draggable={draggable}
         onDragStart={draggable ? (e) => { setDragKey(key); e.dataTransfer.effectAllowed = "move"; } : undefined}
         onDragEnter={draggable ? () => { if (dragKey && dragKey !== key) moveManual(dragKey, key); } : undefined}
-        onDragOver={draggable ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } : undefined}
+        onDragOver={(e) => {
+          if (isFileDrag(e.dataTransfer)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            if (fileDropKey !== key) setFileDropKey(key);
+            return;
+          }
+          if (draggable) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }
+        }}
+        onDragLeave={(e) => {
+          const to = e.relatedTarget;
+          if (fileDropKey === key && !(to instanceof Node && e.currentTarget.contains(to))) setFileDropKey(null);
+        }}
         // Order was already applied live during the drag — drop/end just clean up.
         // The release click after a drag must NEVER act — reordering ending
         // with "you are now inside a terminal" is a drag that went off a
         // cliff. Same suppression the long-press sheet uses.
-        onDrop={draggable ? (e) => { e.preventDefault(); suppressTapRef.current = true; setDragKey(null); } : undefined}
+        onDrop={(e) => {
+          if (isFileDrag(e.dataTransfer)) {
+            e.preventDefault();
+            setFileDropKey(null);
+            suppressTapRef.current = true;
+            void uploadFilesTo(s, filesFrom(e.dataTransfer));
+            return;
+          }
+          if (draggable) { e.preventDefault(); suppressTapRef.current = true; setDragKey(null); }
+        }}
         onDragEnd={draggable ? () => { suppressTapRef.current = true; setDragKey(null); window.setTimeout(() => { suppressTapRef.current = false; }, 250); } : undefined}
         onClick={(e) => {
           // Post-drag / post-long-press release: not a click.
@@ -2698,6 +2774,7 @@ export const SessionSwitcher = ({
               onFullscreen={() => onSwitch(s)}
               onUnfocus={() => setFocusedKey(null)}
               onNotice={onNotice}
+              onSender={(fn) => { if (fn) tileSendersRef.current.set(key, fn); else tileSendersRef.current.delete(key); }}
             />
           </div>
         ) : (

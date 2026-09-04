@@ -227,6 +227,52 @@ describe("hold-space dictation", () => {
     expect(overlays[overlays.length - 1]).toBe(null);
   });
 
+  it("a recogniser that ends on its own mid-hold is replaced, and the words survive", () => {
+    // Safari ends a session at the first pause in speech; Chrome after a few
+    // silent seconds. Neither is the user letting go of Space.
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    const first = FakeRecognition.last!;
+    first.onresult?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "hello " } }] });
+    first.onend?.();
+
+    expect(hold.isActive()).toBe(true);
+    const second = FakeRecognition.last!;
+    expect(second).not.toBe(first);
+    expect(second.started).toBe(true);
+    second.onresult?.({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: "world" } }] });
+    expect(overlays[overlays.length - 1]).toBe("hello world");
+
+    hold.handleKey(keyup());
+    expect(hold.isActive()).toBe(false);
+    expect(sent[sent.length - 1]).toBe("hello world");
+  });
+
+  it("Chrome's no-speech mid-hold is a pause, not a failure", () => {
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    const first = FakeRecognition.last!;
+    first.onerror?.({ error: "no-speech" });
+    first.onend?.();
+    expect(hold.isActive()).toBe(true);
+    expect(notices).toEqual([]);
+    expect(FakeRecognition.last).not.toBe(first);
+  });
+
+  it("gives the space bar back when recognisers keep ending without hearing anything", () => {
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    FakeRecognition.last!.onend?.();
+    FakeRecognition.last!.onend?.();
+    expect(hold.isActive()).toBe(true);
+    FakeRecognition.last!.onend?.();
+    expect(hold.isActive()).toBe(false);
+    expect(overlays[overlays.length - 1]).toBe(null);
+  });
+
   it("a recogniser that never ends cannot kill the space bar", () => {
     // The regression that bit Jian: dictation started, the recogniser never
     // fired onend, `active` stuck true — and because every space is eaten

@@ -2612,6 +2612,12 @@ button.primary {
   background: color-mix(in srgb, var(--err) 12%, transparent);
 }
 
+/* A file held over a card: this session is where it will land. */
+.switcher-card.file-drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
 /* Folder picker: the session's current folder is marked, not highlighted —
    a filled row in a list of plain rows reads as hover state. */
 .switcher-sheet > button.on {
@@ -3796,13 +3802,19 @@ button.primary {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.45; transform: scale(0.75); }
 }
+/* A live caption: what matters is the words arriving NOW. nowrap + ellipsis
+   pinned the START of the transcript and hid everything after the first
+   line, so a long dictation looked frozen. Right-aligned in a clipping flex
+   box, the text overflows off the LEFT edge and the tail stays in view. */
 .voice-text {
   font-family: var(--font-mono);
   font-size: 12.5px;
   color: var(--ink, #ddd);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
 }
 .voice-text.muted { color: var(--ink-muted, #888); }
 

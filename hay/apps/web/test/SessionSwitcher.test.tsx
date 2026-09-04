@@ -371,6 +371,47 @@ describe("manual folders in the wall", () => {
     }
   });
 
+  it("files a session into a folder from its menu, no drag needed", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      calls.push({ url: u, body: init?.body ? JSON.parse(String(init.body)) : null });
+      if (u.includes("digest")) return { ok: false, json: async () => null };
+      if (u === "/api/folders") return { ok: true, json: async () => ({ ok: true, folder: { id: "f2", name: "Fresh" } }) };
+      return { ok: true, json: async () => ({ ok: true }) };
+    }));
+    try {
+      render(<SessionSwitcher {...props} sessions={withFolder} folders={folders} open />);
+      // Into an existing folder.
+      fireEvent.click(screen.getByRole("button", { name: "More actions for outside" }));
+      fireEvent.click(screen.getByRole("button", { name: "Move to folder…" }));
+      fireEvent.click(screen.getByRole("button", { name: "Filed" }));
+      await vi.waitFor(() => expect(calls.some((c) => c.url === "/api/sessions/move")).toBe(true));
+      expect(calls.find((c) => c.url === "/api/sessions/move")!.body).toEqual({ internalName: "outside", folderId: "f1" });
+
+      // Out of its folder: the current one is marked, "No folder" clears it.
+      calls.length = 0;
+      fireEvent.click(screen.getByRole("button", { name: "More actions for inside" }));
+      fireEvent.click(screen.getByRole("button", { name: "Move to folder…" }));
+      expect(screen.getByRole("button", { name: "Filed" }).className).toContain("on");
+      fireEvent.click(screen.getByRole("button", { name: "No folder" }));
+      await vi.waitFor(() => expect(calls.some((c) => c.url === "/api/sessions/move")).toBe(true));
+      expect(calls.find((c) => c.url === "/api/sessions/move")!.body).toEqual({ internalName: "inside", folderId: null });
+
+      // A brand-new folder, created and filed into in one gesture.
+      calls.length = 0;
+      vi.stubGlobal("prompt", vi.fn(() => "Fresh"));
+      fireEvent.click(screen.getByRole("button", { name: "More actions for outside" }));
+      fireEvent.click(screen.getByRole("button", { name: "Move to folder…" }));
+      fireEvent.click(screen.getByRole("button", { name: "New folder…" }));
+      await vi.waitFor(() => expect(calls.some((c) => c.url === "/api/sessions/move")).toBe(true));
+      expect(calls.find((c) => c.url === "/api/folders")!.body).toEqual({ name: "Fresh" });
+      expect(calls.find((c) => c.url === "/api/sessions/move")!.body).toEqual({ internalName: "outside", folderId: "f2" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("a query in manual mode still offers the full-history search", () => {
     // Manual keeps its own render branch under a query (narrow-in-place), so
     // the search tail — content hits + the deep button — must ride along or

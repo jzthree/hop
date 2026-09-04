@@ -111,7 +111,7 @@ type Props = {
 
 type Sheet = {
   session: SwitcherSession;
-  mode: "menu" | "rename";
+  mode: "menu" | "rename" | "folder";
   // Viewport point the menu anchors to — the ... button or the long-press
   // finger position. A bottom sheet made the thumb travel the whole screen
   // for actions about the element it was already touching.
@@ -1361,10 +1361,31 @@ export const SessionSwitcher = ({
       return false;
     }
   };
+  // Returns the created folder (the daemon mints the id) so "New folder…"
+  // from a session's menu can file the session into it in the same gesture.
+  const createFolderNamed = async (name: string): Promise<SwitcherFolder | null> => {
+    try {
+      const res = await fetch("/api/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      const data = await res.json().catch(() => ({} as { error?: string; folder?: SwitcherFolder }));
+      if (!res.ok || !data.folder?.id) {
+        onNotice(data.error || "Could not create folder");
+        return null;
+      }
+      onRefresh();
+      return { id: data.folder.id, name: data.folder.name || name };
+    } catch {
+      onNotice("Could not create folder");
+      return null;
+    }
+  };
   const createFolder = async () => {
     const name = window.prompt("Folder name")?.trim();
     if (!name) return;
-    if (await folderApi("/api/folders", { name }, "Could not create folder")) onNotice(`Created ${name}`);
+    if (await createFolderNamed(name)) onNotice(`Created ${name}`);
   };
   const renameFolder = async (folder: SwitcherFolder) => {
     const name = window.prompt("Rename folder", folder.name)?.trim();
@@ -3149,7 +3170,9 @@ export const SessionSwitcher = ({
             aria-label={`Actions for ${sheetSession.displayName}`}
             style={(() => {
               const width = 264;
-              const estH = sheet.mode === "rename" ? 150 : 330;
+              const estH = sheet.mode === "rename" ? 150
+                : sheet.mode === "folder" ? 100 + 34 * (folders.length + 3)
+                : 330;
               const left = Math.min(Math.max(8, sheet.anchor.x - width), window.innerWidth - width - 8);
               let top = sheet.anchor.y + 8;
               if (top + estH > window.innerHeight - 8) top = Math.max(8, sheet.anchor.y - estH - 8);
@@ -3176,6 +3199,54 @@ export const SessionSwitcher = ({
                 <button type="submit">Save</button>
                 <button type="button" onClick={() => setSheet({ session: sheetSession, mode: "menu", anchor: sheet.anchor })}>✕</button>
               </form>
+            ) : sheet.mode === "folder" ? (
+              // Filing from the menu: drag-and-drop needs a pointer, a free
+              // hand, and the folder on screen at the same time as the card —
+              // none of which a phone or a long wall reliably has. Same
+              // /api/sessions/move the drop uses, so the two never disagree.
+              <>
+                {(() => {
+                  const key = sessionKey(sheetSession);
+                  const current = sheetSession.folderId || null;
+                  const file = async (folderId: string | null, label: string) => {
+                    setSheet(null);
+                    if (folderId === current) return;
+                    if (await folderApi("/api/sessions/move", { internalName: key, folderId }, "Could not move session")) {
+                      // Folders only render in the Manual layout; filing from
+                      // Recent or Project would otherwise look like a no-op.
+                      const where = sortMode === "manual" ? "" : " — folders show in the Manual layout";
+                      onNotice(folderId ? `Filed under ${label}${where}` : "Moved out of its folder");
+                    }
+                  };
+                  return (
+                    <>
+                      <button type="button" className={current === null ? "on" : ""} onClick={() => { void file(null, ""); }}>
+                        No folder
+                      </button>
+                      {folders.map((f) => (
+                        <button key={f.id} type="button" className={current === f.id ? "on" : ""} onClick={() => { void file(f.id, f.name); }}>
+                          {f.name}
+                        </button>
+                      ))}
+                      <div className="switcher-sheet-sep" aria-hidden="true" />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const name = window.prompt("Folder name")?.trim();
+                          if (!name) return;
+                          const created = await createFolderNamed(name);
+                          if (created) await file(created.id, created.name);
+                        }}
+                      >
+                        New folder…
+                      </button>
+                      <button type="button" className="back" onClick={() => setSheet({ session: sheetSession, mode: "menu", anchor: sheet.anchor })}>
+                        ← Back
+                      </button>
+                    </>
+                  );
+                })()}
+              </>
             ) : (
               <>
                 {!isCurrentSession(sheetSession) && (
@@ -3218,6 +3289,12 @@ export const SessionSwitcher = ({
                   }}
                 >
                   Rename
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSheet({ session: sheetSession, mode: "folder", anchor: sheet.anchor })}
+                >
+                  Move to folder…
                 </button>
                 {sheetSession.type !== "port" && <div className="switcher-sheet-sep" aria-hidden="true" />}
                 {sheetSession.type !== "port" && (

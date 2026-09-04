@@ -2612,6 +2612,20 @@ button.primary {
   background: color-mix(in srgb, var(--err) 12%, transparent);
 }
 
+/* Folder picker: the session's current folder is marked, not highlighted —
+   a filled row in a list of plain rows reads as hover state. */
+.switcher-sheet > button.on {
+  font-weight: 600;
+}
+.switcher-sheet > button.on::before {
+  content: "✓";
+  margin-right: 6px;
+  color: var(--accent);
+}
+.switcher-sheet > button.back {
+  color: var(--ink-muted);
+}
+
 /* Touch: same menu, roomier targets. */
 @media (pointer: coarse) {
   .switcher-sheet {

@@ -898,7 +898,14 @@ const App = () => {
       return;
     }
     try {
-      const notification = new Notification(title, { body: "Terminal bell" });
+      // silent: the attention is the notification itself — the dot in the
+      // tab title, the card's badge, the banner. macOS played the system
+      // alert sound for every bell on top of that, and a fleet of agents
+      // ringing for attention turned the laptop into a pinball machine.
+      // tag: a session that rings twice replaces its banner instead of
+      // stacking a second one (Safari ignores both options; its sound
+      // follows System Settings › Notifications).
+      const notification = new Notification(title, { body: "Terminal bell", silent: true, tag: `hop-bell-${title}` });
       notification.onclick = () => {
         window.focus();
         onClick?.();

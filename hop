@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const { spawn, execSync, execFile, execFileSync } = require('child_process');
+const trajectoryExtract = require(path.join(__dirname, 'scripts', 'trajectory-extract.js'));
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -539,6 +540,45 @@ function enforceViewBudget() {
     } catch (e) { /* a failed sweep never blocks a publish */ }
 }
 
+// The uploads cache's housekeeping — same shape as enforceViewBudget. Runs
+// after every upload AND hourly on a timer, so the cache shrinks even on a
+// quiet day. Copies only: the phone/browser still has the original.
+function enforceUploadBudget() {
+    const root = path.join(HOME_DIR, 'uploads');
+    try {
+        const files = [];
+        const now = Date.now();
+        for (const sess of fs.readdirSync(root)) {
+            const dir = path.join(root, sess);
+            let st; try { st = fs.statSync(dir); } catch (e) { continue; }
+            if (!st.isDirectory()) continue;
+            for (const f of fs.readdirSync(dir)) {
+                const p = path.join(dir, f);
+                let fst; try { fst = fs.statSync(p); } catch (e) { continue; }
+                if (!fst.isFile()) continue;
+                if (now - fst.mtimeMs > UPLOADS_MAX_AGE_MS) {
+                    try { fs.rmSync(p); log(`[uploads] aged out ${sess}/${f}`, DIM); } catch (e) { /* next */ }
+                    continue;
+                }
+                files.push({ p, sess, f, bytes: fst.size, mtime: fst.mtimeMs });
+            }
+            // A session folder emptied by the sweep is just clutter.
+            try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch (e) { /* ignore */ }
+        }
+        let total = files.reduce((a, b) => a + b.bytes, 0);
+        if (total <= UPLOADS_BUDGET_BYTES) return;
+        files.sort((a, b) => a.mtime - b.mtime);
+        for (const it of files) {
+            if (total <= UPLOADS_BUDGET_BYTES) break;
+            try {
+                fs.rmSync(it.p);
+                total -= it.bytes;
+                log(`[uploads] budget: evicted ${it.sess}/${it.f} (${Math.round(it.bytes / 1024)} KB, oldest first)`, DIM);
+            } catch (e) { /* the next candidate still evicts */ }
+        }
+    } catch (e) { /* no uploads dir yet — and a failed sweep never blocks an upload */ }
+}
+
 // Does the proxied session behind a Views server row still exist? Answered
 // from the ports ledger on disk (plus the in-memory store, when this is the
 // daemon), so the CLI and the daemon agree.
@@ -645,6 +685,12 @@ const SESSION_COOKIE_NAME = 'tunnel_session';
 const LOG_DIR = path.join(HOME_DIR, 'logs');
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const UPLOAD_MAX_BYTES = parsePositiveIntEnv('HOP_UPLOAD_MAX_BYTES', 100 * 1024 * 1024);
+// Uploads (photos from the phone, files dropped on the web) are transient
+// inputs — once the agent has read one it is dead weight, and nothing else
+// ever deleted them (Jian: "we need to clean cache periodically"). Two
+// limits: an AGE sweep and a SIZE budget, oldest evicted first.
+const UPLOADS_BUDGET_BYTES = parsePositiveIntEnv('HOP_UPLOADS_BUDGET_MB', 512) * 1024 * 1024;
+const UPLOADS_MAX_AGE_MS = parsePositiveIntEnv('HOP_UPLOADS_MAX_AGE_DAYS', 14) * 86400000;
 const DEFAULT_WORKSPACE_NAME = 'default';
 const HISTORY_DIR_NAME = 'history';
 const WORKSPACE_LOGS_DIR_NAME = 'logs';
@@ -11085,7 +11131,7 @@ happens until someone clicks it.
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    const { name, internalName } = JSON.parse(body);
+                    const { name, internalName, target } = JSON.parse(body);
                     const source = resolveSessionInternalName(name, internalName);
                     if (!source || !(hopSessionExists(source) || getEffectiveSessionConfig(source))) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -11106,26 +11152,81 @@ happens until someone clicks it.
                     const plausibleCwd = (c) => c && !/[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(c));
                     const cwd = [rec?.cwd, meta?.cwd, config.cwd].find(plausibleCwd) || undefined;
 
-                    let command;
-                    let kind = 'shell';
-                    if (rec) {
-                        const base = rebuildClaudeLaunch(rec.launchCmd) || 'claude';
-                        command = base + ' --resume ' + rec.sessionId + ' --fork-session';
-                        kind = 'claude';
-                    } else if (/codex/i.test(String(config.foregroundProcess || '')) ||
-                               /codex/i.test(String(getRuntimeSessionMetadata(source)?.foregroundProcess || ''))) {
-                        command = 'codex resume';
-                        kind = 'codex';
+                    // What the source is running: a claude conversation (the
+                    // hook's record), codex (by process — codex has no hook),
+                    // or a plain shell.
+                    const runsCodex = /codex/i.test(String(config.foregroundProcess || ''))
+                        || /codex/i.test(String(getRuntimeSessionMetadata(source)?.foregroundProcess || ''));
+                    const sourceKind = rec ? 'claude' : runsCodex ? 'codex' : 'shell';
+                    const wantTarget = typeof target === 'string' && target.trim() ? target.trim().toLowerCase() : null;
+                    if (wantTarget && wantTarget !== 'claude' && wantTarget !== 'codex') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: `Unknown fork target "${wantTarget}" — claude or codex` }));
+                        return;
                     }
+                    // Crossing tools is a HANDOFF, not a fork: neither tool can
+                    // resume the other's transcript, so the conversation is
+                    // extracted to a document the new agent reads before its
+                    // first turn (scripts/trajectory-extract.js). Same tool,
+                    // or no target, is the conversation fork as before.
+                    const handoff = !!wantTarget && wantTarget !== sourceKind;
+                    if (handoff && sourceKind === 'shell') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'This session has no claude or codex conversation to hand off' }));
+                        return;
+                    }
+                    const codexRollout = sourceKind === 'codex' ? resolveCodexTranscriptByCwd(cwd) : null;
 
                     const sourceDisplay = getSessionDisplayName(source) || source;
-                    let forkName = sourceDisplay + '-fork';
+                    const suffix = handoff ? '-' + wantTarget : '-fork';
+                    let forkName = sourceDisplay + suffix;
                     let n = 2;
                     while (isDisplayNameInUse(forkName) || hopSessionExists(toInternalSessionName(forkName))) {
-                        forkName = sourceDisplay + '-fork' + n;
+                        forkName = sourceDisplay + suffix + n;
                         n += 1;
                     }
                     const forkInternal = toInternalSessionName(forkName);
+
+                    let command;
+                    let kind = 'shell';
+                    let extract = null;
+                    const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+                    if (handoff) {
+                        const transcript = sourceKind === 'claude' ? resolveClaudeTranscriptPath(rec) : codexRollout;
+                        if (!transcript) {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: `No ${sourceKind} transcript found for ${sourceDisplay} to hand off` }));
+                            return;
+                        }
+                        // Budget by what the RECEIVER can hold: Codex's context is
+                        // a fraction of Claude's, and a document it cannot finish
+                        // reading is worse than a shorter one it can.
+                        const maxChars = wantTarget === 'codex' ? 400000 : 800000;
+                        const result = await trajectoryExtract.extractConversation(transcript, { tool: sourceKind, maxChars });
+                        // Staged where uploads for the new session live: the
+                        // one per-session directory that already exists for
+                        // "a file this session is meant to read".
+                        const stage = path.join(HOME_DIR, 'uploads', forkInternal);
+                        fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
+                        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+                        const extractPath = path.join(stage, `handoff-from-${sourceDisplay}-${stamp}.md`);
+                        writePrivateFile(extractPath, result.text);
+                        const bytes = Buffer.byteLength(result.text);
+                        const prompt = trajectoryExtract.handoffPrompt(extractPath, bytes, sourceKind);
+                        command = `${wantTarget} ${shq(prompt)}`;
+                        kind = 'handoff';
+                        extract = { path: extractPath, bytes, turns: result.turns, totalTurns: result.totalTurns };
+                    } else if (rec) {
+                        const base = rebuildClaudeLaunch(rec.launchCmd) || 'claude';
+                        command = base + ' --resume ' + rec.sessionId + ' --fork-session';
+                        kind = 'claude';
+                    } else if (runsCodex) {
+                        // By id when the rollout is identifiable — the picker
+                        // otherwise, which asks the user to find it.
+                        const rolloutId = codexRollout ? await trajectoryExtract.codexRolloutId(codexRollout) : null;
+                        command = rolloutId ? `codex resume ${shq(rolloutId)}` : 'codex resume';
+                        kind = 'codex';
+                    }
 
                     // The fork inherits the source's origin: forking an agent
                     // worker makes another agent worker; forking your own
@@ -11149,10 +11250,11 @@ happens until someone clicks it.
                         displayName: forkName,
                         cwd,
                         createdBy,
-                        forkedFrom: source
+                        forkedFrom: source,
+                        ...(handoff ? { handoffFrom: sourceKind, handoffTo: wantTarget } : {})
                     });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, name: forkName, internalName: forkInternal, kind }));
+                    res.end(JSON.stringify({ ok: true, name: forkName, internalName: forkInternal, kind, target: handoff ? wantTarget : sourceKind, extract }));
                 } catch (e) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: e?.message || 'Fork failed' }));
@@ -11398,6 +11500,7 @@ happens until someone clicks it.
                     fs.mkdirSync(dir, { recursive: true });
                     const filePath = uniqueUploadPath(dir, safeUploadFilename(parsedUrl.query.filename));
                     fs.writeFileSync(filePath, Buffer.concat(chunks), { mode: 0o600 });
+                    enforceUploadBudget();   // every upload pays its way; hourly timer covers idle days
                     log(`[upload] ${getSessionDisplayName(internalName) || internalName}: ${path.basename(filePath)} (${received} bytes)`, DIM);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, path: filePath, name: path.basename(filePath), bytes: received }));
@@ -18302,6 +18405,12 @@ async function main() {
         };
         setTimeout(runRestoreReconcile, 12000).unref?.();
         setInterval(runRestoreReconcile, 30000).unref?.();
+
+        // Uploads cache: age out + size-cap, once at boot (a daemon that sat
+        // idle for a week still cleans up) and then hourly. Cheap: one stat
+        // per file, and a no-op when the folder doesn't exist yet.
+        setTimeout(enforceUploadBudget, 20000).unref?.();
+        setInterval(enforceUploadBudget, 3600000).unref?.();
     }
 
     if (DAEMON_FLAG) {

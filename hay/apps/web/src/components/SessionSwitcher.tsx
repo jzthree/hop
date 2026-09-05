@@ -2299,6 +2299,38 @@ export const SessionSwitcher = ({
     });
   };
 
+  // Fork (same tool) or hand off (target names the other tool). One call
+  // for both so the two can never disagree about the endpoint.
+  const forkSession = async (s: SwitcherSession, target?: "claude" | "codex") => {
+    setSheet(null);
+    onNotice(target ? `Handing off to ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
+    try {
+      const res = await fetch("/api/sessions/fork", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internalName: sessionKey(s), ...(target ? { target } : {}) })
+      });
+      const data = await res.json().catch(() => ({} as { error?: string; name?: string; kind?: string; extract?: { turns?: number; bytes?: number } }));
+      if (!res.ok) {
+        onNotice(data.error || (target ? "Handoff failed" : "Fork failed"));
+        return;
+      }
+      if (data.kind === "handoff") {
+        const kb = Math.max(1, Math.round((data.extract?.bytes || 0) / 1024));
+        onNotice(`${data.name} — ${data.extract?.turns ?? "?"} turns handed off (${kb} KB); it reads them first`);
+      } else {
+        onNotice(
+          data.kind === "claude" ? `Forked conversation → ${data.name}`
+            : data.kind === "codex" ? `${data.name} opened — resuming the conversation`
+            : `Forked → ${data.name} (new shell, same directory)`
+        );
+      }
+      onRefresh();
+    } catch {
+      onNotice(target ? "Handoff failed" : "Fork failed");
+    }
+  };
+
   const submitRename = async (event: FormEvent) => {
     event.preventDefault();
     if (!sheet) return;
@@ -3346,35 +3378,24 @@ export const SessionSwitcher = ({
                 {!isCurrentSession(sheetSession) && (
                   <button type="button" onClick={() => { setSheet(null); onSwitch(sheetSession); }}>Open full screen</button>
                 )}
-                <button
-                  type="button"
-                  onClick={async () => {
-                      setSheet(null);
-                      onNotice("Forking…");
-                      try {
-                        const res = await fetch("/api/sessions/fork", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ internalName: sessionKey(sheetSession) })
-                        });
-                        const data = await res.json().catch(() => ({} as { error?: string; name?: string; kind?: string }));
-                        if (!res.ok) {
-                          onNotice(data.error || "Fork failed");
-                          return;
-                        }
-                        onNotice(
-                          data.kind === "claude" ? `Forked conversation → ${data.name}`
-                            : data.kind === "codex" ? `${data.name} opened — pick the conversation to resume`
-                            : `Forked → ${data.name} (new shell, same directory)`
-                        );
-                        onRefresh();
-                    } catch {
-                      onNotice("Fork failed");
-                    }
-                  }}
-                >
+                <button type="button" onClick={() => { void forkSession(sheetSession); }}>
                   Fork session
                 </button>
+                {/* Crossing tools: the conversation is extracted to a document
+                    the new agent reads first (context handoff, not a resume).
+                    Offered for every terminal — the daemon knows what a
+                    restored session runs better than the process name here —
+                    minus the tool this one is visibly running already. */}
+                {sheetSession.type !== "port" && appLabel(sheetSession) !== "codex" && (
+                  <button type="button" onClick={() => { void forkSession(sheetSession, "codex"); }}>
+                    Continue in Codex…
+                  </button>
+                )}
+                {sheetSession.type !== "port" && appLabel(sheetSession) !== "claude" && (
+                  <button type="button" onClick={() => { void forkSession(sheetSession, "claude"); }}>
+                    Continue in Claude…
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {

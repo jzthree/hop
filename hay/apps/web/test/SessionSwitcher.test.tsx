@@ -425,6 +425,30 @@ describe("manual folders in the wall", () => {
   });
 });
 
+describe("handoff to the other tool", () => {
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("asks the daemon for a codex target and reports the extract", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("digest")) return { ok: false, json: async () => null };
+      if (u === "/api/sessions/fork") {
+        bodies.push(JSON.parse(String(init?.body)));
+        return { ok: true, json: async () => ({ ok: true, name: "alpha-codex", kind: "handoff", target: "codex", extract: { turns: 12, bytes: 40960 } }) };
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    }));
+    render(<SessionSwitcher {...props} open />);
+    fireEvent.click(screen.getAllByRole("button", { name: /More actions for/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Continue in Codex…" }));
+    await vi.waitFor(() => expect(bodies.length).toBe(1));
+    expect(bodies[0]).toMatchObject({ target: "codex" });
+    expect(typeof bodies[0].internalName).toBe("string");
+    await vi.waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("alpha-codex — 12 turns handed off (40 KB); it reads them first"));
+  });
+});
+
 describe("file drop on a wall card", () => {
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 

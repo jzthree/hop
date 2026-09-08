@@ -12,6 +12,7 @@ import {
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { CwdField } from "./CwdField";
@@ -473,6 +474,16 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Same as the full-screen terminal: URLs are links (line-wrapped OAuth
+    // and codex sign-in URLs included). The tile is where most reading
+    // happens now, and a URL you could click full-screen but not here read
+    // as "links don't work in hop". window.open inside the click handler
+    // keeps the popup-blocker happy; the tile's own click handler already
+    // stops the card from treating the click as a switch.
+    term.loadAddon(new WebLinksAddon((event, uri) => {
+      event.preventDefault();
+      window.open(uri, "_blank", "noopener");
+    }));
     term.open(box);
     termRef.current = term;
     fitRef.current = fit;

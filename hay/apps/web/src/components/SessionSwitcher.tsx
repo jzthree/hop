@@ -1636,7 +1636,18 @@ export const SessionSwitcher = ({
   // sessions that vanish drop out; brand-new ones append at the end rather
   // than reshuffling the wall.
   const frozenOrderRef = useRef<{ mode: "tiers" | "project"; hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
-  useEffect(() => { if (!open) frozenOrderRef.current = null; }, [open]);
+  // Search results freeze the same way, per QUERY: the order you see is the
+  // order at the moment you searched. Score ties break on attention and
+  // recency, and manual mode's unplaced rows sort by name, so without this a
+  // bell, an activity tick, a rename, or a fresh tagline re-sorted the
+  // results under the cursor. New matches join at the end; matches that
+  // stop matching drop; a new query, or the user's own drag, recaptures.
+  const frozenQueryRef = useRef<
+    | { mode: "filter"; query: string; manualOrder: string[]; rows: string[] }
+    | { mode: "manual"; query: string; manualOrder: string[]; loose: string[]; folders: Array<{ id: string; rows: string[] }> }
+    | null
+  >(null);
+  useEffect(() => { if (!open) { frozenOrderRef.current = null; frozenQueryRef.current = null; } }, [open]);
   // A non-empty query, whichever render branch the model picks for it.
   const searching = filter.trim().length > 0;
   const model = useMemo(() => {
@@ -1644,7 +1655,48 @@ export const SessionSwitcher = ({
     // wall shows only unparked sessions.
     const pool = filter.trim() ? visibleSessions : wallSessions;
     const live = buildSwitcherModel(pool, currentRoom, filter, sortMode, manualOrder, folders);
-    if (!open || (live.mode !== "tiers" && live.mode !== "project")) return live;
+    if (!open) return live;
+    const query = filter.trim();
+    if (live.mode === "filter" || (live.mode === "manual" && query)) {
+      const fq = frozenQueryRef.current;
+      const stale = !fq || fq.mode !== live.mode || fq.query !== query || fq.manualOrder !== manualOrder;
+      if (stale) {
+        frozenQueryRef.current = live.mode === "filter"
+          ? { mode: "filter", query, manualOrder, rows: live.rows.map(sessionKey) }
+          : {
+              mode: "manual", query, manualOrder,
+              loose: live.rows.map(sessionKey),
+              folders: live.folders.map((f) => ({ id: f.folder.id, rows: f.rows.map(sessionKey) }))
+            };
+        return live;
+      }
+      // Resolve against what still MATCHES (the live rows), never the whole
+      // pool: a session that stopped matching leaves, one that started
+      // matching joins at the end, and nothing in between moves.
+      const pin = (frozenKeys: string[], liveRows: SwitcherSession[]) => {
+        const byKey = new Map(liveRows.map((r) => [sessionKey(r), r]));
+        const known = new Set(frozenKeys);
+        return [
+          ...frozenKeys.map((k) => byKey.get(k)).filter((r): r is SwitcherSession => !!r),
+          ...liveRows.filter((r) => !known.has(sessionKey(r)))
+        ];
+      };
+      if (live.mode === "filter" && fq.mode === "filter") {
+        return { mode: "filter" as const, rows: pin(fq.rows, live.rows) };
+      }
+      if (live.mode === "manual" && fq.mode === "manual") {
+        return {
+          mode: "manual" as const,
+          rows: pin(fq.loose, live.rows),
+          folders: live.folders.map((f) => {
+            const fz = fq.folders.find((x) => x.id === f.folder.id);
+            return fz ? { folder: f.folder, rows: pin(fz.rows, f.rows) } : f;
+          })
+        };
+      }
+      return live;
+    }
+    if (live.mode !== "tiers" && live.mode !== "project") return live;
     let frozen = frozenOrderRef.current;
     if (!frozen || frozen.mode !== live.mode) {
       frozen = live.mode === "tiers"

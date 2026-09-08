@@ -247,7 +247,11 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     const onKey = (event: KeyboardEvent) => {
       if (docked) {
         const el = panelRef.current;
-        const target = event.target as Node | null;
+        // A keydown dispatched on `window` (tests do this; so does a page with
+        // nothing focused) has a target that is not a Node, and jsdom throws
+        // on contains() for it — which took the whole test run down as an
+        // unhandled error. Only a Node can be inside the panel.
+        const target = event.target instanceof Node ? event.target : null;
         const inside = !!el && ((target && el.contains(target))
           || (document.activeElement && el.contains(document.activeElement)));
         if (!inside) return;

@@ -307,6 +307,50 @@ describe("context menus", () => {
   });
 });
 
+describe("search results hold their order", () => {
+  afterEach(() => { document.body.innerHTML = ""; localStorage.removeItem("hay_sort_mode"); });
+  const mk = (name: string, activity: number, extra: Partial<SwitcherSession> = {}): SwitcherSession =>
+    ({ name, displayName: name, internalName: name, active: true, starting: false, createdBy: "user", lastActivityAt: activity, ...extra });
+  const order = () => Array.from(document.querySelectorAll(".switcher-card[data-session-key]")).map((c) => c.getAttribute("data-session-key"));
+  const typeQuery = (q: string) => {
+    const input = document.querySelector(".switcher-top input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: q } });
+  };
+  // Both names match "vault" as a prefix with equal score, so the tie-break
+  // (attention, then recency) decides — which is exactly what must not keep
+  // deciding after the search.
+  const two = (a: Partial<SwitcherSession> = {}, b: Partial<SwitcherSession> = {}) =>
+    [mk("vault-a", 1000, a), mk("vault-b", 2000, b)];
+
+  it("in Recent mode: activity, bells and new matches do not reorder the results you searched", () => {
+    localStorage.setItem("hay_sort_mode", "recent");
+    const view = render(<SessionSwitcher {...props} sessions={two()} open />);
+    typeQuery("vault");
+    expect(order()).toEqual(["vault-b", "vault-a"]); // recency ranks b first — at search time
+    // a becomes the most active and rings a bell: it would now rank first.
+    view.rerender(<SessionSwitcher {...props} sessions={two({ lastActivityAt: 99000, bellUnseen: true })} open />);
+    expect(order()).toEqual(["vault-b", "vault-a"]);
+    // A new match joins at the end; one that stops matching leaves.
+    view.rerender(<SessionSwitcher {...props} sessions={[...two({ lastActivityAt: 99000 }), mk("vault-c", 500000)]} open />);
+    expect(order()).toEqual(["vault-b", "vault-a", "vault-c"]);
+    view.rerender(<SessionSwitcher {...props} sessions={[mk("vault-a", 99000), mk("vault-c", 500000)]} open />);
+    expect(order()).toEqual(["vault-a", "vault-c"]);
+    // A new query is a new search: ranked fresh.
+    typeQuery("vault-c");
+    expect(order()).toEqual(["vault-c"]);
+  });
+
+  it("in Manual mode: a rename mid-search does not move the card", () => {
+    localStorage.setItem("hay_sort_mode", "manual");
+    const view = render(<SessionSwitcher {...props} sessions={two()} open />);
+    typeQuery("vault");
+    expect(order()).toEqual(["vault-a", "vault-b"]); // unplaced rows: by name at search time
+    // a is renamed to something that sorts after b (and still matches).
+    view.rerender(<SessionSwitcher {...props} sessions={two({ displayName: "zz-vault-a" })} open />);
+    expect(order()).toEqual(["vault-a", "vault-b"]);
+  });
+});
+
 describe("manual folders in the wall", () => {
   afterEach(() => { document.body.innerHTML = ""; });
   const folders = [{ id: "f1", name: "Filed" }];

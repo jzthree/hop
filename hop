@@ -2650,21 +2650,8 @@ const CLAUDE_UI_RE = /bypass permissions on|shift\+tab to cycle|Welcome back|esc
 // sat at the dialog for two weeks (lightscope, Neptune). Whitespace-
 // tolerant because the grid text can run words together across wraps.
 const TRUST_PROMPT_RE = /Quick\s*safety\s*check|Yes,?\s*I\s*trust\s*this\s*folder|Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust/i;
-// The directory the dialog is asking about, so an answer is only ever given
-// for the workspace the session was launched in - never for wherever a
-// shell happened to wander.
-function trustDialogWorkspace(screenText) {
-    const m = /Accessing\s*workspace:?\s*(\/[^\s\u2502\u2500]+)/i.exec(String(screenText || ''));
-    return m ? m[1].replace(/\/+$/, '') : null;
-}
-function samePath(a, b) {
-    const norm = (p) => {
-        let v = String(p || '').replace(/\/+$/, '');
-        try { v = fs.realpathSync(v); } catch (e) { /* keep as-is */ }
-        return v;
-    };
-    return !!a && !!b && norm(a) === norm(b);
-}
+// Trust-dialog reading lives in lib/trust-dialog.js so it can be unit-tested.
+const { trustDialogWorkspace, trustDialogAnswer, samePath } = require('./lib/trust-dialog.js');
 function getResumeMode() {
     const mode = String(getHopConfig().resume_mode || '').toLowerCase();
     return mode === 'summary' || mode === 'ask' ? mode : 'full';
@@ -6109,7 +6096,34 @@ async function sweepRestoreReconcile() {
             // The screen and foreground name lie for argv-launched sessions.
             const procUp = claudeProcessRunning(exp.sessionId);
             const running = !isShellProcName(entry.foregroundProcess);
-            const claudeUp = procUp || running || CLAUDE_UI_RE.test(text);
+            const alive = procUp || running;
+            // A trust dialog is only a dialog while claude is up to show it.
+            // Checked BEFORE "converged": a live claude parked at the dialog
+            // used to be declared running and left there forever, while the
+            // dialog's text lingering on a dead session's screen — the
+            // process gone, a shell prompt under it — was "answered" every
+            // tick, typing digits into the shell (motif, 2026-09-10).
+            const settledMs = now - Math.max(exp.lastDriveAt || 0, exp.recordedAt || 0);
+            if (TRUST_PROMPT_RE.test(text) && alive && settledMs >= 6000) {
+                const trust = trustDialogAnswer(text, exp.cwd);
+                if (trust.ours) {
+                    if (!exp.trustAnsweredAt || now - exp.trustAnsweredAt > 20_000) {
+                        try {
+                            const e2 = await attachTerminalApiClient(name, exp.displayName, { actor: 'system', label: 'reconcile' });
+                            try { sendTerminalInput(e2, trust.input); } finally { try { closeTerminalApiEntry(e2.id); } catch (e) {} }
+                            exp.trustAnsweredAt = now;
+                            changed = true;
+                            log(`[reconcile] ${exp.displayName}: accepted ${trust.preapproval ? 'pre-approved permissions' : 'workspace trust'} (${trust.how})`, DIM);
+                        } catch (e) { /* try again next tick */ }
+                    }
+                    continue;
+                }
+                // Trust dialog for some OTHER directory — not ours to answer.
+                exp.status = 'needs-attention';
+                exp.reason = `claude is asking to trust ${trust.asked || 'a directory'}, not ${exp.cwd}`;
+                changed = true;
+                continue;
+            const claudeUp = alive || CLAUDE_UI_RE.test(text);
             if (claudeUp) {
                 exp.status = 'converged';
                 exp.convergedAt = now;
@@ -6117,23 +6131,6 @@ async function sweepRestoreReconcile() {
                 log(`[reconcile] ${exp.displayName}: verified running`, DIM);
                 continue;
             }
-            // A dialog: the resume sweep answers resume prompts already; the
-            // trust dialog we answer here (only for this session's own cwd).
-            if (TRUST_PROMPT_RE.test(text)) {
-                const asked = trustDialogWorkspace(text);
-                if (asked && samePath(asked, exp.cwd)) {
-                    try {
-                        const e2 = await attachTerminalApiClient(name, exp.displayName, { actor: 'system', label: 'reconcile' });
-                        try { sendTerminalInput(e2, '1\r'); } finally { try { closeTerminalApiEntry(e2.id); } catch (e) {} }
-                        log(`[reconcile] ${exp.displayName}: accepted workspace trust`, DIM);
-                    } catch (e) { /* try again next tick */ }
-                    continue;
-                }
-                // Trust dialog for some OTHER directory — not ours to answer.
-                exp.status = 'needs-attention';
-                exp.reason = `claude is asking to trust ${asked || 'a directory'}, not ${exp.cwd}`;
-                changed = true;
-                continue;
             }
             if (RESUME_PROMPT_RE.test(text)) continue; // resume sweep owns this
             // A busy non-shell foreground we did not recognise as claude: the
@@ -6560,18 +6557,32 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                     const grid = await getRoomGridPreviewShared(job.plan.internalName);
                     screen = String(grid?.text || '');
                 } catch (e) { continue; }
-                if (TRUST_PROMPT_RE.test(screen) && !job.trustAnswered) {
+                // Only a LIVE dialog: the same text lingers on screen after
+                // claude has exited (or before the new one has drawn), and
+                // answering it then types into a shell or into a claude that
+                // has not asked yet.
+                // ...and only once the fresh claude has had time to DRAW it:
+                // the previous claude's dialog text is still on screen for the
+                // first seconds after launch, and an answer sent then reaches
+                // a claude that has not asked yet (the Enter lands on whatever
+                // it shows next — for this dialog, the default "No, exit").
+                const dialogLive = TRUST_PROMPT_RE.test(screen) && Date.now() - job.since >= 6000 && (() => {
+                    const recId = readClaudeSessionRecord(job.plan.internalName)?.sessionId;
+                    const fg = getRuntimeSessionMetadata(job.plan.internalName)?.foregroundProcess;
+                    return (!!recId && claudeProcessRunning(recId)) || (!!fg && !isShellProcName(fg));
+                })();
+                if (dialogLive && !job.trustAnswered) {
                     // Answer only for the workspace this session was launched
                     // in. A dialog naming any other directory is not ours to
                     // wave through - leave it on screen and say so.
-                    const asked = trustDialogWorkspace(screen);
-                    if (asked && samePath(asked, job.plan.cwd)) {
-                        try { sendTerminalInput(job.entry, '1\r'); } catch (e) { finish('write-failed'); continue; }
-                        log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: accepted workspace trust for ${asked}`, DIM);
+                    const trust = trustDialogAnswer(screen, job.plan.cwd);
+                    if (trust.ours) {
+                        try { sendTerminalInput(job.entry, trust.input); } catch (e) { finish('write-failed'); continue; }
+                        log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: accepted ${trust.preapproval ? 'pre-approved permissions' : `workspace trust for ${trust.asked}`} (${trust.how})`, DIM);
                         job.trustAnswered = true;
                         job.since = Date.now();
                     } else {
-                        log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: claude is asking to trust ${asked || 'an unknown directory'}, not ${job.plan.cwd} — left for you to answer`, YELLOW);
+                        log(`  ${getSessionDisplayName(job.plan.internalName) || job.plan.internalName}: claude is asking to trust ${trust.asked || 'an unknown directory'}, not ${job.plan.cwd} — left for you to answer`, YELLOW);
                         finish('trust-prompt');
                     }
                     continue;
@@ -15362,7 +15373,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
     'mail', 'registration', 'canonical'
 ];
 
@@ -15485,6 +15496,7 @@ const HELP_SECTIONS = [
     ] },
     { title: 'Restore', lines: [
         `hop restore [--dry-run] [--agents]  Recreate your saved sessions, resuming claude conversations (--agents includes agent-created ones)`,
+        `hop recover [<session>]     Bring back the agent that last ran here: inside a session, relaunch its conversation in this terminal`,
         `hop restore <name>...     Redo just those sessions — even live ones, if they hold only an idle shell or a startup dialog`,
         `hop restore --health      Show sessions the reconciler could not bring back on its own, and why`,
         `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
@@ -16096,6 +16108,61 @@ async function main() {
     // Handle `hop resume-waiting` — answer claude's resume question for any
     // session currently parked on it (sessions restored before this existed,
     // or restored with resume_mode=ask and since reconsidered).
+    // hop recover [<session>] — bring back the agent that last ran in a
+    // session. Inside a session with no argument, it relaunches that
+    // session's own conversation IN THIS TERMINAL (the same flag-preserving
+    // command `hop restore` would use), so a claude that exited — crash,
+    // /exit, a wrong answer to a dialog — is one command away, and any
+    // dialog it shows is answered by the human sitting there. Named from
+    // anywhere, it is `hop restore <name>`.
+    if (process.argv[2] === 'recover') {
+        const args = process.argv.slice(3);
+        const dryRun = args.includes('--dry-run') || args.includes('-n');
+        const named = args.find((a) => !a.startsWith('-')) || null;
+        const here = process.env.HOP_SESSION || null;
+        if (!named && !here) {
+            log(`Run ${CYAN}hop recover${RESET} inside a hop session, or name one: ${CYAN}hop recover <session>${RESET}`, YELLOW);
+            process.exit(1);
+        }
+        const target = named ? (resolveSessionInternalName(named, named) || named) : here;
+        if (target !== here) {
+            // Not this terminal: the daemon relaunches it in its own room.
+            const child = spawn(process.execPath, [__filename, 'restore', ...(dryRun ? ['--dry-run'] : []), named], { stdio: 'inherit' });
+            child.on('exit', (code) => process.exit(code ?? 1));
+            return;
+        }
+        const display = getSessionDisplayName(target) || target;
+        const meta = readClaudeSessionMeta(target);
+        const cfg = getSessionConfig(target);
+        const cwd = meta?.cwd || cfg?.cwd || process.cwd();
+        const rec = readClaudeSessionRecord(target);
+        if (rec?.sessionId && claudeProcessRunning(rec.sessionId)) {
+            log(`${display}: its claude conversation ${String(rec.sessionId).slice(0, 8)}… is already running in this session.`, YELLOW);
+            process.exit(1);
+        }
+        const plan = restorePlanForSession({ internalName: target, cwd, startup: cfg?.startup, autoStart: cfg?.autoStart });
+        let command = plan?.command || null;
+        let kind = command ? 'claude' : null;
+        if (!command) {
+            // No claude record: a codex conversation is found by its rollout.
+            const rollout = resolveCodexTranscriptByCwd(cwd);
+            const rolloutId = rollout ? await trajectoryExtract.codexRolloutId(rollout) : null;
+            if (rolloutId) {
+                command = `codex resume '${rolloutId.replace(/'/g, `'\\''`)}'`;
+                kind = 'codex';
+            }
+        }
+        if (!command) {
+            log(`${display}: nothing to recover — no claude or codex conversation is recorded for this session${plan?.warning ? ` (${plan.warning})` : ''}.`, YELLOW);
+            process.exit(1);
+        }
+        log(`${dryRun ? 'Would recover' : 'Recovering'} ${BOLD}${display}${RESET} (${kind}) in this terminal:`, RESET);
+        log(`  ${DIM}${command}${RESET}`, RESET);
+        if (dryRun) process.exit(0);
+        const child = spawn('/bin/zsh', ['-lc', command], { stdio: 'inherit', cwd: plan?.cwd || cwd, env: process.env });
+        child.on('exit', (code, signal) => process.exit(signal ? 1 : (code ?? 0)));
+        return;
+    }
     if (process.argv[2] === 'resume-waiting') {
         const state = isServerRunning();
         if (!state) { printNotRunningError(); process.exit(1); }
@@ -16258,7 +16325,7 @@ async function main() {
             log(`${na.length} session(s) need your attention:`, YELLOW);
             for (const it of na) {
                 log(`  ${YELLOW}⚠${RESET} ${it.name}  ${DIM}${it.reason}${RESET}`, RESET);
-                log(`      ${DIM}redo: ${CYAN}hop restore ${it.name}${RESET}`, RESET);
+                log(`      ${DIM}redo: ${CYAN}hop restore ${it.name}${RESET}${DIM}, or inside it: ${CYAN}hop recover${RESET}`, RESET);
             }
             process.exit(0);
         }

@@ -73,6 +73,12 @@ export type ClientInfo = {
   // larger requests are a deliberate ask for scrollback DEPTH and keep the
   // raw-tail replay. Unset = raw tail at the room default (CLI reattach).
   replayBytes?: number;
+  // "attach" = the client claims the size AS it connects — the same
+  // election a resize message with claim:"attach" runs, but BEFORE the
+  // snapshot goes out, so the first frame the client renders is already
+  // its own size. A phone opening a session a desktop was driving used to
+  // paint the desktop's grid and reflow ~half a second later.
+  sizeClaim?: "attach";
   // False = skip the equal-size attach "wiggle" (the −1/+1 column repaint
   // nudge). Wall tiles decline it: they arrive already showing the current
   // grid (the daemon's headless screen, complete — not a raw byte tail), so
@@ -435,6 +441,13 @@ export class Room extends EventEmitter {
         created
       } satisfies ServerMessage)
     );
+
+    // Connect-time size claim (see ClientInfo.sizeClaim): after hello, so
+    // the client can tell the resulting active_size is its own, and before
+    // the snapshot, so the replay is already at the claimed size.
+    if (info.sizeClaim === "attach") {
+      this.handleResize(client, info.cols, info.rows, "attach");
+    }
 
     socket.send(
       JSON.stringify({
@@ -1317,17 +1330,26 @@ export class Room extends EventEmitter {
    * like the attach path so cursor/mouse state present identically too.
    */
   serializeScreen(
-    callback: (result: { data: string; cols: number; rows: number } | null) => void,
+    callback: (result: { data: string; cols: number; rows: number; offset: number } | null) => void,
     scrollback = 200
   ) {
     if (this.outputBytes === 0) { callback(null); return; }
     const grid = this.ensureGrid();
     if (!grid) { callback(null); return; }
+    // The output cursor this screen reflects: everything in the ring NOW is
+    // queued into the grid ahead of the serialize marker, everything that
+    // arrives later lands behind it. A consumer that keeps its own parser
+    // (the daemon's preview grids) continues from here with /output?since=
+    // and never misses or repeats a byte — which is what let it seed from a
+    // whole screen instead of a raw tail cut mid-frame (a differential TUI
+    // never re-sends the cells such a tail lost: Codex previews stayed
+    // partially wrong until the app repainted, 2026-09-09).
+    const offset = this.outputStart + this.outputBytes;
     grid.serialize((serialized) => {
       if (serialized === null) { callback(null); return; }
       const modeSeq = (this.mouseReporting ? "\x1b[?1002h" + (this.mouseSgr ? "\x1b[?1006h" : "") : "")
         + (this.cursorHidden ? "\x1b[?25l" : "");
-      callback({ data: "\x1bc" + serialized + modeSeq, cols: this.activeCols, rows: this.activeRows });
+      callback({ data: "\x1bc" + serialized + modeSeq, cols: this.activeCols, rows: this.activeRows, offset });
     }, scrollback);
   }
 
@@ -1471,7 +1493,7 @@ export class RoomManager {
 
   serializeRoomScreen(
     id: string,
-    callback: (result: { data: string; cols: number; rows: number } | null) => void,
+    callback: (result: { data: string; cols: number; rows: number; offset: number } | null) => void,
     scrollback?: number
   ) {
     const room = this.rooms.get(id);

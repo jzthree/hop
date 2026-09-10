@@ -5248,6 +5248,89 @@ function readTurnCount(internalName) {
 // surfaces (dedupe + seen-marks already handle "one finish, one alert").
 // Baselined at arm time (notifyBaseTurn) so arming a long-lived session does
 // not fire a single notification for its entire back history.
+// The ASK record the Claude hook writes when the agent stops to ask the human
+// something (permission, a question, a plan to approve): {count, at, type,
+// message}. Always on — unlike a finished turn, a question is worth a buzz by
+// definition — its count rides bellSeq like a bell, and the message travels
+// beside it so the phone can say what is being asked.
+function readAsk(internalName) {
+    try {
+        const a = JSON.parse(fs.readFileSync(
+            path.join(CLAUDE_SESSIONS_DIR, `${internalName}.ask`), 'utf8'));
+        if (!a || !Number.isInteger(a.count) || a.count < 0) return null;
+        const atMs = Date.parse(a.at);
+        return {
+            count: a.count,
+            at: Number.isFinite(atMs) ? atMs : null,
+            type: typeof a.type === 'string' ? a.type : '',
+            message: typeof a.message === 'string' ? a.message : ''
+        };
+    } catch (e) { return null; }
+}
+// One read per session per second at most: /api/sessions maps every field
+// through askOf() and the list is polled by every client.
+const askMemo = new Map();
+function askOf(internalName) {
+    const now = Date.now();
+    const hit = askMemo.get(internalName);
+    if (hit && now - hit.t < 1000) return hit.v;
+    const v = readAsk(internalName);
+    askMemo.set(internalName, { t: now, v });
+    return v;
+}
+// When the agent's last turn ended, from the same .turn record (Claude's
+// Stop hook, Codex's notify chain). Used to attribute a bell: Codex rings
+// the terminal bell at the end of EVERY turn, and a bell that lands within
+// seconds of the turn record is "finished", not "needs you".
+function readTurnAt(internalName) {
+    try {
+        const at = Date.parse(JSON.parse(fs.readFileSync(
+            path.join(CLAUDE_SESSIONS_DIR, `${internalName}.turn`), 'utf8')).at);
+        return Number.isFinite(at) ? at : 0;
+    } catch (e) { return 0; }
+}
+// The newest published view's time (ms) for a session, from the manifest
+// the views summary already reads. `hop view` rings one bell per publish.
+function latestViewAtMs(internalName) {
+    try {
+        const items = JSON.parse(fs.readFileSync(path.join(VIEWS_DIR, 'manifest.json'), 'utf8')).items || [];
+        let best = 0, title = '';
+        for (const it of items) {
+            if (it.session !== internalName) continue;
+            const ms = Number(it.mtime) < 1e11 ? Number(it.mtime) * 1000 : Number(it.mtime);
+            if (ms > best) { best = ms; title = it.title || it.name || ''; }
+        }
+        return { at: best, title };
+    } catch (e) { return { at: 0, title: '' }; }
+}
+// WHY a session wants attention — the thing Jian could not find when the UI
+// said a Codex session "needs your input" and the screen showed a finished
+// turn. Decided from timestamps hop already has, newest signal first:
+//   ask      the agent asked (hook record; also `hop notify`) — note = message
+//   finished the bell landed with the turn record (Codex rings at turn end)
+//   view     the bell landed with a `hop view` publish — note = the title
+//   bell     a bell nothing explains
+function attentionReason(internalName, lastBellAt, lastActivityAt) {
+    const ask = askOf(internalName);
+    const now = Date.now();
+    if (ask && ask.at && now - ask.at < 15 * 60 * 1000) {
+        return { reason: 'ask', note: ask.message || '', askType: ask.type || '' };
+    }
+    const bell = Number(lastBellAt) || 0;
+    if (bell > 0) {
+        const turnAt = readTurnAt(internalName);
+        if (turnAt && Math.abs(bell - turnAt) <= 4000) return { reason: 'finished', note: '' };
+        const view = latestViewAtMs(internalName);
+        if (view.at && Math.abs(bell - view.at) <= 4000) return { reason: 'view', note: view.title };
+        // Still producing output: an agent that needs you is QUIET. Codex
+        // rings mid-turn too (six bells in four minutes of "Working…" on
+        // angler-codex) — those are pings, not questions.
+        const active = Number(lastActivityAt) || 0;
+        if (active && now - active < 15000) return { reason: 'working', note: '' };
+        return { reason: 'bell', note: '' };
+    }
+    return { reason: '', note: '' };
+}
 function finishBump(internalName, config) {
     if (!config || config.notifyOnFinish !== true) return 0;
     const base = Number.isInteger(config.notifyBaseTurn) ? config.notifyBaseTurn : 0;
@@ -6529,7 +6612,12 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
 // The same script is registered for two events: SessionStart (records the
 // conversation id for `hop restore`) and Stop (bumps a per-turn counter a driver
 // can wait on). See scripts/claude-session-hook.js.
-const CLAUDE_HOOK_EVENTS = ['SessionStart', 'Stop'];
+const CLAUDE_HOOK_EVENTS = ['SessionStart', 'Stop', 'Notification', 'PreToolUse'];
+// Notification (permission prompts, elicitation) and PreToolUse (the two tools
+// that open a dialog and wait) bump the per-session ASK record — "whenever an
+// agent asks me a question, notify me" (Jian). PreToolUse gets a matcher, or
+// the script would run on every tool call for nothing.
+const CLAUDE_HOOK_MATCHERS = { PreToolUse: 'AskUserQuestion|ExitPlanMode' };
 
 function getClaudeSettingsPath() {
     const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -6649,7 +6737,7 @@ function installClaudeHook() {
     for (const ev of CLAUDE_HOOK_EVENTS) {
         if (!Array.isArray(data.hooks[ev])) data.hooks[ev] = [];
         if (!hookGroupsHaveScript(data.hooks[ev])) {
-            data.hooks[ev].push({ matcher: '', hooks: [{ type: 'command', command }] });
+            data.hooks[ev].push({ matcher: CLAUDE_HOOK_MATCHERS[ev] || '', hooks: [{ type: 'command', command }] });
         }
     }
     try {
@@ -6693,6 +6781,65 @@ function removeClaudeHook() {
 // there (e.g. Codex Computer Use) via "--chain <orig...>". TOML is edited
 // line-by-line — `notify` is a top-level key, and we touch only that one line —
 // so the rest of the user's config is never reserialized (and mangled).
+// Codex hooks (Claude-compatible hooks.json at $CODEX_HOME/hooks.json): the
+// PermissionRequest event fires before Codex asks the human to approve a
+// command or network access — the same hop hook script records it as an ASK
+// so the phone buzzes with Codex's own one-line reason. Parity with Claude's
+// Notification/PreToolUse asks. Codex requires the user to TRUST a new hook
+// once, in its `/hooks` screen; until then it does not run.
+function getCodexHooksPath() {
+    return path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hooks.json');
+}
+function codexHookGroupsHaveScript(groups) {
+    return Array.isArray(groups) && groups.some((g) => Array.isArray(g?.hooks) && g.hooks.some(
+        (h) => h && typeof h.command === 'string' && h.command.includes('claude-session-hook.js')
+    ));
+}
+function readCodexHooks() {
+    const p = getCodexHooksPath();
+    try { return { path: p, data: JSON.parse(fs.readFileSync(p, 'utf8')) }; }
+    catch (e) { return { path: p, data: { hooks: {} } }; }
+}
+function codexHookIsInstalled(data) {
+    return codexHookGroupsHaveScript(data?.hooks?.PermissionRequest);
+}
+function installCodexHook() {
+    const { path: p, data } = readCodexHooks();
+    if (codexHookIsInstalled(data)) return { ok: true, already: true, path: p };
+    if (!fs.existsSync(CLAUDE_HOOK_SCRIPT)) return { ok: false, error: `hook script missing: ${CLAUDE_HOOK_SCRIPT}` };
+    data.hooks = data.hooks && typeof data.hooks === 'object' ? data.hooks : {};
+    if (!Array.isArray(data.hooks.PermissionRequest)) data.hooks.PermissionRequest = [];
+    data.hooks.PermissionRequest.push({
+        matcher: '',
+        hooks: [{ type: 'command', command: `${process.execPath} ${CLAUDE_HOOK_SCRIPT}`, timeout: 5,
+                  statusMessage: 'hop: noting the question for your phone' }]
+    });
+    if (!data.description) data.description = 'hop: notify the phone when Codex stops to ask (PermissionRequest)';
+    try {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, JSON.stringify(data, null, 2) + '\n');
+        return { ok: true, already: false, path: p };
+    } catch (e) { return { ok: false, error: e.message }; }
+}
+function removeCodexHook() {
+    const { path: p, data } = readCodexHooks();
+    if (!codexHookIsInstalled(data)) return { ok: true, already: true, path: p };
+    const groups = data.hooks.PermissionRequest;
+    for (const g of groups) {
+        if (Array.isArray(g.hooks)) {
+            g.hooks = g.hooks.filter((h) => !(h && typeof h.command === 'string' && h.command.includes('claude-session-hook.js')));
+        }
+    }
+    data.hooks.PermissionRequest = groups.filter((g) => Array.isArray(g.hooks) && g.hooks.length > 0);
+    if (data.hooks.PermissionRequest.length === 0) delete data.hooks.PermissionRequest;
+    try {
+        if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, JSON.stringify(data, null, 2) + '\n');
+        return { ok: true, already: false, path: p };
+    } catch (e) { return { ok: false, error: e.message }; }
+}
+
 const CODEX_NOTIFY_SCRIPT = path.join(__dirname, 'scripts', 'codex-notify-hook.js');
 function getCodexConfigPath() {
     return path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
@@ -7836,6 +7983,38 @@ setInterval(() => {
     }
 }, 60_000).unref();
 
+// The host's whole current screen for a room (RIS + serialized grid + modes),
+// with the output cursor it reflects. Seeds a daemon preview grid without the
+// mid-frame holes a raw tail carries. null: host unreachable, room gone, or
+// an old host without the endpoint — callers fall back to the tail.
+function fetchHayRoomSerializedScreen(internalName) {
+    const host = hayHostState || readHayHostStateFile();
+    if (!host || !Number.isInteger(host.port) || host.port > 0 === false) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: host.port,
+            path: `/rooms/${encodeURIComponent(internalName)}/serialized`,
+            method: 'GET'
+        }, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                if ((res.statusCode || 0) !== 200) { done(null); return; }
+                try {
+                    const parsed = JSON.parse(data || 'null');
+                    done(parsed && typeof parsed.data === 'string' && parsed.data ? parsed : null);
+                } catch (e) { done(null); }
+            });
+        });
+        req.on('error', () => done(null));
+        req.setTimeout(6000, () => { req.destroy(); done(null); });
+        req.end();
+    });
+}
+
 function fetchHayRoomOutputSince(internalName, since) {
     const host = hayHostState || readHayHostStateFile();
     if (!host || !Number.isInteger(host.port) || host.port <= 0) return Promise.resolve(null);
@@ -7988,7 +8167,7 @@ async function getRoomGridPreview(internalName) {
     const Term = loadHeadlessTerminal();
     if (!Term) return null;
     let grid = roomGrids.get(internalName);
-    const res = await fetchHayRoomOutputSince(internalName, grid ? grid.offset : undefined);
+    let res = await fetchHayRoomOutputSince(internalName, grid ? grid.offset : undefined);
     if (!res) {
         // Host unreachable: an existing grid still holds the last true
         // screen — serve that rather than nothing.
@@ -8000,11 +8179,31 @@ async function getRoomGridPreview(internalName) {
         return null;
     }
     outputSinceProbe.supported = true;
+    // A grid that must (re)start seeds from the host's WHOLE screen, then
+    // continues with deltas from the cursor that screen reflects. Seeding
+    // from a bounded raw tail cut at an arbitrary byte left a differential
+    // TUI (Codex, Claude's inline UI) with holes it never re-sent: previews
+    // stayed partially wrong until the app repainted in full. An old host
+    // without an offset continues from the delta call's cursor instead —
+    // a few bytes may be skipped once, still far better than the tail.
+    const reseed = !grid || res.reset;
+    let seed = null;
+    if (reseed) {
+        const snap = await fetchHayRoomSerializedScreen(internalName);
+        if (snap) {
+            const from = Number.isFinite(Number(snap.offset)) ? Number(snap.offset) : res.offset;
+            const delta = await fetchHayRoomOutputSince(internalName, from);
+            if (delta && !delta.notFound && !delta.reset) {
+                seed = { data: snap.data, cols: Number(snap.cols) || res.cols, rows: Number(snap.rows) || res.rows };
+                res = delta;
+            }
+        }
+    }
     // Generous clamps: rendering NARROWER than the PTY re-wraps every long
     // line into garbage (the old 400 clamp mangled a real 476-col session).
-    const cols = Math.max(2, Math.min(1000, Math.floor(Number(res.cols) || 80)));
-    const rows = Math.max(2, Math.min(200, Math.floor(Number(res.rows) || 24)));
-    if (!grid || res.reset) {
+    const cols = Math.max(2, Math.min(1000, Math.floor(Number((seed || res).cols) || 80)));
+    const rows = Math.max(2, Math.min(200, Math.floor(Number((seed || res).rows) || 24)));
+    if (reseed) {
         disposeRoomGrid(internalName);
         let term;
         try {
@@ -8024,6 +8223,11 @@ async function getRoomGridPreview(internalName) {
         }
         grid = { term, serialize, offset: res.offset, cols, rows, lastUsedAt: Date.now() };
         roomGrids.set(internalName, grid);
+        if (seed) {
+            await new Promise((resolve) => {
+                try { term.write(seed.data, () => resolve()); } catch (e) { resolve(); }
+            });
+        }
         if (roomGrids.size > ROOM_GRID_MAX) {
             let oldestKey = null;
             let oldestAt = Infinity;
@@ -11067,8 +11271,18 @@ happens until someone clicks it.
                 // adds to bellSeq so the phone treats a finished response like a
                 // bell (dedupe/seen-marks make it one alert per finish). Plain
                 // sessions are unaffected — finishBump returns 0.
-                bellSeq: s.bellSeq + finishBump(s.internalName, getEffectiveSessionConfig(s.internalName)),
-                lastBellAt: s.lastBellAt,
+                bellSeq: s.bellSeq + finishBump(s.internalName, getEffectiveSessionConfig(s.internalName))
+                    + (askOf(s.internalName)?.count || 0),
+                // The bell's timestamp advances to the ask's, so clients that
+                // key seen-markers on time (the web) see a question as new.
+                lastBellAt: Math.max(Number(s.lastBellAt) || 0, askOf(s.internalName)?.at || 0) || s.lastBellAt,
+                // Why it wants you (see attentionReason): ask / finished / view / bell.
+                attentionReason: attentionReason(s.internalName, s.lastBellAt, s.lastActivityAt).reason,
+                attentionNote: attentionReason(s.internalName, s.lastBellAt, s.lastActivityAt).note,
+                askSeq: askOf(s.internalName)?.count || 0,
+                askAt: askOf(s.internalName)?.at || null,
+                askType: askOf(s.internalName)?.type || null,
+                askMessage: askOf(s.internalName)?.message || null,
                 shell: s.shell,
                 env: s.env,
                 cols: s.cols,
@@ -13225,6 +13439,9 @@ happens until someone clicks it.
             const rows = parseInt(wsUrl.searchParams.get('rows') || '24', 10);
             const source = wsUrl.searchParams.get('source') || '';
             const claimId = wsUrl.searchParams.get('claim') || null;
+            // Connect-time size claim (hay ClientInfo.sizeClaim): the phone's
+            // first frame at its own size, not a desktop peer's then a reflow.
+            const sizeClaim = wsUrl.searchParams.get('sizeClaim') === 'attach' ? 'attach' : undefined;
             // Client-supplied tab identity; the room evicts a same-key
             // predecessor on attach (reconnect replaces its own ghost).
             const deviceKeyRaw = wsUrl.searchParams.get('device') || '';
@@ -13266,7 +13483,7 @@ happens until someone clicks it.
 
             // Attach client to hay room
             session.room.attachClient(
-                { id: clientId, name: clientName, source, deviceKey, colorIndex, cols, rows },
+                { id: clientId, name: clientName, source, deviceKey, colorIndex, cols, rows, sizeClaim },
                 hay.createSocketAdapter(ws)
             );
         });
@@ -15145,7 +15362,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
+    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
     'mail', 'registration', 'canonical'
 ];
 
@@ -16129,6 +16346,29 @@ async function main() {
     // Stop hook, so "notify me when it finishes" works for Codex sessions too.
     // Installs a WRAPPER into ~/.codex/config.toml that chains to any existing
     // notify (Computer Use), so nothing already there breaks.
+    if (process.argv[2] === 'codex-hook') {
+        const sub = process.argv[3] || 'status';
+        if (sub === 'install') {
+            const r = installCodexHook();
+            if (!r.ok) { log(`Failed to install Codex hook: ${r.error}`, RED); process.exit(1); }
+            log(r.already ? `Codex PermissionRequest hook already installed (${r.path}).`
+                          : `${GREEN}Installed${RESET} Codex PermissionRequest hook → ${r.path}`, RESET);
+            log(`Codex runs a new hook only after you trust it once: in Codex, type ${CYAN}/hooks${RESET} and choose Trust.`, DIM);
+            process.exit(0);
+        }
+        if (sub === 'remove') {
+            const r = removeCodexHook();
+            if (!r.ok) { log(`Failed to remove Codex hook: ${r.error}`, RED); process.exit(1); }
+            log(r.already ? `Codex PermissionRequest hook was not installed.` : `${GREEN}Removed${RESET} Codex PermissionRequest hook from ${r.path}`, RESET);
+            process.exit(0);
+        }
+        const { path: p, data } = readCodexHooks();
+        log(codexHookIsInstalled(data)
+            ? `${GREEN}✓${RESET} Codex PermissionRequest hook installed (${p}) — trusted in Codex's /hooks?`
+            : `${YELLOW}!${RESET} Codex PermissionRequest hook not installed. Run ${CYAN}hop codex-hook install${RESET} to get a phone notification when Codex asks.`, RESET);
+        process.exit(0);
+    }
+
     if (process.argv[2] === 'codex-notify') {
         const sub = process.argv[3] || 'status';
         if (sub === 'install') {
@@ -16405,6 +16645,19 @@ async function main() {
         if (!msg) {
             log('Usage: hop notify <why you need the human>', YELLOW);
             process.exit(1);
+        }
+        // The message rides the ASK record too, so the phone can say WHAT is
+        // needed instead of a bare "wants you" (see readAsk / attentionReason).
+        const hs = process.env.HOP_SESSION;
+        if (hs && /^[A-Za-z0-9_-]+$/.test(hs)) {
+            try {
+                const file = path.join(CLAUDE_SESSIONS_DIR, `${hs}.ask`);
+                let count = 0;
+                try { count = JSON.parse(fs.readFileSync(file, 'utf8')).count || 0; } catch (e) { /* first */ }
+                fs.mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true });
+                fs.writeFileSync(file, JSON.stringify({ sessionId: null, count: count + 1,
+                    at: new Date().toISOString(), type: 'notify', message: msg.slice(0, 300) }));
+            } catch (e) { /* the bell still rings */ }
         }
         process.stdout.write(`\n\u2691 NEEDS YOU: ${msg}\n`);
         process.stdout.write('\x07');

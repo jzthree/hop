@@ -121,6 +121,31 @@ describe("Room", () => {
     expect(ptyInstance!.resizes.length).toBe(before);
   });
 
+  it("a connect-time size claim sizes the PTY before the snapshot goes out", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("claim", { cols: 120, rows: 40 }, "/tmp");
+    // A desktop is driving the size, and the session has painted something
+    // (a room with no output sends no snapshot at all).
+    room.attachClient({ id: "desk", name: "Desk", colorIndex: 0, cols: 120, rows: 40 }, new FakeSocket());
+    ptyInstance!.emit("$ ls\r\nREADME.md\r\n");
+    // ...and a phone opens the session, claiming its own size as it attaches.
+    const phone = new FakeSocket();
+    room.attachClient({ id: "phone", name: "iPhone", colorIndex: 1, cols: 60, rows: 30, sizeClaim: "attach" }, phone);
+    expect(ptyInstance!.resizes.some((r) => r.cols === 60 && r.rows === 30)).toBe(true);
+    const types = readMessages(phone).map((m) => m.type);
+    const sized = readMessages(phone).findIndex((m) => m.type === "active_size" && m.cols === 60 && m.rows === 30);
+    const snapshot = types.indexOf("snapshot");
+    expect(sized).toBeGreaterThanOrEqual(0);
+    expect(snapshot).toBeGreaterThan(sized);
+    // The phone owns the size: the active_size it receives names it.
+    expect(readMessages(phone).some((m) => m.type === "active_size" && m.clientId === "phone")).toBe(true);
+  });
+
   it("broadcasts pty output to all clients", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {
@@ -861,6 +886,19 @@ describe("Room", () => {
       expect(String(snapshot.data)).not.toContain("ROW-1");
       expect(String(snapshot.data)).toContain("ROW-4");
       expect(String(snapshot.data)).toContain("ROW-5");
+    });
+
+    it("serializeScreen reports the output cursor the screen reflects, so a delta consumer can continue exactly", async () => {
+      const { room, pty } = await setup("offset");
+      pty().emit("hello\r\n");
+      const first = await new Promise<any>((r) => room.serializeScreen((x) => r(x)));
+      expect(first.offset).toBe(room.getOutputSince(undefined).offset);
+      pty().emit("more");
+      const second = await new Promise<any>((r) => room.serializeScreen((x) => r(x)));
+      expect(second.offset).toBe(first.offset + 4);
+      const delta = room.getOutputSince(first.offset);
+      expect(delta.reset).toBe(false);
+      expect(delta.data).toBe("more");
     });
 
     it("flags a serialized snapshot as capped when deeper raw history exists", async () => {

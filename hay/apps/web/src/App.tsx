@@ -15,6 +15,7 @@ import { attachScrollFlywheel } from "./utils/scrollFlywheel";
 import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSearch";
 import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
 import { tabTitle } from "./utils/tabTitle";
+import { remoteAppOwnsScreen } from "./utils/echoGuard";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -639,6 +640,11 @@ const App = () => {
   // local viewport scroll is a no-op there — touch scrolling must instead send the
   // app its own scroll keys (PageUp/PageDown). See the mobile touch handler.
   const remoteAltScreenRef = useRef(false);
+  // The other ways an app announces it owns the screen (see utils/echoGuard):
+  // Codex draws in a DECSTBM scroll region on the normal screen inside DEC
+  // 2026 synchronized-output frames, never entering the alternate screen.
+  const remoteScrollRegionRef = useRef(false);
+  const remoteSyncOutputSeenAtRef = useRef(0);
   // Mouse tracking requested by the remote app (?1000/1002/1003) + SGR
   // encoding (?1006). When both are on, touch scrolling drives the app with
   // per-line SGR wheel events (smooth, momentum-capable) instead of Page keys.
@@ -1131,7 +1137,12 @@ const App = () => {
     // the SHELL, where the terminal echoes char-by-char with no redraw to
     // fight. (Reconcile's TUI guard still protects any in-flight echo when the
     // app flips to alt-screen mid-keystroke.)
-    && !remoteAltScreenRef.current
+    && !remoteAppOwnsScreen({
+      altScreen: remoteAltScreenRef.current,
+      mouseReporting: remoteMouseReportingRef.current,
+      scrollRegion: remoteScrollRegionRef.current,
+      syncOutputSeenAt: remoteSyncOutputSeenAtRef.current
+    }, Date.now())
     && !hasActiveOtherTypist(presenceRef.current, clientIdRef.current, typingLastSeenRef.current, Date.now())
     && (collabModeRef.current ? true : controllerIdRef.current === clientIdRef.current);
   const optimisticActive = echoEnabledNow();
@@ -2172,11 +2183,27 @@ const App = () => {
         if (ALT_SCREEN_PARAMS.has(n)) remoteAltScreenRef.current = enabled;
         if (MOUSE_TRACK_PARAMS.has(n)) remoteMouseReportingRef.current = enabled;
         if (n === 1006) remoteMouseSgrRef.current = enabled;
+        // DEC 2026: a synchronized-output frame — only TUIs draw this way.
+        if (n === 2026 && enabled) remoteSyncOutputSeenAtRef.current = Date.now();
       }
       return false; // let xterm's default handler apply the mode
     };
     terminal.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => trackAltScreen(params, true));
     terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => trackAltScreen(params, false));
+    // DECSTBM (CSI t;b r): a scroll region narrower than the screen means an
+    // app is composing the screen itself. Bare CSI r (or RIS) clears it.
+    terminal.parser.registerCsiHandler({ final: 'r' }, (params) => {
+      const top = Number(Array.isArray(params[0]) ? params[0][0] : params[0]) || 1;
+      const bottomRaw = Array.isArray(params[1]) ? params[1][0] : params[1];
+      const bottom = Number(bottomRaw) || terminal.rows;
+      remoteScrollRegionRef.current = !(top <= 1 && bottom >= terminal.rows);
+      return false;
+    });
+    terminal.parser.registerEscHandler({ final: 'c' }, () => {
+      remoteScrollRegionRef.current = false;
+      remoteSyncOutputSeenAtRef.current = 0;
+      return false;
+    });
 
     setTerminalReady(true);
 
@@ -3129,6 +3156,8 @@ const App = () => {
           internalName: s.internalName || s.name,
           lastActivityAt: Number(s.lastActivityAt) || 0,
           bellSeq: Number(s.bellSeq) || 0,
+          attentionReason: typeof s.attentionReason === "string" ? s.attentionReason : "",
+          attentionNote: typeof s.attentionNote === "string" ? s.attentionNote : "",
           foregroundProcess: s.foregroundProcess,
           agentPermitted: s.agentPermitted === true,
           createdBy: s.createdBy === "agent" ? "agent" : "user",

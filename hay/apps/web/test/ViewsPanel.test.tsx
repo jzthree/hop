@@ -28,6 +28,31 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
 describe("ViewsPanel", () => {
+  it("Download saves the stored file itself through a same-origin anchor, in the list and in the preview", async () => {
+    // The row is an <a>, so the button clicks a hidden anchor of its own;
+    // capture what that anchor asked the browser to do.
+    const clicked: Array<{ href: string; download: string }> = [];
+    const origClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      clicked.push({ href: this.getAttribute("href") || "", download: this.download });
+    };
+    try {
+      render(<ViewsPanel onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+      fireEvent.click(screen.getByRole("button", { name: "Download agent-result.md" }));
+      expect(clicked).toEqual([{ href: "/view/Orion/agent-result.md/download", download: "agent-result.md" }]);
+      // Open the preview: its header offers the same download.
+      fireEvent.click(screen.getByText("Views end-to-end").closest("a") as HTMLAnchorElement);
+      const inPreview = screen.getAllByRole("button", { name: "Download agent-result.md" });
+      expect(inPreview.length).toBeGreaterThanOrEqual(2);
+      fireEvent.click(inPreview[inPreview.length - 1]);
+      expect(clicked.length).toBe(2);
+      expect(clicked[1].href).toBe("/view/Orion/agent-result.md/download");
+    } finally {
+      HTMLAnchorElement.prototype.click = origClick;
+    }
+  });
+
   it("a plain click previews IN PLACE; the row stays a real link for modified clicks", async () => {
     render(<ViewsPanel onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());

@@ -10793,8 +10793,12 @@ happens until someone clicks it.
         // file name. The legacy /assets/view/<s>/<f> form redirects here, so
         // an edge-cached response is at worst a redirect, never the bytes.
         const viewMatch = (req.method === 'GET' || req.method === 'HEAD')
-            && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline)?$/);
+            && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download)?$/);
         if (viewMatch) {
+            // /download: the stored file itself, as an attachment — the
+            // markdown an agent wrote rather than the page it renders into,
+            // the PDF rather than the viewer. Same bytes `hop view` copied in.
+            const wantDownload = viewMatch[3] === '/download';
             const viewRoot = path.resolve(VIEWS_DIR);
             const target = path.resolve(path.join(
                 viewRoot, decodeURIComponent(viewMatch[1]), decodeURIComponent(viewMatch[2])));
@@ -10805,11 +10809,31 @@ happens until someone clicks it.
                 return;
             }
             const viewExt = path.extname(target).toLowerCase();
+            // ?download=1 — the FILE, not the page: the bytes the agent
+            // published, under their real name, as an attachment. Rendered
+            // kinds (md/csv/json) come back raw here, not as the HTML the
+            // viewer shows (Jian: "I should be able to download a hop view
+            // item from the UI, right?").
+            if (parsedUrl.query.download === '1') {
+                const rawTypes = { '.md': 'text/markdown; charset=utf-8', '.markdown': 'text/markdown; charset=utf-8',
+                                   '.csv': 'text/csv; charset=utf-8', '.tsv': 'text/tab-separated-values; charset=utf-8',
+                                   '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8' };
+                const dlName = path.basename(target).replace(/["\r\n]/g, '_');
+                res.writeHead(200, {
+                    'Content-Type': rawTypes[viewExt] || STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream',
+                    'Content-Length': fs.statSync(target).size,
+                    'Content-Disposition': `attachment; filename="${dlName}"; filename*=UTF-8''${encodeURIComponent(dlName)}`,
+                    'Cache-Control': 'no-store'
+                });
+                if (req.method === 'HEAD') { res.end(); return; }
+                fs.createReadStream(target).pipe(res);
+                return;
+            }
             // Markdown is rendered, not dumped: an agent's write-up is a
             // RESULT, and handing over a wall of raw asterisks is the "just
             // text" outcome this feature exists to avoid. The stored file
             // stays the markdown the agent wrote.
-            if (VIEW_RENDERED.has(viewExt)) {
+            if (VIEW_RENDERED.has(viewExt) && !wantDownload) {
                 const sess = decodeURIComponent(viewMatch[1]);
                 const file = decodeURIComponent(viewMatch[2]);
                 const caption = readViewMeta(sess)[file]?.title || file;
@@ -10867,7 +10891,15 @@ happens until someone clicks it.
                 fs.createReadStream(target, { start, end }).pipe(res);
                 return;
             }
+            // RFC 6266: an ASCII fallback plus the UTF-8 form for names with
+            // anything else in them.
+            const downloadName = path.basename(target);
+            const asciiName = downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+            const disposition = wantDownload
+                ? { 'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}` }
+                : {};
             res.writeHead(200, {
+                ...disposition,
                 'Content-Type': viewType,
                 'Content-Length': viewSize,
                 'Accept-Ranges': 'bytes'

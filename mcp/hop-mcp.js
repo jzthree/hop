@@ -34,15 +34,47 @@ const CLAUDE_PERMISSION_MODES = new Set([
   'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'manual', 'plan'
 ]);
 
+// Least → most autonomous. The host operator can cap what a spawned worker
+// may run with (config.json "agent_permission_ceiling", or the env var
+// HOP_AGENT_PERMISSION_CEILING; `hop config agent-ceiling <mode>`). Requests
+// above the cap are clamped, never refused, so orchestration keeps working on
+// a locked-down host — the worker just asks more. Default is the historical
+// behaviour (bypassPermissions): MCP access already implies shell access on
+// this machine, so the ceiling is a safety rail against accidents, not a
+// security boundary against an attacker who holds the daemon secret.
+const CLAUDE_PERMISSION_RANK = { plan: 0, manual: 1, acceptEdits: 2, dontAsk: 3, auto: 3, bypassPermissions: 4 };
+const DEFAULT_AGENT_PERMISSION_CEILING = 'bypassPermissions';
+
+function readAgentPermissionCeiling() {
+  const fromEnv = String(process.env.HOP_AGENT_PERMISSION_CEILING || '').trim();
+  if (CLAUDE_PERMISSION_MODES.has(fromEnv)) return fromEnv;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(resolveHomeDir(), '.config.json'), 'utf8'));
+    if (CLAUDE_PERMISSION_MODES.has(cfg.agent_permission_ceiling)) return cfg.agent_permission_ceiling;
+  } catch (e) { }
+  return DEFAULT_AGENT_PERMISSION_CEILING;
+}
+
+function clampPermissionMode(requested, ceiling) {
+  const want = CLAUDE_PERMISSION_MODES.has(requested) ? requested : DEFAULT_AGENT_PERMISSION_CEILING;
+  const cap = CLAUDE_PERMISSION_MODES.has(ceiling) ? ceiling : DEFAULT_AGENT_PERMISSION_CEILING;
+  return CLAUDE_PERMISSION_RANK[want] > CLAUDE_PERMISSION_RANK[cap] ? cap : want;
+}
+
 function claudePresetCommand() {
   return `env ${CLAUDE_PRESET_UNSET_ENV.map((name) => `-u ${name}`).join(' ')} claude`;
 }
 
-function codexPresetCommand() {
+function codexPresetCommand(ceiling = DEFAULT_AGENT_PERMISSION_CEILING) {
   // Managed workers cannot answer an interactive workspace-trust or approval
   // prompt. `command` bypasses a same-named interactive-shell function so the
   // autonomous flag is applied exactly once; the config override also keeps a
   // self-update chooser from intercepting the first delegated task.
+  // Below the top ceiling Codex keeps its sandbox and asks on request instead
+  // of bypassing approvals outright.
+  if (ceiling !== 'bypassPermissions') {
+    return 'command codex --full-auto -c check_for_update_on_startup=false';
+  }
   return 'command codex --dangerously-bypass-approvals-and-sandbox -c check_for_update_on_startup=false';
 }
 
@@ -3603,7 +3635,7 @@ class HopMCPServer {
             agent: { type: 'string', enum: ['claude', 'codex', 'gemini', 'custom'], description: 'Agent CLI preset (default: claude, launched with the Opus model alias — override via HOP_SPAWN_CLAUDE_MODEL or args — in autonomous permission mode). Use custom with command=... for anything else.' },
             command: { type: 'string', description: 'Override the launch command (required when agent=custom).' },
             args: { type: 'string', description: 'Extra CLI arguments appended to the launch command (e.g. "--model opus").' },
-            permission_mode: { type: 'string', enum: ['acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'manual', 'plan'], description: 'Claude worker permission mode (default: bypassPermissions so delegated tasks cannot park on an approval prompt). Set manual or another Claude mode for restricted workers. Ignored by other presets and explicit command overrides.' },
+            permission_mode: { type: 'string', enum: ['acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'manual', 'plan'], description: 'Claude worker permission mode (default: bypassPermissions so delegated tasks cannot park on an approval prompt). Set manual or another Claude mode for restricted workers. The host may cap this (hop config agent-ceiling); a request above the cap is clamped and reported in permission_note. Ignored by other presets and explicit command overrides.' },
             initial_task: { type: 'string', description: 'First task to dispatch once ready. Hop appends a unique success-token instruction unless until_reply_regex is supplied.' },
             until_reply_regex: { type: 'string', description: 'Optional caller-defined completion contract for initial_task. When omitted, Hop creates and instructs the worker to emit a unique success token. The turn is contract_failed if its final reply does not match.' },
             async: { type: 'boolean', description: 'Initial-task behavior: false/default waits for the contracted result and returns initial_task_result; true returns a pending wait_id for explicit fleet orchestration.' },
@@ -5999,7 +6031,10 @@ class HopMCPServer {
   // optional contracted first task that blocks unless async is explicit.
   async handleSpawnAgent(args = {}) {
     const preset = typeof args.agent === 'string' && args.agent ? args.agent : 'claude';
-    const presetCommands = { claude: claudePresetCommand(), codex: codexPresetCommand(), gemini: 'gemini' };
+    const permissionCeiling = readAgentPermissionCeiling();
+    let permissionNote = null;
+    let appliedPermissionMode = null;
+    const presetCommands = { claude: claudePresetCommand(), codex: codexPresetCommand(permissionCeiling), gemini: 'gemini' };
     let command = typeof args.command === 'string' && args.command.trim() ? args.command.trim() : '';
     const usesPresetCommand = command.length === 0;
     if (args.permission_mode !== undefined && !CLAUDE_PERMISSION_MODES.has(args.permission_mode)) {
@@ -6028,10 +6063,17 @@ class HopMCPServer {
         command += ` --model ${defaultModel}`;
       }
       if (preset === 'claude' && !/(?:^|\s)(?:--permission-mode(?:\s|=|$)|--dangerously-skip-permissions(?:\s|$))/.test(extraArgs)) {
-        const permissionMode = typeof args.permission_mode === 'string' && args.permission_mode
+        const requestedMode = typeof args.permission_mode === 'string' && args.permission_mode
           ? args.permission_mode
-          : 'bypassPermissions';
+          : DEFAULT_AGENT_PERMISSION_CEILING;
+        const permissionMode = clampPermissionMode(requestedMode, permissionCeiling);
+        if (permissionMode !== requestedMode) {
+          permissionNote = `permission_mode ${requestedMode} clamped to this host's ceiling ${permissionCeiling} (hop config agent-ceiling)`;
+        }
+        appliedPermissionMode = permissionMode;
         command += ` --permission-mode ${permissionMode}`;
+      } else if (preset === 'codex' && permissionCeiling !== 'bypassPermissions') {
+        permissionNote = `codex runs sandboxed (--full-auto) under this host's ceiling ${permissionCeiling}`;
       }
     }
     if (!usesPresetCommand && args.permission_mode !== undefined) {
@@ -6194,6 +6236,8 @@ class HopMCPServer {
     if (composerReady !== null) {
       result.composer_ready = composerReady;
     }
+    if (appliedPermissionMode) result.permission_mode = appliedPermissionMode;
+    if (permissionNote) result.permission_note = permissionNote;
     if (startupBlocker) {
       result.startup_blocker = startupBlocker;
       result.readiness_status = startupBlocker.kind;

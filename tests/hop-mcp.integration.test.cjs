@@ -1231,7 +1231,7 @@ test('hopx_spawn_agent gives initial tasks an automatic echo-safe completion con
   }
 });
 
-test('hopx_spawn_agent uses autonomous Sonnet by default unless explicitly overridden', async () => {
+test('hopx_spawn_agent uses autonomous Opus by default unless explicitly overridden', async () => {
   const { server, port, getWrites } = await startMockHopStreamServer({ startupOutput: '❯ ' });
   const hopHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hop-mcp-claude-model-test-'));
   const { child, call } = startMcp({
@@ -1249,7 +1249,7 @@ test('hopx_spawn_agent uses autonomous Sonnet by default unless explicitly overr
     const defaultPayload = JSON.parse(defaultSpawn.result.content[0].text);
     assert.equal(defaultPayload.ok, true, JSON.stringify(defaultPayload));
     const cleanClaude = 'env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION claude';
-    assert.equal(defaultPayload.command, `${cleanClaude} --model sonnet --permission-mode bypassPermissions`);
+    assert.equal(defaultPayload.command, `${cleanClaude} --model opus --permission-mode bypassPermissions`);
 
     const explicitSpawn = await call('tools/call', {
       name: 'hopx_spawn_agent',
@@ -1266,7 +1266,7 @@ test('hopx_spawn_agent uses autonomous Sonnet by default unless explicitly overr
     assert.deepEqual(
       getWrites().filter((write) => write.data.includes(' claude')).map((write) => write.data),
       [
-        `${cleanClaude} --model sonnet --permission-mode bypassPermissions\n`,
+        `${cleanClaude} --model opus --permission-mode bypassPermissions\n`,
         `${cleanClaude} --permission-mode bypassPermissions --model opus\n`
       ]
     );
@@ -1367,7 +1367,7 @@ test('hopx_spawn_agent permits a restricted Claude worker mode', async () => {
     });
     const payload = JSON.parse(spawned.result.content[0].text);
     assert.equal(payload.ok, true, JSON.stringify(payload));
-    assert.match(payload.command, /--model sonnet --permission-mode manual$/);
+    assert.match(payload.command, /--model opus --permission-mode manual$/);
   } finally {
     child.kill();
     server.close();

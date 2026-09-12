@@ -290,6 +290,8 @@ Paths:
 - workspace-backed sessions: `~/.hop2/workspaces/<workspace>/history/<internal-session>.history`
 - workspace-backed audit logs: `~/.hop2/workspaces/<workspace>/logs/<internal-session>/audit.ndjson`
 
+Retention: a session's live `audit.ndjson` rotates at 64 MB (`HOP_SESSION_AUDIT_MAX_MB`, keep `HOP_SESSION_AUDIT_KEEP`=5 rotations), and a *dead* session's whole log directory is deleted 90 days after its last write (`HOP_SESSION_AUDIT_RETENTION_DAYS`; `0` disables). Live sessions are never swept.
+
 Key tunables:
 
 - `HOP_SESSION_HISTORY_SIZE`
@@ -298,6 +300,8 @@ Key tunables:
 - `HOP_AGENT_POST_START_HISTORY_INIT`
 - `HOP_POST_START_HISTORY_INIT`
 - `HOP_SESSION_AUDIT_INLINE_MAX_BYTES`
+- `HOP_SESSION_AUDIT_MAX_MB`, `HOP_SESSION_AUDIT_KEEP`, `HOP_SESSION_AUDIT_RETENTION_DAYS`
+- `HOP_SESSION_TTL_DAYS` (login session lifetime, default 30)
 - `HOP_SESSION_TUI_KEYFRAME_INTERVAL_MS`
 - `HOP_SESSION_TUI_KEYFRAME_TAIL_CHARS`
 - `HOP_SESSION_TUI_KEYFRAME_MAX_LINES`
@@ -360,13 +364,15 @@ Notes:
 
 ### Security
 
-- Password + TOTP is supported; password is required for custom domains
-- Login cookies are `httpOnly`, `secure`, and `sameSite=lax`
-- Browser sessions persist across `hop stop/start` by default through a stable session secret
-- The local server binds only to `127.0.0.1`
-- Cloudflare Tunnel provides end-to-end TLS
+- Login is password + TOTP, or a passkey (Touch ID / Face ID / security key). **A password is required before the public tunnel opens**; `hop config totp-only on` opts out.
+- Every login gets its **own per-device session** (random token, stored hashed), valid for 30 days (`HOP_SESSION_TTL_DAYS`). `hop auth` lists logged-in devices, `hop auth revoke <id>` logs one out, `hop auth revoke --all` logs everyone out, `hop auth token` mints a revocable token for an app or script.
+- Login cookies are `httpOnly`, `secure`, `sameSite=lax`, and host-scoped; they survive `hop stop/start`.
+- The daemon's own secret is only for local processes (CLI, MCP, hay) as a Bearer header; it is never a cookie.
+- The local server binds only to `127.0.0.1`; Cloudflare Tunnel provides end-to-end TLS.
+- Audit logs rotate at 64 MB and dead sessions' logs are removed after 90 days (see Logging).
+- `hop config agent-ceiling <mode>` caps the permission mode spawned agents may run with.
 
-Secrets are stored in `~/.hop2/`. Set `HOP_PERSIST_SESSION_SECRET=0` if you want login cookies invalidated on every daemon restart.
+Secrets are stored in `~/.hop2/`. Full threat model, what an authenticated user can do, and how to report a hole: [SECURITY.md](SECURITY.md).
 
 ### Runtime and Recovery
 

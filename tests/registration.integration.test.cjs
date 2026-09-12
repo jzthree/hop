@@ -424,7 +424,9 @@ test('a signed-in client hands its session to the new hostname exactly once', as
     await setCanonical('me.hoptest.example.com');
     await until(async () => (await request('GET', '/api/instance')).json?.canonicalHost, 'canonical host');
 
-    const auth = { Cookie: `tunnel_session=${state.sessionSecret}` };
+    // The daemon secret is local-IPC only (Bearer); it is no longer a valid
+    // cookie. Any authenticated caller may mint a handoff for its browser.
+    const auth = { Authorization: `Bearer ${state.sessionSecret}` };
     const mint = await request('POST', '/api/handoff', { body: {}, headers: auth });
     assert.equal(mint.status, 200);
     assert.match(mint.json.url, /^https:\/\/me\.hoptest\.example\.com\/api\/handoff\/redeem\?token=/);

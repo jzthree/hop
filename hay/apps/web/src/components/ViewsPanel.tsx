@@ -123,6 +123,27 @@ const formatBytes = (n?: number) => {
 const hrefFor = (item: ViewItem) =>
   item.kind === "server" && item.target ? item.target : item.path;
 
+// The stored file itself, as an attachment: the daemon's /download mode
+// serves the markdown an agent wrote rather than the page it renders into.
+// Only files — a server is live, there is nothing to save.
+const downloadHrefFor = (item: ViewItem) =>
+  item.kind === "server" ? null : item.path.replace(/\/inline$/, "") + "/download";
+
+// A hidden same-origin anchor with `download`: the row is already an <a>
+// (anchors cannot nest), and window.open would show the file, not save it.
+const triggerDownload = (item: ViewItem) => {
+  const href = downloadHrefFor(item);
+  if (!href) return;
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = item.name;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
+
 const extOf = (name: string) => (name.split(".").pop() || "").toLowerCase();
 const isVideo = (name: string) => ["mp4", "mov", "webm", "m4v", "ogv"].includes(extOf(name));
 const isAudio = (name: string) => ["mp3", "m4a", "wav", "flac", "aac", "ogg", "oga", "opus"].includes(extOf(name));
@@ -427,10 +448,25 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
           <button type="button" className="views-act"
                   title="Open in a new tab" aria-label="Open in a new tab"
                   onClick={() => window.open(hrefFor(item), "_blank", "noopener")}>↗</button>
+          {!isServer && (
+            <button type="button" className="views-act"
+                    title="Download" aria-label={`Download ${item.name}`}
+                    onClick={() => triggerDownload(item)}>⤓</button>
+          )}
           <button type="button" className="views-act"
                   title={copied === item.path ? "Copied" : "Copy link"}
                   aria-label="Copy link"
                   onClick={() => copyLink(item)}>{copied === item.path ? "✓" : "⧉"}</button>
+          {!isServer && (
+            /* The FILE, not the page: ?download=1 serves the published bytes as
+               an attachment under their real name (md/csv/json raw, not the
+               rendered view). A window.open, not an anchor: anchors can't nest
+               in the row's own link, and the attachment header keeps the tab
+               from navigating. */
+            <button type="button" className="views-act"
+                    title="Download" aria-label="Download"
+                    onClick={() => window.open(item.path + "?download=1", "_blank", "noopener")}>⤓</button>
+          )}
           {!isServer && (
             <button type="button"
                     className={"views-act danger" + (armedDelete === item.path ? " armed" : "")}
@@ -484,6 +520,11 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
           {preview.title || preview.name}
         </span>
         <span className="views-head-spacer" />
+        {preview.kind !== "server" && (
+          <button type="button" className="views-act"
+                  title="Download" aria-label={`Download ${preview.name}`}
+                  onClick={() => triggerDownload(preview)}>⤓</button>
+        )}
         <button type="button" className="views-act"
                 title="Open in a new tab" aria-label="Open preview in a new tab"
                 onClick={() => window.open(hrefFor(preview), "_blank", "noopener")}>↗</button>

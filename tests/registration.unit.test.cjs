@@ -7,12 +7,24 @@ const path = require('node:path');
 const {
   RegistrationStore,
   validateSubdomain,
-  validateEmail
+  validateEmail: validateEmailRaw
 } = require('../lib/registration');
+
+// The module has no default domain any more; these tests model an admin who
+// configured uchicago.edu.
+const validateEmail = (raw, options = { allowedDomain: 'uchicago.edu' }) => validateEmailRaw(raw, options);
+
+test('email validation refuses everything until an email domain is configured', () => {
+  assert.equal(validateEmailRaw('alice@uchicago.edu').ok, false);
+  assert.match(validateEmailRaw('alice@uchicago.edu', {}).error, /no email domain/i);
+  assert.equal(validateEmailRaw('alice@uchicago.edu', { allowedDomain: 'uchicago.edu' }).ok, true);
+});
 
 const tmpStore = (options = {}) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hop-reg-'));
-  return new RegistrationStore(path.join(dir, 'registrations.json'), options);
+  // Every store models an admin who configured a domain; the module itself
+  // ships without one (see the validateEmail test above).
+  return new RegistrationStore(path.join(dir, 'registrations.json'), { allowedDomain: 'uchicago.edu', ...options });
 };
 
 test('subdomain validation refuses names that would break or impersonate DNS', () => {

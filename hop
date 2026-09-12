@@ -17,6 +17,8 @@ const net = require('net');
 const WebSocket = require('ws');
 const { resolveActorFromHeaders, canActorAccessSession } = require('./lib/terminal-access');
 const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = require('./lib/naming-themes');
+const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/auth-sessions');
+const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
     createFailureTracker,
     createSingleFlight,
@@ -398,7 +400,7 @@ function listPublishTargets(state) {
         const out = execFileSync(process.execPath, ['-e', `
             const http = require('http');
             http.get({ host: '127.0.0.1', port: ${Number(state.port)}, path: '/api/sessions',
-                       headers: { Cookie: 'tunnel_session=' + process.argv[1] } }, (r) => {
+                       headers: { Authorization: 'Bearer ' + process.argv[1] } }, (r) => {
                 let b = ''; r.on('data', (c) => b += c);
                 r.on('end', () => {
                     try {
@@ -682,6 +684,22 @@ const DOMAIN_CONFIG_FILE = path.join(HOME_DIR, '.domain-config.json');
 const HOP_CONFIG_FILE = path.join(HOME_DIR, '.config.json');
 const DEFAULT_PASSWORD_FILE = path.join(HOME_DIR, '.password_hash');
 const SESSION_COOKIE_NAME = 'tunnel_session';
+// Per-device login sessions (lib/auth-sessions.js). 30 days by default: log
+// in once a month, not once a week — and revoke any one device on its own.
+const AUTH_SESSIONS_FILE = path.join(HOME_DIR, '.auth-sessions.json');
+const AUTH_SESSION_TTL_DAYS = parsePositiveIntEnv('HOP_SESSION_TTL_DAYS', 30);
+const AUTH_SESSION_TTL_MS = AUTH_SESSION_TTL_DAYS * 86400000;
+// Audit log limits: rotate a session's live audit.ndjson past this size,
+// keep this many rotations, and delete a DEAD session's whole log dir after
+// this many days (0 disables the age sweep). Live sessions are never swept.
+const SESSION_AUDIT_MAX_BYTES = parsePositiveIntEnv('HOP_SESSION_AUDIT_MAX_MB', 64) * 1024 * 1024;
+const SESSION_AUDIT_KEEP_ROTATIONS = parsePositiveIntEnv('HOP_SESSION_AUDIT_KEEP', 5);
+const SESSION_AUDIT_RETENTION_DAYS = (() => {
+    const raw = process.env.HOP_SESSION_AUDIT_RETENTION_DAYS;
+    if (raw === undefined || raw === '') return 90;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 90;
+})();
 const LOG_DIR = path.join(HOME_DIR, 'logs');
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const UPLOAD_MAX_BYTES = parsePositiveIntEnv('HOP_UPLOAD_MAX_BYTES', 100 * 1024 * 1024);
@@ -895,6 +913,26 @@ function clearPassword() {
 
 function isPasswordEnabled() {
     return fs.existsSync(PASSWORD_FILE_PATH);
+}
+
+// Remote access policy. A public tunnel URL guarded by a TOTP code alone is
+// one factor. hop requires a password on top before it opens the tunnel,
+// unless the operator opts out explicitly (config allow_totp_only, or
+// HOP_ALLOW_TOTP_ONLY=1). Local-only use (hop local, HOP_NO_TUNNEL) is exempt.
+function isTotpOnlyAllowed() {
+    if (process.env.HOP_ALLOW_TOTP_ONLY === '1') return true;
+    try { return getHopConfig().allow_totp_only === true; } catch (e) { return false; }
+}
+
+function remoteAccessPolicy() {
+    if (isPasswordEnabled()) return { ok: true, reason: 'password' };
+    if (isTotpOnlyAllowed()) return { ok: true, reason: 'totp-only (opted in)' };
+    return {
+        ok: false,
+        reason: 'no password',
+        statusError: 'Tunnel not started: no password set. Run `hop password set`, or `hop config totp-only on` to allow authenticator-only logins.',
+        message: `Remote access is off: no password is set. Run ${CYAN}hop password set${RESET} (recommended), or ${CYAN}hop config totp-only on${RESET} to allow authenticator-only logins, then ${CYAN}hop stop && hop start${RESET}.`
+    };
 }
 const LEGACY_SESSION_PREFIXES = ['hop2-'];
 
@@ -2200,11 +2238,14 @@ function getSessionAuditSink(sessionName, workspaceName) {
     const filePath = path.join(sessionDir, 'audit.ndjson');
     ensurePrivateWritableFile(filePath);
     const stream = fs.createWriteStream(filePath, { flags: 'a', mode: PRIVATE_FILE_MODE });
+    let bytes = 0;
+    try { bytes = fs.statSync(filePath).size; } catch (e) { }
     const sink = {
         stream,
         filePath,
         workspaceName: dirs.workspaceName,
-        failed: false
+        failed: false,
+        bytes
     };
     stream.on('error', () => {
         if (sink.failed) return;
@@ -2530,8 +2571,41 @@ function appendSessionAuditEvent(sessionName, workspaceName, type, payload = {})
         ...payload
     };
     try {
-        sink.stream.write(JSON.stringify(record) + '\n');
+        const line = JSON.stringify(record) + '\n';
+        sink.stream.write(line);
+        sink.bytes += Buffer.byteLength(line, 'utf8');
+        if (sink.bytes >= SESSION_AUDIT_MAX_BYTES) rotateSessionAuditSink(sessionName, sink);
     } catch (e) { }
+}
+
+// Size rotation. Rename FIRST, then end the old stream: on POSIX the open
+// descriptor follows the renamed file, so whatever is still buffered lands in
+// the rotated file, and the next append opens a fresh audit.ndjson.
+function rotateSessionAuditSink(sessionName, sink) {
+    const result = rotateAuditFile(sink.filePath, { keep: SESSION_AUDIT_KEEP_ROTATIONS });
+    sessionAuditSinks.delete(sessionName);
+    try { sink.stream.end(); } catch (e) { }
+    if (result.rotatedTo) {
+        log(`[Audit] Rotated ${sessionName} audit log at ${Math.round(SESSION_AUDIT_MAX_BYTES / 1048576)} MB → ${path.basename(result.rotatedTo)}${result.pruned.length ? ` (pruned ${result.pruned.length})` : ''}`, DIM);
+    }
+}
+
+// Age retention: a session that no longer exists keeps its logs for the
+// retention window, then the whole per-session dir goes. Live sessions never.
+function sweepSessionAuditLogs() {
+    if (SESSION_AUDIT_RETENTION_DAYS <= 0) return { removed: [], kept: 0 };
+    const roots = [path.join(RUNTIME_DATA_DIR, WORKSPACE_LOGS_DIR_NAME)];
+    try {
+        for (const ws of fs.readdirSync(WORKSPACES_DIR)) roots.push(path.join(WORKSPACES_DIR, ws, WORKSPACE_LOGS_DIR_NAME));
+    } catch (e) { }
+    const result = sweepStaleAuditDirs(roots, {
+        retentionMs: SESSION_AUDIT_RETENTION_DAYS * 86400000,
+        isLive: (name) => sessionAuditSinks.has(name) || Boolean(activeSessions[name])
+    });
+    if (result.removed.length) {
+        log(`[Audit] Removed ${result.removed.length} stale session log dir(s) older than ${SESSION_AUDIT_RETENTION_DAYS}d`, DIM);
+    }
+    return result;
 }
 
 function registerSessionClientActor(sessionName, clientId, actor) {
@@ -2991,7 +3065,10 @@ function getRegistrationConfig() {
     const gate = stored.emailGate === 'cloudflare-access' ? 'cloudflare-access' : 'smtp';
     const value = {
         enabled: stored.enabled === true,
-        allowedEmailDomain: stored.allowedEmailDomain || 'uchicago.edu',
+        // No default: an admin must say which email domain signups are open to.
+        allowedEmailDomain: typeof stored.allowedEmailDomain === 'string' && stored.allowedEmailDomain.trim()
+            ? stored.allowedEmailDomain.trim().toLowerCase()
+            : null,
         // Where the admin's own hop lives once the bare host becomes the
         // landing page. Purely for the "sign in" link and the approval mail.
         adminSubdomain: stored.adminSubdomain || null,
@@ -3208,7 +3285,7 @@ function renderLandingPage(landingHost, config) {
     const baseDomain = getBaseDomain() || landingHost;
     const domain = escapeHtml(baseDomain);
     const example = escapeHtml(userHostnameFor('you') || `hop-you.${baseDomain}`);
-    const emailDomain = escapeHtml(config.allowedEmailDomain);
+    const emailDomain = escapeHtml(config.allowedEmailDomain || '');
     const adminLink = config.adminSubdomain
         ? `<p class="muted">Already have a subdomain? <a href="https://${escapeHtml(userHostnameFor(config.adminSubdomain))}">Sign in</a>.</p>`
         : '';
@@ -4015,6 +4092,7 @@ function loadSessionSecret(existingState) {
 // Generate or load session secret
 const existingState = isServerRunning();
 const SESSION_SECRET = loadSessionSecret(existingState);
+const authSessions = new AuthSessionStore(AUTH_SESSIONS_FILE, { ttlMs: AUTH_SESSION_TTL_MS });
 
 // Persistence for Stable QR Code
 let AUTH_SECRET;
@@ -9652,21 +9730,97 @@ function appendSetCookie(res, cookies) {
     res.setHeader('Set-Cookie', merged);
 }
 
-// The session cookie, minted in one place. Host-scoped deliberately: adding a
-// Domain would hand this instance's secret to every subdomain of the parent,
-// which on a multi-user host means every other user's machine.
-// (The three login paths below still inline an identical cookie; they predate
-// this helper and were left alone rather than refactoring live auth code.)
-function setAuthCookie(res) {
+// Is this connection direct from the local machine (CLI, hay, MCP) rather
+// than proxied in through cloudflared? cloudflared connects from 127.0.0.1
+// too, but always stamps CF-Connecting-IP on what it forwards.
+function isDirectLoopbackRequest(req) {
+    if (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for']) return false;
+    const addr = String(req.socket?.remoteAddress || '');
+    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+// Every way a request can prove itself, in one place.
+//   cookie — a per-device login session (browser, hop-ios)
+//   token  — Authorization: Bearer <device session token>
+//   ipc    — Authorization: Bearer <daemon secret> from a local hop process
+//            (CLI, MCP, hay); also accepted as ?token= on a DIRECT loopback
+//            WebSocket, which is how the local CLI attaches.
+// The daemon secret is never valid as a cookie: cookies ride the public
+// tunnel, and one shared value there is exactly what per-device sessions
+// replace. A stale cookie holding the old secret simply lands on the login page.
+function authenticateRequest(req, cookies, { queryToken = null } = {}) {
+    const cookieToken = cookies[SESSION_COOKIE_NAME];
+    if (isAuthSessionToken(cookieToken)) {
+        const session = authSessions.verify(cookieToken);
+        if (session) return { ok: true, via: 'cookie', session };
+    }
+    const authHeader = req.headers.authorization;
+    const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    if (bearer) {
+        if (bearer === SESSION_SECRET) return { ok: true, via: 'ipc', session: null };
+        if (isAuthSessionToken(bearer)) {
+            const session = authSessions.verify(bearer);
+            if (session) return { ok: true, via: 'token', session };
+        }
+    }
+    if (typeof queryToken === 'string' && queryToken) {
+        if (queryToken === SESSION_SECRET && isDirectLoopbackRequest(req)) return { ok: true, via: 'ipc', session: null };
+        if (isAuthSessionToken(queryToken)) {
+            const session = authSessions.verify(queryToken);
+            if (session) return { ok: true, via: 'token', session };
+        }
+    }
+    return { ok: false, via: null, session: null };
+}
+
+// "iPhone · Safari", "Mac · Chrome": enough to recognise a device in a list.
+function describeUserAgent(ua) {
+    const s = String(ua || '');
+    if (!s) return null;
+    let device = 'Unknown device';
+    if (/iPhone/i.test(s)) device = 'iPhone';
+    else if (/iPad/i.test(s)) device = 'iPad';
+    else if (/Android/i.test(s)) device = 'Android';
+    else if (/Macintosh|Mac OS X/i.test(s)) device = 'Mac';
+    else if (/Windows/i.test(s)) device = 'Windows';
+    else if (/CrOS/i.test(s)) device = 'ChromeOS';
+    else if (/Linux/i.test(s)) device = 'Linux';
+    let browser = null;
+    if (/HopSpike|hop-ios/i.test(s)) browser = 'hop app';
+    else if (/Edg\//i.test(s)) browser = 'Edge';
+    else if (/OPR\//i.test(s)) browser = 'Opera';
+    else if (/Chrome\//i.test(s) && !/Chromium/i.test(s)) browser = 'Chrome';
+    else if (/Firefox\//i.test(s)) browser = 'Firefox';
+    else if (/Safari\//i.test(s)) browser = 'Safari';
+    else if (/curl|node|python|Go-http/i.test(s)) browser = 'script';
+    return browser ? `${device} · ${browser}` : device;
+}
+
+// Mint a per-device session for a login that just succeeded and hand the
+// browser its cookie. Host-scoped deliberately: adding a Domain would hand
+// this device's token to every subdomain of the parent, which on a multi-user
+// host means every other user's machine.
+function issueAuthSession(req, res, via) {
+    const ua = String(req.headers['user-agent'] || '');
+    const ip = getClientIp(req);
+    const label = describeUserAgent(ua);
+    const created = authSessions.create({
+        via,
+        label,
+        ip,
+        userAgent: ua
+    });
     appendSetCookie(res, [
-        cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
+        cookie.serialize(SESSION_COOKIE_NAME, created.token, {
             httpOnly: true,
             secure: true,
             sameSite: 'lax',
             path: '/',
-            maxAge: 60 * 60 * 24 * 7
+            maxAge: Math.floor(AUTH_SESSION_TTL_MS / 1000)
         })
     ]);
+    log(`[auth] login via ${via} from ${ip} (${label || 'unknown device'}) → session ${created.id}, ${AUTH_SESSION_TTL_DAYS}d`, GREEN);
+    return created;
 }
 
 function clearAuthCookies(res) {
@@ -9706,6 +9860,21 @@ function escapeHtml(value) {
 // per-rpID (per hostname), so a passkey enrolled at the tunnel domain works
 // there and one enrolled at localhost works locally.
 const PASSKEYS_FILE = path.join(HOME_DIR, '.passkeys.json');
+
+// App IDs allowed to use this host's passkeys natively (Apple webcredentials).
+// Default: the official hop-ios app, so any hop server works with the App
+// Store build. Forks and private builds override with HOP_AASA_APP_IDS
+// (comma-separated TEAMID.bundle.id) or config.json "aasa_app_ids": [...].
+const DEFAULT_AASA_APP_IDS = ['5AD7QB9795.io.zhoulab.hop.spike'];
+function getAasaAppIds() {
+    const fromEnv = String(process.env.HOP_AASA_APP_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (fromEnv.length) return fromEnv;
+    try {
+        const cfg = getHopConfig();
+        if (Array.isArray(cfg.aasa_app_ids) && cfg.aasa_app_ids.length) return cfg.aasa_app_ids.map(String);
+    } catch (e) { }
+    return DEFAULT_AASA_APP_IDS;
+}
 let webauthnLibPromise = null;
 function loadWebauthn() {
     // The library is ESM-only; hop is CJS — load lazily via dynamic import.
@@ -9914,14 +10083,11 @@ function startAuthProxy(authEmitter) {
             return rawWriteHead(...args);
         };
 
-        // Check auth via cookie OR Authorization header (internal hop-to-hop only)
-        // Bearer token is read from state file by other hop processes on same machine
-        const authHeader = req.headers.authorization;
-        const tokenFromHeader = authHeader && authHeader.startsWith('Bearer ')
-            ? authHeader.substring(7)
-            : null;
-        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET
-            || tokenFromHeader === SESSION_SECRET;
+        // Per-device session (cookie / Bearer device token) or the daemon's
+        // own secret as a Bearer from a local hop process. See authenticateRequest.
+        const auth = authenticateRequest(req, cookies);
+        const isAuthenticated = auth.ok;
+        req.hopAuthSession = auth.session;
         // How this request proved itself decides the DEFAULT actor. Humans
         // reach the API through the web UI (cookie) or the hop CLI (which
         // stamps x-hop-via); a raw Bearer-token call with neither is, in
@@ -9929,7 +10095,7 @@ function startAuthProxy(authEmitter) {
         // Those callers rarely remember to declare x-hop-actor, and every
         // one that forgot used to land its sessions in the USER tab
         // (SelectProbe et al). Explicit headers still win outright.
-        req.hopAuthVia = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET ? 'cookie' : 'token';
+        req.hopAuthVia = auth.via === 'cookie' ? 'cookie' : 'token';
 
         // API: Auth status (used by local CLI to wait for remote login)
         if (parsedUrl.pathname === '/api/auth' && req.method === 'GET') {
@@ -9943,6 +10109,82 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // API: per-device login sessions — list, revoke, mint device tokens —
+        // and logout (revokes the caller's own session).
+        if (parsedUrl.pathname.startsWith('/api/auth/sessions') || parsedUrl.pathname === '/api/logout') {
+            const respond = (status, payload) => {
+                setNoCache(res);
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(payload));
+            };
+            if (!isAuthenticated) {
+                respond(401, { ok: false, error: 'Unauthorized' });
+                return;
+            }
+            if (parsedUrl.pathname === '/api/auth/sessions' && req.method === 'GET') {
+                const currentId = auth.session?.id || null;
+                respond(200, {
+                    ok: true,
+                    current: currentId,
+                    via: auth.via,
+                    ttlDays: AUTH_SESSION_TTL_DAYS,
+                    sessions: authSessions.list().map((s) => ({ ...s, current: s.id === currentId }))
+                });
+                return;
+            }
+            if (parsedUrl.pathname === '/api/auth/sessions/revoke' && req.method === 'POST') {
+                const body = (await readRequestJson(req)) || {};
+                if (body.all === true) {
+                    const keep = body.keepCurrent === false ? null : (auth.session?.id || null);
+                    const removed = authSessions.revokeAll({ exceptId: keep });
+                    log(`[auth] revoked ${removed} login session(s)${keep ? ` (kept ${keep})` : ''}`, YELLOW);
+                    respond(200, { ok: true, removed, kept: keep });
+                    return;
+                }
+                const id = String(body.id || '');
+                if (!id) {
+                    respond(400, { ok: false, error: 'Send { id } or { all: true }' });
+                    return;
+                }
+                const removed = authSessions.revoke(id);
+                if (removed) log(`[auth] revoked login session ${id}`, YELLOW);
+                respond(removed ? 200 : 404, { ok: removed, removed: removed ? 1 : 0 });
+                return;
+            }
+            if (parsedUrl.pathname === '/api/auth/sessions/token' && req.method === 'POST') {
+                const body = (await readRequestJson(req)) || {};
+                const days = Number(body.days);
+                const created = authSessions.create({
+                    via: 'device-token',
+                    label: String(body.label || '').slice(0, 80) || 'device token',
+                    ip: getClientIp(req),
+                    userAgent: req.headers['user-agent'] || null,
+                    ttlMs: Number.isFinite(days) && days > 0 ? days * 86400000 : undefined,
+                    noExpiry: body.noExpiry === true
+                });
+                log(`[auth] device token ${created.id} minted (${body.label || 'unlabelled'}, ${created.expiresAt ? `expires ${new Date(created.expiresAt).toISOString().slice(0, 10)}` : 'no expiry'})`, GREEN);
+                respond(200, { ok: true, id: created.id, token: created.token, expiresAt: created.expiresAt });
+                return;
+            }
+            if (parsedUrl.pathname === '/api/logout' && (req.method === 'POST' || req.method === 'GET')) {
+                if (auth.session) {
+                    authSessions.revoke(auth.session.id);
+                    log(`[auth] logout: session ${auth.session.id}`, YELLOW);
+                }
+                clearAuthCookies(res);
+                if (req.method === 'GET') {
+                    setNoCache(res);
+                    res.writeHead(302, { Location: '/' });
+                    res.end();
+                    return;
+                }
+                respond(200, { ok: true });
+                return;
+            }
+            respond(404, { ok: false, error: 'Unknown auth endpoint' });
+            return;
+        }
+
         // Apple App Site Association — the trust anchor for NATIVE passkey
         // sign-in from hop-ios (webcredentials). Apple's CDN fetches this
         // anonymously over HTTPS, so it must sit in front of the auth gate.
@@ -9951,7 +10193,7 @@ function startAuthProxy(authEmitter) {
         if (parsedUrl.pathname === '/.well-known/apple-app-site-association' && req.method === 'GET') {
             res.hopCacheControl = 'public, max-age=300';    // public on purpose — Apple's CDN reads it
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ webcredentials: { apps: ['5AD7QB9795.io.zhoulab.hop.spike'] } }));
+            res.end(JSON.stringify({ webcredentials: { apps: getAasaAppIds() } }));
             return;
         }
 
@@ -10020,7 +10262,7 @@ function startAuthProxy(authEmitter) {
                     <p><a href="/">Sign in here instead</a>.</p>`));
                 return;
             }
-            setAuthCookie(res);
+            issueAuthSession(req, res, 'handoff');
             recordAuth(authEmitter);
             // Keep the token out of the Referer of whatever loads next.
             res.writeHead(302, { Location: '/', 'Referrer-Policy': 'no-referrer' });
@@ -10102,17 +10344,7 @@ function startAuthProxy(authEmitter) {
                     cred.lastUsedAt = new Date().toISOString();
                     savePasskeys(store);
                     resetFailure(ip);
-                    appendSetCookie(res, [
-                        cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
-                            httpOnly: true,
-                            secure: true,
-                            sameSite: 'lax',
-                            path: '/',
-                            maxAge: 60 * 60 * 24 * 7
-                        })
-                    ]);
-                    recordAuth(authEmitter);
-                    respond(200, { ok: true });
+                    issueAuthSession(req, res, 'passkey');                    recordAuth(authEmitter);                    respond(200, { ok: true });
                     return;
                 }
                 // Everything below requires an authenticated session.
@@ -10455,17 +10687,7 @@ happens until someone clicks it.
                         // Check TOTP
                         if (authenticator.check(totp, AUTH_SECRET)) {
                             resetFailure(ip);
-                            appendSetCookie(res, [
-                                cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
-                                    httpOnly: true,
-                                    secure: true,
-                                    sameSite: 'lax',
-                                    path: '/',
-                                    maxAge: 60 * 60 * 24 * 7
-                                })
-                            ]);
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true }));
+                            issueAuthSession(req, res, 'totp');                            res.writeHead(200, { 'Content-Type': 'application/json' });                            res.end(JSON.stringify({ success: true }));
                             recordAuth(authEmitter);
                         } else {
                             recordFailure(ip);
@@ -10512,16 +10734,7 @@ happens until someone clicks it.
                         // Check TOTP
                         if (authenticator.check(token, AUTH_SECRET)) {
                             resetFailure(ip);
-                            appendSetCookie(res, [
-                                cookie.serialize(SESSION_COOKIE_NAME, SESSION_SECRET, {
-                                    httpOnly: true,
-                                    secure: true,
-                                    sameSite: 'lax',
-                                    path: '/',
-                                    maxAge: 60 * 60 * 24 * 7
-                                })
-                            ]);
-                            const redirectTarget = requestedInternalName
+                            issueAuthSession(req, res, 'totp');                            const redirectTarget = requestedInternalName
                                 ? buildSessionPath(requestedDisplayName)
                                 : '/sessions';
                             res.writeHead(302, { 'Location': redirectTarget });
@@ -13344,13 +13557,13 @@ happens until someone clicks it.
         const parsedUrl = url.parse(req.url, true);
         const cookies = cookie.parse(req.headers.cookie || '');
 
-        // Auth via cookie, Bearer token, or query param (for local CLI connections)
-        const authHeader = req.headers.authorization || '';
-        const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-        const tokenFromQuery = parsedUrl.query.token;
-        const isAuthenticated = cookies[SESSION_COOKIE_NAME] === SESSION_SECRET ||
-                               bearerToken === SESSION_SECRET ||
-                               tokenFromQuery === SESSION_SECRET;
+        // Auth via a per-device session (cookie / Bearer / ?token=) or the
+        // daemon secret from a local hop process (Bearer, or ?token= on a
+        // direct loopback connection — how the local CLI attaches).
+        const wsAuth = authenticateRequest(req, cookies, {
+            queryToken: typeof parsedUrl.query.token === 'string' ? parsedUrl.query.token : null
+        });
+        const isAuthenticated = wsAuth.ok;
 
         if (!isAuthenticated) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -13607,6 +13820,12 @@ function startTunnel(isRestart = false) {
     if (NO_TUNNEL) {
         log(`[test] tunnel disabled (HOP_NO_TUNNEL=1) — local stack at http://127.0.0.1:${BASE_PORT}`, YELLOW);
         return Promise.resolve({ tunnel: null, publicUrl: `http://127.0.0.1:${BASE_PORT}` });
+    }
+    const policy = remoteAccessPolicy();
+    if (!policy.ok) {
+        log(`[Tunnel] ${policy.message}`, RED);
+        updateTunnelStatus({ connected: false, lastEvent: 'blocked_no_password', lastError: policy.statusError });
+        return Promise.resolve({ tunnel: null, publicUrl: null });
     }
     const domainConfig = getDomainConfig();
     const useNamedTunnel = domainConfig && domainConfig.tunnelName && domainConfig.hostname;
@@ -13927,6 +14146,11 @@ let tunnelRestartQueued = false;
 
 async function startTunnelWithRestart() {
     if (NO_TUNNEL) return;
+    const policy = remoteAccessPolicy();
+    if (!policy.ok) {
+        updateTunnelStatus({ connected: false, lastEvent: 'blocked_no_password', lastError: policy.statusError });
+        return;
+    }
     // Prevent concurrent restarts
     if (tunnelRestartInProgress) {
         tunnelRestartQueued = true;
@@ -14131,6 +14355,23 @@ function stopTunnelHealthMonitor() {
     }
 }
 
+// The URL + QR banner, or — when the tunnel is blocked by the remote access
+// policy — the reason and the two ways to lift it.
+function printTunnelUrlBlock(publicUrl) {
+    if (!publicUrl) {
+        log(`TUNNEL:`, BOLD + YELLOW);
+        const policy = remoteAccessPolicy();
+        log(`  ${policy.ok ? 'not connected yet' : policy.message}`, YELLOW);
+        log(`  Local sessions work as usual; remote access resumes once the tunnel is up.`, RESET);
+        return;
+    }
+    log(`TUNNEL URL:`, BOLD + GREEN);
+    log(`  ${publicUrl}`, GREEN);
+    log(`  Scan to open on mobile:`, RESET);
+    // Simple URL QR code - scan with any camera app
+    qrcode.generate(publicUrl, { small: true });
+}
+
 function waitForStart(authEmitter, publicUrl, label) {
     return new Promise((resolve) => {
         if (process.stdout.isTTY) console.clear();
@@ -14138,12 +14379,7 @@ function waitForStart(authEmitter, publicUrl, label) {
         log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
         log(`==================================================\n`, MAGENTA);
 
-        log(`TUNNEL URL:`, BOLD + GREEN);
-        log(`  ${publicUrl}`, GREEN);
-        log(`  Scan to open on mobile:`, RESET);
-
-        // Simple URL QR code - scan with any camera app
-        qrcode.generate(publicUrl, { small: true });
+        printTunnelUrlBlock(publicUrl, '        ');
 
         log(`\n--------------------------------------------------`, RESET);
 
@@ -14178,11 +14414,7 @@ function printStartupInfo(publicUrl, label) {
     log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
     log(`==================================================\n`, MAGENTA);
 
-    log(`TUNNEL URL:`, BOLD + GREEN);
-    log(`  ${publicUrl}`, GREEN);
-    log(`  Scan to open on mobile:`, RESET);
-
-    qrcode.generate(publicUrl, { small: true });
+    printTunnelUrlBlock(publicUrl);
 
     log(`\n--------------------------------------------------`, RESET);
     printStartupAuthSection(label);
@@ -14198,10 +14430,7 @@ function waitForStartPolling(state, label) {
         log(`            >>>  HOP - TUNNEL SHELL  <<<`, BOLD + MAGENTA);
         log(`==================================================\n`, MAGENTA);
 
-        log(`TUNNEL URL:`, BOLD + GREEN);
-        log(`  ${state.url}`, GREEN);
-        log(`  Scan to open on mobile:`, RESET);
-        qrcode.generate(state.url, { small: true });
+        printTunnelUrlBlock(state.url);
 
         log(`\n--------------------------------------------------`, RESET);
         printStartupAuthSection(label);
@@ -14318,20 +14547,21 @@ async function maybeOfferFirstRunPassword() {
     config.password_offer_shown = true;
     saveHopConfig(config);
 
-    log(`\nYour tunnel URL will be protected by an authenticator (TOTP) code only.`, YELLOW);
-    log(`A password adds a second factor for remote access.`, RESET);
+    log(`\nRemote access needs a password in addition to the authenticator (TOTP) code.`, YELLOW);
+    log(`Without one, hop runs local-only and the public tunnel stays off`, RESET);
+    log(`(${CYAN}hop config totp-only on${RESET} opts out of that requirement).`, RESET);
 
     const readline = require('readline');
     const stream = require('stream');
 
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const answer = await new Promise((resolve) => {
-        rl.question(`Set a password for remote access? [y/N] `, resolve);
+        rl.question(`Set a password for remote access now? [Y/n] `, resolve);
     });
     rl.close();
 
-    if (!/^y(es)?$/i.test(String(answer || '').trim())) {
-        log(`Skipped. You can add one anytime with ${CYAN}hop password set${RESET}.`, RESET);
+    if (/^n(o)?$/i.test(String(answer || '').trim())) {
+        log(`Skipped. The tunnel stays off until ${CYAN}hop password set${RESET} — or allow authenticator-only logins with ${CYAN}hop config totp-only on${RESET}.`, YELLOW);
         return;
     }
 
@@ -15405,7 +15635,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'user', 'workspace', 'session', 'wipe', 'restore', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
+    'password', 'auth', 'user', 'workspace', 'session', 'wipe', 'restore', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
     'mail', 'registration', 'canonical'
 ];
 
@@ -15477,8 +15707,13 @@ const HELP_SECTIONS = [
     ] },
     { title: 'Security', lines: [
         `hop password              Show password status`,
-        `hop password set          Set or change password`,
+        `hop password set          Set or change password (required for the public tunnel)`,
         `hop password clear        Remove password protection`,
+        `hop auth                  List logged-in devices (per-device sessions, 30-day default)`,
+        `hop auth revoke <id>|--all  Log one device out, or everyone`,
+        `hop auth token [--label L]  Mint a device token for an app or script`,
+        `hop config totp-only on|off  Allow the tunnel with authenticator-only login (not recommended)`,
+        `hop config agent-ceiling <mode>  Cap the permission mode spawned agents may run with`,
     ] },
     { title: 'Multi-user (admin)', lines: [
         `hop user list             List all users`,
@@ -16563,6 +16798,17 @@ async function main() {
             log(`  Tunnel:    ${state.url || '(unknown)'}  ${YELLOW}(status unavailable)${RESET}`, RESET);
         }
 
+        {
+            const policy = remoteAccessPolicy();
+            let loginCount = null;
+            try {
+                const r = await callLocalApi(state, '/api/auth/sessions', 'GET');
+                if (r && r.status === 200) loginCount = (r.data.sessions || []).length;
+            } catch (e) { }
+            log(`  Auth:      password ${isPasswordEnabled() ? `${GREEN}set${RESET}` : `${YELLOW}not set${RESET}`} · passkeys ${loadPasskeys().credentials.length} · logged-in devices ${loginCount === null ? `${YELLOW}?${RESET}` : loginCount} (${CYAN}hop auth${RESET})`, RESET);
+            if (!policy.ok) log(`             ${RED}remote access blocked: ${policy.reason}${RESET} — hop password set, or hop config totp-only on`, RESET);
+        }
+
         const hh = readHayHostStateFile();
         if (hh && hh.pid) {
             let alive = false;
@@ -17031,6 +17277,55 @@ async function main() {
             }
             process.exit(0);
         }
+        // Remote access policy: may the tunnel open with TOTP as the only factor?
+        if (subCmd === 'totp-only') {
+            const value = String(process.argv[4] || '').toLowerCase();
+            const cfg = getHopConfig();
+            if (value === 'on' || value === 'true' || value === '1') {
+                cfg.allow_totp_only = true;
+                saveHopConfig(cfg);
+                log(`Authenticator-only remote login allowed. ${YELLOW}A password is still recommended: hop password set${RESET}`, GREEN);
+                log(`Takes effect on the next daemon start (${CYAN}hop stop && hop start${RESET}).`, DIM);
+            } else if (value === 'off' || value === 'false' || value === '0') {
+                delete cfg.allow_totp_only;
+                saveHopConfig(cfg);
+                log(`Authenticator-only remote login disallowed: the tunnel needs a password (${CYAN}hop password set${RESET}).`, GREEN);
+                log(`Takes effect on the next daemon start (${CYAN}hop stop && hop start${RESET}).`, DIM);
+            } else if (value) {
+                log(`Usage: hop config totp-only on|off`, RED);
+                process.exit(1);
+            } else {
+                const policy = remoteAccessPolicy();
+                log(`TOTP-only remote login: ${isTotpOnlyAllowed() ? `${YELLOW}allowed${RESET}` : 'not allowed (the tunnel needs a password)'}`, RESET);
+                log(`Remote access policy now: ${policy.ok ? `${GREEN}ok${RESET} (${policy.reason})` : `${RED}blocked${RESET} (${policy.reason})`}`, RESET);
+                log(`Change with: ${CYAN}hop config totp-only on|off${RESET}`, DIM);
+            }
+            process.exit(0);
+        }
+        // Ceiling on the permission mode hopx_spawn_agent may give a worker.
+        if (subCmd === 'agent-ceiling') {
+            const modes = ['plan', 'manual', 'acceptEdits', 'dontAsk', 'auto', 'bypassPermissions'];
+            const value = process.argv[4];
+            const cfg = getHopConfig();
+            if (value === 'clear' || value === 'default') {
+                delete cfg.agent_permission_ceiling;
+                saveHopConfig(cfg);
+                log(`Agent permission ceiling reset to the default (bypassPermissions).`, GREEN);
+            } else if (value) {
+                if (!modes.includes(value)) {
+                    log(`Unknown mode "${value}". Use one of: ${modes.join(', ')}`, RED);
+                    process.exit(1);
+                }
+                cfg.agent_permission_ceiling = value;
+                saveHopConfig(cfg);
+                log(`Spawned agents are capped at ${BOLD}${value}${RESET}; requests above it are clamped.`, GREEN);
+            } else {
+                log(`Agent permission ceiling: ${BOLD}${cfg.agent_permission_ceiling || 'bypassPermissions (default)'}${RESET}`, RESET);
+                log(`  Applies to hopx_spawn_agent / hopa spawn (Claude --permission-mode; Codex loses the approval bypass below the top).`, DIM);
+                log(`Change with: ${CYAN}hop config agent-ceiling <mode|clear>${RESET}`, DIM);
+            }
+            process.exit(0);
+        }
         if (subCmd === 'theme' || subCmd === 'naming-theme') {
             const themeArg = process.argv[4];
             if (themeArg) {
@@ -17371,7 +17666,7 @@ async function main() {
         if (!subcommand || subcommand === 'status') {
             log(`\n${BOLD}Self-service registration:${RESET} ${config.enabled ? `${GREEN}on${RESET}` : `${YELLOW}off${RESET}`}`, RESET);
             log(`  Landing page:  ${landingHost ? `https://${landingHost}` : '(no custom domain — run hop domain <host>)'}${config.landingHost ? `  ${DIM}(separate host; ${escapeHtml((getDomainConfig()||{}).hostname||'the bare domain')} stays your instance)${RESET}` : ''}`, RESET);
-            log(`  Open to:       ${config.allowedEmailDomain} addresses`, RESET);
+            log(`  Open to:       ${config.allowedEmailDomain ? `${config.allowedEmailDomain} addresses` : `${RED}not set — hop registration domain <email-domain>${RESET}`}`, RESET);
             log(`  Admin host:    ${config.adminSubdomain ? userHostnameFor(config.adminSubdomain) : '(not set)'}`, RESET);
             if (config.emailGate === 'cloudflare-access') {
                 log(`  Identity gate: ${GREEN}Cloudflare Access${RESET} (no email sent)`, RESET);
@@ -17391,6 +17686,10 @@ async function main() {
         if (subcommand === 'enable') {
             if (!landingHost) {
                 log(`Set a custom domain first: hop domain <hostname>`, RED);
+                process.exit(1);
+            }
+            if (!config.allowedEmailDomain) {
+                log(`Say which email domain signups are open to first: hop registration domain <email-domain>`, RED);
                 process.exit(1);
             }
             if (config.emailGate === 'cloudflare-access') {
@@ -17565,6 +17864,96 @@ async function main() {
     }
 
     // Handle `hop password` commands
+    // Handle `hop auth` — per-device login sessions (list / revoke / device tokens).
+    if (process.argv[2] === 'auth') {
+        const subcommand = process.argv[3];
+        const state = isServerRunning();
+        const requireDaemon = () => {
+            if (!state) {
+                printNotRunningError();
+                process.exit(1);
+            }
+        };
+        const fmtRel = (ts) => {
+            if (!Number.isFinite(ts)) return 'never';
+            const diff = ts - Date.now();
+            const abs = Math.abs(diff);
+            const unit = abs < 3600000 ? [Math.round(abs / 60000), 'm'] : abs < 86400000 ? [Math.round(abs / 3600000), 'h'] : [Math.round(abs / 86400000), 'd'];
+            return diff < 0 ? `${unit[0]}${unit[1]} ago` : `in ${unit[0]}${unit[1]}`;
+        };
+        const flag = (name) => {
+            const i = process.argv.indexOf(name);
+            return i > 0 ? (process.argv[i + 1] || '') : null;
+        };
+
+        if (!subcommand || subcommand === 'sessions' || subcommand === 'list' || subcommand === 'status') {
+            requireDaemon();
+            const r = await callLocalApi(state, '/api/auth/sessions', 'GET');
+            if (!r || r.status !== 200) {
+                log(`Failed to list sessions: ${r?.data?.error || `status ${r?.status}`}`, RED);
+                process.exit(1);
+            }
+            const sessions = r.data.sessions || [];
+            log(`\n${BOLD}Login sessions${RESET}  ${sessions.length} active · new logins last ${r.data.ttlDays} days`, CYAN);
+            log(`  Password: ${isPasswordEnabled() ? `${GREEN}set${RESET}` : `${YELLOW}not set${RESET}`}   Passkeys: ${loadPasskeys().credentials.length}   TOTP-only allowed: ${isTotpOnlyAllowed() ? `${YELLOW}yes${RESET}` : 'no'}`, RESET);
+            if (!sessions.length) {
+                log(`  (none — nobody is logged in through the tunnel)`, DIM);
+            }
+            for (const s of sessions) {
+                log(`  ${s.id}  ${String(s.label || '—').padEnd(24).slice(0, 24)}  ${String(s.via).padEnd(12)}  seen ${fmtRel(s.lastSeenAt).padEnd(9)}  ${s.expiresAt ? `expires ${fmtRel(s.expiresAt)}` : 'no expiry'}${s.ip ? `  ${s.ip}` : ''}`, RESET);
+            }
+            log(`\nRevoke one: ${CYAN}hop auth revoke <id>${RESET}   everyone: ${CYAN}hop auth revoke --all${RESET}   device token: ${CYAN}hop auth token --label "iPhone"${RESET}`, DIM);
+            process.exit(0);
+        }
+
+        if (subcommand === 'revoke' || subcommand === 'logout') {
+            requireDaemon();
+            const target = process.argv[4];
+            if (!target) {
+                log(`Usage: hop auth revoke <session-id> | --all`, RED);
+                process.exit(1);
+            }
+            const body = target === '--all' || target === 'all' ? { all: true, keepCurrent: false } : { id: target };
+            const r = await callLocalApi(state, '/api/auth/sessions/revoke', 'POST', body);
+            if (!r || r.status !== 200) {
+                log(`${r?.status === 404 ? 'No such session' : `Failed: ${r?.data?.error || `status ${r?.status}`}`}`, RED);
+                process.exit(1);
+            }
+            log(`${GREEN}✓ Revoked ${r.data.removed} session(s).${RESET} Those devices see the login page on their next request.`, GREEN);
+            process.exit(0);
+        }
+
+        if (subcommand === 'token') {
+            requireDaemon();
+            const label = flag('--label') || `device token ${new Date().toISOString().slice(0, 10)}`;
+            const daysRaw = flag('--days');
+            const noExpiry = process.argv.includes('--no-expiry');
+            const days = daysRaw ? Number(daysRaw) : null;
+            if (daysRaw && (!Number.isFinite(days) || days <= 0)) {
+                log(`--days must be a positive number`, RED);
+                process.exit(1);
+            }
+            const r = await callLocalApi(state, '/api/auth/sessions/token', 'POST', { label, days: days || undefined, noExpiry });
+            if (!r || r.status !== 200) {
+                log(`Failed: ${r?.data?.error || `status ${r?.status}`}`, RED);
+                process.exit(1);
+            }
+            log(`\n${BOLD}Device token${RESET} ${r.data.id} · ${label} · ${r.data.expiresAt ? `expires ${new Date(r.data.expiresAt).toISOString().slice(0, 10)}` : `${YELLOW}never expires${RESET}`}`, CYAN);
+            log(`\n  ${r.data.token}\n`, BOLD);
+            log(`Shown once. Send it as ${CYAN}Authorization: Bearer <token>${RESET} (or the tunnel_session cookie) from the device.`, RESET);
+            log(`Revoke with: ${CYAN}hop auth revoke ${r.data.id}${RESET}`, DIM);
+            process.exit(0);
+        }
+
+        const unknownAuthSub = subcommand && subcommand !== 'help' && subcommand !== '--help';
+        if (unknownAuthSub) log(`Unknown subcommand: ${subcommand}`, RED);
+        log(`\n${BOLD}Login session commands:${RESET}\n`, CYAN);
+        log(`  hop auth                          List devices logged in (per-device sessions)`, RESET);
+        log(`  hop auth revoke <id> | --all      Log a device out — or everyone`, RESET);
+        log(`  hop auth token [--label L] [--days N | --no-expiry]   Mint a device token for an app or script`, RESET);
+        process.exit(unknownAuthSub ? 1 : 0);
+    }
+
     if (process.argv[2] === 'password') {
         const subcommand = process.argv[3];
         const readline = require('readline');
@@ -17626,6 +18015,10 @@ async function main() {
             clearPassword();
             log(`${GREEN}✓ Password protection removed.${RESET}`, GREEN);
             log(`\nLogin will only require TOTP code.`, RESET);
+            if (!isTotpOnlyAllowed()) {
+                log(`${YELLOW}The public tunnel will stay off after the next daemon start until a password is set again,${RESET}`, YELLOW);
+                log(`${YELLOW}or you allow authenticator-only logins: ${CYAN}hop config totp-only on${RESET}`, YELLOW);
+            }
             process.exit(0);
         }
 
@@ -18737,6 +19130,15 @@ async function main() {
         log(`[tagline] auto-sweep ${TAGLINE_DISABLED ? 'disabled by HOP_AI_TAGLINES' : 'enabled'}`, CYAN);
         setTimeout(runSweep, 60000).unref?.();
         setInterval(runSweep, 180000).unref?.();
+
+        // Audit retention: dead sessions' logs go after the retention window.
+        // Two minutes after boot, then daily. Live sessions are never touched.
+        const runAuditSweep = () => {
+            try { sweepSessionAuditLogs(); } catch (e) { log(`[Audit] sweep error: ${e && e.message}`, YELLOW); }
+        };
+        log(`[Audit] rotation at ${Math.round(SESSION_AUDIT_MAX_BYTES / 1048576)} MB ×${SESSION_AUDIT_KEEP_ROTATIONS}, retention ${SESSION_AUDIT_RETENTION_DAYS > 0 ? `${SESSION_AUDIT_RETENTION_DAYS}d` : 'off'}`, CYAN);
+        setTimeout(runAuditSweep, 120000).unref?.();
+        setInterval(runAuditSweep, 86400000).unref?.();
 
         // Stuck resume prompts are urgent in a way a stale tagline isn't — a
         // session sitting on one is frozen, not just unlabeled — so this runs

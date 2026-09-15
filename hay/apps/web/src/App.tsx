@@ -1059,9 +1059,19 @@ const App = () => {
   // behind). Poll our own index.html for the bundle it now names; when it
   // differs from the one running, reload — but only while the tab is HIDDEN
   // and the terminal has no buffered input, so nobody ever sees it happen.
+  // A window that is never hidden — a dedicated hop window left open on a
+  // second display — never reloaded at all, and ran fixes-old code for days
+  // ("the bell is still ringing" was a window on a bundle from before bells
+  // went silent). Such a tab now gets told once per new bundle, and reloads
+  // itself after a quarter hour with no keystroke, click or wheel in it: a
+  // terminal reconnects and lands where it was, so an idle reload costs the
+  // user nothing they were doing.
   const staleBundleRef = useRef(false);
+  const STALE_IDLE_RELOAD_MS = 15 * 60 * 1000;
   useEffect(() => {
     let disposed = false;
+    let noticedFor: string | null = null;
+    let lastUserInputAt = Date.now();
     const loadedBundle = (() => {
       try { return new URL(import.meta.url).pathname.split("/").pop() || null; }
       catch { return null; }
@@ -1072,18 +1082,28 @@ const App = () => {
         const res = await fetch("/", { cache: "no-store" });
         const html = await res.text();
         const current = (html.match(/assets\/(index-[^"']+\.js)/) || [])[1];
-        if (!disposed && current && current !== loadedBundle) staleBundleRef.current = true;
+        if (!disposed && current && current !== loadedBundle) {
+          staleBundleRef.current = true;
+          if (noticedFor !== current && !document.hidden) {
+            noticedFor = current;
+            pushNoticeRef.current?.("hop was updated — reload to pick it up (this tab reloads itself when hidden or idle)");
+          }
+        }
       } catch { /* offline — try again next tick */ }
     };
     const maybeReload = () => {
-      if (staleBundleRef.current && document.hidden) window.location.reload();
+      if (!staleBundleRef.current) return;
+      if (document.hidden || Date.now() - lastUserInputAt > STALE_IDLE_RELOAD_MS) window.location.reload();
     };
+    const touch = () => { lastUserInputAt = Date.now(); };
     const interval = window.setInterval(() => { void check().then(maybeReload); }, 5 * 60 * 1000);
     document.addEventListener("visibilitychange", maybeReload);
+    for (const ev of ["keydown", "pointerdown", "wheel", "touchstart"] as const) window.addEventListener(ev, touch, { passive: true });
     return () => {
       disposed = true;
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", maybeReload);
+      for (const ev of ["keydown", "pointerdown", "wheel", "touchstart"] as const) window.removeEventListener(ev, touch);
     };
   }, []);
 

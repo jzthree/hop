@@ -13,6 +13,7 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { urlAtCell, cellAtPoint } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { CwdField } from "./CwdField";
@@ -363,6 +364,33 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const rescaleRef = useRef<() => void>(() => {});
   // Wired by the live effect; watch mode leaves them null so keys go nowhere.
   const sendInputRef = useRef<((data: string) => void) | null>(null);
+  // When the link addon last opened something from this tile — so the click
+  // that follows its mouseup does not open the same URL a second time.
+  const lastLinkOpenAtRef = useRef(0);
+  // The URL under a viewport point, reassembled across the rows it spans
+  // (utils/urlAtCell): Codex hard-breaks long URLs at the tile's edge, and
+  // the addon only joins rows the terminal itself wrapped.
+  const urlAtPoint = (clientX: number, clientY: number): string | null => {
+    const term = termRef.current;
+    const screen = boxRef.current?.querySelector(".xterm-screen") as HTMLElement | null;
+    if (!term || !screen) return null;
+    const rowsEl = boxRef.current?.querySelector(".xterm-rows") as HTMLElement | null;
+    const cell = cellAtPoint(screen, rowsEl, term.cols, term.rows, clientX, clientY);
+    const buf = term.buffer.active;
+    const url = cell ? urlAtCell(
+      (i) => { const l = buf.getLine(i); return l ? { text: l.translateToString(false), wrapped: l.isWrapped } : null; },
+      buf.length, term.cols, buf.viewportY + cell.row, cell.col
+    ) : null;
+    // Diagnostics for "clicking a link in a tile does nothing" reports:
+    // localStorage.hay_debug_links=1 prints what the click resolved to.
+    try {
+      if (localStorage.getItem("hay_debug_links")) {
+        const line = cell ? buf.getLine(buf.viewportY + cell.row) : null;
+        console.log("[links]", JSON.stringify({ cell, cols: term.cols, rows: term.rows, viewportY: buf.viewportY, len: buf.length, domRows: rowsEl?.children.length ?? null, line: line ? line.translateToString(false).slice(0, 90) : null, url }));
+      }
+    } catch { /* diagnostics only */ }
+    return url;
+  };
   const kbdEnhancedRef = useRef(false);
   // Throttle gate for typing-driven size ownership (below) — same 500ms
   // budget as the full-screen terminal's fit-on-type, and for the same
@@ -482,7 +510,12 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     // stops the card from treating the click as a switch.
     term.loadAddon(new WebLinksAddon((event, uri) => {
       event.preventDefault();
-      window.open(uri, "_blank", "noopener");
+      // Prefer the whole URL when the addon saw only the first row of a
+      // hard-broken one (its match ends at the tile's right edge).
+      const joined = urlAtPoint(event.clientX, event.clientY);
+      const target = joined && joined.startsWith(uri) && joined.length > uri.length ? joined : uri;
+      lastLinkOpenAtRef.current = Date.now();
+      window.open(target, "_blank", "noopener");
     }));
     term.open(box);
     termRef.current = term;
@@ -1070,7 +1103,22 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       // bottom-anchored screen otherwise shows the CARD's background as a
       // pale strip — the "space on top".
       style={{ background: (theme as { background?: string } | undefined)?.background }}
-      onClick={live ? (e) => e.stopPropagation() : undefined}
+      onClick={(e) => {
+        if (live) {
+          e.stopPropagation();
+          // The addon opened it on mouseup. Otherwise a URL the addon could
+          // not see as one — a continuation row of a hard break — is ours.
+          if (Date.now() - lastLinkOpenAtRef.current < 600) return;
+          const url = urlAtPoint(e.clientX, e.clientY);
+          if (url) window.open(url, "_blank", "noopener");
+          return;
+        }
+        // Not live yet: the click bubbles and focuses the tile as before,
+        // AND a URL under it opens — the first click on a link is not a dud
+        // that merely wakes the tile.
+        const url = urlAtPoint(e.clientX, e.clientY);
+        if (url) window.open(url, "_blank", "noopener");
+      }}
       onPointerDown={live ? (e) => e.stopPropagation() : undefined}
     >
       <div className="switcher-focus-term" ref={boxRef} />
@@ -2657,11 +2705,22 @@ export const SessionSwitcher = ({
 
   const now = Date.now();
 
+  // WHY the bell rang, so an amber dot on a Codex session — which rings at
+  // the end of every turn — reads "finished", not "needs your input".
+  const bellWhy = (s: SwitcherSession) => {
+    switch (s.attentionReason) {
+      case "ask": return s.attentionNote ? `Asking: ${s.attentionNote}` : "Asking you something";
+      case "finished": return "Finished a turn (bell)";
+      case "view": return s.attentionNote ? `Published: ${s.attentionNote}` : "Published a view";
+      case "working": return "Still working — rang mid-turn, nothing needs you yet";
+      default: return "Bell rung since last viewed";
+    }
+  };
   const dots = (s: SwitcherSession) =>
     (s.bellUnseen || s.unread) && (
       <span
         className={`attention-dot ${s.bellUnseen ? "bell" : "output"}`}
-        title={s.bellUnseen ? "Bell rung since last viewed" : "New output since last viewed"}
+        title={s.bellUnseen ? bellWhy(s) : "New output since last viewed"}
       />
     );
 

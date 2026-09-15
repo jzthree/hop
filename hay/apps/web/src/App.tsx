@@ -16,6 +16,7 @@ import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSea
 import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
 import { tabTitle } from "./utils/tabTitle";
 import { remoteAppOwnsScreen } from "./utils/echoGuard";
+import { urlAtCell, cellAtPoint } from "./utils/urlAtCell";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -2089,7 +2090,16 @@ const App = () => {
     // window.open inside the click handler keeps the popup-blocker happy.
     terminal.loadAddon(new WebLinksAddon((event, uri) => {
       event.preventDefault();
-      window.open(uri, "_blank", "noopener");
+      // Prefer the whole URL when the addon saw only the first row of one a
+      // TUI hard-broke at the right edge (see utils/urlAtCell).
+      let target = uri;
+      const screen = containerRef.current?.querySelector(".xterm-screen") as HTMLElement | null;
+      const cell = screen ? cellAtPoint(screen, containerRef.current?.querySelector(".xterm-rows") as HTMLElement | null, terminal.cols, terminal.rows, event.clientX, event.clientY) : null;
+      if (cell) {
+        const joined = extractUrlAtCell(terminal.buffer.active.viewportY + cell.row, cell.col);
+        if (joined && joined.startsWith(uri) && joined.length > uri.length) target = joined;
+      }
+      window.open(target, "_blank", "noopener");
     }));
     terminal.open(containerRef.current);
 
@@ -3743,29 +3753,16 @@ const App = () => {
 
   // Reconstruct the URL under a tapped cell. Wrapped rows are joined into the
   // logical line first — OAuth URLs span many screen rows.
+  // Shared with the wall tiles (utils/urlAtCell): joins soft-wrapped rows
+  // and the hard breaks a TUI makes at the right edge.
   const extractUrlAtCell = useCallback((bufferRow: number, col: number): string | null => {
     const term = termRef.current;
     if (!term) return null;
     const buf = term.buffer.active;
-    let start = bufferRow;
-    while (start > 0 && buf.getLine(start)?.isWrapped) start--;
-    let text = "";
-    let offset = -1;
-    for (let r = start; r < buf.length; r++) {
-      const line = buf.getLine(r);
-      if (!line || (r > start && !line.isWrapped)) break;
-      if (r === bufferRow) offset = text.length + Math.min(col, term.cols - 1);
-      text += line.translateToString(false);
-    }
-    if (offset < 0) return null;
-    const urlRe = /https?:\/\/[^\s"'`<>]+/g;
-    let m: RegExpExecArray | null;
-    while ((m = urlRe.exec(text)) !== null) {
-      if (offset >= m.index && offset <= m.index + m[0].length) {
-        return m[0].replace(/[.,;:!?)\]}]+$/, "");
-      }
-    }
-    return null;
+    return urlAtCell(
+      (i) => { const l = buf.getLine(i); return l ? { text: l.translateToString(false), wrapped: l.isWrapped } : null; },
+      buf.length, term.cols, bufferRow, col
+    );
   }, []);
 
   // Enroll this device's platform authenticator (Touch ID / Face ID) as a

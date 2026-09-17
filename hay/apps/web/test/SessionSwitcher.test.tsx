@@ -308,7 +308,7 @@ describe("context menus", () => {
 });
 
 describe("search results hold their order", () => {
-  afterEach(() => { document.body.innerHTML = ""; localStorage.removeItem("hay_sort_mode"); });
+  afterEach(() => { document.body.innerHTML = ""; try { localStorage.setItem("hay_sort_mode", "recent"); } catch { /* stubbed storage */ } });
   const mk = (name: string, activity: number, extra: Partial<SwitcherSession> = {}): SwitcherSession =>
     ({ name, displayName: name, internalName: name, active: true, starting: false, createdBy: "user", lastActivityAt: activity, ...extra });
   const order = () => Array.from(document.querySelectorAll(".switcher-card[data-session-key]")).map((c) => c.getAttribute("data-session-key"));
@@ -338,6 +338,54 @@ describe("search results hold their order", () => {
     // A new query is a new search: ranked fresh.
     typeQuery("vault-c");
     expect(order()).toEqual(["vault-c"]);
+  });
+
+  it("a session matched only by its running process keeps its place when that process changes", () => {
+    // Manual mode, query "vault": vault-a matches by name, runner only by
+    // its foreground process. Typing a command into runner changes the
+    // process name — that must not evict it from the rows mid-search.
+    localStorage.setItem("hay_sort_mode", "manual");
+    const before = [mk("runner", 1000, { foregroundProcess: "vault-runner" }), mk("vault-a", 2000)];
+    const view = render(<SessionSwitcher {...props} sessions={before} open />);
+    typeQuery("vault");
+    expect(order()).toEqual(["runner", "vault-a"]);
+    view.rerender(<SessionSwitcher {...props} sessions={[mk("runner", 3000, { foregroundProcess: "zsh" }), mk("vault-a", 2000)]} open />);
+    expect(order()).toEqual(["runner", "vault-a"]);
+    // A new query re-evaluates: runner no longer matches "vault" at all.
+    typeQuery("vault-");
+    expect(order()).toEqual(["vault-a"]);
+  });
+
+  it("screen-text matches keep their first-seen order and do not refetch on every poll", async () => {
+    localStorage.setItem("hay_sort_mode", "manual");
+    const searches: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.startsWith("/api/sessions/search")) {
+        searches.push(u);
+        // The daemon answers newest-activity first; the order it gives is
+        // deliberately NOT what the section must show after the first time.
+        const first = searches.length === 1;
+        return { ok: true, json: async () => ({ matches: first
+          ? [{ internalName: "beta", snippet: "probe here" }, { internalName: "alpha", snippet: "probe there" }]
+          : [{ internalName: "alpha", snippet: "probe there" }, { internalName: "beta", snippet: "probe here" }] }) };
+      }
+      return { ok: false, json: async () => null };
+    }));
+    try {
+      const view = render(<SessionSwitcher {...props} sessions={[mk("alpha", 1000), mk("beta", 2000)]} open />);
+      typeQuery("probe");
+      await vi.waitFor(() => expect(order()).toEqual(["beta", "alpha"]));
+      expect(searches.length).toBe(1);
+      // A sessions poll (new array, alpha now the newest) must neither refetch
+      // nor reorder the section.
+      view.rerender(<SessionSwitcher {...props} sessions={[mk("alpha", 99000), mk("beta", 2000)]} open />);
+      await new Promise((r) => setTimeout(r, 350));
+      expect(searches.length).toBe(1);
+      expect(order()).toEqual(["beta", "alpha"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("in Manual mode: a rename mid-search does not move the card", () => {

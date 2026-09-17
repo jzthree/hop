@@ -541,6 +541,17 @@ describe("handoff to the other tool", () => {
   });
 });
 
+describe("what a session runs decides its handoff menu", () => {
+  afterEach(() => { document.body.innerHTML = ""; });
+  it("a codex session (running as node) offers Claude, not Codex", () => {
+    const codex: SwitcherSession = { name: "cx", displayName: "cx", internalName: "cx", active: true, starting: false, createdBy: "user", foregroundProcess: "node", agent: "codex" };
+    render(<SessionSwitcher {...props} sessions={[codex]} open />);
+    fireEvent.click(screen.getByRole("button", { name: "More actions for cx" }));
+    expect(screen.getByRole("button", { name: "Continue in Claude…" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Continue in Codex…" })).toBeNull();
+  });
+});
+
 describe("file drop on a wall card", () => {
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 

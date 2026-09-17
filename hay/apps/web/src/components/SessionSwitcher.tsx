@@ -1729,11 +1729,16 @@ export const SessionSwitcher = ({
             };
         return live;
       }
-      // Resolve against what still MATCHES (the live rows), never the whole
-      // pool: a session that stopped matching leaves, one that started
-      // matching joins at the end, and nothing in between moves.
-      const pin = (frozenKeys: string[], liveRows: SwitcherSession[]) => {
-        const byKey = new Map(liveRows.map((r) => [sessionKey(r), r]));
+      // Membership is as frozen as order. The filter also matches a
+      // session's running process and its tagline, and both change under
+      // the user's hands — a command typed into the session, an hourly
+      // tagline — so a session that matched at search time could stop
+      // matching mid-work and vanish from these rows (to reappear, moved,
+      // among the screen-text matches below). Frozen keys resolve against
+      // the POOL: a session stays where it was until the query changes or
+      // the session itself is gone; genuinely new matches join at the end.
+      const pin = (frozenKeys: string[], liveRows: SwitcherSession[], poolRows: SwitcherSession[]) => {
+        const byKey = new Map(poolRows.map((r) => [sessionKey(r), r]));
         const known = new Set(frozenKeys);
         return [
           ...frozenKeys.map((k) => byKey.get(k)).filter((r): r is SwitcherSession => !!r),
@@ -1741,15 +1746,17 @@ export const SessionSwitcher = ({
         ];
       };
       if (live.mode === "filter" && fq.mode === "filter") {
-        return { mode: "filter" as const, rows: pin(fq.rows, live.rows) };
+        return { mode: "filter" as const, rows: pin(fq.rows, live.rows, pool) };
       }
       if (live.mode === "manual" && fq.mode === "manual") {
+        const folderIDs = new Set(live.folders.map((f) => f.folder.id));
+        const loosePool = pool.filter((r) => !r.folderId || !folderIDs.has(r.folderId));
         return {
           mode: "manual" as const,
-          rows: pin(fq.loose, live.rows),
+          rows: pin(fq.loose, live.rows, loosePool),
           folders: live.folders.map((f) => {
             const fz = fq.folders.find((x) => x.id === f.folder.id);
-            return fz ? { folder: f.folder, rows: pin(fz.rows, f.rows) } : f;
+            return fz ? { folder: f.folder, rows: pin(fz.rows, f.rows, pool.filter((r) => r.folderId === f.folder.id)) } : f;
           })
         };
       }
@@ -1807,15 +1814,38 @@ export const SessionSwitcher = ({
 
   // Content-aware matches: debounced grep over each session's recent screen
   // text (daemon-side, over already-retained output — no index, no polling).
-  const [contentMatches, setContentMatches] = useState<Array<{ session: SwitcherSession; snippet: string }>>([]);
+  // Screen-text hits for the current query, as keys: the daemon answers
+  // newest-activity first, and re-asking on every poll made the section
+  // re-sort under the user's hands — the session being typed in has the
+  // newest activity, so it jumped to the front on each keystroke's poll.
+  // Hits keep the order they first appeared in for this query; a slow
+  // refresh still lets new hits join (at the end) and stale ones leave.
+  const [contentHits, setContentHits] = useState<Array<{ key: string; snippet: string }>>([]);
+  const contentOrderRef = useRef<{ q: string; keys: string[] }>({ q: "", keys: [] });
+  const [contentRefreshTick, setContentRefreshTick] = useState(0);
+  const visibleSessionsRef = useRef(visibleSessions);
+  visibleSessionsRef.current = visibleSessions;
+  const contentMatches = useMemo(() => {
+    const byKey = new Map(visibleSessions.map((s) => [sessionKey(s), s]));
+    return contentHits
+      .map((h) => { const session = byKey.get(h.key); return session ? { session, snippet: h.snippet } : null; })
+      .filter((m): m is { session: SwitcherSession; snippet: string } => !!m);
+  }, [contentHits, visibleSessions]);
   // The server caps how many sessions it greps per keystroke; when the fleet
   // exceeds the cap, say so — silence would read as "searched everything".
   const [contentTruncated, setContentTruncated] = useState(false);
   useEffect(() => {
     const q = filter.trim();
+    if (!open || q.length < 3) return;
+    const t = window.setInterval(() => setContentRefreshTick((n) => n + 1), 30_000);
+    return () => window.clearInterval(t);
+  }, [open, filter]);
+  useEffect(() => {
+    const q = filter.trim();
     if (!open || q.length < 3) {
-      setContentMatches([]);
+      setContentHits([]);
       setContentTruncated(false);
+      contentOrderRef.current = { q: "", keys: [] };
       return;
     }
     let cancelled = false;
@@ -1824,19 +1854,20 @@ export const SessionSwitcher = ({
         const res = await fetch(`/api/sessions/search?q=${encodeURIComponent(q)}`);
         const data = await res.json();
         if (cancelled) return;
-        const byKey = new Map(visibleSessions.map((s) => [s.internalName || s.name, s]));
-        setContentMatches(
-          (Array.isArray(data?.matches) ? data.matches : [])
-            .map((m: { internalName?: string; name?: string; snippet?: string }) => {
-              const session = byKey.get(m.internalName || "") || byKey.get(m.name || "");
-              return session ? { session, snippet: m.snippet || "" } : null;
-            })
-            .filter(Boolean) as Array<{ session: SwitcherSession; snippet: string }>
-        );
+        const byKey = new Map(visibleSessionsRef.current.map((s) => [sessionKey(s), s]));
+        const hits = new Map<string, string>();
+        for (const m of (Array.isArray(data?.matches) ? data.matches : []) as Array<{ internalName?: string; name?: string; snippet?: string }>) {
+          const session = byKey.get(m.internalName || "") || byKey.get(m.name || "");
+          if (session) hits.set(sessionKey(session), m.snippet || "");
+        }
+        const frozen = contentOrderRef.current.q === q ? contentOrderRef.current.keys : [];
+        const keys = [...frozen.filter((k) => hits.has(k)), ...[...hits.keys()].filter((k) => !frozen.includes(k))];
+        contentOrderRef.current = { q, keys };
+        setContentHits(keys.map((key) => ({ key, snippet: hits.get(key) || "" })));
         setContentTruncated(data?.truncated === true);
       } catch {
         if (!cancelled) {
-          setContentMatches([]);
+          setContentHits([]);
           setContentTruncated(false);
         }
       }
@@ -1845,7 +1876,7 @@ export const SessionSwitcher = ({
       cancelled = true;
       window.clearTimeout(t);
     };
-  }, [open, filter, visibleSessions]);
+  }, [open, filter, contentRefreshTick]);
 
   // Full-history search: greps ENTIRE transcripts server-side (ripgrep), so
   // it runs only when the user explicitly asks — never per keystroke. Results

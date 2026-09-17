@@ -4672,6 +4672,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdAt: config?.createdAt,
             createdBy: config?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
+            agent: sessionAgentKind(s.name),
             localCliCount,
             hasLocalCli: clientSummary.hasLocalCli || localCliCount > 0 || s.hasLocalCli === true,
             ...getSessionSeenInfo(s.name)
@@ -4716,6 +4717,7 @@ function buildSessionEntries(haySessions, opts = {}) {
                 createdAt: config?.createdAt,
                 createdBy,
                 agentPermitted: config?.agentPermitted === true,
+                agent: sessionAgentKind(name),
                 localCliCount: clientSummary.localCliCount,
                 hasLocalCli: clientSummary.hasLocalCli,
                 ...getSessionSeenInfo(name)
@@ -4780,6 +4782,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdAt: config?.createdAt,
             createdBy: effective?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
+            agent: sessionAgentKind(s.name),
             localCliCount: clientSummary.localCliCount,
             hasLocalCli: clientSummary.hasLocalCli,
             ...getSessionSeenInfo(name)
@@ -5477,6 +5480,56 @@ function readTurnSessionId(internalName) {
         return typeof t.sessionId === 'string' && t.sessionId ? t.sessionId : null;
     } catch (e) { return null; }
 }
+/**
+ * What the Stop hook last counted for a session: the conversation id and,
+ * for codex (which has no SessionStart record), the agent it belongs to.
+ */
+function readTurnInfo(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    try {
+        const t = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.turn`), 'utf8'));
+        if (typeof t.sessionId !== 'string' || !t.sessionId) return null;
+        return { sessionId: t.sessionId, agent: t.agent === 'codex' ? 'codex' : 'claude' };
+    } catch (e) { return null; }
+}
+
+/**
+ * The agent a session is running, by the records its hooks leave — not by
+ * the foreground process name, which reports codex as "node" and any
+ * argv-launched restore as the wrapper shell. 'claude' | 'codex' | null.
+ */
+function sessionAgentKind(internalName) {
+    if (readClaudeSessionRecord(internalName)?.sessionId) return 'claude';
+    const turn = readTurnInfo(internalName);
+    return turn ? turn.agent : null;
+}
+
+/** A codex rollout by its session id: the id is in the file's name. */
+function findCodexRolloutById(sessionId) {
+    if (!sessionId || !/^[A-Za-z0-9-]{8,}$/.test(sessionId)) return null;
+    for (const root of getCodexConfigRoots()) {
+        const sessions = path.join(root, 'sessions');
+        let years = [];
+        try { years = fs.readdirSync(sessions).sort().reverse(); } catch (e) { continue; }
+        for (const y of years) {
+            let months = [];
+            try { months = fs.readdirSync(path.join(sessions, y)).sort().reverse(); } catch (e) { continue; }
+            for (const m of months) {
+                let days = [];
+                try { days = fs.readdirSync(path.join(sessions, y, m)).sort().reverse(); } catch (e) { continue; }
+                for (const d of days) {
+                    const dir = path.join(sessions, y, m, d);
+                    let names = [];
+                    try { names = fs.readdirSync(dir); } catch (e) { continue; }
+                    const hit = names.find((n) => n.endsWith('.jsonl') && n.includes(sessionId));
+                    if (hit) return path.join(dir, hit);
+                }
+            }
+        }
+    }
+    return null;
+}
+
 // Find a transcript for a bare session id across every claude config root,
 // returning which root (= the CLAUDE_CONFIG_DIR to resume under) holds it.
 function findClaudeTranscriptById(sessionId) {
@@ -11522,6 +11575,7 @@ happens until someone clicks it.
                 folderId: s.folderId || null,
                 cwd: s.cwd,
                 foregroundProcess: s.foregroundProcess,
+                agent: s.agent || null,
                 lastActivityAt: s.lastActivityAt,
                 // For sessions armed with notify-on-finish, each completed turn
                 // adds to bellSeq so the phone treats a finished response like a
@@ -11623,9 +11677,13 @@ happens until someone clicks it.
                     const cwd = [rec?.cwd, meta?.cwd, config.cwd].find(plausibleCwd) || undefined;
 
                     // What the source is running: a claude conversation (the
-                    // hook's record), codex (by process — codex has no hook),
-                    // or a plain shell.
-                    const runsCodex = /codex/i.test(String(config.foregroundProcess || ''))
+                    // SessionStart record), codex (its Stop hook's turn file
+                    // names the agent and the conversation — the process name
+                    // says "node" and cannot), or a plain shell.
+                    const turn = readTurnInfo(source);
+                    const codexId = turn?.agent === 'codex' ? turn.sessionId : null;
+                    const runsCodex = !!codexId
+                        || /codex/i.test(String(config.foregroundProcess || ''))
                         || /codex/i.test(String(getRuntimeSessionMetadata(source)?.foregroundProcess || ''));
                     const sourceKind = rec ? 'claude' : runsCodex ? 'codex' : 'shell';
                     const wantTarget = typeof target === 'string' && target.trim() ? target.trim().toLowerCase() : null;
@@ -11645,7 +11703,9 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'This session has no claude or codex conversation to hand off' }));
                         return;
                     }
-                    const codexRollout = sourceKind === 'codex' ? resolveCodexTranscriptByCwd(cwd) : null;
+                    const codexRollout = sourceKind === 'codex'
+                        ? ((codexId && findCodexRolloutById(codexId)) || resolveCodexTranscriptByCwd(cwd))
+                        : null;
 
                     const sourceDisplay = getSessionDisplayName(source) || source;
                     const suffix = handoff ? '-' + wantTarget : '-fork';
@@ -11691,12 +11751,13 @@ happens until someone clicks it.
                         command = base + ' --resume ' + rec.sessionId + ' --fork-session';
                         kind = 'claude';
                     } else if (runsCodex) {
-                        // By id when the rollout is identifiable — the picker
-                        // otherwise, which asks the user to find it.
-                        const rolloutId = codexRollout ? await trajectoryExtract.codexRolloutId(codexRollout) : null;
+                        // By id — the hook's, else the rollout's — and the
+                        // picker only when neither is known.
+                        const rolloutId = codexId || (codexRollout ? await trajectoryExtract.codexRolloutId(codexRollout) : null);
                         command = rolloutId ? `codex resume ${shq(rolloutId)}` : 'codex resume';
                         kind = 'codex';
                     }
+                    log(`[fork] ${sourceDisplay} (${sourceKind}) → ${forkName}: ${kind}${command ? ` — ${command.slice(0, 80)}` : ' (shell)'}`, DIM);
 
                     // The fork inherits the source's origin: forking an agent
                     // worker makes another agent worker; forking your own
@@ -11726,6 +11787,7 @@ happens until someone clicks it.
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, name: forkName, internalName: forkInternal, kind, target: handoff ? wantTarget : sourceKind, extract }));
                 } catch (e) {
+                    log(`[fork] failed: ${e?.message || e}`, RED);
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: e?.message || 'Fork failed' }));
                 }
@@ -16411,9 +16473,11 @@ async function main() {
         let command = plan?.command || null;
         let kind = command ? 'claude' : null;
         if (!command) {
-            // No claude record: a codex conversation is found by its rollout.
-            const rollout = resolveCodexTranscriptByCwd(cwd);
-            const rolloutId = rollout ? await trajectoryExtract.codexRolloutId(rollout) : null;
+            // No claude record: a codex conversation by its hook's id, else
+            // by the newest rollout in this directory.
+            const turn = readTurnInfo(target);
+            const rollout = turn?.agent === 'codex' ? null : resolveCodexTranscriptByCwd(cwd);
+            const rolloutId = turn?.agent === 'codex' ? turn.sessionId : (rollout ? await trajectoryExtract.codexRolloutId(rollout) : null);
             if (rolloutId) {
                 command = `codex resume '${rolloutId.replace(/'/g, `'\\''`)}'`;
                 kind = 'codex';

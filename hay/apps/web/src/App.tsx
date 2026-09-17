@@ -3192,6 +3192,7 @@ const App = () => {
           agentPermitted: s.agentPermitted === true,
           createdBy: s.createdBy === "agent" ? "agent" : "user",
           createdVia: typeof s.createdVia === "string" ? s.createdVia : null,
+          agent: s.agent === "claude" || s.agent === "codex" ? s.agent : null,
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
           rows: Number.isInteger(s.rows) ? s.rows : undefined,
           // These three were silently dropped here, so the switcher never saw

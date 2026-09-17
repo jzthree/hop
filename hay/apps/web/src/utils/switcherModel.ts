@@ -29,7 +29,12 @@ export type SwitcherSession = {
   bellSeq?: number;
   unread?: boolean;
   bellUnseen?: boolean;
+  // Why the bell rang, from the daemon: "ask" | "finished" | "view" | "bell".
+  attentionReason?: string;
+  attentionNote?: string;
   foregroundProcess?: string;
+  /** What the session runs, by its hooks' records: claude, codex, or nothing known. */
+  agent?: "claude" | "codex" | null;
   agentPermitted?: boolean;
   cols?: number;
   rows?: number;

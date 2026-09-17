@@ -2757,6 +2757,9 @@ export const SessionSwitcher = ({
 
   // Claude Code titles its process with a bare version number — label it.
   const appLabel = (s: SwitcherSession) => {
+    // The daemon knows from the hooks' records; the process name reports
+    // codex as "node" and a restored session as its wrapper shell.
+    if (s.agent) return s.agent;
     const app = runningApp(s);
     if (!app) return "";
     return /^\d+\.\d+\.\d+$/.test(app) ? "claude" : app;

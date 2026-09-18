@@ -11769,18 +11769,24 @@ happens until someone clicks it.
                         saveDefinition: false,
                         command
                     });
+                    // Filed where its source is. The effective config is the
+                    // wall's own truth for the folder (saved, runtime and
+                    // durable layers merged); the durable meta alone missed
+                    // sessions filed before folders were written there.
+                    const folderId = config.folderId || meta?.folderId || null;
                     rememberRuntimeSessionMetadata(forkInternal, {
                         type: 'terminal',
                         displayName: forkName,
                         cwd,
                         createdBy,
-                        folderId: meta?.folderId || undefined
+                        folderId: folderId || undefined
                     });
                     writeClaudeSessionMeta(forkInternal, {
                         internalName: forkInternal,
                         displayName: forkName,
                         cwd,
                         createdBy,
+                        folderId: folderId || undefined,
                         forkedFrom: source,
                         ...(handoff ? { handoffFrom: sourceKind, handoffTo: wantTarget } : {})
                     });

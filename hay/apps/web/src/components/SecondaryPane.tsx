@@ -1,17 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { safeParseServerMessage } from "hay-shared";
+import { PaneButtons, PaneIcon, type DragHandle } from "./PaneLayout";
+import type { Side } from "../utils/paneTree";
 
 // A lightweight additional pane: its own WS attach + xterm for one session,
-// scaled-to-fit rendering, typing forwarded when focused. Deliberately
-// NON-CLAIMING: it never sends resize, and connects with the room's current
-// size, so it can watch (and poke) a session without fighting the primary
+// typing forwarded when focused. A FOCUSED pane claims its box size (crisp
+// 1:1, like the primary); an unfocused one renders the room's elected size
+// scaled to fit, so it can watch a session without fighting the primary
 // viewer — or your phone — over the shared PTY size.
 //
 // Kept minimal by design (no optimistic echo, no find, no touch layer): the
 // full-featured primary terminal is where heavy interaction happens; panes
-// are for driving a fleet. Desktop-only.
+// are for driving a fleet. Desktop-only. Its title bar is the drag handle
+// for re-docking (see PaneLayout) and carries the split / zoom / swap /
+// close controls.
 
 type Props = {
   sessionName: string;
@@ -23,12 +27,35 @@ type Props = {
   fontSize: number;
   theme: object;
   focused: boolean;
+  zoomed?: boolean;
+  mac?: boolean;
+  dragHandle?: DragHandle;
   onFocus: () => void;
   onClose: () => void;
   onPromote?: () => void;
+  onSplit?: (side: Side) => void;
+  onZoom?: () => void;
 };
 
-export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, rows, fontSize, theme, focused, onFocus, onClose, onPromote }: Props) => {
+export const SecondaryPane = ({
+  sessionName,
+  procLabel,
+  wsUrl,
+  userName,
+  cols,
+  rows,
+  fontSize,
+  theme,
+  focused,
+  zoomed = false,
+  mac = true,
+  dragHandle,
+  onFocus,
+  onClose,
+  onPromote,
+  onSplit,
+  onZoom
+}: Props) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -209,24 +236,52 @@ export const SecondaryPane = ({ sessionName, procLabel, wsUrl, userName, cols, r
     requestAnimationFrame(() => fitRef.current());
   }, [focused]);
 
+  const k = (m: string, o: string) => (mac ? m : o);
+  const swallow = (e: ReactPointerEvent) => e.stopPropagation();
+
   return (
     <div
-      className={`secondary-pane${focused ? " focused" : ""}`}
+      className={`secondary-pane${focused ? " focused" : ""}${zoomed ? " zoomed" : ""}`}
       onMouseDown={onFocus}
     >
-      <div className="secondary-pane-bar">
+      <div
+        className="secondary-pane-bar"
+        onPointerDown={dragHandle?.onPointerDown}
+        title={dragHandle ? "Drag to move this pane" : undefined}
+      >
         {activity && !focused && <span className="secondary-pane-dot" title="New output" />}
         <span className="secondary-pane-name">{sessionName}</span>
         {procLabel ? <span className="secondary-pane-proc">{procLabel}</span> : null}
         <span className={`secondary-pane-status ${status}`}>{status === "connected" ? "" : status}</span>
-        {onPromote && (
-          <button type="button" aria-label={`Swap ${sessionName} with primary`} title="Swap with primary (⌘⇧E)" onClick={(e) => { e.stopPropagation(); onPromote(); }}>
-            ⇄
+        <span className="pane-actions">
+          {onSplit && onZoom && (
+            <PaneButtons label={sessionName} mac={mac} zoomed={zoomed} onSplit={onSplit} onZoom={onZoom} />
+          )}
+          {onPromote && (
+            <button
+              type="button"
+              className="pane-btn"
+              aria-label={`Swap ${sessionName} with primary`}
+              title={`Swap with primary (${k("⌘⇧E", "Ctrl+Shift+E")})`}
+              onPointerDown={swallow}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={(e) => { e.stopPropagation(); onPromote(); }}
+            >
+              <PaneIcon kind="swap" />
+            </button>
+          )}
+          <button
+            type="button"
+            className="pane-btn"
+            aria-label={`Close pane ${sessionName}`}
+            title={`Close pane (${k("⌘⇧K", "Ctrl+Shift+K")})`}
+            onPointerDown={swallow}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => { e.stopPropagation(); onClose(); }}
+          >
+            <PaneIcon kind="close" />
           </button>
-        )}
-        <button type="button" aria-label={`Close pane ${sessionName}`} onClick={(e) => { e.stopPropagation(); onClose(); }}>
-          ✕
-        </button>
+        </span>
       </div>
       <div className="secondary-pane-box" ref={boxRef}>
         <div className="secondary-pane-scale" style={{ transform: `scale(${scale})` }}>

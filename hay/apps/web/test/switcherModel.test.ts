@@ -5,7 +5,8 @@ import {
   filterSessionsByOrigin,
   projectKey,
   relativeTime,
-  type SwitcherSession
+  type SwitcherSession,
+  insertAfter
 } from "../src/utils/switcherModel";
 
 const mk = (over: Partial<SwitcherSession> & { name: string }): SwitcherSession => ({
@@ -521,5 +522,17 @@ describe("origin scope vs foldered sessions", () => {
 
     // The agent tab still lists it — it IS agent-created; no tab lies.
     expect(filterSessionsByOrigin(sessions, "agent").map((s) => s.name)).toContain("mybot");
+  });
+});
+
+describe("insertAfter — a fork takes the slot after its source", () => {
+  it("inserts right after a placed source, moving an existing entry", () => {
+    expect(insertAfter(["a", "b", "c"], "a", "x")).toEqual(["a", "x", "b", "c"]);
+    expect(insertAfter(["a", "b", "x"], "a", "x")).toEqual(["a", "x", "b"]);
+  });
+  it("leaves the order alone when the source was never placed, or is itself", () => {
+    const order = ["a", "b"];
+    expect(insertAfter(order, "zzz", "x")).toBe(order);
+    expect(insertAfter(order, "a", "a")).toBe(order);
   });
 });

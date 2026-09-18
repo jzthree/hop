@@ -28,7 +28,8 @@ import {
   type SessionOriginScope,
   type SwitcherFolder,
   type SwitcherSession,
-  type SwitcherSortMode
+  type SwitcherSortMode,
+  insertAfter
 } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { DigestCard } from "./DigestCard";
@@ -2452,10 +2453,15 @@ export const SessionSwitcher = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ internalName: sessionKey(s), ...(target ? { target } : {}) })
       });
-      const data = await res.json().catch(() => ({} as { error?: string; name?: string; kind?: string; extract?: { turns?: number; bytes?: number } }));
+      const data = await res.json().catch(() => ({} as { error?: string; name?: string; internalName?: string; kind?: string; extract?: { turns?: number; bytes?: number } }));
       if (!res.ok) {
         onNotice(data.error || (target ? "Handoff failed" : "Fork failed"));
         return;
+      }
+      // The new session belongs beside its source: the daemon files it in
+      // the same folder; on a hand-arranged wall it takes the next slot.
+      if (typeof data.internalName === "string" && data.internalName) {
+        persistManualOrder(insertAfter(manualOrder, sessionKey(s), data.internalName));
       }
       if (data.kind === "handoff") {
         const kb = Math.max(1, Math.round((data.extract?.bytes || 0) / 1024));

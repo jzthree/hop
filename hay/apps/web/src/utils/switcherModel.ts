@@ -267,6 +267,19 @@ const orderManually = (sessions: SwitcherSession[], manualOrder: string[]): Swit
 };
 
 /**
+ * Place `key` right after `afterKey` in a manual order. A source the user
+ * never placed leaves the order alone: both then sort by name at the tail,
+ * where a fork's name already follows its source's.
+ */
+export const insertAfter = (order: string[], afterKey: string, key: string): string[] => {
+  const at = order.indexOf(afterKey);
+  if (at < 0 || afterKey === key) return order;
+  const without = order.filter((k) => k !== key);
+  const i = without.indexOf(afterKey);
+  return [...without.slice(0, i + 1), key, ...without.slice(i + 1)];
+};
+
+/**
  * Split sessions into the user's folders plus everything still loose.
  * Folders belong to MANUAL mode only: Recent is ordered by the machine and
  * Project by the filesystem, so a hand-authored grouping would contradict

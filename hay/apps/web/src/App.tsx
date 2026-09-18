@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent, type ReactElement, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent, type ReactElement } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
@@ -22,6 +22,25 @@ import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
+import { PaneLayout } from "./components/PaneLayout";
+import {
+  PRIMARY_PANE,
+  findLeaf,
+  leafIds,
+  moveLeaf,
+  neighborLeaf,
+  newPaneId,
+  paneTreeHasPrimary,
+  paneTreeValid,
+  removeLeaf,
+  setLeafSession,
+  setSplitRatio,
+  splitLeaf,
+  type Direction,
+  type DropZone,
+  type PaneNode,
+  type Side
+} from "./utils/paneTree";
 import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
 import type { ViewsSummary } from "./utils/switcherModel";
 
@@ -209,30 +228,6 @@ type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "
 
 // Latency compensation (optimistic echo) and auto-fit-on-type are always on;
 // kept as constants so the gated code paths stay obvious.
-// ── Pane layout tree ─────────────────────────────────────────────────────
-// Splits are a full binary tree (direction + ratio + two children) so future
-// layouts (nested splits, 2x2 grids) need no model changes — today's UI just
-// happens to build one split at a time. The primary leaf (session: null) is
-// the full-featured terminal; other leaves are lightweight SecondaryPanes.
-type PaneNode =
-  | { kind: "leaf"; id: string; session: string | null }
-  | { kind: "split"; id: string; dir: "row" | "col"; ratio: number; a: PaneNode; b: PaneNode };
-
-const PRIMARY_PANE: PaneNode = { kind: "leaf", id: "primary", session: null };
-const newPaneId = () => `p${Math.random().toString(36).slice(2, 8)}`;
-
-const paneTreeValid = (n: unknown): n is PaneNode => {
-  const x = n as PaneNode;
-  if (!x || typeof x !== "object") return false;
-  if (x.kind === "leaf") return typeof x.id === "string" && (x.session === null || typeof x.session === "string");
-  if (x.kind === "split") {
-    return (x.dir === "row" || x.dir === "col") && typeof x.ratio === "number" && paneTreeValid(x.a) && paneTreeValid(x.b);
-  }
-  return false;
-};
-const paneTreeHasPrimary = (n: PaneNode): boolean =>
-  n.kind === "leaf" ? n.session === null : paneTreeHasPrimary(n.a) || paneTreeHasPrimary(n.b);
-
 const LATENCY_COMP = true;
 // A WebSocket handshake normally completes in well under a second. One still
 // CONNECTING after this long has hung (a stalled tunnel upgrade) and must be
@@ -261,6 +256,14 @@ type SessionInfo = {
   foregroundProcess?: string;
   agentPermitted?: boolean;
   createdBy?: "user" | "agent";
+  createdVia?: string | null;
+  agent?: "claude" | "codex" | null;
+  attentionReason?: string;
+  attentionNote?: string;
+  cols?: number;
+  rows?: number;
+  folderId?: string | null;
+  hasLocalCli?: boolean;
   // Computed against the local seen-markers: new output / an unseen bell since
   // this client last viewed the session.
   unread?: boolean;
@@ -739,6 +742,8 @@ const App = () => {
   shortcutHelpRef.current = shortcutHelpOpen;
 
   // ── Panes ──
+  // Any binary nesting of splits; the primary leaf can sit anywhere in it
+  // (PaneLayout keeps its DOM in place). Persisted per browser.
   const [paneTree, setPaneTree] = useState<PaneNode>(() => {
     try {
       const raw = localStorage.getItem("hay_pane_tree");
@@ -752,7 +757,8 @@ const App = () => {
   const [focusedPaneId, setFocusedPaneId] = useState("primary");
   const focusedPaneIdRef = useRef(focusedPaneId);
   focusedPaneIdRef.current = focusedPaneId;
-  // ⌘\ opens the palette in pick-a-session-for-the-new-pane mode.
+  // Zoom (iTerm's maximize): one pane fills the layout; the tree is kept.
+  const [zoomedPaneId, setZoomedPaneId] = useState<string | null>(null);
   // Holds the empty pane id awaiting a session from the palette (split-first-
   // then-fill), or null when the palette is a normal session switch.
   const paneTargetRef = useRef<string | null>(null);
@@ -762,101 +768,69 @@ const App = () => {
       else localStorage.setItem("hay_pane_tree", JSON.stringify(paneTree));
     } catch { /* ignore */ }
   }, [paneTree]);
+  const paneTreeRef = useRef(paneTree);
+  paneTreeRef.current = paneTree;
 
-  // Split the focused pane, adding an EMPTY pane in the given direction (dir:
-  // "row" = side-by-side, "col" = stacked). Returns the new empty pane's id so
-  // the caller can focus it and open the palette to fill it (split-first, then
-  // pick — matching tmux/iTerm muscle memory). Direct fill of an existing empty
-  // pane is a separate op (fillPane).
-  const splitEmpty = (dir: "row" | "col"): string => {
+  // Split a pane on the given side, adding an EMPTY pane there. Returns the
+  // new pane's id so the caller can focus it and open the palette to fill it
+  // (split-first, then pick — tmux/iTerm muscle memory). Direct fill of an
+  // existing empty pane is a separate op (fillPane).
+  const splitPaneAt = (targetId: string, side: Side): string => {
     const freshId = newPaneId();
-    const fresh: PaneNode = { kind: "leaf", id: freshId, session: "" };
-    setPaneTree((tree) => {
-      const target = focusedPaneIdRef.current;
-      // Rule: the PRIMARY leaf never re-parents (React would remount the live
-      // xterm/WebGL terminal and kill it). Splits from the primary nest on the
-      // secondary side; secondary leaves split in place (they tolerate remount).
-      if (target === "primary" || tree.kind === "leaf") {
-        if (tree.kind === "leaf") {
-          return { kind: "split", id: "root", dir, ratio: 0.55, a: tree, b: fresh };
-        }
-        return { ...tree, b: { kind: "split", id: newPaneId(), dir, ratio: 0.5, a: tree.b, b: fresh } };
-      }
-      let done = false;
-      const replace = (n: PaneNode): PaneNode => {
-        if (n.kind === "leaf") {
-          if (n.id !== target || done) return n;
-          done = true;
-          return { kind: "split", id: newPaneId(), dir, ratio: 0.5, a: n, b: fresh };
-        }
-        return { ...n, a: replace(n.a), b: replace(n.b) };
-      };
-      const next = replace(tree);
-      return done ? next : { ...tree, b: { kind: "split", id: newPaneId(), dir, ratio: 0.5, a: (tree as Extract<PaneNode, { kind: "split" }>).b, b: fresh } };
-    });
+    setPaneTree((tree) => splitLeaf(tree, targetId, side, { kind: "leaf", id: freshId, session: "" }));
     return freshId;
   };
   const fillPane = (paneId: string, session: string) => {
-    setPaneTree((tree) => setPaneLeafSession(tree, paneId, session));
+    setPaneTree((tree) => setLeafSession(tree, paneId, session));
   };
   // Split + immediately open the palette targeting the new empty pane.
-  const splitAndPick = (dir: "row" | "col") => {
-    const id = splitEmpty(dir);
+  const splitAndPick = (side: Side, targetId: string = focusedPaneIdRef.current) => {
+    const id = splitPaneAt(targetId, side);
+    setZoomedPaneId(null);
     setFocusedPaneId(id);
     paneTargetRef.current = id;
     setSwitcherOpen(true);
   };
   const closePane = (id: string) => {
     if (id === "primary") return;
+    setZoomedPaneId((z) => (z === id ? null : z));
     setFocusedPaneId("primary");
-    setPaneTree((tree) => {
-      const prune = (n: PaneNode): PaneNode | null => {
-        if (n.kind === "leaf") return n.id === id ? null : n;
-        const a = prune(n.a);
-        const b = prune(n.b);
-        if (a && b) return { ...n, a, b };
-        return a || b;
-      };
-      return prune(tree) || PRIMARY_PANE;
-    });
+    setPaneTree((tree) => removeLeaf(tree, id) || PRIMARY_PANE);
   };
   const setPaneRatio = (id: string, ratio: number) => {
-    setPaneTree((tree) => {
-      const walk = (n: PaneNode): PaneNode =>
-        n.kind === "split" ? (n.id === id ? { ...n, ratio } : { ...n, a: walk(n.a), b: walk(n.b) }) : n;
-      return walk(tree);
-    });
+    setPaneTree((tree) => setSplitRatio(tree, id, ratio));
   };
-  const paneTreeRef = useRef(paneTree);
-  paneTreeRef.current = paneTree;
-  const findPaneLeafSession = (n: PaneNode, id: string): string | null => {
-    if (n.kind === "leaf") return n.id === id ? n.session : null;
-    return findPaneLeafSession(n.a, id) ?? findPaneLeafSession(n.b, id);
+  // Re-dock: a pane dropped on another's edge splits it there; dropped on
+  // the middle, the two trade places. The primary moves like any other leaf.
+  const movePane = (id: string, targetId: string, where: DropZone) => {
+    setPaneTree((tree) => moveLeaf(tree, id, targetId, where));
+    setFocusedPaneId(id);
   };
-  const setPaneLeafSession = (n: PaneNode, id: string, session: string): PaneNode =>
-    n.kind === "leaf"
-      ? (n.id === id ? { ...n, session } : n)
-      : { ...n, a: setPaneLeafSession(n.a, id, session), b: setPaneLeafSession(n.b, id, session) };
+  const toggleZoom = (id: string = focusedPaneIdRef.current) => {
+    setZoomedPaneId((z) => (z === id ? null : id));
+    setFocusedPaneId(id);
+  };
+  const focusNeighbor = (dir: Direction) => {
+    const next = neighborLeaf(paneTreeRef.current, focusedPaneIdRef.current, dir);
+    if (!next) return;
+    setZoomedPaneId(null);
+    setFocusedPaneId(next);
+  };
   // Promote: the pane's session becomes the primary and the primary's session
   // moves into the pane. Pure connection retargeting — the primary terminal's
-  // DOM never moves (a remount would kill the live canvas); the pane
-  // reconnects when its sessionName prop changes.
+  // DOM never moves; the pane reconnects when its sessionName prop changes.
   const swapPaneWithPrimary = (paneId: string) => {
-    const paneSession = findPaneLeafSession(paneTreeRef.current, paneId);
+    const paneSession = findLeaf(paneTreeRef.current, paneId)?.session;
     const primaryRoom = activeSessionRoomRef.current;
     if (!paneSession || !primaryRoom || paneSession === primaryRoom) return;
     const target = sessionsRef.current.find((x) => x.name === paneSession || x.internalName === paneSession);
     if (!target) return;
-    setPaneTree((tree) => setPaneLeafSession(tree, paneId, primaryRoom));
+    setPaneTree((tree) => setLeafSession(tree, paneId, primaryRoom));
     switchSessionRef.current?.(target);
     setFocusedPaneId("primary");
   };
-  // In-order leaves = visual left-to-right/top-to-bottom pane order.
-  const paneOpsRef = useRef({ splitAndPick, closePane, swapPaneWithPrimary });
-  paneOpsRef.current = { splitAndPick, closePane, swapPaneWithPrimary };
-  const paneLeafIds = (n: PaneNode): string[] =>
-    n.kind === "leaf" ? [n.id] : [...paneLeafIds(n.a), ...paneLeafIds(n.b)];
-  const paneDragRef = useRef<{ id: string; dir: "row" | "col"; rect: DOMRect } | null>(null);
+  const paneOpsRef = useRef({ splitAndPick, closePane, swapPaneWithPrimary, toggleZoom, focusNeighbor });
+  paneOpsRef.current = { splitAndPick, closePane, swapPaneWithPrimary, toggleZoom, focusNeighbor };
   const sessionListLoadedRef = useRef(false);
   const sessionListFetchedAtRef = useRef(0);
   // Monotonic fetch id so a stale in-flight /api/sessions response can't
@@ -3913,6 +3887,21 @@ const App = () => {
       if (target) switchSessionRef.current?.(target);
     };
     const onKey = (event: KeyboardEvent) => {
+      // ⌘⌥← ↑ ↓ → (Ctrl+Alt elsewhere) moves focus to the pane in that
+      // direction — iTerm's chord. Only when there is somewhere to go, so a
+      // lone terminal keeps every key.
+      const arrow = ({ ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" } as Record<string, Direction | undefined>)[event.key];
+      const navMod = isMacPlatform
+        ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey
+        : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey;
+      if (arrow && navMod) {
+        if (leafIds(paneTreeRef.current).length > 1) {
+          event.preventDefault();
+          event.stopPropagation();
+          paneOpsRef.current.focusNeighbor(arrow);
+        }
+        return;
+      }
       const mod = isMacPlatform
         ? event.metaKey && !event.ctrlKey && !event.altKey
         : event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey;
@@ -3950,7 +3939,7 @@ const App = () => {
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
       if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
       if (key === "e") {
-        const leaves = paneLeafIds(paneTreeRef.current).filter((id) => id !== "primary");
+        const leaves = leafIds(paneTreeRef.current).filter((id) => id !== "primary");
         const swapTarget = focusedPaneIdRef.current !== "primary"
           ? focusedPaneIdRef.current
           : (leaves.length === 1 ? leaves[0] : null);
@@ -3967,7 +3956,7 @@ const App = () => {
         return;
       }
       if (key === "]" || key === "[") {
-        const ids = paneLeafIds(paneTreeRef.current);
+        const ids = leafIds(paneTreeRef.current);
         if (ids.length > 1) {
           grab();
           const cur = Math.max(0, ids.indexOf(focusedPaneIdRef.current));
@@ -3975,11 +3964,17 @@ const App = () => {
         }
         return;
       }
-      // Split-first-then-fill: ⌘\ side-by-side, ⌘⇧\ stacked; each opens an
-      // empty pane and the palette to fill it. ⌘⇧K closes the focused pane.
-      if (key === "\\" || key === "|") {
+      // Split-first-then-fill: ⌘\ or ⌘D side-by-side, ⌘⇧\ or ⌘⇧D stacked
+      // (iTerm's chords included); each opens an empty pane and the palette to
+      // fill it. ⌘⇧⏎ zooms the focused pane (again restores). ⌘⇧K closes it.
+      if (key === "\\" || key === "|" || key === "d") {
         grab();
-        paneOpsRef.current.splitAndPick(shifted || key === "|" ? "col" : "row");
+        const stacked = key === "|" || (isMacPlatform ? shifted : key !== "d");
+        paneOpsRef.current.splitAndPick(stacked ? "bottom" : "right");
+        return;
+      }
+      if (shifted && key === "enter") {
+        if (leafIds(paneTreeRef.current).length > 1) { grab(); paneOpsRef.current.toggleZoom(); }
         return;
       }
       if (shifted && key === "k" && focusedPaneIdRef.current !== "primary") {
@@ -4735,109 +4730,72 @@ const App = () => {
                 </div>
               </section>
             );
-            const renderDivider = (node: Extract<PaneNode, { kind: "split" }>): ReactElement => (
-              <div
-                key={`div-${node.id}`}
-                className="pane-divider"
-                onPointerDown={(e: ReactPointerEvent<HTMLDivElement>) => {
-                  const parent = (e.currentTarget as HTMLElement).parentElement;
-                  if (!parent) return;
-                  paneDragRef.current = { id: node.id, dir: node.dir, rect: parent.getBoundingClientRect() };
-                  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-                }}
-                onPointerMove={(e: ReactPointerEvent<HTMLDivElement>) => {
-                  const d = paneDragRef.current;
-                  if (!d || d.id !== node.id) return;
-                  const r = d.dir === "row"
-                    ? (e.clientX - d.rect.left) / Math.max(1, d.rect.width)
-                    : (e.clientY - d.rect.top) / Math.max(1, d.rect.height);
-                  setPaneRatio(d.id, Math.min(0.85, Math.max(0.15, r)));
-                }}
-                onPointerUp={() => { paneDragRef.current = null; }}
-              />
-            );
-            const renderPaneNode = (node: PaneNode): ReactElement => {
-              if (node.kind === "leaf") {
-                if (node.session === null) {
-                  return (
-                    <div key="primary" className="primary-pane-wrap" onMouseDownCapture={() => setFocusedPaneId("primary")}>
-                      {renderPrimarySection()}
-                    </div>
-                  );
-                }
-                if (node.session === "") {
-                  // Empty pane awaiting a session (split-first, then fill).
-                  return (
-                    <div
-                      key={node.id}
-                      className={`empty-pane${focusedPaneId === node.id ? " focused" : ""}`}
-                      onMouseDown={() => setFocusedPaneId(node.id)}
-                    >
-                      <button
-                        type="button"
-                        className="empty-pane-pick"
-                        onClick={() => { setFocusedPaneId(node.id); paneTargetRef.current = node.id; setSwitcherOpen(true); }}
-                      >
-                        <span className="empty-pane-plus">+</span>
-                        <span>Pick a session&ensp;<kbd>{isMacPlatform ? "⌘K" : "Ctrl+Shift+K"}</kbd></span>
-                      </button>
-                      <button type="button" className="empty-pane-close" aria-label="Close empty pane" onClick={(e) => { e.stopPropagation(); closePane(node.id); }}>✕</button>
-                    </div>
-                  );
-                }
-                const paneInfo = sessions.find((x) => x.name === node.session || x.internalName === node.session);
-                const paneProcRaw = (paneInfo?.foregroundProcess || "").replace(/^-/, "");
-                const paneProc = /^\d+\.\d+\.\d+$/.test(paneProcRaw) ? "claude" : paneProcRaw;
-                return (
-                  <SecondaryPane
-                    key={node.id}
-                    sessionName={node.session}
-                    procLabel={paneProc === "zsh" || paneProc === "bash" ? "" : paneProc}
-                    wsUrl={resolveWsUrl()}
-                    userName={name}
-                    cols={120}
-                    rows={30}
-                    fontSize={fontSize}
-                    theme={resolveTerminalTheme(themeMode)}
-                    focused={focusedPaneId === node.id}
-                    onFocus={() => setFocusedPaneId(node.id)}
-                    onClose={() => closePane(node.id)}
-                    onPromote={() => swapPaneWithPrimary(node.id)}
-                  />
-                );
-              }
-              return (
-                <div key={node.id} className={`pane-split ${node.dir === "row" ? "dir-row" : "dir-col"}`}>
-                  <div className="pane-cell" style={{ flexGrow: node.ratio, flexBasis: 0 }}>{renderPaneNode(node.a)}</div>
-                  {renderDivider(node)}
-                  <div className="pane-cell" style={{ flexGrow: 1 - node.ratio, flexBasis: 0 }}>{renderPaneNode(node.b)}</div>
-                </div>
-              );
-            };
-            const primaryWrap = (
-              <div key="primary" className="primary-pane-wrap" onMouseDownCapture={() => setFocusedPaneId("primary")}>
-                {renderPrimarySection()}
-              </div>
-            );
             if (isMobile) return renderPrimarySection();
-            // Stable scaffold: the primary's ancestor chain (pane-root → root
-            // split → cell A) and keys are IDENTICAL with and without a split,
-            // so adding/removing panes never re-parents the live terminal.
-            const rootSplit = paneTree.kind === "split" ? paneTree : null;
+            const primaryLabel = sessionLabel || session.room;
+            const infoOf = (key: string) => sessions.find((x) => x.name === key || x.internalName === key);
             return (
-              <div className="pane-root" inert={switcherOpen} style={switcherOpen ? { visibility: "hidden" } : undefined}>
-                <div key="rootsplit" className={`pane-split ${rootSplit?.dir === "col" ? "dir-col" : "dir-row"}`}>
-                  <div key="cell-a" className="pane-cell" style={{ flexGrow: rootSplit ? rootSplit.ratio : 1, flexBasis: 0 }}>
-                    {rootSplit && rootSplit.a.kind !== "leaf" ? renderPaneNode(rootSplit.a) : primaryWrap}
-                  </div>
-                  {rootSplit && renderDivider(rootSplit)}
-                  {rootSplit && (
-                    <div key="cell-b" className="pane-cell" style={{ flexGrow: 1 - rootSplit.ratio, flexBasis: 0 }}>
-                      {renderPaneNode(rootSplit.b)}
-                    </div>
-                  )}
-                </div>
-              </div>
+              <PaneLayout
+                tree={paneTree}
+                focusedId={focusedPaneId}
+                zoomedId={zoomedPaneId}
+                hidden={switcherOpen}
+                mac={isMacPlatform}
+                primary={renderPrimarySection()}
+                labelOf={(leaf) =>
+                  leaf.session === null ? primaryLabel : (infoOf(leaf.session)?.displayName || leaf.session || "empty pane")}
+                onFocus={setFocusedPaneId}
+                onRatio={setPaneRatio}
+                onSplit={(id, side) => splitAndPick(side, id)}
+                onZoom={toggleZoom}
+                onMove={movePane}
+                renderLeaf={(leaf, api) => {
+                  if (leaf.session === "") {
+                    // Empty pane awaiting a session (split-first, then fill).
+                    return (
+                      <div
+                        className={`empty-pane${api.focused ? " focused" : ""}`}
+                        onMouseDown={() => setFocusedPaneId(leaf.id)}
+                      >
+                        <button
+                          type="button"
+                          className="empty-pane-pick"
+                          onClick={() => { setFocusedPaneId(leaf.id); paneTargetRef.current = leaf.id; setSwitcherOpen(true); }}
+                        >
+                          <span className="empty-pane-plus">+</span>
+                          <span>Pick a session&ensp;<kbd>{isMacPlatform ? "⌘K" : "Ctrl+Shift+K"}</kbd></span>
+                        </button>
+                        <button type="button" className="empty-pane-close" aria-label="Close empty pane" onClick={(e) => { e.stopPropagation(); closePane(leaf.id); }}>✕</button>
+                      </div>
+                    );
+                  }
+                  const paneInfo = infoOf(leaf.session as string);
+                  const paneProcRaw = (paneInfo?.foregroundProcess || "").replace(/^-/, "");
+                  // The daemon knows the agent from its hooks; the process name
+                  // reports codex as "node" and a restore as its wrapper shell.
+                  const paneProc = paneInfo?.agent || (/^\d+\.\d+\.\d+$/.test(paneProcRaw) ? "claude" : paneProcRaw);
+                  return (
+                    <SecondaryPane
+                      sessionName={leaf.session as string}
+                      procLabel={paneProc === "zsh" || paneProc === "bash" ? "" : paneProc}
+                      wsUrl={resolveWsUrl()}
+                      userName={name}
+                      cols={120}
+                      rows={30}
+                      fontSize={fontSize}
+                      theme={resolveTerminalTheme(themeMode)}
+                      focused={api.focused}
+                      zoomed={api.zoomed}
+                      mac={isMacPlatform}
+                      dragHandle={api.dragHandle}
+                      onFocus={() => setFocusedPaneId(leaf.id)}
+                      onClose={() => closePane(leaf.id)}
+                      onPromote={() => swapPaneWithPrimary(leaf.id)}
+                      onSplit={(side) => splitAndPick(side, leaf.id)}
+                      onZoom={() => toggleZoom(leaf.id)}
+                    />
+                  );
+                }}
+              />
             );
           })()}
           <SessionSwitcher
@@ -4901,10 +4859,14 @@ const App = () => {
                   ...(isMacPlatform ? [["⌘+ / ⌘− / ⌘0", "terminal font size"]] : []),
                   ["Ctrl+Shift+C / V", "copy / paste"],
                   ["Shift+PgUp / PgDn", "scrollback"],
-                  [isMacPlatform ? "⌘\\ / ⌘⇧\\" : "Ctrl+Shift+\\ / +|", "split pane — side / stacked"],
-                  [isMacPlatform ? "⌘⇧K" : "Ctrl+Shift+K", "close focused pane"],
+                  [isMacPlatform ? "⌘D or ⌘\\" : "Ctrl+Shift+D", "split pane to the right"],
+                  [isMacPlatform ? "⌘⇧D or ⌘⇧\\" : "Ctrl+Shift+|", "split pane below"],
+                  [isMacPlatform ? "⌘⌥← ↑ ↓ →" : "Ctrl+Alt+arrows", "focus the pane in that direction"],
                   [isMacPlatform ? "⌘] / ⌘[" : "Ctrl+Shift+] / [", "next / previous pane"],
+                  [isMacPlatform ? "⌘⇧⏎" : "Ctrl+Shift+⏎", "zoom the focused pane (again to restore)"],
                   [isMacPlatform ? "⌘⇧E" : "Ctrl+Shift+E", "swap pane with primary"],
+                  [isMacPlatform ? "⌘⇧K" : "Ctrl+Shift+K", "close focused pane"],
+                  ["drag a pane's title bar", "re-dock it — an edge splits there, the middle swaps"],
                   [isMacPlatform ? "⌘/" : "Ctrl+Shift+/", "this help"],
                   ["Esc", "close panels"]
                 ].map(([keys, what]) => (

@@ -19,6 +19,7 @@ import { remoteAppOwnsScreen } from "./utils/echoGuard";
 import { urlAtCell, cellAtPoint } from "./utils/urlAtCell";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
+import { claimOnAttach, claimOnClick } from "./utils/sizeClaim";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -1348,7 +1349,11 @@ const App = () => {
   const killArmedAtRef = useRef(0);
   // Set by an explicit session switch; the next attach claim carries
   // user:true (deliberate — wins the size election outright on new hosts).
-  const deliberateAttachRef = useRef(false);
+  // A page load is the human opening this session, so the first attach may
+  // claim the size. Every later attach must be re-armed by an actual act (a
+  // switch, closing the wall into the session, a click, the Fit button) —
+  // a reconnect is the socket healing itself, not a person.
+  const deliberateAttachRef = useRef(true);
   // A canvas that was HIDDEN can come back showing a stale frame: the wall
   // covers the terminal with visibility:hidden, browsers throttle or drop
   // WebGL contexts for hidden canvases, and xterm only repaints rows it
@@ -1489,6 +1494,24 @@ const App = () => {
       ...(claim ? { claim } : {}),
       ...(deliberate ? { user: true } : {})
     });
+  };
+
+  /**
+   * Take the session's size for THIS viewport, because the user just acted
+   * here. Quiet when the session is already at our fit, so an ordinary click
+   * (or a selection drag) never pushes a resize.
+   */
+  const claimSizeHere = (force = false) => {
+    if (!force && !claimOnClick({
+      viewMode: viewModeRef.current,
+      natural: measureNaturalFit(),
+      active: activeSizeRef.current,
+      owned: activeOwnerRef.current === clientIdRef.current
+    })) return;
+    attachClaimPendingRef.current = true;
+    deliberateAttachRef.current = true;
+    fitToViewport();
+    handleResize();
   };
 
   // Scale the owner's grid to this viewport (letterboxed, centered
@@ -1904,10 +1927,14 @@ const App = () => {
           // ownership of the shared size outright — but only when someone is
           // actually LOOKING. A hidden tab's auto-reconnect is not an opening;
           // claiming from it would yank the size from whoever is present.
+          if (claimOnAttach({
+            viewMode: viewModeRef.current,
+            visible: document.visibilityState === "visible",
+            deliberate: deliberateAttachRef.current
+          })) {
+            attachClaimPendingRef.current = true;
+          }
           if (viewModeRef.current === "fit") {
-            if (document.visibilityState === "visible") {
-              attachClaimPendingRef.current = true;
-            }
             fitWhenReady(12, () => termRef.current?.scrollToBottom());
           }
           break;
@@ -4331,11 +4358,8 @@ const App = () => {
               <div className="quick-group">
                 <button type="button" className="quick-btn" onClick={() => {
                   // An explicit Fit is a deliberate act: claim the size, even
-                  // from a peer that owns it.
-                  attachClaimPendingRef.current = true;
-                  deliberateAttachRef.current = true;
-                  fitToViewport();
-                  handleResize();
+                  // from a peer that owns it, and even if we think we fit.
+                  claimSizeHere(true);
                 }}>
                   Fit
                 </button>
@@ -4564,6 +4588,10 @@ const App = () => {
                     if (!isMobile) {
                       termRef.current?.focus();
                     }
+                    // A click here is a human act on this surface, so it may
+                    // take a size some other window left behind. No-op when
+                    // the session already fits this viewport.
+                    claimSizeHere();
                   }}
                   onDragEnter={(e) => {
                     if (Array.from(e.dataTransfer?.types || []).includes("Files")) {

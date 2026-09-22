@@ -37,7 +37,7 @@
       "id": "02-agent-live",
       "type": "clip",
       "src": "demo-output/footage/live/02-agent-live.webm",
-      "duration": 9,
+      "duration": 8.5,
       "caption": {
         "kicker": "03 · AGENTS",
         "text": "Agents work in real terminals. Watch, steer, take over."
@@ -68,11 +68,55 @@
       "speed": 1.1
     },
     {
+      "id": "14-switch-hud",
+      "type": "clip",
+      "src": "demo-output/footage/live/14-switch-hud.webm",
+      "duration": 7.2,
+      "caption": {
+        "kicker": "06 · SWITCH",
+        "text": "⌘J / ⌘L walk your recent sessions; release to land."
+      }
+    },
+    {
+      "id": "15-folders",
+      "type": "clip",
+      "src": "demo-output/footage/live/15-folders.webm",
+      "start": 0.5,
+      "duration": 8.4,
+      "caption": {
+        "kicker": "07 · FOLDERS",
+        "text": "File a session from its menu — no drag needed."
+      }
+    },
+    {
+      "id": "16-drop",
+      "type": "clip",
+      "src": "demo-output/footage/live/16-drop.webm",
+      "start": 1.0,
+      "duration": 9.2,
+      "caption": {
+        "kicker": "08 · FILES",
+        "text": "Drop a file on a session: it lands on the host and the path is typed for you."
+      }
+    },
+    {
+      "id": "06-math",
+      "type": "clip",
+      "src": "demo-output/footage/live/06-math.webm",
+      "start": 1.2,
+      "duration": 8.5,
+      "speed": 1.1,
+      "caption": {
+        "kicker": "09 · MATH",
+        "text": "hop math renders LaTeX where a terminal can't."
+      }
+    },
+    {
       "id": "13-handoff",
       "type": "clip",
       "src": "demo-output/footage/live/13-handoff.webm",
       "caption": {
-        "kicker": "06 · HAND-OFF",
+        "kicker": "10 · HAND-OFF",
         "text": "Continue a Claude conversation in Codex — or the other way round."
       },
       "start": 1.0,
@@ -83,6 +127,13 @@
       "type": "still",
       "src": "docs/hero-handoff.svg",
       "duration": 7,
+      "push": 1.07
+    },
+    {
+      "id": "14b-operations-still",
+      "type": "still",
+      "src": "docs/hero-operations.svg",
+      "duration": 7.5,
       "push": 1.07
     },
     {

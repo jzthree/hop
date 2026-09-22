@@ -226,6 +226,25 @@ How it works: every hop terminal gets a `HOP_SESSION` env var; a Claude Code `Se
 
 `hop claude-hook install` adds a `SessionStart` entry to `~/.claude/settings.json` (backed up first); `hop claude-hook remove` reverts it. The hook is a no-op outside hop terminals.
 
+### Fork a conversation, or hand it to the other tool
+
+<p align="center">
+  <img src="docs/hero-handoff.svg" width="980" alt="One conversation, either tool: a wall card for a Claude session with its action menu open on Continue in Codex; an arrow carries the extracted transcript to a new terminal where Codex reads the hand-off and picks the work up; the new session is filed in the same folder, beside its source." />
+</p>
+
+Every session card's `⋯` menu offers **Fork** (the same tool resumes the same
+conversation in a new session — Claude and Codex alike) and **Continue in
+Codex… / Continue in Claude…** (the transcript is extracted to a file and the
+other tool reads all of it before it says a word). The new session lands
+beside its source: same folder, same directory, labelled by what it runs.
+The same operation is one call for agents:
+
+```bash
+curl -X POST http://127.0.0.1:$PORT/api/sessions/fork \
+  -H "Authorization: Bearer $HOP_SECRET" -H 'Content-Type: application/json' \
+  -d '{"name":"angler","target":"codex"}'     # omit target to fork with the same tool
+```
+
 ### Render LaTeX math (`hop math`)
 
 Glance at a formula without leaving the terminal:

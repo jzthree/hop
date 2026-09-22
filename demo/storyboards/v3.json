@@ -1,0 +1,104 @@
+{
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "segments": [
+    {
+      "id": "00-title",
+      "type": "card",
+      "duration": 3.2,
+      "kicker": "TERMINALS FOR HUMANS + AGENTS",
+      "title": "hop",
+      "titleSize": 96,
+      "subtitle": "every session your agents run, on one wall"
+    },
+    {
+      "id": "00-wall",
+      "type": "clip",
+      "src": "demo-output/footage/live/00-wall.webm",
+      "duration": 12,
+      "caption": {
+        "kicker": "01 · THE WALL",
+        "text": "Every terminal, one wall. Filter to find it; click to work in place."
+      }
+    },
+    {
+      "id": "10-new-session",
+      "type": "clip",
+      "src": "demo-output/footage/live/10-new-session.webm",
+      "caption": {
+        "kicker": "02 · NEW SESSION",
+        "text": "Terminal, Claude or Codex — in any directory, with completion."
+      },
+      "start": 1.2,
+      "duration": 13
+    },
+    {
+      "id": "02-agent-live",
+      "type": "clip",
+      "src": "demo-output/footage/live/02-agent-live.webm",
+      "duration": 9,
+      "caption": {
+        "kicker": "03 · AGENTS",
+        "text": "Agents work in real terminals. Watch, steer, take over."
+      }
+    },
+    {
+      "id": "11-panes",
+      "type": "clip",
+      "src": "demo-output/footage/live/11-panes.webm",
+      "caption": {
+        "kicker": "04 · PANES",
+        "text": "Split any side. Drag a pane to re-dock it. Zoom, and back."
+      },
+      "start": 0.6,
+      "duration": 15,
+      "speed": 1.12
+    },
+    {
+      "id": "12-views",
+      "type": "clip",
+      "src": "demo-output/footage/live/12-views.webm",
+      "caption": {
+        "kicker": "05 · VIEWS",
+        "text": "hop view publishes a result; read it right on the wall."
+      },
+      "start": 1.5,
+      "duration": 13.5,
+      "speed": 1.1
+    },
+    {
+      "id": "13-handoff",
+      "type": "clip",
+      "src": "demo-output/footage/live/13-handoff.webm",
+      "caption": {
+        "kicker": "06 · HAND-OFF",
+        "text": "Continue a Claude conversation in Codex — or the other way round."
+      },
+      "start": 1.0,
+      "duration": 12.5
+    },
+    {
+      "id": "13b-handoff-still",
+      "type": "still",
+      "src": "docs/hero-handoff.svg",
+      "duration": 7,
+      "push": 1.07
+    },
+    {
+      "id": "04-mobile",
+      "type": "still",
+      "src": "docs/hero-mobile.svg",
+      "duration": 7,
+      "push": 1.07
+    },
+    {
+      "id": "06-close",
+      "type": "card",
+      "duration": 4,
+      "title": "hop — terminals for humans + agents",
+      "titleSize": 54,
+      "subtitle": "github.com/jzthree/hop"
+    }
+  ]
+}

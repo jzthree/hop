@@ -17096,8 +17096,23 @@ async function main() {
         const stdinName = flagValue('--name');
         const wantList = argv.includes('--list');
         const removals = argv.reduce((acc, a, i) => (a === '--rm' && argv[i + 1] ? acc.concat(argv[i + 1]) : acc), []);
-        const wantSession = flagValue('--session');
-        const consumed = new Set(['--title', title, '--name', stdinName, '--session', wantSession,
+        const wantSessionArg = flagValue('--session');
+        // A human types the display name; publications are keyed by the
+        // session id, which is what the wall joins on. Resolve before filing,
+        // else the view exists but no card ever lights up for it.
+        let wantSession = wantSessionArg;
+        if (wantSessionArg) {
+            const st = isServerRunning();
+            if (st) {
+                try {
+                    const res = await fetchSessionList(st);
+                    const hit = (res?.sessions || []).find((x) => x.internalName === wantSessionArg
+                        || x.name === wantSessionArg || x.displayName === wantSessionArg);
+                    if (hit?.internalName) wantSession = hit.internalName;
+                } catch (e) { /* publish under the name given */ }
+            }
+        }
+        const consumed = new Set(['--title', title, '--name', stdinName, '--session', wantSessionArg,
                                   '--list', '--rm', ...removals]);
         const files = argv.filter((a) => !consumed.has(a) && (a === '-' || !a.startsWith('-')));
         // WHICH session a result belongs to is the whole filing system: the

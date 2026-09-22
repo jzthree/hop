@@ -1,7 +1,8 @@
 // Sanitized live-footage capture driver for the hop product video (dark theme).
 // Usage: node demo/capture/capture.mjs <clip>   where clip in:
 //   00-wall | 01-sessions | 02-agent-live | 02b-desktop-terminal | 03-phone-live |
-//   04-phone-switcher | 05-presence | 06-math | 07-theme
+//   04-phone-switcher | 05-presence | 06-math | 07-theme |
+//   10-new-session | 11-panes | 12-views | 13-handoff   (the v3 additions)
 //
 // Run demo/capture/setup-sessions.mjs and demo/capture/spawn-aurora.mjs first
 // (setup-04.mjs for the 04 clip). Paths and identity strings come from
@@ -26,17 +27,23 @@
 //    handshakes) is trimmed off with ffmpeg on save. No idle/light/keyboard/
 //    "Connecting" frames survive into the delivered clips.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { getHopState, sleep } from "../hop-demo-lib.mjs";
 import { chromium, devices } from "../../hay/node_modules/playwright/index.mjs";
 import { NATIVE_CSS_INIT } from "./native-css.mjs";
 import {
-  CHROME, FFMPEG, OUT, VID_TMP, ALLOWED, SCREEN_FORBIDDEN, TERMINALS_PATH, loadTerminals
+  CHROME, FFMPEG, OUT, VID_TMP, ALLOWED, SCREEN_FORBIDDEN, TERMINALS_PATH, REPORT_HTML, REPO_ROOT, loadTerminals
 } from "./capture-env.mjs";
 
 const state = getHopState();
 const terminals = loadTerminals();
+// Session ids are minted (s_…) while the cast is addressed by display name;
+// the API reports both, and Views keys on the id. Accept either.
+const CAST_KEYS = new Set([...ALLOWED, ...Object.values(terminals).map((t) => t.sessionName).filter(Boolean)]);
+const inCast = (s) => !!s && (CAST_KEYS.has(s.name) || CAST_KEYS.has(s.internalName) || CAST_KEYS.has(s.displayName)
+  || ALLOWED.some((n) => s.displayName === n || s.name === n));
 fs.mkdirSync(VID_TMP, { recursive: true });
 
 function requireTerminalId(name) {
@@ -49,8 +56,10 @@ function requireTerminalId(name) {
   return t.terminalId;
 }
 
+const IDENTITY_MAP = [[os.homedir(), "~"], [os.userInfo().username, "demo"]];
 const REWRITER = `(() => {
-  const MAP = [["Aurora2","Aurora"],["Lyra2","Lyra"],["Nebula2","Nebula"],["Polaris2","Polaris"]];
+  const MAP = [["Aurora2-codex","Aurora-codex"],["Aurora2","Aurora"],["Lyra2","Lyra"],["Nebula2","Nebula"],["Polaris2","Polaris"],
+    ...${JSON.stringify(IDENTITY_MAP)}];
   const fix = (s) => { let o = s; for (const [a,b] of MAP) o = o.split(a).join(b); return o; };
   const ATTRS = ["title","aria-label","placeholder"];
   const SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1 };
@@ -98,12 +107,63 @@ const REWRITER = `(() => {
 // by context colorScheme below).
 const DARK_INIT = `(() => { try {
   localStorage.setItem("hay_theme", "dark");
+  localStorage.setItem("hay_passkey_nudge_done", "1"); // no "Touch ID next time?" bar on camera
+
   localStorage.setItem("hay-syskb-seen", "1"); // suppress first-run KB hint overlay (it eats taps)
 } catch (e) {} })();`;
+
+// The briefing is STAGED for every clip, both files the card reads (the
+// archive carries every edition — the real one would put the whole fleet's
+// week on camera). Nothing is written to disk.
+const STAGED_EDITION = () => ({
+  generated_at: new Date(Date.now() - 2 * 60000).toISOString(),
+  summary: "Nebula finished the ingest refactor; Polaris is mid-benchmark; Aurora wants a review.",
+  items: [
+    { session: "Nebula", headline: "Ingest refactor landed — 41s → 9s on the sample day", urgency: "info", at: new Date(Date.now() - 22 * 60000).toISOString() },
+    { session: "Polaris", headline: "Benchmark sweep 60% done, no regressions so far", urgency: "info", at: new Date(Date.now() - 9 * 60000).toISOString() },
+    { session: "Aurora", headline: "Wants review: error-handling change in the exporter", urgency: "attention", at: new Date(Date.now() - 3 * 60000).toISOString() }
+  ]
+});
 
 async function sanitizeContext(context) {
   await context.addInitScript(DARK_INIT);
   await context.addInitScript(REWRITER);
+  await context.route("**/assets/digest.json", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify(STAGED_EDITION()) }));
+  await context.route("**/assets/digest-archive.json", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ editions: [STAGED_EDITION()] }) }));
+  // The Views list is fleet-wide: only the demo cast's publications may show.
+  await context.route(
+    (url) => url.pathname === "/api/views",
+    async (route) => {
+      try {
+        if (route.request().method() !== "GET") return await route.continue();
+        const resp = await route.fetch();
+        let json;
+        try { json = await resp.json(); } catch { return await route.fulfill({ response: resp }); }
+        json.items = (json.items || []).filter((it) => CAST_KEYS.has(it.session) || ALLOWED.includes(it.session));
+        return await route.fulfill({ response: resp, json });
+      } catch { try { await route.abort(); } catch {} }
+    }
+  );
+  // Directory completion reads the real filesystem; the create form gets a
+  // staged tree instead, rooted at the demo workspace.
+  await context.route(
+    (url) => url.pathname === "/api/fs/complete",
+    async (route) => {
+      const q = new URL(route.request().url()).searchParams.get("q") || "";
+      const tree = {
+        "/tmp/hop-demo/": ["/tmp/hop-demo/workspace", "/tmp/hop-demo/tools", "/tmp/hop-demo/home"],
+        "/tmp/hop-demo/workspace/": ["/tmp/hop-demo/workspace/scripts", "/tmp/hop-demo/workspace/server"]
+      };
+      const dir = q.endsWith("/") ? q : q.slice(0, q.lastIndexOf("/") + 1);
+      const prefix = q.slice(dir.length);
+      const entries = (tree[dir] || (dir === "/tmp/" || dir === "/" ? ["/tmp/hop-demo"] : []))
+        .filter((e) => e.slice(dir.length).startsWith(prefix))
+        .map((p) => ({ path: p }));
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ home: "/tmp/hop-demo/home", entries }) });
+    }
+  );
   await context.route(
     (url) => url.pathname === "/api/sessions",
     async (route) => {
@@ -112,14 +172,17 @@ async function sanitizeContext(context) {
         const resp = await route.fetch();
         let json;
         try { json = await resp.json(); } catch { return await route.fulfill({ response: resp }); }
-        json.sessions = (json.sessions || []).filter((s) => ALLOWED.includes(s.name))
+        json.sessions = (json.sessions || []).filter((s) => inCast(s))
           // The rig creates its sessions through the terminal API, which the
           // origin classifier (correctly) marks agent-created — but the wall
           // defaults to the USER scope, so the whole demo cast would be
-          // hidden behind the Agent toggle. They PLAY user sessions.
-          .map((s) => ({ ...s, createdBy: "user" }));
-        json.active = (json.active || []).filter((n) => ALLOWED.includes(n));
-        json.starting = (json.starting || []).filter((n) => ALLOWED.includes(n));
+          // hidden behind the Agent toggle. They PLAY user sessions. Aurora
+          // runs a real claude; saying so explicitly makes its card menu
+          // offer the codex hand-off even before the hook has written its
+          // record.
+          .map((s) => ({ ...s, createdBy: "user", ...(s.name === "Aurora2" ? { agent: "claude" } : {}) }));
+        json.active = (json.active || []).filter((n) => CAST_KEYS.has(n) || ALLOWED.includes(n));
+        json.starting = (json.starting || []).filter((n) => CAST_KEYS.has(n) || ALLOWED.includes(n));
         json.aliases = {};
         json.folders = [];
         if (json.order) json.order = { folders: [], sessions: { root: [] } };
@@ -131,9 +194,28 @@ async function sanitizeContext(context) {
   );
 }
 
-function cookie() {
+// The daemon takes its secret only as a Bearer header (local IPC); a browser
+// must present a real login session. Mint a short-lived device token once
+// per rig run and hand it to every context as the session cookie.
+const TOKEN_PATH = path.join(VID_TMP, "device-token.json");
+async function deviceToken() {
+  try {
+    const t = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+    if (t.token && Date.parse(t.expiresAt || 0) > Date.now() + 60000) return t.token;
+  } catch {}
+  const r = await fetch(`${state.localUrl}/api/auth/sessions/token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.sessionSecret}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "video capture rig", days: 1 })
+  });
+  const j = await r.json();
+  if (!r.ok || !j.token) throw new Error("could not mint a device token: " + JSON.stringify(j).slice(0, 200));
+  fs.writeFileSync(TOKEN_PATH, JSON.stringify({ id: j.id, token: j.token, expiresAt: j.expiresAt }));
+  return j.token;
+}
+async function cookie() {
   return {
-    name: "tunnel_session", value: state.sessionSecret, domain: "127.0.0.1",
+    name: "tunnel_session", value: await deviceToken(), domain: "127.0.0.1",
     path: "/", httpOnly: true, secure: false, sameSite: "Lax"
   };
 }
@@ -151,10 +233,10 @@ async function newRecordedPage(browser, { mobile = false, record = true, viewpor
     opts.recordVideo = { dir: VID_TMP, size: mobile ? { width: 390, height: 664 } : desktopVp };
   }
   const ctx = await browser.newContext(opts);
-  await ctx.addCookies([cookie()]);
+  await ctx.addCookies([await cookie()]);
   await sanitizeContext(ctx);
   if (css) await ctx.addInitScript(css); // e.g. NATIVE_CSS_INIT, installed pre-paint
-  const page = await ctx.newPage();
+  const page = rememberPage(await ctx.newPage());
   const t0 = Date.now();
   return { ctx, page, t0 };
 }
@@ -200,12 +282,15 @@ async function saveVideo(page, clipName, trimSec = 0) {
 const trimFor = (t0, markerMs, padSec = 0.4) => Math.max(0, (markerMs - t0) / 1000 + padSec);
 
 async function gotoSession(page, name, extraQuery = "") {
+  // A session page streams over its socket and never goes network-idle;
+  // the terminal mounting is the readiness signal.
   await page.goto(`${state.localUrl}/s/${encodeURIComponent(name)}${extraQuery}`, {
-    waitUntil: "networkidle", timeout: 30000
+    waitUntil: "domcontentloaded", timeout: 30000
   });
+  await page.waitForSelector(".xterm", { timeout: 20000 });
   // Hard safety check: the page must be attached to the intended demo session.
   const room = await page.evaluate(() => window.__HOP_SESSION__ && window.__HOP_SESSION__.room);
-  if (room !== name) {
+  if (room !== name && room !== terminals[name]?.sessionName) {
     throw new Error(`SAFETY ABORT: page attached to room "${room}", expected "${name}"`);
   }
 }
@@ -231,7 +316,8 @@ async function apiResize(terminalId, cols, rows) {
 }
 
 async function previewText(name) {
-  const r = await fetch(`${state.localUrl}/api/sessions/preview?name=${encodeURIComponent(name)}`, {
+  const key = terminals[name]?.sessionName || name;
+  const r = await fetch(`${state.localUrl}/api/sessions/preview?name=${encodeURIComponent(key)}`, {
     headers: { Authorization: `Bearer ${state.sessionSecret}` }
   });
   try { return (await r.json()).text || ""; } catch { return ""; }
@@ -279,6 +365,11 @@ const TASK_02B =
   "Love it. Now the director's cut: narrate the full story of a day of real work inside hop — morning attach, " +
   "agents running in their rooms, a teammate dropping in from a phone, a restore after a laptop reboot — all in " +
   "the same flowing prose, at least 1100 words, no lists, don't stop to summarize, just keep the narration rolling.";
+
+const TASK_02C =
+  "Now do roadmap step 1 for real: add a package.json (name, version, a bin entry pointing at the hop script, a test script), " +
+  "fix the relative require in the entry script so symlinked installs work, run the tests, and narrate every step as you go — " +
+  "one short paragraph per action, at least 700 words, keep the commentary flowing until it is done.";
 
 const TASK_03 =
   "Give the phone-reader's tour: re-read README.md, index.html, and each file under scripts/ and server/ one at a time, and " +
@@ -354,6 +445,21 @@ async function hideKeyboard(page) {
 }
 
 const clip = process.argv[2];
+let lastPage = null;
+const rememberPage = (p) => { lastPage = p; return p; };
+process.on("unhandledRejection", async (err) => {
+  console.error(err);
+  try {
+    if (lastPage && !lastPage.isClosed()) {
+      const shot = path.join(VID_TMP, `${clip}-fail.png`);
+      await lastPage.screenshot({ path: shot });
+      const names = await lastPage.$$eval("button, [role=button], [role=radio], [role=menuitem]", (els) =>
+        els.filter((e) => e.offsetParent !== null).map((e) => (e.getAttribute("aria-label") || e.textContent || "").trim()).filter(Boolean).slice(0, 60));
+      console.error("FAIL SHOT " + shot + "\nVISIBLE CONTROLS: " + names.join(" | "));
+    }
+  } catch {}
+  process.exit(1);
+});
 const browser = await chromium.launch({ headless: true, executablePath: CHROME });
 
 try {
@@ -364,10 +470,14 @@ try {
     const { page, t0 } = await newRecordedPage(browser, {});
     await gotoSession(page, "Aurora2");
     await sleep(1500);
-    const baseline = normalize(await previewText("Aurora2")).length;
-    await sendTask(TASK_02);
-    await waitOutputGrowth(baseline, 250); // agent visibly producing output
-    await sleep(3000); // ~3s of live streaming before the kept portion starts
+    // HOP_CAPTURE_TASK=02B / 02C continue an existing conversation instead
+    // of repeating the tour. Gate on the screen CHANGING, not growing: a
+    // full grid never grows, so the growth gate timed out on every
+    // continued conversation and recorded a finished screen.
+    const task = process.env.HOP_CAPTURE_TASK === "02B" ? TASK_02B
+      : process.env.HOP_CAPTURE_TASK === "02C" ? TASK_02C : TASK_02;
+    await sendTask(task);
+    await sleep(7000); // the agent is streaming by now; no gate can wait past the turn
     await assertDark(page, "02-agent-live");
     const marker = Date.now();
     await sleep(18000); // kept content; short enough to precede any usage banner
@@ -612,20 +722,6 @@ try {
     const { ctx, page, t0 } = await newRecordedPage(browser, {
       css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}"
     });
-    await ctx.route("**/assets/digest.json", (route) =>
-      route.fulfill({
-        contentType: "application/json",
-        body: JSON.stringify({
-          generated_at: new Date().toISOString(),
-          summary: "Nebula finished the ingest refactor; Polaris is mid-benchmark; Aurora wants a review.",
-          items: [
-            { session: "Nebula", headline: "Ingest refactor landed — 41s → 9s on the sample day", urgency: "info" },
-            { session: "Polaris", headline: "Benchmark sweep 60% done, no regressions so far", urgency: "info" },
-            { session: "Aurora", headline: "Wants review: error-handling change in the exporter", urgency: "attention" }
-          ]
-        })
-      })
-    );
     await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
     await sleep(3500);
     await assertDark(page, "00-wall");
@@ -645,6 +741,152 @@ try {
     await page.keyboard.press("Meta+Enter");
     await sleep(3400);
     await saveVideo(page, "00-wall", trimFor(t0, marker));
+  } else if (clip === "10-new-session") {
+    // Creating a session is a three-choice form now: name, what it runs
+    // (Terminal / Claude / Codex), and where — a directory field with
+    // completion. Vega is created as a claude session in the demo workspace
+    // and its tile appears on the wall as it starts.
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
+    await sleep(2500);
+    await assertDark(page, "10-new-session");
+    const marker = Date.now();
+    await sleep(1200);
+    await page.locator(".switcher-new-top").first().click();
+    await sleep(900);
+    const nameBox = page.locator('input[placeholder="session-name"]').first();
+    await nameBox.click();
+    await page.keyboard.type("Vega", { delay: 140 });
+    await sleep(700);
+    await page.getByRole("radio", { name: "Claude" }).click();
+    await sleep(900);
+    const cwd = page.locator('input[aria-label="Working directory"]').first();
+    await cwd.click();
+    await page.keyboard.type("/tmp/hop-demo/", { delay: 90 });
+    await sleep(1100); // the completion list opens: workspace / tools / home
+    await page.keyboard.type("wo", { delay: 120 });
+    await sleep(700);
+    await page.keyboard.press("Tab"); // accept the completion
+    await sleep(900);
+    await page.getByRole("button", { name: "Create" }).first().click();
+    await sleep(6500); // Vega's tile appears, then its claude comes up
+    await saveVideo(page, "10-new-session", trimFor(t0, marker));
+
+  } else if (clip === "11-panes") {
+    // iTerm-style panes in full screen: ⌘D splits, the palette fills the
+    // new pane, a title bar drags to re-dock it on another edge, ⌘⇧⏎ zooms.
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.removeItem('hay_pane_tree');localStorage.setItem('hay_view_mode','fit');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    await gotoSession(page, "Lyra2");
+    await sleep(2500);
+    await page.mouse.click(700, 500);
+    await sleep(600);
+    await assertDark(page, "11-panes");
+    const marker = Date.now();
+    await sleep(1400);
+    await page.keyboard.press("Meta+d");           // split right → palette
+    await page.waitForSelector(".switcher-overlay", { timeout: 10000 });
+    await sleep(1500);
+    await page.locator(".switcher-card", { hasText: "Nebula" }).first().click();
+    await sleep(700);
+    await page.keyboard.press("Meta+Enter");        // fills the empty pane
+    await page.waitForSelector(".secondary-pane", { timeout: 10000 });
+    await sleep(3200);
+    // Drag Nebula's title bar onto the primary's LEFT edge: it re-docks there.
+    const bar = await page.locator(".secondary-pane-bar .secondary-pane-name").first().boundingBox();
+    const slot = await page.locator(".primary-slot").first().boundingBox();
+    await page.mouse.move(bar.x + 6, bar.y + 6);
+    await page.mouse.down();
+    await page.mouse.move(bar.x + 40, bar.y + 60, { steps: 6 });
+    await page.mouse.move(slot.x + slot.width * 0.10, slot.y + slot.height * 0.5, { steps: 22 });
+    await sleep(700);                               // the drop hint shows the zone
+    await page.mouse.up();
+    await sleep(2600);
+    await page.keyboard.press("Meta+Shift+Enter");  // zoom the focused pane
+    await sleep(2200);
+    await page.keyboard.press("Meta+Shift+Enter");  // and restore
+    await sleep(1600);
+    await page.keyboard.press("Meta+Alt+ArrowRight"); // focus moves by direction
+    await sleep(2000);
+    await saveVideo(page, "11-panes", trimFor(t0, marker));
+
+  } else if (clip === "12-views") {
+    // An agent publishes a result with `hop view`; the wall lights its
+    // Views dot, and the report reads docked on the wall itself.
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    // Start clean so the publish happens on camera: nothing of Lyra's is
+    // published when the wall comes up.
+    await fetch(`${state.localUrl}/api/views`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${state.sessionSecret}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ session: terminals.Lyra2?.sessionName || "Lyra2", all: true })
+    }).catch(() => {});
+    await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
+    await sleep(2500);
+    await assertDark(page, "12-views");
+    const marker = Date.now();
+    await sleep(1500);
+    // Lyra publishes. Run from here with an explicit target; the rig's
+    // sanitized shells have no HOP_SESSION of their own.
+    const r = spawnSync(process.execPath, [
+      path.join(REPO_ROOT, "hop"), "view", "--session", "Lyra2", "--title", "Benchmark report — rollout wave 3", REPORT_HTML
+    ], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error("hop view failed: " + (r.stderr || r.stdout).slice(-400));
+    await page.waitForSelector(".views-chip-dot", { timeout: 20000 });
+    await sleep(2200);
+    await page.getByRole("button", { name: "Published views" }).first().click();
+    await page.waitForSelector('[role="dialog"][aria-label="Published views"]', { timeout: 10000 });
+    await sleep(1800);
+    await page.locator('[role="dialog"][aria-label="Published views"]').getByText("Benchmark report", { exact: false }).first().click();
+    await sleep(5000);                              // the report, docked
+    await saveVideo(page, "12-views", trimFor(t0, marker));
+
+  } else if (clip === "13-handoff") {
+    // A claude conversation handed to codex from the card menu: the new
+    // session lands beside its source and codex reads the transcript first.
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
+    await sleep(2500);
+    await assertDark(page, "13-handoff");
+    const marker = Date.now();
+    await sleep(1400);
+    const auroraCard = page.locator(".switcher-card", { hasText: "Aurora" }).first();
+    await auroraCard.hover();
+    await sleep(700);
+    await page.locator('button[aria-label="More actions for Aurora"]:visible').first().click();
+    await page.waitForSelector(".switcher-sheet", { timeout: 10000 });
+    await sleep(1600);
+    const item = page.locator(".switcher-sheet button", { hasText: "Continue in Codex" }).first();
+    await item.hover();
+    await sleep(1400);
+    await item.click();
+    await sleep(9000);                              // the new card appears; codex starts reading
+    await saveVideo(page, "13-handoff", trimFor(t0, marker));
+
+  } else if (clip === "debug-sheet") {
+    // Diagnostic: open Aurora's card menu on the wall, keep a frame, list
+    // every visible control. No recording kept.
+    const { page } = await newRecordedPage(browser, { record: false,
+      css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}" });
+    await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
+    await sleep(2500);
+    const more = page.getByRole("button", { name: "More actions for Aurora" });
+    console.log("more-actions buttons:", await more.count());
+    await more.first().click({ force: true });
+    await sleep(1500);
+    await page.screenshot({ path: path.join(VID_TMP, "debug-sheet.png") });
+    const names = await page.$$eval("button, [role=button], [role=menuitem]", (els) =>
+      els.filter((e) => e.offsetParent !== null).map((e) => (e.getAttribute("aria-label") || e.textContent || "").trim()).filter(Boolean));
+    console.log("VISIBLE CONTROLS: " + names.join(" | "));
+    console.log("sheet present:", await page.locator(".switcher-sheet").count());
+    await page.context().close();
   } else if (clip === "01-sessions") {
     const { page, t0 } = await newRecordedPage(browser, {});
     await page.goto(`${state.localUrl}/sessions`, { waitUntil: "networkidle", timeout: 30000 });

@@ -292,6 +292,10 @@ a result in prose.
 
 ## Operations
 
+<p align="center">
+  <img src="docs/hero-operations.svg" width="980" alt="hop operations, three panels: hop restore after a reboot bringing every session back verified with its conversation, fork and folder; a sign-in card with a passkey button, password plus 2FA, and a list of signed-in devices with revoke; and a signup page where a lab member requests their own subdomain with a university email and gets their own daemon once approved." />
+</p>
+
 ### Logging and History
 
 Hop always writes per-session audit logs.

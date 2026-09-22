@@ -2,7 +2,7 @@
 // Usage: node demo/capture/capture.mjs <clip>   where clip in:
 //   00-wall | 01-sessions | 02-agent-live | 02b-desktop-terminal | 03-phone-live |
 //   04-phone-switcher | 05-presence | 06-math | 07-theme |
-//   10-new-session | 11-panes | 12-views | 13-handoff   (the v3 additions)
+//   10-new-session | 11-panes | 12-views | 13-handoff | 14-switch-hud | 15-folders | 16-drop   (v3)
 //
 // Run demo/capture/setup-sessions.mjs and demo/capture/spawn-aurora.mjs first
 // (setup-04.mjs for the 04 clip). Paths and identity strings come from
@@ -34,7 +34,7 @@ import { getHopState, sleep } from "../hop-demo-lib.mjs";
 import { chromium, devices } from "../../hay/node_modules/playwright/index.mjs";
 import { NATIVE_CSS_INIT } from "./native-css.mjs";
 import {
-  CHROME, FFMPEG, OUT, VID_TMP, ALLOWED, SCREEN_FORBIDDEN, TERMINALS_PATH, REPORT_HTML, REPO_ROOT, loadTerminals
+  CHROME, FFMPEG, OUT, VID_TMP, ALLOWED, SCREEN_FORBIDDEN, TERMINALS_PATH, REPORT_HTML, REPO_ROOT, WIPE, loadTerminals
 } from "./capture-env.mjs";
 
 const state = getHopState();
@@ -184,8 +184,13 @@ async function sanitizeContext(context) {
         json.active = (json.active || []).filter((n) => CAST_KEYS.has(n) || ALLOWED.includes(n));
         json.starting = (json.starting || []).filter((n) => CAST_KEYS.has(n) || ALLOWED.includes(n));
         json.aliases = {};
-        json.folders = [];
-        if (json.order) json.order = { folders: [], sessions: { root: [] } };
+        // Only the demo folder (created by the folders clip) may show; the
+        // user's own folders never do.
+        let demoFolder = null;
+        try { demoFolder = JSON.parse(fs.readFileSync(path.join(VID_TMP, "..", "folder.json"), "utf8")).id; } catch {}
+        json.folders = (json.folders || []).filter((f) => f && f.id === demoFolder);
+        if (json.order) json.order = { folders: demoFolder ? [demoFolder] : [], sessions: { root: [], ...(demoFolder ? { [demoFolder]: [] } : {}) } };
+        json.sessions = json.sessions.map((s) => ({ ...s, folderId: s.folderId === demoFolder ? s.folderId : null }));
         return await route.fulfill({ response: resp, json });
       } catch {
         try { await route.abort(); } catch {}
@@ -460,7 +465,12 @@ process.on("unhandledRejection", async (err) => {
   } catch {}
   process.exit(1);
 });
-const browser = await chromium.launch({ headless: true, executablePath: CHROME });
+const browser = await chromium.launch(
+  // Playwright's own Chromium by default: the installed Google Chrome changes
+  // under the rig between shoots (its 154 headless pads every recording with
+  // a gray band at the bottom). HOP_CAPTURE_BROWSER=chrome opts back in.
+  process.env.HOP_CAPTURE_BROWSER === "chrome" ? { headless: true, executablePath: CHROME } : { headless: true }
+);
 
 try {
   if (clip === "02-agent-live") {
@@ -680,6 +690,8 @@ try {
 
   } else if (clip === "06-math") {
     const lyra = requireTerminalId("Lyra2");
+    await apiWrite(lyra, WIPE + "; clear\r");   // canvas-rendered: no scrollback may carry an earlier take
+    await sleep(900);
     const { page, t0 } = await newRecordedPage(browser, {});
     await gotoSession(page, "Lyra2");
     await sleep(2200);
@@ -870,6 +882,103 @@ try {
     await sleep(9000);                              // the new card appears; codex starts reading
     await saveVideo(page, "13-handoff", trimFor(t0, marker));
 
+  } else if (clip === "14-switch-hud") {
+    // ⌘J / ⌘L walk the recent-sessions ring in a HUD; releasing ⌘ lands.
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.removeItem('hay_pane_tree');localStorage.setItem('hay_view_mode','fit');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    await gotoSession(page, "Lyra2");
+    await sleep(2500);
+    await page.mouse.click(700, 500);
+    await sleep(500);
+    await assertDark(page, "14-switch-hud");
+    const marker = Date.now();
+    await sleep(1200);
+    await page.keyboard.down("Meta");
+    await page.keyboard.press("j");
+    await page.waitForSelector(".switch-hud", { timeout: 5000 });
+    await sleep(1400);
+    await page.keyboard.press("j");
+    await sleep(1400);
+    await page.keyboard.up("Meta");                 // lands on the lit session
+    await sleep(3200);
+    await saveVideo(page, "14-switch-hud", trimFor(t0, marker));
+
+  } else if (clip === "15-folders") {
+    // File a session into a folder from its card menu — no drag needed.
+    // The folder is REAL (created here, removed by cleanup) so the move is
+    // the real /api/sessions/move; the sanitizer shows only this folder.
+    const auth = { Authorization: `Bearer ${state.sessionSecret}`, "Content-Type": "application/json" };
+    const folderFile = path.join(VID_TMP, "..", "folder.json");
+    let folderId = null;
+    try { folderId = JSON.parse(fs.readFileSync(folderFile, "utf8")).id; } catch {}
+    if (!folderId) {
+      const mk = await fetch(`${state.localUrl}/api/folders`, { method: "POST", headers: auth, body: JSON.stringify({ name: "Benchmarks" }) });
+      const made = await mk.json();
+      if (!made?.folder?.id) throw new Error("could not create the demo folder: " + JSON.stringify(made).slice(0, 200));
+      folderId = made.folder.id;
+      fs.writeFileSync(folderFile, JSON.stringify({ id: folderId, name: "Benchmarks" }));
+    }
+    // A re-take starts with Nebula unfiled, so the move happens on camera.
+    await fetch(`${state.localUrl}/api/sessions/move`, { method: "POST", headers: auth,
+      body: JSON.stringify({ internalName: terminals.Nebula2?.sessionName || "Nebula2", folderId: null }) }).catch(() => {});
+    await sleep(800);
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');localStorage.setItem('hay_sort_mode','manual');}catch(e){}"
+    });
+    await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
+    await sleep(2500);
+    const manual = page.getByRole("button", { name: "Manual" }).first();
+    if (await manual.count()) { await manual.click(); await sleep(900); }
+    await assertDark(page, "15-folders");
+    const marker = Date.now();
+    await sleep(1500);
+    const card = page.locator(".switcher-card", { hasText: "Nebula" }).first();
+    await card.hover();
+    await sleep(600);
+    await page.locator('button[aria-label="More actions for Nebula"]:visible').first().click();
+    await page.waitForSelector(".switcher-sheet", { timeout: 10000 });
+    await sleep(1300);
+    await page.locator(".switcher-sheet button", { hasText: "Move to folder" }).first().click();
+    await sleep(1300);
+    await page.locator(".switcher-sheet button", { hasText: "Benchmarks" }).first().click();
+    await sleep(3800);                              // the card files itself under Research
+    await saveVideo(page, "15-folders", trimFor(t0, marker));
+
+  } else if (clip === "16-drop") {
+    // A file dropped on a session lands on the host and its path is typed
+    // into the terminal. Filmed on the wall: the tile is DOM-rendered, so
+    // the sanitizer's rewriter keeps the real home directory off camera.
+    await apiWrite(requireTerminalId("Lyra2"), WIPE + "; clear\r"); // a clean prompt for the drop
+    await sleep(900);
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
+    await sleep(2500);
+    await assertDark(page, "16-drop");
+    const marker = Date.now();
+    await sleep(1000);
+    const card = page.locator(".switcher-card", { hasText: "Lyra" }).first();
+    await card.click();                             // engage the tile in place
+    await sleep(1500);
+    await page.keyboard.type("head -3 ", { delay: 90 });
+    await sleep(600);
+    const dt = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["sample,ingest_s,render_p99_ms\nday-1,41.0,74\nday-2,9.1,61\n"], "results.csv", { type: "text/csv" }));
+      return dt;
+    });
+    await card.dispatchEvent("dragenter", { dataTransfer: dt });
+    await sleep(500);
+    await card.dispatchEvent("dragover", { dataTransfer: dt });
+    await sleep(500);
+    await card.dispatchEvent("drop", { dataTransfer: dt });
+    await sleep(2600);                              // upload → path typed
+    await page.keyboard.press("Enter");
+    await sleep(3200);
+    await saveVideo(page, "16-drop", trimFor(t0, marker));
+
   } else if (clip === "debug-sheet") {
     // Diagnostic: open Aurora's card menu on the wall, keep a frame, list
     // every visible control. No recording kept.
@@ -877,6 +986,7 @@ try {
       css: "try{localStorage.setItem('hay_tile_zoom','6');localStorage.setItem('hay_theme','dark');}catch(e){}" });
     await page.goto(`${state.localUrl}/s/Lyra2/?view=wall`, { waitUntil: "networkidle", timeout: 30000 });
     await sleep(2500);
+    console.log("viewport:", JSON.stringify(page.viewportSize()), "window:", JSON.stringify(await page.evaluate(() => [innerWidth, innerHeight, outerWidth, outerHeight, devicePixelRatio, document.documentElement.clientHeight])));
     const more = page.getByRole("button", { name: "More actions for Aurora" });
     console.log("more-actions buttons:", await more.count());
     await more.first().click({ force: true });

@@ -113,8 +113,48 @@ concatenated, and faded in/out once. `--no-captions` keeps a clean plate;
 while the wall joins views on the session id, so the card never lit up.
 Fixed in the CLI: `--session` resolves to the id before publishing.
 
-## Phone footage checklist (unchanged)
+## The final cut is built ON the August video
 
-hero-mobile.svg still stands in for the two segments only a phone can film
-(hop-ios keyboard feel, HopBoard dictation). Real device footage replaces
-the still whenever it gets filmed; the slot and timing stay.
+`demo/storyboards/v3-on-v2.json` is the one that ships. It uses
+`demo-output/hop-v2-rough.mp4` as the spine — its wall opening (0–12.88s),
+its phone illustration (12.88–20.0s) and its end card (20.0–23.33s) exactly
+as they were — and splices everything new in between. `v3.json` is the
+from-scratch variant with a title card; keep it for reference.
+
+## The phone, filmed for real
+
+The native app is recorded in the iOS simulator against an **isolated,
+tunnel-less daemon** so only the demo cast is ever on camera:
+
+```bash
+HOP_NO_TUNNEL=1 HOP_HOME=/tmp/hop-demo/hop-home hop start      # its own port + secret
+HOP_HOME=/tmp/hop-demo/hop-home HOP_CAPTURE_CAST_SUFFIX= node demo/capture/setup-sessions.mjs
+HOP_HOME=/tmp/hop-demo/hop-home HOP_CAPTURE_CAST_SUFFIX= node demo/capture/spawn-aurora.mjs
+# mint a device token on THAT daemon, stage hay-web/assets/digest*.json (backup first), then:
+cd ~/Code/hop-ios && make gen && xcodebuild build-for-testing -scheme HopSpikeUI …
+xcrun simctl status_bar $SIM override --time 9:41 --batteryState charged --batteryLevel 100
+xcrun simctl io $SIM recordVideo --codec h264 --force /tmp/hop-demo/phone.mp4 &
+TEST_RUNNER_HOP_DEV_COOKIE=$TOKEN TEST_RUNNER_HOP_DEV_SERVER=http://127.0.0.1:$PORT \
+TEST_RUNNER_HOP_CAPTURE_OPEN=Lyra xcodebuild test-without-building -scheme HopSpikeUI \
+  -only-testing:HopSpikeUITests/WallCapture …
+kill -INT %1; restore the digest files; HOP_HOME=/tmp/hop-demo/hop-home hop stop
+```
+
+- `UITests/WallCapture.swift` (hop-ios) is the tour: wall, a slow scroll,
+  tap a session, type with the keyboard up, back. Real gestures, so the
+  recording shows the app as it behaves.
+- `HOP_DEV_SERVER` (new, debug builds only) points the app at the rig
+  daemon; the dev cookie is no longer marked Secure for http, or the
+  simulator would never send it to 127.0.0.1.
+- `HOP_CAPTURE_CAST_SUFFIX=` drops the "2" from the cast's names: the
+  phone shows internal names verbatim, and an isolated daemon has nothing
+  to collide with.
+- Type into a SHELL session (Lyra) on the phone, not the claude one: a
+  prompt typed into claude gets an answer, and the first take's answer
+  quoted the user's global instructions back on camera.
+- The briefing files are served from the repo's `hay-web/assets` by every
+  daemon, the live one included, so the staged copies must go back within
+  minutes — and never across the hourly digest run at :40.
+- HopBoard still cannot run in the simulator (keyboard extension + mic +
+  on-device Whisper), so the v2 illustration follows the real footage for
+  that one beat.

@@ -137,10 +137,24 @@
       "push": 1.07
     },
     {
+      "id": "20-phone",
+      "type": "clip",
+      "src": "demo-output/footage/live/20-phone.mp4",
+      "start": 11.3,
+      "duration": 25,
+      "speed": 1.1,
+      "caption": {
+        "kicker": "NEW · THE PHONE",
+        "text": "The native app: the wall, the briefing, a real keyboard — the same fleet in your pocket.",
+        "side": "left",
+        "size": 30
+      }
+    },
+    {
       "id": "04-mobile",
       "type": "still",
       "src": "docs/hero-mobile.svg",
-      "duration": 7,
+      "duration": 6.0,
       "push": 1.07
     },
     {

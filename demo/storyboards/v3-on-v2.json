@@ -1,0 +1,157 @@
+{
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "note": "The August production cut (demo-output/hop-v2-rough.mp4) is the spine: its wall opening, its phone illustration and its end card are used as they were; everything new is spliced in between. Boundaries measured on the v2 file: wall 0-12.88s, phone still 12.88-20.0s, end card 20.0-23.33s.",
+  "segments": [
+    {
+      "id": "v2-wall",
+      "type": "clip",
+      "src": "demo-output/hop-v2-rough.mp4",
+      "start": 0,
+      "duration": 12.88
+    },
+    {
+      "id": "10-new-session",
+      "type": "clip",
+      "src": "demo-output/footage/live/10-new-session.webm",
+      "start": 1.2,
+      "duration": 13,
+      "caption": {
+        "kicker": "NEW · SESSIONS",
+        "text": "Terminal, Claude or Codex — in any directory, with completion."
+      }
+    },
+    {
+      "id": "02-agent-live",
+      "type": "clip",
+      "src": "demo-output/footage/live/02-agent-live.webm",
+      "duration": 8.5,
+      "caption": {
+        "kicker": "NEW · AGENTS",
+        "text": "Agents work in real terminals. Watch, steer, take over."
+      }
+    },
+    {
+      "id": "11-panes",
+      "type": "clip",
+      "src": "demo-output/footage/live/11-panes.webm",
+      "start": 0.6,
+      "duration": 15,
+      "speed": 1.12,
+      "caption": {
+        "kicker": "NEW · PANES",
+        "text": "Split any side. Drag a pane to re-dock it. Zoom, and back."
+      }
+    },
+    {
+      "id": "12-views",
+      "type": "clip",
+      "src": "demo-output/footage/live/12-views.webm",
+      "start": 1.5,
+      "duration": 13.5,
+      "speed": 1.1,
+      "caption": {
+        "kicker": "NEW · VIEWS",
+        "text": "hop view publishes a result; read it right on the wall."
+      }
+    },
+    {
+      "id": "14-switch-hud",
+      "type": "clip",
+      "src": "demo-output/footage/live/14-switch-hud.webm",
+      "duration": 7.2,
+      "caption": {
+        "kicker": "NEW · SWITCH",
+        "text": "⌘J / ⌘L walk your recent sessions; release to land."
+      }
+    },
+    {
+      "id": "15-folders",
+      "type": "clip",
+      "src": "demo-output/footage/live/15-folders.webm",
+      "start": 0.5,
+      "duration": 8.4,
+      "caption": {
+        "kicker": "NEW · FOLDERS",
+        "text": "File a session from its menu — no drag needed."
+      }
+    },
+    {
+      "id": "16-drop",
+      "type": "clip",
+      "src": "demo-output/footage/live/16-drop.webm",
+      "start": 1.0,
+      "duration": 9.2,
+      "caption": {
+        "kicker": "NEW · FILES",
+        "text": "Drop a file on a session: it lands on the host and the path is typed for you."
+      }
+    },
+    {
+      "id": "06-math",
+      "type": "clip",
+      "src": "demo-output/footage/live/06-math.webm",
+      "start": 1.2,
+      "duration": 8.5,
+      "speed": 1.1,
+      "caption": {
+        "kicker": "NEW · MATH",
+        "text": "LaTeX renders where a terminal can't."
+      }
+    },
+    {
+      "id": "13-handoff",
+      "type": "clip",
+      "src": "demo-output/footage/live/13-handoff.webm",
+      "start": 1.0,
+      "duration": 12.5,
+      "caption": {
+        "kicker": "NEW · HAND-OFF",
+        "text": "Continue a Claude conversation in Codex — or the other way round."
+      }
+    },
+    {
+      "id": "13b-handoff-still",
+      "type": "still",
+      "src": "docs/hero-handoff.svg",
+      "duration": 7,
+      "push": 1.07
+    },
+    {
+      "id": "14b-operations-still",
+      "type": "still",
+      "src": "docs/hero-operations.svg",
+      "duration": 7.5,
+      "push": 1.07
+    },
+    {
+      "id": "20-phone",
+      "type": "clip",
+      "src": "demo-output/footage/live/20-phone.mp4",
+      "start": 11.3,
+      "duration": 25,
+      "speed": 1.1,
+      "caption": {
+        "kicker": "NEW · THE PHONE",
+        "text": "The native app: the wall, the briefing, a real keyboard — the same fleet in your pocket.",
+        "side": "left",
+        "size": 30
+      }
+    },
+    {
+      "id": "v2-phone-still",
+      "type": "clip",
+      "src": "demo-output/hop-v2-rough.mp4",
+      "start": 12.88,
+      "duration": 6.0
+    },
+    {
+      "id": "v2-end",
+      "type": "clip",
+      "src": "demo-output/hop-v2-rough.mp4",
+      "start": 20.0,
+      "duration": 3.33
+    }
+  ]
+}

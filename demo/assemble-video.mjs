@@ -106,12 +106,20 @@ const renderCard = async (seg, out) => {
 // capitals — the illustration kicker) over one sentence in a dark pill,
 // bottom-centre, clear of the terminal's own footer.
 const renderCaption = async (cap, out) => {
-  await shoot(`<!doctype html><html><body style="margin:0;width:${W}px;height:${H}px;background:transparent;position:relative;font-family:${MONO};">
-    <div style="position:absolute;left:0;right:0;bottom:${cap.bottom ?? 64}px;display:flex;flex-direction:column;align-items:center;gap:10px;">
-      ${cap.kicker ? `<div style="font-size:17px;letter-spacing:0.18em;color:#a78bfa;text-shadow:0 1px 2px rgba(0,0,0,.8);">${esc(cap.kicker)}</div>` : ""}
-      <div style="font-size:${cap.size || 33}px;color:#e6e6e9;background:rgba(23,24,29,0.97);border:1px solid #2e3038;border-radius:12px;padding:14px 26px;box-shadow:0 8px 30px rgba(0,0,0,.45);max-width:${Math.round(W * 0.8)}px;text-align:center;line-height:1.35;">${esc(cap.text)}</div>
-    </div>
-  </body></html>`, out, { transparent: true });
+  // A portrait clip (the phone) sits in the middle of the frame: its caption
+  // goes BESIDE it (cap.side = "left" | "right"), not across it.
+  const pill = `font-size:${cap.size || 33}px;color:#e6e6e9;background:rgba(23,24,29,0.97);border:1px solid #2e3038;border-radius:12px;padding:14px 26px;box-shadow:0 8px 30px rgba(0,0,0,.45);line-height:1.35;`;
+  const kicker = cap.kicker ? `<div style="font-size:17px;letter-spacing:0.18em;color:#a78bfa;text-shadow:0 1px 2px rgba(0,0,0,.8);">${esc(cap.kicker)}</div>` : "";
+  const body = cap.side
+    ? `<div style="position:absolute;top:50%;transform:translateY(-50%);${cap.side === "right" ? "right" : "left"}:${Math.round(W * 0.06)}px;width:${Math.round(W * 0.30)}px;display:flex;flex-direction:column;align-items:flex-start;gap:12px;">
+        ${kicker}
+        <div style="${pill}text-align:left;">${esc(cap.text)}</div>
+      </div>`
+    : `<div style="position:absolute;left:0;right:0;bottom:${cap.bottom ?? 64}px;display:flex;flex-direction:column;align-items:center;gap:10px;">
+        ${kicker}
+        <div style="${pill}max-width:${Math.round(W * 0.8)}px;text-align:center;">${esc(cap.text)}</div>
+      </div>`;
+  await shoot(`<!doctype html><html><body style="margin:0;width:${W}px;height:${H}px;background:transparent;position:relative;font-family:${MONO};">${body}</body></html>`, out, { transparent: true });
 };
 
 // ── Segment normalisation: every piece becomes W×H, FPS, yuv420p, no audio ──

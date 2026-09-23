@@ -8,16 +8,16 @@ import {
   getHopState, ensureTerminal, execTerminal, resizeTerminal, sleep
 } from "../hop-demo-lib.mjs";
 import {
-  WORKSPACE, sanitizedShell, WIPE, loadTerminals, saveTerminals, seedDemoTree
+  WORKSPACE, sanitizedShell, WIPE, loadTerminals, saveTerminals, seedDemoTree, castName
 } from "./capture-env.mjs";
 
 const state = getHopState();
 seedDemoTree();
 
 const defs = [
-  { name: "Lyra2",    after: ["ls -1"] },
-  { name: "Nebula2",  after: ["sh ../tools/build.sh"] },
-  { name: "Polaris2", after: ["sh ../tools/metrics.sh"] }
+  { name: castName("Lyra"),    after: ["ls -1"] },
+  { name: castName("Nebula"),  after: ["sh ../tools/build.sh"] },
+  { name: castName("Polaris"), after: ["sh ../tools/metrics.sh"] }
 ];
 
 const out = loadTerminals({ required: false });

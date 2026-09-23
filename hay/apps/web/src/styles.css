@@ -4467,10 +4467,10 @@ body.pane-dragging { user-select: none; }
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
   padding: 14px 16px;
 }
-/* With a preview open the dialog becomes a reading surface: list + pane,
-   sized like a mail client rather than a popover. The transition is not
-   animated — a width tween on an iframe re-lays the document per frame. */
-.views-panel.with-preview {
+/* With anything to read the dialog IS a reading surface: index beside page,
+   sized like a mail client rather than a popover. Not animated — a width
+   tween on an iframe re-lays the document per frame. */
+.views-panel.reading {
   width: min(1080px, 94vw);
   max-height: min(84vh, 820px);
   height: min(84vh, 820px);
@@ -4478,8 +4478,8 @@ body.pane-dragging { user-select: none; }
 /* A big monitor earns a bigger page — 1080px of PDF on a 5K display wastes
    the reason to read at a desk. */
 @media (min-width: 1800px) {
-  .views-panel.with-preview { width: min(1360px, 90vw); height: min(86vh, 1000px); max-height: min(86vh, 1000px); }
-  .views-panel.with-preview .views-list { flex-basis: 340px; }
+  .views-panel.reading { width: min(1360px, 90vw); height: min(86vh, 1000px); max-height: min(86vh, 1000px); }
+  .views-panel.reading.rail-side .views-list { flex-basis: 340px; }
 }
 /* Full-screen terminal mode: a right dock with no backdrop. The terminal
    stays visible, live and interactive beside it; width is the reader's own
@@ -4503,23 +4503,44 @@ body.pane-dragging { user-select: none; }
 }
 .views-dock-handle:hover { background: color-mix(in srgb, var(--accent, #7c5cff) 25%, transparent); }
 .views-panel.docked .views-preview { min-height: 0; }
-.views-back { font-size: 16px; font-weight: 700; }
-.views-body { display: flex; min-height: 0; flex: 1; gap: 0; }
-.views-panel.with-preview .views-list {
-  flex: 0 0 300px;
+.views-body { display: flex; min-height: 0; flex: 1; gap: 0; position: relative; }
+/* The index BESIDE the page. */
+.views-panel.rail-side .views-list {
+  flex: 0 0 260px;
   border-right: 1px solid var(--line);
   padding-right: 10px;
   margin-right: 12px;
 }
+.views-panel.docked.rail-side .views-list { flex-basis: 240px; }
+/* The index OVER the page (a narrow dock): a sheet under the nav bar. */
+.views-index {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 10px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+.views-index .views-list { flex: 1; }
 .views-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.views-preview-head {
-  display: flex; align-items: center; gap: 6px;
-  padding: 0 0 8px 2px;
+/* The reader's bar: index toggle · ‹ n/N › · title · actions. */
+.views-nav {
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 0 8px 0; margin-bottom: 6px;
+  border-bottom: 1px solid var(--line);
 }
-.views-preview-title {
+.views-nav .views-act { font-size: 15px; padding: 3px 7px; }
+.views-nav .views-act:disabled { opacity: 0.35; cursor: default; background: none; }
+.views-rail-toggle.on { background: color-mix(in srgb, var(--accent, #7c5cff) 14%, transparent); color: var(--accent, #7c5cff); }
+.views-nav-pos { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-muted); padding: 0 4px; white-space: nowrap; }
+.views-nav-title {
+  display: flex; flex-direction: column; min-width: 0; margin-left: 6px;
   font-size: 12.5px; font-weight: 600; color: var(--ink);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.views-nav-title, .views-nav-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.views-nav-meta { font-size: 10.5px; font-weight: 400; color: var(--ink-muted); }
+.views-nav-acts { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.views-empty-page { margin: 18px 12px; max-width: 460px; font-size: 13px; }
 .views-frame {
   flex: 1; width: 100%; border: 1px solid var(--line); border-radius: 8px;
   background: #fff;   /* PDFs and pages assume a paper ground before they load */
@@ -4649,6 +4670,48 @@ body.pane-dragging { user-select: none; }
   width: 5px; height: 5px; border-radius: 3px;
   background: var(--accent, #7c5cff);
 }
+/* The drawer pull: a tab on the right edge, mid-height, above the wall
+   (600) and its sheets (620), below the Views panel (730) it opens. Big by
+   design — this is the front door to Views, not a toolbar icon. */
+.views-pull {
+  position: fixed;
+  right: 0; top: 50%;
+  transform: translateY(-50%);
+  z-index: 700;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  width: 44px; padding: 14px 0 12px;
+  border: 1px solid var(--line); border-right: none;
+  border-radius: 12px 0 0 12px;
+  background: var(--panel);
+  color: var(--ink-muted);
+  box-shadow: -6px 0 22px rgba(0, 0, 0, 0.22);
+  cursor: pointer;
+  transition: width 0.12s ease, color 0.12s ease;
+}
+.views-pull:hover { color: var(--ink); border-color: var(--accent, #7c5cff); width: 48px; }
+.views-pull.fresh { color: var(--ink); border-color: var(--accent, #7c5cff); }
+.views-pull-glyph { font-size: 18px; line-height: 1; color: var(--accent, #7c5cff); }
+.views-pull-label {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  font-size: 12px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+}
+.views-pull-count {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  padding: 2px 5px; border-radius: 6px;
+  background: var(--bg-alt); color: var(--ink-muted);
+  writing-mode: vertical-rl; transform: rotate(180deg);
+}
+.views-pull-count.fresh { background: var(--accent, #7c5cff); color: #fff; }
+/* Labelled entry points beat a 16px glyph: the wall's header and the
+   topbar both say the word, and wear the count. */
+.views-entry-count {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  padding: 1px 6px; border-radius: 6px;
+  background: var(--bg-alt); color: var(--ink-muted);
+}
+.views-entry-count.fresh { background: var(--accent, #7c5cff); color: #fff; }
+.switcher-action.views-entry { width: auto; padding: 0 10px; gap: 6px; font-size: 12.5px; font-weight: 600; }
+
 /* The switcher's header action is a fixed 32px square with a centred glyph —
    an inline dot would shove the icon off-centre, so it rides the corner. */
 .switcher-action { position: relative; }

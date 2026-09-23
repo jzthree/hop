@@ -44,7 +44,7 @@ import {
   type PaneNode,
   type Side
 } from "./utils/paneTree";
-import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
+import { ViewsPanel, ViewsPull, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
 import type { ViewsSummary } from "./utils/switcherModel";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
@@ -4069,6 +4069,7 @@ const App = () => {
     const seen = loadViewsSeen();
     return sessions.filter((s) => hasUnseenViews(s.internalName || s.name, s.views?.latestAt, seen)).length;
   }, [sessions, viewsOpen]);
+  const totalViews = useMemo(() => sessions.reduce((n, s) => n + (s.views?.count || 0), 0), [sessions]);
 
   const sessionStyle = isMobile
     ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)
@@ -4158,7 +4159,9 @@ const App = () => {
               onClick={() => setViewsOpen({ session: session.room, dock: true })}
             >
               Views
-              {unseenViewSessions > 0 && <span className="views-chip-dot" aria-label="New views" />}
+              {unseenViewSessions > 0
+                ? <span className="views-entry-count fresh" aria-label={`New views in ${unseenViewSessions} session${unseenViewSessions === 1 ? "" : "s"}`}>{unseenViewSessions} new</span>
+                : totalViews > 0 ? <span className="views-entry-count">{totalViews}</span> : null}
             </button>
             <button
               type="button"
@@ -4195,7 +4198,7 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
-            onOpenViews={(scope) => setViewsOpen({ session: scope })}
+            onOpenViews={(scope) => setViewsOpen({ session: scope, dock: true })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
           />
@@ -4854,7 +4857,7 @@ const App = () => {
             tileWsBase={resolveWsUrl()}
             onFocusSession={focusSessionInPlace}
             folders={folders}
-            onOpenViews={(scope) => setViewsOpen({ session: scope })}
+            onOpenViews={(scope) => setViewsOpen({ session: scope, dock: true })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {
@@ -4994,6 +4997,14 @@ const App = () => {
           )}
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
+      )}
+      {/* The drawer pull on the right edge: the front door to Views on every
+          desktop surface — the wall, the hub and a full-screen session — and
+          the one place a new result announces itself in large type. Scoped to
+          the session you are in; fleet-wide from the wall and the hub. */}
+      {!isMobile && !viewsOpen && (!!session || isEmbeddedInHop()) && (
+        <ViewsPull count={totalViews} fresh={unseenViewSessions}
+                   onOpen={() => setViewsOpen(switcherOpen || !session ? { dock: true } : { session: session.room, dock: true })} />
       )}
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}

@@ -3163,11 +3163,13 @@ export const SessionSwitcher = ({
           {/* The hub renders this wall as the whole page, so this is the only
               fleet-wide way in to Views when no session is open. */}
           {onOpenViews && (
-            <button type="button" className="switcher-action" aria-label="Published views" title="Files agents published with hop view" onClick={() => onOpenViews()}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 4v16"/>
-              </svg>
-              {unseenViewSessions > 0 && <span className="views-chip-dot" aria-label="New views" />}
+            <button type="button" className="switcher-action views-entry" aria-label="Published views"
+                    title="Results agents published with hop view" onClick={() => onOpenViews()}>
+              <span aria-hidden="true">◧</span>
+              Views
+              {unseenViewSessions > 0
+                ? <span className="views-entry-count fresh">{unseenViewSessions} new</span>
+                : (() => { const n = visibleSessions.reduce((k, s) => k + (s.views?.count || 0), 0); return n > 0 ? <span className="views-entry-count">{n}</span> : null; })()}
             </button>
           )}
           {onOpenSettings && (

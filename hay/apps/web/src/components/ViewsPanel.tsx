@@ -7,19 +7,21 @@ import { relativeTime } from "../utils/switcherModel";
 // this client was to catch the printed URL before it scrolled out of the
 // viewport.
 //
-// TWO SHAPES, one per surface, because the wall and the full-screen terminal
-// read differently:
+// ONE SHAPE: a reader. Opening Views lands you IN the newest result (the
+// scoped session's, or the fleet's), with ‹ › to step through the rest and
+// an index you can pull open beside or over the page. There is no separate
+// "list mode" to click through first — the list was a detour on the way to
+// the thing you came to read.
 //
-// - MODAL (tiles mode / the wall): a centred dialog; on a desk-sized window
-//   it is two panes, list beside an iframe preview, and a plain click renders
-//   the result in place. The wall is an overview surface — covering it while
-//   you read is fine, it has no live cursor to lose.
-// - DOCK (full-screen terminal): a right-side panel with NO backdrop, so the
-//   terminal beside it stays visible, live and INTERACTIVE — you read the
-//   plot while the session that produced it keeps streaming, and you can
-//   still type. In the dock the preview stacks over the list (back to
-//   return) rather than side-by-side: a pane inside a 450px dock would
-//   squeeze both halves below usefulness.
+// Two placements of that one shape:
+//
+// - DOCK (the default on a desk-sized window): a right-side drawer with NO
+//   backdrop, so the wall or the terminal beside it stays visible, live and
+//   INTERACTIVE — you read the plot while the session that produced it keeps
+//   streaming, and you can still type. Opened from the ◧ Views pull on the
+//   right edge, the topbar, a card's ◧ chip, or ⌘⇧V.
+// - MODAL (windows too narrow for a drawer): the same reader, centred, with
+//   the index beside the page.
 //
 // The dock deliberately OVERLAYS the terminal instead of splitting the
 // layout: a layout split would change the terminal's width, which re-fits and
@@ -165,8 +167,12 @@ const previewSrc = (item: ViewItem) =>
     ? `${item.path}?theme=${pageTheme()}`
     : hrefFor(item);
 
+const RAIL_KEY = "hop_views_rail";
+// Wide enough to read a report AND keep the index beside it; still leaves a
+// usable terminal on a 1440 display. The drag handle remembers a choice.
+const DEFAULT_DOCK_W = 620;
 const clampDockW = (w: number) =>
-  Math.max(340, Math.min(Math.round(window.innerWidth * 0.6), w));
+  Math.max(380, Math.min(Math.round(window.innerWidth * 0.7), w));
 
 export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
@@ -190,9 +196,19 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
   const [docked] = useState(() => dock && window.innerWidth >= 1100);
   const [dockW, setDockW] = useState(() => {
     const stored = Number(localStorage.getItem(DOCK_W_KEY));
-    return clampDockW(Number.isFinite(stored) && stored > 0 ? stored : 440);
+    return clampDockW(Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_DOCK_W);
   });
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // The index (the list of everything published) is a companion to the
+  // reader, not a mode of its own. BESIDE the page where there is room, it
+  // stays open unless you hide it (remembered). OVER the page — a narrow
+  // dock — it is a sheet you pull when you want it and never on open, so
+  // the drawer always lands on the result itself.
+  const [railOpen, setRailOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem(RAIL_KEY) !== "0"; } catch { return true; }
+  });
+  const [indexOpen, setIndexOpen] = useState(false);
+  const widened = useRef(false);
   const now = Date.now();
 
   // The scope arrives as whatever identifier the opener HAD — the URL's
@@ -255,6 +271,32 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
 
   const flatRows = useMemo(() => groups.flatMap(([, rows]) => rows), [groups]);
 
+  // Straight to the page: the newest result in scope is open the moment the
+  // index lands, and the reader never shows nothing while something exists
+  // (a deleted or out-of-scope selection moves to the newest that remains).
+  useEffect(() => {
+    if (!items || !canPreview()) return;
+    if (preview && flatRows.some((r) => r.path === preview.path)) return;
+    setPreview(flatRows[0] ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, flatRows]);
+
+  // A session that has published nothing yet is not a dead end: widen to the
+  // fleet once, automatically, and let the scope toggle say so. Once only —
+  // a reader who narrows back to the session meant it.
+  useEffect(() => {
+    if (!items || widened.current || !resolvedSession || showAll) return;
+    if (flatRows.length === 0 && items.length > 0) { widened.current = true; setShowAll(true); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, flatRows, resolvedSession, showAll]);
+
+  const at = preview ? flatRows.findIndex((r) => r.path === preview.path) : -1;
+  const step = (dir: 1 | -1) => {
+    if (!flatRows.length) return;
+    const next = at < 0 ? 0 : Math.min(flatRows.length - 1, Math.max(0, at + dir));
+    setPreview(flatRows[next]);
+  };
+
   // Escape backs OUT one layer — preview first, then the panel — and arrows
   // read the list like a mail client. Capture phase + stopPropagation: the
   // switcher listens for Escape on window too, and without this one press
@@ -280,24 +322,24 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        if (preview) setPreview(null);
+        // The index OVER the page is the one layer to back out of; the
+        // reader itself is the panel, so the next Escape closes it.
+        if (railOverlay && indexOpen) setIndexOpen(false);
         else onClose();
         return;
       }
-      if ((event.key === "ArrowDown" || event.key === "ArrowUp") && flatRows.length
-          && canPreview()) {
+      const dir = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1
+        : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 0;
+      if (dir && flatRows.length && canPreview()) {
         event.preventDefault();
         event.stopPropagation();
-        const at = preview ? flatRows.findIndex((r) => r.path === preview.path) : -1;
-        const next = event.key === "ArrowDown"
-          ? Math.min(flatRows.length - 1, at + 1)
-          : Math.max(0, at < 0 ? 0 : at - 1);
-        setPreview(flatRows[next]);
+        step(dir);
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, preview, flatRows, docked]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onClose, preview, flatRows, docked, indexOpen, dockW]);
 
   // Opening the panel IS the act of seeing what it shows.
   useEffect(() => {
@@ -334,6 +376,7 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     if (!canPreview()) return;   // narrow: the anchor's new tab is right
     event.preventDefault();
     setPreview(item);
+    setIndexOpen(false);
   };
 
   const copyLink = (item: ViewItem) => {
@@ -401,9 +444,19 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     el.addEventListener("pointerup", onUp);
   };
 
+  // Where the index lives: beside the page when the panel is wide enough for
+  // both, over it otherwise (a 620px dock with a 240px rail leaves 380px of
+  // page — enough for a plot, not for a report).
+  const railOverlay = docked ? dockW < 900 : false;
+  const railVisible = (railOverlay ? indexOpen : railOpen) && flatRows.length > 0;
+  const toggleRail = () => {
+    if (railOverlay) { setIndexOpen((v) => !v); return; }
+    setRailOpen((v) => {
+      try { localStorage.setItem(RAIL_KEY, v ? "0" : "1"); } catch { /* private mode */ }
+      return !v;
+    });
+  };
   const showPreview = preview !== null;
-  // Docked, the preview STACKS over the list; the modal shows them side by side.
-  const stackedPreview = docked && showPreview;
 
   const rowsFor = (key: string, rows: ViewItem[]) => rows.map((item) => {
     const fresh = (item.mtime || 0) > (seenAtOpen[key] || 0);
@@ -487,15 +540,7 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
         <p className="views-empty">Couldn't reach the view index.</p>
       ) : !items ? (
         <p className="views-empty">Loading…</p>
-      ) : groups.length === 0 ? (
-        <div className="views-empty">
-          <p>Nothing published yet{effectiveScope ? " by this session" : ""}. Agents
-          hand over results a terminal can't draw — plots, PDFs, rendered
-          write-ups, live dev servers — and they land here, grouped by the
-          session that produced them.</p>
-          <pre className="views-empty-cmds">{"hop view --title \"ROC curve\" plot.png\nhop port 5173"}</pre>
-        </div>
-      ) : (
+      ) : groups.length === 0 ? null : (
         groups.map(([key, rows]) => (
           <div className="views-group" key={key}>
             {/* One scoped session's own header would repeat the head badge. */}
@@ -509,64 +554,101 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     </div>
   );
 
-  const previewPane = showPreview && (
-    <div className="views-preview">
-      <div className="views-preview-head">
-        {stackedPreview && (
-          <button type="button" className="views-act views-back" aria-label="Back to the list"
-                  onClick={() => setPreview(null)}>‹</button>
-        )}
-        <span className="views-preview-title" title={preview.title || preview.name}>
+  const empty = items && groups.length === 0 && (
+    <div className="views-empty views-empty-page">
+      <p>Nothing published yet{effectiveScope ? " by this session" : ""}. Agents
+      hand over results a terminal can't draw — plots, PDFs, rendered
+      write-ups, live dev servers — and they land here, grouped by the
+      session that produced them.</p>
+      <pre className="views-empty-cmds">{"hop view --title \"ROC curve\" plot.png\nhop port 5173"}</pre>
+    </div>
+  );
+
+  // The page: media natively, documents in an iframe. Media gets NATIVE
+  // elements, not an iframe: an iframed raw image sits tiny in a white
+  // top-left corner, and native <video> gives the real controls. Documents
+  // stay iframes — sandboxed only for LIVE servers (an arbitrary dev app
+  // must not frame-bust the wall); our own files skip the sandbox, because a
+  // sandboxed iframe disables the browser's PDF viewer.
+  const page = showPreview && (
+    preview.kind !== "server" && isImage(preview.name) ? (
+      <div className="views-media"><img src={preview.path} alt={preview.title || preview.name} /></div>
+    ) : preview.kind !== "server" && isVideo(preview.name) ? (
+      <div className="views-media"><video src={preview.path} controls autoPlay={false} /></div>
+    ) : preview.kind !== "server" && isAudio(preview.name) ? (
+      <div className="views-media audio"><audio src={preview.path} controls /></div>
+    ) : (
+      <iframe
+        className="views-frame"
+        key={preview.path}
+        src={previewSrc(preview)}
+        title={preview.title || preview.name}
+        sandbox={preview.kind === "server"
+          ? "allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
+          : undefined}
+      />
+    )
+  );
+
+  // The reader's own bar: the index toggle, ‹ n/N ›, the title, and what you
+  // can do with the page you are on.
+  const nav = flatRows.length > 0 && (
+    <div className="views-nav">
+      <button type="button" className={"views-act views-rail-toggle" + (railVisible ? " on" : "")}
+              aria-label={railVisible ? "Hide the index" : "Show the index"} aria-pressed={railVisible}
+              title={railVisible ? "Hide the index" : "Everything published"}
+              onClick={toggleRail}>☰</button>
+      <button type="button" className="views-act" aria-label="Previous view" title="Previous (←)"
+              disabled={at <= 0} onClick={() => step(-1)}>‹</button>
+      <span className="views-nav-pos">{at < 0 ? "–" : at + 1} / {flatRows.length}</span>
+      <button type="button" className="views-act" aria-label="Next view" title="Next (→)"
+              disabled={at < 0 || at >= flatRows.length - 1} onClick={() => step(1)}>›</button>
+      {preview && (
+        <span className="views-nav-title" title={preview.title || preview.name}>
           {preview.title || preview.name}
+          <span className="views-nav-meta">
+            {preview.kind === "server" ? "live server" : [label(preview.session), relativeTime((preview.mtime || 0) * 1000, now)].join(" · ")}
+          </span>
         </span>
-        <span className="views-head-spacer" />
-        {preview.kind !== "server" && (
+      )}
+      <span className="views-head-spacer" />
+      {preview && (
+        <span className="views-nav-acts">
+          {preview.kind !== "server" && (
+            <button type="button" className="views-act"
+                    title="Download" aria-label={`Download ${preview.name}`}
+                    onClick={() => triggerDownload(preview)}>⤓</button>
+          )}
           <button type="button" className="views-act"
-                  title="Download" aria-label={`Download ${preview.name}`}
-                  onClick={() => triggerDownload(preview)}>⤓</button>
-        )}
-        <button type="button" className="views-act"
-                title="Open in a new tab" aria-label="Open preview in a new tab"
-                onClick={() => window.open(hrefFor(preview), "_blank", "noopener")}>↗</button>
-        {!stackedPreview && (
-          <button type="button" className="views-act" aria-label="Close preview"
-                  onClick={() => setPreview(null)}>×</button>
-        )}
-      </div>
-      {/* Media gets NATIVE elements, not an iframe: an iframed raw image
-          sits tiny in a white top-left corner, and native <video> gives the
-          real controls. Documents stay iframes — sandboxed only for LIVE
-          servers (an arbitrary dev app must not frame-bust the wall); our own
-          files skip the sandbox, because a sandboxed iframe disables the
-          browser's PDF viewer. */}
-      {preview.kind !== "server" && isImage(preview.name) ? (
-        <div className="views-media"><img src={preview.path} alt={preview.title || preview.name} /></div>
-      ) : preview.kind !== "server" && isVideo(preview.name) ? (
-        <div className="views-media"><video src={preview.path} controls autoPlay={false} /></div>
-      ) : preview.kind !== "server" && isAudio(preview.name) ? (
-        <div className="views-media audio"><audio src={preview.path} controls /></div>
-      ) : (
-        <iframe
-          className="views-frame"
-          key={preview.path}
-          src={previewSrc(preview)}
-          title={preview.title || preview.name}
-          sandbox={preview.kind === "server"
-            ? "allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
-            : undefined}
-        />
+                  title="Open in a new tab" aria-label="Open preview in a new tab"
+                  onClick={() => window.open(hrefFor(preview), "_blank", "noopener")}>↗</button>
+          <button type="button" className="views-act"
+                  title={copied === preview.path ? "Copied" : "Copy link"} aria-label="Copy link"
+                  onClick={() => copyLink(preview)}>{copied === preview.path ? "✓" : "⧉"}</button>
+          {preview.kind !== "server" && (
+            <button type="button"
+                    className={"views-act danger" + (armedDelete === preview.path ? " armed" : "")}
+                    title={armedDelete === preview.path ? "Click again to delete" : "Delete"}
+                    aria-label={armedDelete === preview.path ? "Click again to delete" : "Delete"}
+                    onMouseLeave={() => setArmedDelete((a) => (a === preview.path ? null : a))}
+                    onClick={() => deleteItem(preview)}>
+              {armedDelete === preview.path ? "sure?" : "🗑"}
+            </button>
+          )}
+        </span>
       )}
     </div>
   );
 
   return (
     <>
-      {/* The dock has NO backdrop on purpose: the terminal beside it stays
-          visible and interactive — reading a result must not pause the
+      {/* The dock has NO backdrop on purpose: the wall or terminal beside it
+          stays visible and interactive — reading a result must not pause the
           session that produced it. */}
       {!docked && <div className="views-backdrop" onClick={onClose} />}
       <div className={"views-panel" + (docked ? " docked" : "")
-             + (showPreview && !docked ? " with-preview" : "")}
+             + (flatRows.length > 0 ? " reading" : "")
+             + (railVisible ? (railOverlay ? " rail-over" : " rail-side") : "")}
            style={docked ? { width: dockW } : undefined}
            role="dialog" aria-label="Published views"
            ref={panelRef} tabIndex={-1}>
@@ -599,10 +681,38 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
           )}
           <button type="button" className="views-close" aria-label="Close views" onClick={onClose}>×</button>
         </div>
+        {nav}
         <div className="views-body">
-          {stackedPreview ? previewPane : <>{list}{!docked && previewPane}</>}
+          {railVisible && !railOverlay && list}
+          <div className="views-preview">
+            {empty || (canPreview() ? page : list)}
+          </div>
+          {railVisible && railOverlay && (
+            <div className="views-index" role="region" aria-label="Everything published">
+              {list}
+            </div>
+          )}
         </div>
       </div>
     </>
   );
 };
+
+/**
+ * The drawer pull: a tab on the right edge of the page that opens Views. It
+ * is the affordance a 32px icon in a toolbar never was — big enough to find
+ * without looking, and it wears the count so a new result is visible from
+ * across the room.
+ */
+export const ViewsPull = ({ count, fresh, onOpen }: { count: number; fresh: number; onOpen: () => void }) => (
+  <button type="button"
+          className={"views-pull" + (fresh > 0 ? " fresh" : "")}
+          aria-label={`Views: ${count} published${fresh > 0 ? `, new in ${fresh} session${fresh === 1 ? "" : "s"}` : ""}`}
+          title="Results agents published with hop view (⌘⇧V)"
+          onClick={onOpen}>
+    <span className="views-pull-glyph" aria-hidden="true">◧</span>
+    <span className="views-pull-label">Views</span>
+    {fresh > 0 ? <span className="views-pull-count fresh">{fresh} new</span>
+      : count > 0 ? <span className="views-pull-count">{count}</span> : null}
+  </button>
+);

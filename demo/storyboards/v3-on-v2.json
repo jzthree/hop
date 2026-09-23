@@ -2,36 +2,25 @@
   "width": 1920,
   "height": 1080,
   "fps": 30,
+  "note": "The August production cut (demo-output/hop-v2-rough.mp4) is the spine: its wall opening, its phone illustration and its end card are used as they were; everything new is spliced in between. Boundaries measured on the v2 file: wall 0-12.88s, phone still 12.88-20.0s, end card 20.0-23.33s.",
   "segments": [
     {
-      "id": "00-title",
-      "type": "card",
-      "duration": 3.2,
-      "kicker": "TERMINALS FOR HUMANS + AGENTS",
-      "title": "hop",
-      "titleSize": 96,
-      "subtitle": "every session your agents run, on one wall"
-    },
-    {
-      "id": "00-wall",
+      "id": "v2-wall",
       "type": "clip",
-      "src": "demo-output/footage/live/00-wall.webm",
-      "duration": 12,
-      "caption": {
-        "kicker": "01 · THE WALL",
-        "text": "Every terminal, one wall. Filter to find it; click to work in place."
-      }
+      "src": "demo-output/hop-v2-rough.mp4",
+      "start": 0,
+      "duration": 12.88
     },
     {
       "id": "10-new-session",
       "type": "clip",
       "src": "demo-output/footage/live/10-new-session.webm",
-      "caption": {
-        "kicker": "02 · NEW SESSION",
-        "text": "Terminal, Claude or Codex — in any directory, with completion."
-      },
       "start": 1.2,
-      "duration": 13
+      "duration": 13,
+      "caption": {
+        "kicker": "NEW · SESSIONS",
+        "text": "Terminal, Claude or Codex — in any directory, with completion."
+      }
     },
     {
       "id": "02-agent-live",
@@ -39,7 +28,7 @@
       "src": "demo-output/footage/live/02-agent-live.webm",
       "duration": 8.5,
       "caption": {
-        "kicker": "03 · AGENTS",
+        "kicker": "NEW · AGENTS",
         "text": "Agents work in real terminals. Watch, steer, take over."
       }
     },
@@ -47,25 +36,25 @@
       "id": "11-panes",
       "type": "clip",
       "src": "demo-output/footage/live/11-panes.webm",
-      "caption": {
-        "kicker": "04 · PANES",
-        "text": "Split any side. Drag a pane to re-dock it. Zoom, and back."
-      },
       "start": 0.6,
       "duration": 15,
-      "speed": 1.12
+      "speed": 1.12,
+      "caption": {
+        "kicker": "NEW · PANES",
+        "text": "Split any side. Drag a pane to re-dock it. Zoom, and back."
+      }
     },
     {
       "id": "12-views",
       "type": "clip",
       "src": "demo-output/footage/live/12-views.webm",
-      "caption": {
-        "kicker": "05 · VIEWS",
-        "text": "hop view publishes a result; read it right on the wall."
-      },
       "start": 1.5,
       "duration": 13.5,
-      "speed": 1.1
+      "speed": 1.1,
+      "caption": {
+        "kicker": "NEW · VIEWS",
+        "text": "hop view publishes a result; read it right on the wall."
+      }
     },
     {
       "id": "14-switch-hud",
@@ -73,7 +62,7 @@
       "src": "demo-output/footage/live/14-switch-hud.webm",
       "duration": 7.2,
       "caption": {
-        "kicker": "06 · SWITCH",
+        "kicker": "NEW · SWITCH",
         "text": "⌘J / ⌘L walk your recent sessions; release to land."
       }
     },
@@ -84,7 +73,7 @@
       "start": 0.5,
       "duration": 8.4,
       "caption": {
-        "kicker": "07 · FOLDERS",
+        "kicker": "NEW · FOLDERS",
         "text": "File a session from its menu — no drag needed."
       }
     },
@@ -95,7 +84,7 @@
       "start": 1.0,
       "duration": 9.2,
       "caption": {
-        "kicker": "08 · FILES",
+        "kicker": "NEW · FILES",
         "text": "Drop a file on a session: it lands on the host and the path is typed for you."
       }
     },
@@ -107,20 +96,20 @@
       "duration": 8.5,
       "speed": 1.1,
       "caption": {
-        "kicker": "09 · MATH",
-        "text": "hop math renders LaTeX where a terminal can't."
+        "kicker": "NEW · MATH",
+        "text": "LaTeX renders where a terminal can't."
       }
     },
     {
       "id": "13-handoff",
       "type": "clip",
       "src": "demo-output/footage/live/13-handoff.webm",
-      "caption": {
-        "kicker": "10 · HAND-OFF",
-        "text": "Continue a Claude conversation in Codex — or the other way round."
-      },
       "start": 1.0,
-      "duration": 12.5
+      "duration": 12.5,
+      "caption": {
+        "kicker": "NEW · HAND-OFF",
+        "text": "Continue a Claude conversation in Codex — or the other way round."
+      }
     },
     {
       "id": "13b-handoff-still",
@@ -151,19 +140,18 @@
       }
     },
     {
-      "id": "04-mobile",
-      "type": "still",
-      "src": "docs/hero-mobile.svg",
-      "duration": 6.0,
-      "push": 1.07
+      "id": "v2-phone-still",
+      "type": "clip",
+      "src": "demo-output/hop-v2-rough.mp4",
+      "start": 12.88,
+      "duration": 6.0
     },
     {
-      "id": "06-close",
-      "type": "card",
-      "duration": 4,
-      "title": "hop — terminals for humans + agents",
-      "titleSize": 54,
-      "subtitle": "github.com/jzthree/hop"
+      "id": "v2-end",
+      "type": "clip",
+      "src": "demo-output/hop-v2-rough.mp4",
+      "start": 20.0,
+      "duration": 3.33
     }
   ]
 }

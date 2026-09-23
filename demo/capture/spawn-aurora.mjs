@@ -6,7 +6,7 @@
 // The agent command defaults to `claude`; override with HOP_CAPTURE_AGENT.
 import { startMcp } from "./mcp-client.mjs";
 import {
-  AGENT_CMD, WORKSPACE, loadTerminals, saveTerminals, seedDemoTree
+  AGENT_CMD, WORKSPACE, loadTerminals, saveTerminals, seedDemoTree, castName
 } from "./capture-env.mjs";
 
 seedDemoTree();
@@ -16,7 +16,7 @@ try {
   await mcp.init();
 
   const res = await mcp.callTool("hopx_spawn_agent", {
-    name: "Aurora2",
+    name: castName("Aurora"),
     cwd: WORKSPACE,
     agent: "custom",
     command: `clear; printf '\\033[3J'; ${AGENT_CMD}`,
@@ -46,7 +46,7 @@ try {
     break;
   }
   const info = loadTerminals({ required: false });
-  info.Aurora2 = { terminalId, sessionName: res.parsed.sessionName || "Aurora2" };
+  info[castName("Aurora")] = { terminalId, sessionName: res.parsed.sessionName || castName("Aurora") };
   saveTerminals(info);
 } finally {
   mcp.kill();

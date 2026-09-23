@@ -34,7 +34,12 @@ export const AGENT_CMD = process.env.HOP_CAPTURE_AGENT || "claude";
 // Demo cast, by INTERNAL session name. The capture driver's DOM rewriter
 // shows the display names (Aurora/Lyra/Nebula/Polaris); Vega appears via the
 // 01-sessions rename clip.
-export const ALLOWED = ["Aurora2", "Lyra2", "Nebula2", "Polaris2", "Vega", "Aurora2-codex"];
+// The "2" suffix keeps the cast clear of real sessions on the live daemon.
+// HOP_CAPTURE_CAST_SUFFIX="" drops it on an isolated daemon (the phone
+// recording shows internal names verbatim — there is no DOM rewriter).
+export const CAST_SUFFIX = process.env.HOP_CAPTURE_CAST_SUFFIX ?? "2";
+export const castName = (base) => base + CAST_SUFFIX;
+export const ALLOWED = [castName("Aurora"), castName("Lyra"), castName("Nebula"), castName("Polaris"), "Vega", castName("Aurora") + "-codex"];
 
 // A sanitized HTML result for the Views clip: Lyra "publishes" it with
 // `hop view`, and the wall reads it docked. Lives in the demo workspace.

@@ -4744,3 +4744,35 @@ body.pane-dragging { user-select: none; }
   padding: 4px 12px;
   border-radius: 999px;
 }
+
+/* ── Rendered math on hover (utils/mathTooltip) ── */
+.math-tip {
+  position: fixed;
+  z-index: 1300;
+  max-width: min(760px, 92vw);
+  padding: 12px 16px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.38);
+  font-size: 19px;
+  line-height: 1.4;
+  user-select: text;
+}
+.math-tip.pinned { border-color: var(--accent); box-shadow: 0 12px 34px rgba(0, 0, 0, 0.38), 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.math-tip-render { overflow-x: auto; max-height: 50vh; overflow-y: auto; }
+.math-tip-render .katex-display { margin: 4px 0; }
+.math-tip-src {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+  word-break: break-all;
+  max-height: 96px;
+  overflow: auto;
+}
+.math-tip-hint { margin-top: 4px; font-size: 10px; color: var(--ink-muted); }
+.math-tip-error { font-family: var(--font-mono); color: var(--err); }

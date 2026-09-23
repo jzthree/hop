@@ -13,6 +13,8 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { enableMathHover } from "../utils/mathLinkProvider";
+import { getMathTip } from "../utils/mathTooltip";
 import { urlAtCell, cellAtPoint } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
@@ -518,6 +520,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
       lastLinkOpenAtRef.current = Date.now();
       window.open(target, "_blank", "noopener");
     }));
+    enableMathHover(term, getMathTip()); // rendered math on hover, here too
     term.open(box);
     termRef.current = term;
     fitRef.current = fit;

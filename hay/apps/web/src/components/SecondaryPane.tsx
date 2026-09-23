@@ -3,6 +3,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { safeParseServerMessage } from "hay-shared";
 import { PaneButtons, PaneIcon, type DragHandle } from "./PaneLayout";
+import { enableMathHover } from "../utils/mathLinkProvider";
+import { getMathTip } from "../utils/mathTooltip";
 import type { Side } from "../utils/paneTree";
 
 // A lightweight additional pane: its own WS attach + xterm for one session,
@@ -82,6 +84,7 @@ export const SecondaryPane = ({
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    enableMathHover(term, getMathTip());
     term.open(hostRef.current);
     termRef.current = term;
 

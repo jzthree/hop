@@ -17,6 +17,8 @@ import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
 import { tabTitle } from "./utils/tabTitle";
 import { remoteAppOwnsScreen } from "./utils/echoGuard";
 import { urlAtCell, cellAtPoint } from "./utils/urlAtCell";
+import { enableMathHover } from "./utils/mathLinkProvider";
+import { getMathTip } from "./utils/mathTooltip";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { claimOnAttach, claimOnClick } from "./utils/sizeClaim";
@@ -2122,6 +2124,10 @@ const App = () => {
       }
       window.open(target, "_blank", "noopener");
     }));
+    // LaTeX in the output is a hover target: the tooltip renders it with
+    // KaTeX, a click pins it. What `hop math` could only approximate in
+    // Unicode, the browser around the terminal draws properly.
+    enableMathHover(terminal, getMathTip());
     terminal.open(containerRef.current);
 
     // GPU-accelerated rendering (same renderer VS Code uses). Must load after

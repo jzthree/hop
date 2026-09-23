@@ -257,7 +257,9 @@ echo '\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}' | hop math
 
 Agents working inside hop terminals can render formulas for the humans watching by invoking the command themselves — install the bundled skills with `hop agent-skill install` so Claude and Codex sessions know to do this (plus ring the bell when blocked, and keep output phone-friendly).
 
-`hop math` renders a **2D Unicode layout** — fractions, roots, sums/limits, sub/superscripts, Greek + operators, and accents — with no dependencies. Inline-image rendering (Kitty/iTerm) is deferred until graphics support lands in the web client (xterm.js): the real payoff is math that renders *inside* a shared hop session, which the re-rendering clients can't show yet, so until then it's Unicode everywhere.
+`hop math` renders a **2D Unicode layout** — fractions, roots, sums/limits, sub/superscripts, Greek + operators, and accents — with no dependencies, for any terminal.
+
+**In the web client, LaTeX renders itself.** Anything an agent prints as `$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or bare `\frac{…}`-style LaTeX is detected in the terminal output — on the wall's tiles, in split panes, and full screen — and underlined on hover, with the formula rendered by KaTeX in a tooltip. Click to pin the tooltip and copy from it; Esc releases it. Prices (`$5`) and Windows paths are left alone. Nothing about the session changes: the source text stays in the terminal, so it round-trips to any client, and the rendering lives in the browser around it.
 
 ### Show something a terminal cannot draw (`hop view`, `hop port`)
 

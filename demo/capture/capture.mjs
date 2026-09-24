@@ -34,7 +34,7 @@ import { getHopState, sleep } from "../hop-demo-lib.mjs";
 import { chromium, devices } from "../../hay/node_modules/playwright/index.mjs";
 import { NATIVE_CSS_INIT } from "./native-css.mjs";
 import {
-  CHROME, FFMPEG, OUT, VID_TMP, ALLOWED, SCREEN_FORBIDDEN, TERMINALS_PATH, REPORT_HTML, REPO_ROOT, WIPE, loadTerminals
+  CHROME, FFMPEG, OUT, VID_TMP, ALLOWED, SCREEN_FORBIDDEN, TERMINALS_PATH, REPORT_HTML, REPO_ROOT, WIPE, castName, loadTerminals
 } from "./capture-env.mjs";
 
 const state = getHopState();
@@ -978,6 +978,76 @@ try {
     await page.keyboard.press("Enter");
     await sleep(3200);
     await saveVideo(page, "16-drop", trimFor(t0, marker));
+
+  } else if (clip === "08-math-hover") {
+    // LaTeX in the output renders on hover: the pointer rests on a formula,
+    // the KaTeX tooltip appears, a click pins it, the pointer moves on to a
+    // second formula. Full screen, on Lyra, from a wiped prompt.
+    //
+    // Size discipline: typing through the API makes the API client the size
+    // owner, at ITS size — the page would then follow that grid scaled, and
+    // xterm maps the mouse through unscaled cell metrics, so a hover misses.
+    // So the page claims first (a click), the API client is resized to the
+    // page's grid, and only then does the API type: the PTY never changes
+    // size again and the page renders 1:1.
+    const lyra = requireTerminalId(castName("Lyra"));
+    const key = terminals[castName("Lyra")]?.sessionName || castName("Lyra");
+    const authH = { Authorization: `Bearer ${state.sessionSecret}` };
+    const grid = async () => {
+      const sc = await (await fetch(`${state.localUrl}/api/sessions/screen?name=${encodeURIComponent(key)}`, { headers: authH })).json();
+      return sc;
+    };
+    const { page, t0 } = await newRecordedPage(browser, {
+      css: "try{localStorage.removeItem('hay_pane_tree');localStorage.setItem('hay_view_mode','fit');localStorage.setItem('hay_theme','dark');}catch(e){}"
+    });
+    await gotoSession(page, castName("Lyra"));
+    await sleep(2200);
+    await page.mouse.click(960, 700);           // the page takes the size
+    await sleep(1500);
+    const g0 = await grid();
+    await apiResize(lyra, g0.cols, g0.rows);   // the API client agrees with it
+    await sleep(600);
+    await apiWrite(lyra, WIPE + "; clear\r");
+    await sleep(1200);
+    await assertDark(page, "08-math-hover");
+    const marker = Date.now();
+    await sleep(900);
+    const line = "printf '%s\\n' 'Closed form: $x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}$ and the series \\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6} converge.'";
+    await typeSlow(lyra, line, 22);
+    await sleep(300); await apiWrite(lyra, "\r");
+    await sleep(1400);
+    const strip = (t) => (t || "").replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1bc|\r/g, "");
+    let sc = null, rows = [], row = -1, col = -1, col2 = -1;
+    for (let attempt = 0; attempt < 16 && row < 0; attempt++) {
+      sc = await grid();
+      rows = strip(sc.data || "").split("\n");
+      for (let i = 0; i < rows.length; i++) {
+        const c = rows[i].indexOf("\\frac");
+        if (c >= 0 && !/printf/.test(rows[i])) { row = i; col = c + 2; col2 = rows[i].indexOf("\\sum") + 2; break; }
+      }
+      if (row < 0) await sleep(500);
+    }
+    if (row < 0) throw new Error("ABORT 08: formula not on screen — rows: " + JSON.stringify(rows.filter((r) => r.trim()).slice(0, 4)));
+    const g = await page.evaluate(() => { const s = document.querySelector(".xterm-screen").getBoundingClientRect(); return { left: s.left, top: s.top, w: s.width, h: s.height }; });
+    const cw = g.w / sc.cols, ch = g.h / sc.rows;
+    const x1 = g.left + (col + 0.5) * cw, x2 = g.left + (col2 + 0.5) * cw, y = g.top + (row + 0.5) * ch;
+    console.error(`08: grid ${sc.cols}x${sc.rows} screen ${g.w.toFixed(0)}x${g.h.toFixed(0)} → row ${row} at y ${y.toFixed(0)}, cols ${col}/${col2}`);
+    await page.mouse.move(x1 - 120, y + 60, { steps: 10 });
+    await sleep(500);
+    await page.mouse.move(x1, y, { steps: 18 });   // the tooltip appears
+    await sleep(900);
+    console.error("08: tooltip visible:", await page.evaluate(() => { const t = document.querySelector(".math-tip"); return !!t && !t.hidden; }));
+    await page.screenshot({ path: path.join(VID_TMP, "08-hover-check.png") });
+    await sleep(1700);
+    await page.mouse.down(); await page.mouse.up();  // pin it
+    await sleep(1800);
+    await page.keyboard.press("Escape");
+    await sleep(400);
+    await page.mouse.move(x2, y, { steps: 24 });     // the second formula
+    await sleep(2800);
+    await page.mouse.move(x2, y + 200, { steps: 12 });
+    await sleep(1200);
+    await saveVideo(page, "08-math-hover", trimFor(t0, marker));
 
   } else if (clip === "debug-sheet") {
     // Diagnostic: open Aurora's card menu on the wall, keep a frame, list

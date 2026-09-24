@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ViewsPanel, ViewsPull, hasUnseenViews, loadViewsSeen } from "../src/components/ViewsPanel";
+import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "../src/components/ViewsPanel";
 import { SessionSwitcher } from "../src/components/SessionSwitcher";
 import type { SwitcherSession } from "../src/utils/switcherModel";
 
@@ -16,7 +16,10 @@ let store: Record<string, string> = {};
 beforeEach(() => {
   // jsdom's own localStorage is only partially implemented here, and the
   // seen-markers are the whole point of these cases.
-  store = {};
+  // The index rail is hidden until asked and the choice is remembered; most
+  // cases below read rows from it, so they start with it open, the way a
+  // reader who opened it once would. The reader-first case clears this.
+  store = { hop_views_rail: "1" };
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => (key in store ? store[key] : null),
     setItem: (key: string, value: string) => { store[key] = value; },
@@ -57,8 +60,9 @@ describe("ViewsPanel", () => {
 
   it("opens STRAIGHT INTO the newest result; a row click switches the page; the row stays a real link", async () => {
     const onClose = vi.fn();
+    delete store.hop_views_rail; // a first-time reader: nothing remembered
     render(<ViewsPanel onClose={onClose} />);
-    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    await waitFor(() => expect(document.querySelector("iframe.views-frame")).toBeTruthy());
     // jsdom's window is 1024 wide — the desk case, where the page exists.
     // No click needed: the newest item is already the page.
     let frame = document.querySelector("iframe.views-frame") as HTMLIFrameElement;
@@ -70,7 +74,10 @@ describe("ViewsPanel", () => {
     // browser's PDF viewer, which is half of what the pane is for.
     expect(frame.hasAttribute("sandbox")).toBe(false);
     expect(screen.getByText("1 / 3")).toBeTruthy();
-    // The index sits beside the page; a plain click on a row turns the page.
+    // The index is not shown until asked — the page is the point. ☰ opens
+    // it beside the page; a plain click on a row turns the page.
+    expect(document.querySelector(".views-list")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show the index" }));
     const row = screen.getByText("views-test.html").closest("a") as HTMLAnchorElement;
     expect(row.getAttribute("target")).toBe("_blank");
     fireEvent.click(row);
@@ -123,24 +130,11 @@ describe("ViewsPanel", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("a session that has published nothing widens to the fleet by itself", async () => {
+  it("a session that has published nothing says so — it never widens by itself", async () => {
     render(<ViewsPanel session="Nowhere" onClose={() => {}} />);
-    await waitFor(() => expect(document.querySelector("iframe.views-frame")).toBeTruthy());
-    expect(screen.getByRole("tab", { name: "all" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByText("1 / 3")).toBeTruthy();
-  });
-
-  it("the drawer pull says the word and wears the count", () => {
-    const onOpen = vi.fn();
-    const { rerender } = render(<ViewsPull count={7} fresh={0} onOpen={onOpen} />);
-    const pull = screen.getByRole("button", { name: "Views: 7 published" });
-    expect(pull.textContent).toContain("Views");
-    expect(pull.textContent).toContain("7");
-    fireEvent.click(pull);
-    expect(onOpen).toHaveBeenCalled();
-    rerender(<ViewsPull count={7} fresh={2} onOpen={onOpen} />);
-    expect(screen.getByRole("button", { name: "Views: 7 published, new in 2 sessions" }).className).toContain("fresh");
-    expect(screen.getByText("2 new")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/Nothing published yet by this session/)).toBeTruthy());
+    expect(screen.getByRole("tab", { name: "all" }).getAttribute("aria-selected")).toBe("false");
+    expect(document.querySelector("iframe.views-frame")).toBeNull();
   });
 
   it("scoped open can widen to the fleet without reopening", async () => {

@@ -18,8 +18,8 @@ import { relativeTime } from "../utils/switcherModel";
 // - DOCK (the default on a desk-sized window): a right-side drawer with NO
 //   backdrop, so the wall or the terminal beside it stays visible, live and
 //   INTERACTIVE — you read the plot while the session that produced it keeps
-//   streaming, and you can still type. Opened from the ◧ Views pull on the
-//   right edge, the topbar, a card's ◧ chip, or ⌘⇧V.
+//   streaming, and you can still type. Per session: opened from the session's
+//   own Views button, a card's ◧ chip, or ⌘⇧V.
 // - MODAL (windows too narrow for a drawer): the same reader, centred, with
 //   the index beside the page.
 //
@@ -200,15 +200,14 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
   });
   const panelRef = useRef<HTMLDivElement | null>(null);
   // The index (the list of everything published) is a companion to the
-  // reader, not a mode of its own. BESIDE the page where there is room, it
-  // stays open unless you hide it (remembered). OVER the page — a narrow
-  // dock — it is a sheet you pull when you want it and never on open, so
-  // the drawer always lands on the result itself.
+  // reader, not a mode of its own: a sheet over the page in a narrow dock, a
+  // rail beside it where there is room — either way only when you ask.
+  // Hidden until asked for, everywhere: the page is what you opened Views
+  // to see. Beside the page it stays as you left it (remembered).
   const [railOpen, setRailOpen] = useState<boolean>(() => {
-    try { return localStorage.getItem(RAIL_KEY) !== "0"; } catch { return true; }
+    try { return localStorage.getItem(RAIL_KEY) === "1"; } catch { return false; }
   });
   const [indexOpen, setIndexOpen] = useState(false);
-  const widened = useRef(false);
   const now = Date.now();
 
   // The scope arrives as whatever identifier the opener HAD — the URL's
@@ -280,15 +279,6 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     setPreview(flatRows[0] ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, flatRows]);
-
-  // A session that has published nothing yet is not a dead end: widen to the
-  // fleet once, automatically, and let the scope toggle say so. Once only —
-  // a reader who narrows back to the session meant it.
-  useEffect(() => {
-    if (!items || widened.current || !resolvedSession || showAll) return;
-    if (flatRows.length === 0 && items.length > 0) { widened.current = true; setShowAll(true); }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, flatRows, resolvedSession, showAll]);
 
   const at = preview ? flatRows.findIndex((r) => r.path === preview.path) : -1;
   const step = (dir: 1 | -1) => {
@@ -697,22 +687,3 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     </>
   );
 };
-
-/**
- * The drawer pull: a tab on the right edge of the page that opens Views. It
- * is the affordance a 32px icon in a toolbar never was — big enough to find
- * without looking, and it wears the count so a new result is visible from
- * across the room.
- */
-export const ViewsPull = ({ count, fresh, onOpen }: { count: number; fresh: number; onOpen: () => void }) => (
-  <button type="button"
-          className={"views-pull" + (fresh > 0 ? " fresh" : "")}
-          aria-label={`Views: ${count} published${fresh > 0 ? `, new in ${fresh} session${fresh === 1 ? "" : "s"}` : ""}`}
-          title="Results agents published with hop view (⌘⇧V)"
-          onClick={onOpen}>
-    <span className="views-pull-glyph" aria-hidden="true">◧</span>
-    <span className="views-pull-label">Views</span>
-    {fresh > 0 ? <span className="views-pull-count fresh">{fresh} new</span>
-      : count > 0 ? <span className="views-pull-count">{count}</span> : null}
-  </button>
-);

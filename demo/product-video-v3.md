@@ -1,4 +1,13 @@
-# Product video v3 — what shipped since August
+# Product video v3 — footage for the Remotion master
+
+**The production video lives in `~/Code/hop-video`** (a Remotion project: the
+July master `out/hop_master_v2*.mp4`, storyboard in `STORYBOARD.md`). This
+directory is the *capture rig* that films the footage it uses. The
+`assemble-video.mjs` cut described below is a rough stitch for review, not
+the product video — the v3 master is rendered from Remotion
+(`npm run render:v3 && npm run mix:v3` there) with the clips listed here
+copied into `footage/live/`.
+
 
 The v2 cut (August) opened on the wall and closed on the phone illustration.
 Since then the product grew four stories worth filming — a three-choice
@@ -44,7 +53,7 @@ card appears on the wall while codex starts reading the transcript. The
 illustration that follows explains what just happened (fork vs hand-off,
 filed beside its source), the way `hero-overview.svg` explains the runtime.
 
-## Producing it
+## Producing it (the rough stitch — for review only)
 
 ```bash
 export PATH=/opt/homebrew/bin:$PATH

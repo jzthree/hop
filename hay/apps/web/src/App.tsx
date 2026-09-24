@@ -44,7 +44,7 @@ import {
   type PaneNode,
   type Side
 } from "./utils/paneTree";
-import { ViewsPanel, ViewsPull, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
+import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
 import type { ViewsSummary } from "./utils/switcherModel";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
@@ -4069,7 +4069,6 @@ const App = () => {
     const seen = loadViewsSeen();
     return sessions.filter((s) => hasUnseenViews(s.internalName || s.name, s.views?.latestAt, seen)).length;
   }, [sessions, viewsOpen]);
-  const totalViews = useMemo(() => sessions.reduce((n, s) => n + (s.views?.count || 0), 0), [sessions]);
 
   const sessionStyle = isMobile
     ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)
@@ -4159,9 +4158,21 @@ const App = () => {
               onClick={() => setViewsOpen({ session: session.room, dock: true })}
             >
               Views
-              {unseenViewSessions > 0
-                ? <span className="views-entry-count fresh" aria-label={`New views in ${unseenViewSessions} session${unseenViewSessions === 1 ? "" : "s"}`}>{unseenViewSessions} new</span>
-                : totalViews > 0 ? <span className="views-entry-count">{totalViews}</span> : null}
+              {(() => {
+                // This session's own results — the entry is per session, as
+                // the panel it opens is. Fresh when it published since you
+                // last looked; otherwise how many it has.
+                // session.room is whatever the URL carried — the display
+                // name on a directly-loaded page, the internal one after a
+                // switch — so match either, like the panel does.
+                const lc = session.room.toLowerCase();
+                const mine = sessions.find((x) => (x.internalName || "").toLowerCase() === lc
+                  || (x.name || "").toLowerCase() === lc || (x.displayName || "").toLowerCase() === lc);
+                const n = mine?.views?.count || 0;
+                const fresh = !!mine && n > 0 && hasUnseenViews(mine.internalName || mine.name, mine.views?.latestAt, loadViewsSeen());
+                return fresh ? <span className="views-entry-count fresh" aria-label="New views">{n} new</span>
+                  : n > 0 ? <span className="views-entry-count">{n}</span> : null;
+              })()}
             </button>
             <button
               type="button"
@@ -4997,14 +5008,6 @@ const App = () => {
           )}
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
-      )}
-      {/* The drawer pull on the right edge: the front door to Views on every
-          desktop surface — the wall, the hub and a full-screen session — and
-          the one place a new result announces itself in large type. Scoped to
-          the session you are in; fleet-wide from the wall and the hub. */}
-      {!isMobile && !viewsOpen && (!!session || isEmbeddedInHop()) && (
-        <ViewsPull count={totalViews} fresh={unseenViewSessions}
-                   onOpen={() => setViewsOpen(switcherOpen || !session ? { dock: true } : { session: session.room, dock: true })} />
       )}
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}

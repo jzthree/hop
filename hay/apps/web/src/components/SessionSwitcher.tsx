@@ -2954,7 +2954,7 @@ export const SessionSwitcher = ({
               onClick={(e) => { e.stopPropagation(); onOpenViews(key); }}
               onPointerDown={(e) => e.stopPropagation()}
             >
-              ◧ {s.views.count}
+              ◧ <span className="views-word">Views · </span>{s.views.count}
             </button>
           )}
           {waitingOnUser(preview) && (

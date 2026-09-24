@@ -4670,38 +4670,6 @@ body.pane-dragging { user-select: none; }
   width: 5px; height: 5px; border-radius: 3px;
   background: var(--accent, #7c5cff);
 }
-/* The drawer pull: a tab on the right edge, mid-height, above the wall
-   (600) and its sheets (620), below the Views panel (730) it opens. Big by
-   design — this is the front door to Views, not a toolbar icon. */
-.views-pull {
-  position: fixed;
-  right: 0; top: 50%;
-  transform: translateY(-50%);
-  z-index: 700;
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  width: 44px; padding: 14px 0 12px;
-  border: 1px solid var(--line); border-right: none;
-  border-radius: 12px 0 0 12px;
-  background: var(--panel);
-  color: var(--ink-muted);
-  box-shadow: -6px 0 22px rgba(0, 0, 0, 0.22);
-  cursor: pointer;
-  transition: width 0.12s ease, color 0.12s ease;
-}
-.views-pull:hover { color: var(--ink); border-color: var(--accent, #7c5cff); width: 48px; }
-.views-pull.fresh { color: var(--ink); border-color: var(--accent, #7c5cff); }
-.views-pull-glyph { font-size: 18px; line-height: 1; color: var(--accent, #7c5cff); }
-.views-pull-label {
-  writing-mode: vertical-rl; transform: rotate(180deg);
-  font-size: 12px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
-}
-.views-pull-count {
-  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
-  padding: 2px 5px; border-radius: 6px;
-  background: var(--bg-alt); color: var(--ink-muted);
-  writing-mode: vertical-rl; transform: rotate(180deg);
-}
-.views-pull-count.fresh { background: var(--accent, #7c5cff); color: #fff; }
 /* Labelled entry points beat a 16px glyph: the wall's header and the
    topbar both say the word, and wear the count. */
 .views-entry-count {
@@ -4716,12 +4684,24 @@ body.pane-dragging { user-select: none; }
    an inline dot would shove the icon off-centre, so it rides the corner. */
 .switcher-action { position: relative; }
 .switcher-action .views-chip-dot { position: absolute; top: 5px; right: 5px; }
+/* A session's results are worth a real button on its card, not an 8px
+   chip: the word, the count, a hit target a thumb can find. */
 .switcher-chip.views {
-  border: none;
+  border: 1px solid var(--line);
   cursor: pointer;
   font-family: inherit;
   line-height: 1.2;
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--panel);
+  white-space: nowrap;
 }
+.switcher-chip.views:hover { border-color: var(--accent, #7c5cff); }
+/* Dense zooms have no room for the word beside the name — the name owns
+   the row (same rule as the inline actions); the glyph and count stay. */
+.switcher-overlay.tile-dense .switcher-chip.views .views-word { display: none; }
 .switcher-chip.views.fresh {
   background: color-mix(in srgb, var(--accent, #7c5cff) 22%, transparent);
   color: var(--accent, #7c5cff);

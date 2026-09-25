@@ -4511,17 +4511,7 @@ body.pane-dragging { user-select: none; }
   padding-right: 10px;
   margin-right: 12px;
 }
-.views-panel.docked.rail-side .views-list { flex-basis: 240px; }
-/* The index OVER the page (a narrow dock): a sheet under the nav bar. */
-.views-index {
-  position: absolute; inset: 0; z-index: 2;
-  display: flex; flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--line); border-radius: 10px;
-  padding: 8px 10px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
-}
-.views-index .views-list { flex: 1; }
+.views-panel.docked.rail-side .views-list { flex-basis: 232px; }
 .views-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 /* The reader's bar: index toggle · ‹ n/N › · title · actions. */
 .views-nav {

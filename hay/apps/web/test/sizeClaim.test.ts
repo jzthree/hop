@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claimOnAttach, claimOnClick } from "../src/utils/sizeClaim";
+import { claimOnAttach, claimOnClick, isPlainClick } from "../src/utils/sizeClaim";
 
 describe("claimOnAttach — only a deliberate open takes the size", () => {
   const base = { viewMode: "fit" as const, visible: true, deliberate: true };
@@ -27,5 +27,16 @@ describe("claimOnClick — a click takes the size only when it changes something
   it("never claims in Manual mode or before the terminal can be measured", () => {
     expect(claimOnClick({ viewMode: "full", natural, active: null, owned: false })).toBe(false);
     expect(claimOnClick({ viewMode: "fit", natural: null, active: null, owned: false })).toBe(false);
+  });
+});
+
+describe("isPlainClick — the release of a drag is not a click", () => {
+  it("a press and release in the same place, nothing selected, is a click", () => {
+    expect(isPlainClick({ x: 100, y: 100 }, { x: 102, y: 101 }, false)).toBe(true);
+    expect(isPlainClick(null, { x: 5, y: 5 }, false)).toBe(true);
+  });
+  it("a drag, or any release with a selection standing, is not", () => {
+    expect(isPlainClick({ x: 100, y: 100 }, { x: 260, y: 100 }, false)).toBe(false);
+    expect(isPlainClick({ x: 100, y: 100 }, { x: 100, y: 100 }, true)).toBe(false);
   });
 });

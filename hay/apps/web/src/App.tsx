@@ -21,7 +21,7 @@ import { enableMathHover } from "./utils/mathLinkProvider";
 import { getMathTip } from "./utils/mathTooltip";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
-import { claimOnAttach, claimOnClick } from "./utils/sizeClaim";
+import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -1356,6 +1356,9 @@ const App = () => {
   // switch, closing the wall into the session, a click, the Fit button) —
   // a reconnect is the socket healing itself, not a person.
   const deliberateAttachRef = useRef(true);
+  // Where the last press on the terminal landed, so a click can be told
+  // apart from the release of a drag.
+  const clickDownRef = useRef<{ x: number; y: number } | null>(null);
   // A canvas that was HIDDEN can come back showing a stale frame: the wall
   // covers the terminal with visibility:hidden, browsers throttle or drop
   // WebGL contexts for hidden canvases, and xterm only repaints rows it
@@ -2170,6 +2173,8 @@ const App = () => {
 
     termRef.current = terminal;
     fitRef.current = fitAddon;
+    // Debug handle for probes and the console (selection, buffer, size).
+    (window as any).__hopTerm = terminal;
     fitWhenReady();
 
     // Register OSC handlers for sequences xterm.js doesn't fully support
@@ -4603,15 +4608,20 @@ const App = () => {
               <section inert={switcherOpen} style={switcherOpen ? { visibility: "hidden" } : undefined} className={`terminal${visibleStatus === "disconnected" || visibleStatus === "ended" ? " degraded" : ""}`}>
                 <div
                   className="terminal-frame"
-                  onClick={() => {
+                  onMouseDown={(e) => { clickDownRef.current = { x: e.clientX, y: e.clientY }; }}
+                  onClick={(e) => {
                     // On mobile, don't focus terminal to prevent system keyboard
                     if (!isMobile) {
                       termRef.current?.focus();
                     }
                     // A click here is a human act on this surface, so it may
                     // take a size some other window left behind. No-op when
-                    // the session already fits this viewport.
-                    claimSizeHere();
+                    // the session already fits this viewport — and never for
+                    // the click that ends a drag: that was a text selection,
+                    // and the resize a claim brings would wipe it.
+                    if (isPlainClick(clickDownRef.current, { x: e.clientX, y: e.clientY }, !!termRef.current?.hasSelection())) {
+                      claimSizeHere();
+                    }
                   }}
                   onDragEnter={(e) => {
                     if (Array.from(e.dataTransfer?.types || []).includes("Files")) {

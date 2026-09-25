@@ -39,3 +39,20 @@ export const claimOnClick = (o: {
   if (!o.active) return true;
   return o.active.cols !== o.natural.cols || o.active.rows !== o.natural.rows;
 };
+
+/**
+ * A click is a click only when the pointer stayed put between press and
+ * release and nothing is selected. A drag that ends over the terminal also
+ * fires `click` — and that drag was a text selection, which a size claim
+ * (a resize) would wipe the moment it finished.
+ */
+export const isPlainClick = (
+  down: { x: number; y: number } | null,
+  up: { x: number; y: number },
+  hasSelection: boolean,
+  slopPx = 4
+): boolean => {
+  if (hasSelection) return false;
+  if (!down) return true;
+  return Math.hypot(up.x - down.x, up.y - down.y) <= slopPx;
+};

@@ -7,11 +7,11 @@ import { relativeTime } from "../utils/switcherModel";
 // this client was to catch the printed URL before it scrolled out of the
 // viewport.
 //
-// ONE SHAPE: a reader. Opening Views lands you IN the newest result (the
-// scoped session's, or the fleet's), with ‹ › to step through the rest and
-// an index you can pull open beside or over the page. There is no separate
-// "list mode" to click through first — the list was a detour on the way to
-// the thing you came to read.
+// ONE SHAPE: a reader with its index beside it. Opening Views lands you IN
+// the newest result (the scoped session's, or the fleet's), the list of
+// everything published on the left, ‹ › to step through it. Both in one
+// window, like a mail client — there is no separate "list mode" to click
+// through first.
 //
 // Two placements of that one shape:
 //
@@ -168,11 +168,11 @@ const previewSrc = (item: ViewItem) =>
     : hrefFor(item);
 
 const RAIL_KEY = "hop_views_rail";
-// Wide enough to read a report AND keep the index beside it; still leaves a
-// usable terminal on a 1440 display. The drag handle remembers a choice.
-const DEFAULT_DOCK_W = 620;
+// Wide enough for the index beside a readable page; on a 1440 display that
+// still leaves 680px of terminal. The drag handle remembers a choice.
+const DEFAULT_DOCK_W = 760;
 const clampDockW = (w: number) =>
-  Math.max(380, Math.min(Math.round(window.innerWidth * 0.7), w));
+  Math.max(560, Math.min(Math.round(window.innerWidth * 0.75), w));
 
 export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
@@ -199,15 +199,13 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     return clampDockW(Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_DOCK_W);
   });
   const panelRef = useRef<HTMLDivElement | null>(null);
-  // The index (the list of everything published) is a companion to the
-  // reader, not a mode of its own: a sheet over the page in a narrow dock, a
-  // rail beside it where there is room — either way only when you ask.
-  // Hidden until asked for, everywhere: the page is what you opened Views
-  // to see. Beside the page it stays as you left it (remembered).
+  // The index (the list of everything published) sits BESIDE the page, in
+  // the same window, like a mail client: the list on the left, the result on
+  // the right, both visible at once. ☰ hides it for a wider page, and that
+  // choice is remembered.
   const [railOpen, setRailOpen] = useState<boolean>(() => {
-    try { return localStorage.getItem(RAIL_KEY) === "1"; } catch { return false; }
+    try { return localStorage.getItem(RAIL_KEY) !== "0"; } catch { return true; }
   });
-  const [indexOpen, setIndexOpen] = useState(false);
   const now = Date.now();
 
   // The scope arrives as whatever identifier the opener HAD — the URL's
@@ -312,10 +310,8 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        // The index OVER the page is the one layer to back out of; the
-        // reader itself is the panel, so the next Escape closes it.
-        if (railOverlay && indexOpen) setIndexOpen(false);
-        else onClose();
+        // The reader IS the panel: Escape closes it.
+        onClose();
         return;
       }
       const dir = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1
@@ -329,7 +325,7 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onClose, preview, flatRows, docked, indexOpen, dockW]);
+  }, [onClose, preview, flatRows, docked]);
 
   // Opening the panel IS the act of seeing what it shows.
   useEffect(() => {
@@ -366,7 +362,6 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     if (!canPreview()) return;   // narrow: the anchor's new tab is right
     event.preventDefault();
     setPreview(item);
-    setIndexOpen(false);
   };
 
   const copyLink = (item: ViewItem) => {
@@ -434,13 +429,8 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     el.addEventListener("pointerup", onUp);
   };
 
-  // Where the index lives: beside the page when the panel is wide enough for
-  // both, over it otherwise (a 620px dock with a 240px rail leaves 380px of
-  // page — enough for a plot, not for a report).
-  const railOverlay = docked ? dockW < 900 : false;
-  const railVisible = (railOverlay ? indexOpen : railOpen) && flatRows.length > 0;
+  const railVisible = railOpen && flatRows.length > 0;
   const toggleRail = () => {
-    if (railOverlay) { setIndexOpen((v) => !v); return; }
     setRailOpen((v) => {
       try { localStorage.setItem(RAIL_KEY, v ? "0" : "1"); } catch { /* private mode */ }
       return !v;
@@ -586,7 +576,7 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
     <div className="views-nav">
       <button type="button" className={"views-act views-rail-toggle" + (railVisible ? " on" : "")}
               aria-label={railVisible ? "Hide the index" : "Show the index"} aria-pressed={railVisible}
-              title={railVisible ? "Hide the index" : "Everything published"}
+              title={railVisible ? "Hide the index (a wider page)" : "Show the index beside the page"}
               onClick={toggleRail}>☰</button>
       <button type="button" className="views-act" aria-label="Previous view" title="Previous (←)"
               disabled={at <= 0} onClick={() => step(-1)}>‹</button>
@@ -638,7 +628,7 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
       {!docked && <div className="views-backdrop" onClick={onClose} />}
       <div className={"views-panel" + (docked ? " docked" : "")
              + (flatRows.length > 0 ? " reading" : "")
-             + (railVisible ? (railOverlay ? " rail-over" : " rail-side") : "")}
+             + (railVisible ? " rail-side" : "")}
            style={docked ? { width: dockW } : undefined}
            role="dialog" aria-label="Published views"
            ref={panelRef} tabIndex={-1}>
@@ -673,15 +663,10 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
         </div>
         {nav}
         <div className="views-body">
-          {railVisible && !railOverlay && list}
+          {railVisible && list}
           <div className="views-preview">
             {empty || (canPreview() ? page : list)}
           </div>
-          {railVisible && railOverlay && (
-            <div className="views-index" role="region" aria-label="Everything published">
-              {list}
-            </div>
-          )}
         </div>
       </div>
     </>

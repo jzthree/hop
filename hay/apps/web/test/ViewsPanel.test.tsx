@@ -16,10 +16,7 @@ let store: Record<string, string> = {};
 beforeEach(() => {
   // jsdom's own localStorage is only partially implemented here, and the
   // seen-markers are the whole point of these cases.
-  // The index rail is hidden until asked and the choice is remembered; most
-  // cases below read rows from it, so they start with it open, the way a
-  // reader who opened it once would. The reader-first case clears this.
-  store = { hop_views_rail: "1" };
+  store = {};
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => (key in store ? store[key] : null),
     setItem: (key: string, value: string) => { store[key] = value; },
@@ -60,7 +57,6 @@ describe("ViewsPanel", () => {
 
   it("opens STRAIGHT INTO the newest result; a row click switches the page; the row stays a real link", async () => {
     const onClose = vi.fn();
-    delete store.hop_views_rail; // a first-time reader: nothing remembered
     render(<ViewsPanel onClose={onClose} />);
     await waitFor(() => expect(document.querySelector("iframe.views-frame")).toBeTruthy());
     // jsdom's window is 1024 wide — the desk case, where the page exists.
@@ -74,10 +70,9 @@ describe("ViewsPanel", () => {
     // browser's PDF viewer, which is half of what the pane is for.
     expect(frame.hasAttribute("sandbox")).toBe(false);
     expect(screen.getByText("1 / 3")).toBeTruthy();
-    // The index is not shown until asked — the page is the point. ☰ opens
-    // it beside the page; a plain click on a row turns the page.
-    expect(document.querySelector(".views-list")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Show the index" }));
+    // The index is beside the page from the start — both in one window; a
+    // plain click on a row turns the page.
+    expect(document.querySelector(".views-panel.rail-side .views-list")).toBeTruthy();
     const row = screen.getByText("views-test.html").closest("a") as HTMLAnchorElement;
     expect(row.getAttribute("target")).toBe("_blank");
     fireEvent.click(row);
@@ -95,7 +90,7 @@ describe("ViewsPanel", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("docked: the page is open at once, the index rides OVER it on demand, and keys are focus-scoped", async () => {
+  it("docked: the page is open at once with the index beside it, and keys are focus-scoped", async () => {
     // The dock only exists on wide windows; jsdom defaults to 1024.
     vi.stubGlobal("innerWidth", 1280);
     const onClose = vi.fn();
@@ -118,14 +113,14 @@ describe("ViewsPanel", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
 
-    // A 620px dock has no room for the index beside the page: ☰ lays it
-    // OVER the page, and Esc from the panel backs that one layer out.
-    fireEvent.click(screen.getByRole("button", { name: "Show the index" }));
-    expect(document.querySelector(".views-index .views-list")).toBeTruthy();
-    expect(document.querySelector("iframe.views-frame")).toBeTruthy(); // the page stays under it
-    fireEvent.keyDown(panel, { key: "Escape" });
-    expect(document.querySelector(".views-index")).toBeNull();
-    // The next Esc from the panel closes it.
+    // The index sits beside the page in the dock too; ☰ hides it for a
+    // wider page and the choice is remembered.
+    expect(document.querySelector(".views-panel.rail-side .views-list")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Hide the index" }));
+    expect(document.querySelector(".views-list")).toBeNull();
+    expect(store.hop_views_rail).toBe("0");
+    expect(document.querySelector("iframe.views-frame")).toBeTruthy();
+    // Esc from the panel closes it.
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
   });

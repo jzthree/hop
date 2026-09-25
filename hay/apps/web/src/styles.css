@@ -4512,6 +4512,11 @@ body.pane-dragging { user-select: none; }
   margin-right: 12px;
 }
 .views-panel.docked.rail-side .views-list { flex-basis: 232px; }
+/* In the rail the title owns the row: the per-row actions would crowd it
+   to three letters, and the reader's bar carries the same actions for the
+   page that is open. (Still in the DOM — a screen reader finds them.) */
+.views-panel.rail-side .views-row .views-acts { display: none; }
+.views-panel.rail-side .views-row.selected { background: color-mix(in srgb, var(--accent, #7c5cff) 16%, transparent); }
 .views-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 /* The reader's bar: index toggle · ‹ n/N › · title · actions. */
 .views-nav {

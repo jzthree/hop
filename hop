@@ -16201,23 +16201,22 @@ async function main() {
         }
 
         if (stopAll) {
-            // Order matters: session deletion needs the daemon, so close sessions
-            // first, then stop the daemon, then kill the hay-host process.
+            // Stop the daemon, then SIGTERM the hay-host. Sessions are NOT
+            // deleted: /api/sessions/delete is the explicit "forget this
+            // session" path (drops its config, display name, and restore
+            // records), so calling it here made every `stop --all` wipe the
+            // restore inventory — 2026-09-26 a full restart lost all 34 live
+            // sessions and `hop restore` found nothing of them. The host's
+            // graceful shutdown persists buffers and keeps every record.
             if (state) {
                 try {
                     const sessionsRes = await fetchSessionList(state);
                     const sessions = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : [];
-                    for (const s of sessions) {
-                        try {
-                            await callLocalApi(state, '/api/sessions/delete', 'POST', { name: s.name || s.internalName });
-                        } catch (e) { }
+                    const liveCount = sessions.filter((s) => s && s.live !== false).length;
+                    if (liveCount > 0) {
+                        log(`Ending ${liveCount} session(s) — restore records kept (${CYAN}hop restore${RESET}${GREEN} brings them back).`, GREEN);
                     }
-                    if (sessions.length > 0) {
-                        log(`Closed ${sessions.length} session(s).`, GREEN);
-                    }
-                } catch (e) {
-                    log(`Warning: could not close sessions via daemon: ${e.message}`, YELLOW);
-                }
+                } catch (e) { /* count is informational only */ }
                 try {
                     process.kill(state.pid, 'SIGTERM');
                     log(`Hop daemon stopped.`, GREEN);
@@ -16227,7 +16226,7 @@ async function main() {
                 }
             }
             if (hayHostAlive) {
-                const stopped = await stopExternalHayHostProcess(hayHost);
+                const stopped = await stopExternalHayHostProcess(hayHost, 8000);
                 if (!stopped) {
                     log(`Failed to stop hay-host (pid ${hayHost.pid}).`, RED);
                     process.exit(1);

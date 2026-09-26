@@ -5947,6 +5947,24 @@ function rebuildClaudeLaunch(launchCmd) {
 // that project directory.
 function restorePlanForSession(entry) {
     let rec = readClaudeSessionRecord(entry.internalName);
+    // Codex has no SessionStart record; its notify hook leaves only the
+    // .turn naming the thread. Without this, every codex session came back
+    // as a bare shell with its conversation stranded.
+    if (!rec) {
+        const turn = readTurnInfo(entry.internalName);
+        if (turn && turn.agent === 'codex') {
+            const metaCwd = readClaudeSessionMeta(entry.internalName)?.cwd;
+            const cwd = metaCwd || entry.cwd;
+            if (!findCodexRolloutById(turn.sessionId)) {
+                return {
+                    command: null,
+                    cwd,
+                    warning: `recorded codex conversation ${String(turn.sessionId).slice(0, 8)}… has no rollout on this host — opening a plain shell instead`
+                };
+            }
+            return { command: `codex resume '${turn.sessionId.replace(/'/g, `'\\''`)}'`, cwd, agent: 'codex' };
+        }
+    }
     // No SessionStart record, but the turn counter may still name this room's
     // conversation (the two are written independently). Recover a record from
     // it when the transcript is real — otherwise this room would drop to a
@@ -6147,6 +6165,7 @@ function recordRestoreExpectations(planned) {
     const state = readRestoreReconcile();
     for (const p of planned || []) {
         if (!p || !p.internalName || !p.command) continue; // no claude command → nothing to converge
+        if (p.agent && p.agent !== 'claude') continue; // the reconciler only knows claude
         state.sessions[p.internalName] = {
             internalName: p.internalName,
             displayName: p.displayName || p.internalName,
@@ -6500,6 +6519,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
         displayName: e.displayName || e.internalName,
         cwd: plan.cwd || e.cwd || process.cwd(),
         command: plan.command,
+        agent: plan.agent || (plan.command ? 'claude' : null),
         warning: plan.warning || null,
         // Plain-shell sessions (no claude/startup command) replay their last
         // screen if we persisted a buffer for them at the previous shutdown.
@@ -6544,7 +6564,11 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
         } catch (e) {
             continue;
         }
-        if (p.command && entry) {
+        if (p.command && entry && p.agent !== 'claude') {
+            // The verifier below reads claude's chrome (and may re-type the
+            // command); a codex resume is launched as argv and left alone.
+            setTimeout(() => { try { closeTerminalApiEntry(entry.id); } catch (e) { /* ignore */ } }, 600);
+        } else if (p.command && entry) {
             // Launched with the command as argv: nothing to type — just
             // confirm it actually came up.
             pending.push({ plan: p, entry, state: 'verify', attempts: 1, since: Date.now() });

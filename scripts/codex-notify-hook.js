@@ -31,6 +31,45 @@ function turnFilePath() {
   return path.join(dir, `${process.env.HOP_SESSION}.turn`);
 }
 
+// A sub-agent's rollout names its parent in its first line (session_meta →
+// parent_thread_id). Walk up to the root, reading only that line of each
+// file — a long thread's rollout runs to hundreds of MB. Any failure leaves
+// the id as given; hop resolves it again at restore time.
+function findRollout(id) {
+  const root = path.join(os.homedir(), ".codex", "sessions");
+  const walk = (dir, depth) => {
+    let names = [];
+    try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+    for (const e of names) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 3) { const hit = walk(p, depth + 1); if (hit) return hit; }
+      else if (e.isFile() && e.name.endsWith(".jsonl") && e.name.includes(id)) return p;
+    }
+    return null;
+  };
+  return walk(root, 0);
+}
+function rootThreadId(id) {
+  let cur = id;
+  for (let hops = 0; hops < 8 && cur; hops++) {
+    const file = findRollout(cur);
+    if (!file) return cur;
+    let parent = null;
+    try {
+      const fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(65536);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      fs.closeSync(fd);
+      const text = buf.toString("utf8", 0, n);
+      const meta = JSON.parse(text.slice(0, text.indexOf("\n") >= 0 ? text.indexOf("\n") : text.length));
+      parent = meta && meta.payload && typeof meta.payload.parent_thread_id === "string" ? meta.payload.parent_thread_id : null;
+    } catch { return cur; }
+    if (!parent || parent === cur) return cur;
+    cur = parent;
+  }
+  return cur;
+}
+
 // Same crash-safe write + same {sessionId, count, at} shape the Claude hook
 // uses, so hop's finishBump() reads one number regardless of which agent wrote.
 function bumpTurn(payload) {
@@ -42,12 +81,15 @@ function bumpTurn(payload) {
     const prev = JSON.parse(fs.readFileSync(file, "utf8"));
     if (prev && Number.isInteger(prev.count) && prev.count >= 0) count = prev.count;
   } catch { /* missing/corrupt -> start at 0 */ }
+  const threadId = (payload && typeof payload["thread-id"] === "string") ? payload["thread-id"]
+             : (payload && typeof payload.thread_id === "string") ? payload.thread_id
+             : (payload && typeof payload.session_id === "string") ? payload.session_id : null;
   const rec = JSON.stringify({
     // The thread id is the conversation (and the rollout file's name); the
-    // turn id names one turn and matches nothing on disk.
-    sessionId: (payload && typeof payload["thread-id"] === "string") ? payload["thread-id"]
-             : (payload && typeof payload.thread_id === "string") ? payload.thread_id
-             : (payload && typeof payload.session_id === "string") ? payload.session_id : null,
+    // turn id names one turn and matches nothing on disk. With multi-agent
+    // codex the thread that finished may be a SUB-agent, which cannot be
+    // resumed on its own — record the root, which can.
+    sessionId: rootThreadId(threadId),
     count: count + 1,
     at: new Date().toISOString(),
     agent: "codex"

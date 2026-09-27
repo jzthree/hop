@@ -5530,6 +5530,48 @@ function findCodexRolloutById(sessionId) {
     return null;
 }
 
+/**
+ * The first line of a rollout (its session_meta), read WITHOUT loading the
+ * file — a long-lived codex thread runs to hundreds of MB.
+ */
+function readCodexRolloutMeta(file) {
+    let fd = null;
+    try {
+        fd = fs.openSync(file, 'r');
+        const buf = Buffer.alloc(64 * 1024);
+        const n = fs.readSync(fd, buf, 0, buf.length, 0);
+        const text = buf.toString('utf8', 0, n);
+        const line = text.slice(0, text.indexOf('\n') >= 0 ? text.indexOf('\n') : text.length);
+        const parsed = JSON.parse(line);
+        return parsed && parsed.type === 'session_meta' ? (parsed.payload || null) : null;
+    } catch (e) {
+        return null;
+    } finally {
+        if (fd !== null) { try { fs.closeSync(fd); } catch (e) { /* ignore */ } }
+    }
+}
+
+/**
+ * The thread `codex resume` must be given for a conversation: the ROOT. The
+ * notify hook records whichever thread finished a turn, and with multi-agent
+ * codex that is often a sub-agent (its rollout's session_meta carries a
+ * parent_thread_id); resuming a sub-agent is refused ("resume the parent
+ * first"), which stranded a restored session in a bare shell. Walk up to the
+ * root, reading only each rollout's first line. Unknown ids come back as given.
+ */
+function codexRootThreadId(sessionId) {
+    let id = sessionId;
+    for (let hops = 0; hops < 8 && id; hops++) {
+        const file = findCodexRolloutById(id);
+        if (!file) return id;
+        const meta = readCodexRolloutMeta(file);
+        const parent = meta && typeof meta.parent_thread_id === 'string' ? meta.parent_thread_id : null;
+        if (!parent || parent === id) return id;
+        id = parent;
+    }
+    return id;
+}
+
 // Find a transcript for a bare session id across every claude config root,
 // returning which root (= the CLAUDE_CONFIG_DIR to resume under) holds it.
 function findClaudeTranscriptById(sessionId) {
@@ -5955,14 +5997,16 @@ function restorePlanForSession(entry) {
         if (turn && turn.agent === 'codex') {
             const metaCwd = readClaudeSessionMeta(entry.internalName)?.cwd;
             const cwd = metaCwd || entry.cwd;
-            if (!findCodexRolloutById(turn.sessionId)) {
+            // The hook may have named a sub-agent's thread; resume the root.
+            const rootId = codexRootThreadId(turn.sessionId);
+            if (!findCodexRolloutById(rootId)) {
                 return {
                     command: null,
                     cwd,
                     warning: `recorded codex conversation ${String(turn.sessionId).slice(0, 8)}… has no rollout on this host — opening a plain shell instead`
                 };
             }
-            return { command: `codex resume '${turn.sessionId.replace(/'/g, `'\\''`)}'`, cwd, agent: 'codex' };
+            return { command: `codex resume '${rootId.replace(/'/g, `'\\''`)}'`, cwd, agent: 'codex' };
         }
     }
     // No SessionStart record, but the turn counter may still name this room's
@@ -11705,7 +11749,7 @@ happens until someone clicks it.
                     // names the agent and the conversation — the process name
                     // says "node" and cannot), or a plain shell.
                     const turn = readTurnInfo(source);
-                    const codexId = turn?.agent === 'codex' ? turn.sessionId : null;
+                    const codexId = turn?.agent === 'codex' ? codexRootThreadId(turn.sessionId) : null;
                     const runsCodex = !!codexId
                         || /codex/i.test(String(config.foregroundProcess || ''))
                         || /codex/i.test(String(getRuntimeSessionMetadata(source)?.foregroundProcess || ''));
@@ -16506,7 +16550,7 @@ async function main() {
             // by the newest rollout in this directory.
             const turn = readTurnInfo(target);
             const rollout = turn?.agent === 'codex' ? null : resolveCodexTranscriptByCwd(cwd);
-            const rolloutId = turn?.agent === 'codex' ? turn.sessionId : (rollout ? await trajectoryExtract.codexRolloutId(rollout) : null);
+            const rolloutId = turn?.agent === 'codex' ? codexRootThreadId(turn.sessionId) : (rollout ? await trajectoryExtract.codexRolloutId(rollout) : null);
             if (rolloutId) {
                 command = `codex resume '${rolloutId.replace(/'/g, `'\\''`)}'`;
                 kind = 'codex';

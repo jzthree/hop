@@ -2249,8 +2249,18 @@ button.primary {
   .switcher-card.active-now .switcher-card-fresh { animation: none; }
 }
 
-.switcher-card.current {
-  border-color: var(--accent);
+/* CURRENT and FOCUSED used to paint the whole frame purple, which made
+   purple the loudest colour on the wall — and purple says nothing about
+   the session. The frame and the wash now belong to STATUS (see the
+   phase/needs-you rules below); current is a purple bar along the top
+   edge plus its chip, focused a thin purple outline. */
+.switcher-card.current::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--accent);
+  pointer-events: none;
 }
 
 /* The wall's order freezes while open — a session producing output RIGHT NOW
@@ -2971,7 +2981,6 @@ button.primary {
 .switcher-row.kbd-selected {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
-  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
 }
 
 /* AI tagline (hop ai tagline): what this session is working on, in words the
@@ -3185,7 +3194,8 @@ button.primary {
 }
 
 .switcher-card.focused {
-  border-color: var(--accent);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 @media (min-width: 769px) {
@@ -3831,13 +3841,19 @@ body.pane-dragging { user-select: none; }
 @media (prefers-reduced-motion: reduce) {
   .switcher-chip.phase.working .phase-dot { animation: none; }
 }
-.switcher-card.phase-working {
-  border-color: color-mix(in srgb, #3b82f6 65%, var(--line));
-  box-shadow: 0 0 0 1px color-mix(in srgb, #3b82f6 30%, transparent);
-}
-.switcher-card.phase-done-unread {
-  border-color: color-mix(in srgb, #22a06b 75%, var(--line));
-  box-shadow: 0 0 0 1px color-mix(in srgb, #22a06b 40%, transparent), 0 0 12px -2px color-mix(in srgb, #22a06b 45%, transparent);
+/* STATUS owns the card's colour: the frame, a wash over the whole card and
+   a soft ring, all in one hue — blue working, green finished-and-unread,
+   amber asking you (wins over the phase: a question is the more urgent
+   fact). A read session goes quiet. Purple is reserved for "you are here". */
+.switcher-card.phase-working { --status: #3b82f6; }
+.switcher-card.phase-done-unread { --status: #22a06b; }
+.switcher-card.needs-you { --status: var(--warn); }
+.switcher-card.phase-working,
+.switcher-card.phase-done-unread,
+.switcher-card.needs-you {
+  border-color: var(--status);
+  background: color-mix(in srgb, var(--status) 9%, var(--panel));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--status) 35%, transparent), 0 0 14px -3px color-mix(in srgb, var(--status) 45%, transparent);
 }
 .switcher-card.phase-done-read {
   opacity: 0.88;

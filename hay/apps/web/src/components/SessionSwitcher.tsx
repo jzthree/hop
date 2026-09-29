@@ -2885,6 +2885,8 @@ export const SessionSwitcher = ({
     // signal, and two rings on one card were unreadable.
     const phase = cardPhase(s);
     const activeNow = !current && !phase && now - (s.lastActivityAt || 0) < 12000;
+    // A question waiting on you is the card's colour too (amber), over the phase.
+    const needsYou = s.attentionReason === "ask" || waitingOnUser(preview);
     // Freshness: recency the eye can read WITHOUT the row moving. A left-edge
     // bar whose intensity decays from full (just active) to nothing over
     // ~10 minutes — bright means "just now", faint means "a while ago",
@@ -2905,7 +2907,7 @@ export const SessionSwitcher = ({
         tabIndex={0}
         data-nav-index={navIndexByKey.get(key)}
         data-session-key={key}
-        className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${phase ? ` phase-${phase}` : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}${fileDropKey === key ? " file-drop" : ""}`}
+        className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${phase ? ` phase-${phase}` : ""}${needsYou ? " needs-you" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}${fileDropKey === key ? " file-drop" : ""}`}
         draggable={draggable}
         onDragStart={draggable ? (e) => { setDragKey(key); e.dataTransfer.effectAllowed = "move"; } : undefined}
         onDragEnter={draggable ? () => { if (dragKey && dragKey !== key) moveManual(dragKey, key); } : undefined}

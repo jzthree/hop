@@ -60,8 +60,10 @@ type Props = {
   // Only used to translate internalName into the name the user renamed it to;
   // the manifest has no idea a session was ever renamed.
   sessions?: { name: string; displayName?: string; internalName?: string }[];
-  // Right-side dock beside a live terminal (full-screen mode). Falls back to
-  // the modal below ~1100px, where a dock would leave no terminal to see.
+  // Right-side dock beside a live terminal. Off by default everywhere now:
+  // the reader opens as the CENTERED window, index beside page — a dock at
+  // the screen's edge was farther from where the eye already is. The dock
+  // stays available for a caller that wants it.
   dock?: boolean;
   onClose: () => void;
 };

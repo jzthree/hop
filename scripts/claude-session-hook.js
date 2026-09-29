@@ -8,6 +8,9 @@
 //
 //   Stop -> bump a per-turn completion counter at
 //       <HOP_HOME>/claude-sessions/<HOP_SESSION>.turn
+//   UserPromptSubmit -> note that a turn just BEGAN, at
+//       <HOP_HOME>/claude-sessions/<HOP_SESSION>.prompt
+//       (with .turn this is how the wall colours a session "working")
 //       ({ sessionId, count, at }). `count` increments once each time Claude
 //       finishes a turn, giving a deterministic "agent is done with this turn"
 //       signal a driver (the hop MCP) can wait on instead of scraping the screen.
@@ -190,6 +193,74 @@ function bumpTurn(dir, hopSession, payload) {
   } catch { /* ignore */ }
 }
 
+// A turn just began: the human (or a driver) submitted a prompt. With the
+// Stop record this brackets the turn, so the wall can colour a session
+// "working" from the first second instead of guessing from output — and
+// keeps colouring it through a long silent think. Overwritten each prompt.
+function notePrompt(dir, hopSession, payload) {
+  const file = path.join(dir, `${hopSession}.prompt`);
+  const record = JSON.stringify({
+    sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
+    at: new Date().toISOString()
+  });
+  try { writeDurable(file, record); } catch { /* ignore */ }
+}
+
+// The agent is ASKING the human something — a permission prompt, an
+// AskUserQuestion dialog, a plan awaiting approval — and will sit there until
+// answered. Recorded per hop session as `<session>.ask` {count, at, type,
+// message}: the daemon folds the count into bellSeq (always on — a question
+// is worth a buzz by definition) and passes the message through, so the
+// phone can say WHAT is being asked. Claude reports these two ways:
+// the Notification event (permission_prompt / elicitation_dialog — the
+// idle_prompt and auth_success types are not questions) and PreToolUse for
+// the two tools that open a dialog (AskUserQuestion carries the question
+// text itself; ExitPlanMode is a plan waiting for approval).
+function bumpAsk(dir, hopSession, payload, event) {
+  let type = "", message = "";
+  if (event === "Notification") {
+    type = typeof payload.notification_type === "string" ? payload.notification_type : "notification";
+    if (type === "idle_prompt" || type === "auth_success") return;
+    message = typeof payload.message === "string" && payload.message
+      ? payload.message
+      : (typeof payload.title === "string" && payload.title ? payload.title : "needs your attention");
+  } else if (event === "PermissionRequest") {
+    // Codex (hooks.json): fires before Codex asks to approve a command or
+    // network access. tool_input.description is Codex's own one-line reason.
+    type = "permission";
+    const ti = payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input : {};
+    const tool = typeof payload.tool_name === "string" ? payload.tool_name : "";
+    message = typeof ti.description === "string" && ti.description ? ti.description
+      : (typeof ti.command === "string" && ti.command ? `wants to run: ${ti.command}`
+      : (tool ? `needs your approval for ${tool}` : "needs your approval"));
+  } else if (event === "PreToolUse") {
+    const tool = typeof payload.tool_name === "string" ? payload.tool_name : "";
+    if (tool === "AskUserQuestion") {
+      type = "question";
+      const qs = Array.isArray(payload.tool_input?.questions) ? payload.tool_input.questions : [];
+      message = qs.map((q) => (q && typeof q.question === "string" ? q.question : ""))
+        .filter(Boolean).join(" · ") || "has a question for you";
+    } else if (tool === "ExitPlanMode") {
+      type = "plan";
+      message = "has a plan ready for your approval";
+    } else return;
+  } else return;
+  const file = path.join(dir, `${hopSession}.ask`);
+  let count = 0;
+  try {
+    const prev = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (prev && Number.isInteger(prev.count) && prev.count >= 0) count = prev.count;
+  } catch { /* first ask */ }
+  try {
+    writeDurable(file, JSON.stringify({
+      sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
+      count: count + 1,
+      at: new Date().toISOString(),
+      type,
+      message: String(message).replace(/\s+/g, " ").trim().slice(0, 300)
+    }));
+  } catch { /* ignore */ }
+}
 function main() {
   const hopSession = process.env.HOP_SESSION;
   if (!hopSession || !/^[A-Za-z0-9_-]+$/.test(hopSession)) return; // not a hop session
@@ -226,6 +297,10 @@ function main() {
   // signals a premature "turn done".
   if (event === "Stop") {
     bumpTurn(dir, hopSession, payload);
+  } else if (event === "UserPromptSubmit") {
+    notePrompt(dir, hopSession, payload);
+  } else if (event === "Notification" || event === "PreToolUse" || event === "PermissionRequest") {
+    bumpAsk(dir, hopSession, payload, event);
   } else {
     recordSession(dir, hopSession, payload, launchCmd); // SessionStart (default)
   }

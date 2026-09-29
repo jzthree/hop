@@ -16,6 +16,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { enableMathHover } from "../utils/mathLinkProvider";
 import { getMathTip } from "../utils/mathTooltip";
 import { claimOnTileFocus, sizeIsForeign } from "../utils/sizeClaim";
+import { cardPhase, phaseLabel, phaseTitle } from "../utils/agentPhase";
 import { urlAtCell, cellAtPoint } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
@@ -2871,7 +2872,11 @@ export const SessionSwitcher = ({
     // producing output RIGHT NOW glows instead of jumping to the top.
     // Window comfortably exceeds the 10s relative-time tick so a busy
     // session's glow holds steady rather than flickering between polls.
-    const activeNow = !current && now - (s.lastActivityAt || 0) < 12000;
+    // Agent sessions wear their PHASE (working / done / read) instead of the
+    // generic "output right now" ring: the daemon's verdict is the sharper
+    // signal, and two rings on one card were unreadable.
+    const phase = cardPhase(s);
+    const activeNow = !current && !phase && now - (s.lastActivityAt || 0) < 12000;
     // Freshness: recency the eye can read WITHOUT the row moving. A left-edge
     // bar whose intensity decays from full (just active) to nothing over
     // ~10 minutes — bright means "just now", faint means "a while ago",
@@ -2892,7 +2897,7 @@ export const SessionSwitcher = ({
         tabIndex={0}
         data-nav-index={navIndexByKey.get(key)}
         data-session-key={key}
-        className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}${fileDropKey === key ? " file-drop" : ""}`}
+        className={`switcher-card${current ? " current" : ""}${activeNow ? " active-now" : ""}${phase ? ` phase-${phase}` : ""}${kbdSelected ? " kbd-selected" : ""}${focusedKey === key ? " focused" : ""}${dragKey === key ? " dragging" : ""}${draggable ? " draggable" : ""}${fileDropKey === key ? " file-drop" : ""}`}
         draggable={draggable}
         onDragStart={draggable ? (e) => { setDragKey(key); e.dataTransfer.effectAllowed = "move"; } : undefined}
         onDragEnter={draggable ? () => { if (dragKey && dragKey !== key) moveManual(dragKey, key); } : undefined}
@@ -2981,6 +2986,11 @@ export const SessionSwitcher = ({
             </span>
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
+          {phase && (
+            <span className={`switcher-chip phase ${phase}`} title={phaseTitle(phase)}>
+              <span className="phase-dot" aria-hidden="true" />{phaseLabel(phase)}
+            </span>
+          )}
           {/* A result waiting on this session is worth as much as its status:
               a published PDF or write-up was otherwise invisible from the wall.
               stopPropagation on pointerdown keeps the long-press sheet out of

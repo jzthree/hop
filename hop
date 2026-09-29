@@ -18,7 +18,7 @@ const WebSocket = require('ws');
 const { resolveActorFromHeaders, canActorAccessSession } = require('./lib/terminal-access');
 const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = require('./lib/naming-themes');
 const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/auth-sessions');
-const { agentPhase } = require('./lib/agent-phase');
+const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
@@ -5370,7 +5370,7 @@ function readPromptAt(internalName) {
 }
 // The wall's three agent colours, decided here so the web and the phone
 // agree: working / done-unread / done-read. Plain shells get null.
-function agentPhaseFields(s) {
+function agentPhaseFields(s, screenWorking = null) {
     if (!s.agent) return { agentPhase: null, turnSeen: true, turnAt: null };
     const turnAt = readTurnAt(s.internalName);
     const r = agentPhase({
@@ -5379,9 +5379,44 @@ function agentPhaseFields(s) {
         promptAt: readPromptAt(s.internalName),
         lastActivityAt: Number(s.lastActivityAt) || 0,
         lastUserSeenAt: Number(s.lastUserSeenAt) || 0,
-        userAttached: s.userAttached === true
+        userAttached: s.userAttached === true,
+        screenWorking
     });
     return { agentPhase: r.phase, turnSeen: r.turnSeen, turnAt: turnAt || null };
+}
+// The screen's own word on whether a turn is running ("esc to interrupt" in
+// both TUIs), read from the host's live grid. Asked only for the sessions
+// the timing rules call working — the small set that can be wrong that way
+// (Codex repaints while idle: rotating tips, the user typing) — and memoised
+// for a few seconds so every client's poll shares one read per session.
+const screenWorkingMemo = new Map(); // internalName -> { t, p: Promise<boolean|null> }
+function screenWorkingOf(internalName) {
+    const now = Date.now();
+    const hit = screenWorkingMemo.get(internalName);
+    if (hit && now - hit.t < 4000) return hit.p;
+    const p = (async () => {
+        try {
+            const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
+            const raw = hostRes?.data?.data;
+            if (typeof raw !== 'string' || !raw) return null;
+            return screenSaysWorking(stripAnsiForSearch(raw));
+        } catch (e) { return null; }
+    })();
+    screenWorkingMemo.set(internalName, { t: now, p });
+    if (screenWorkingMemo.size > 500) screenWorkingMemo.clear();
+    return p;
+}
+// Phase for every entry of a list, the screen consulted where it matters.
+async function agentPhaseFieldsForAll(entries) {
+    const verdicts = new Map();
+    await Promise.all(entries.map(async (s) => {
+        if (!s.agent) return;
+        if (agentPhaseFields(s).agentPhase !== 'working') return;
+        verdicts.set(s.internalName, await screenWorkingOf(s.internalName));
+    }));
+    const out = new Map();
+    for (const s of entries) out.set(s.internalName, agentPhaseFields(s, verdicts.has(s.internalName) ? verdicts.get(s.internalName) : null));
+    return out;
 }
 // The newest published view's time (ms) for a session, from the manifest
 // the views summary already reads. `hop view` rings one bell per publish.
@@ -11711,6 +11746,7 @@ happens until someone clicks it.
             // compares latestAt against its own last-seen mark. No new state,
             // no new poll, and the badge works the same everywhere.
             const viewsBySession = viewSummaryBySession();
+            const phaseBySession = await agentPhaseFieldsForAll(visibleEntries);
             const sessions = visibleEntries.map(s => ({
                 views: viewsBySession[s.internalName] || undefined,
                 name: s.displayName,
@@ -11728,7 +11764,7 @@ happens until someone clicks it.
                 agent: s.agent || null,
                 // working / done + whether the human has opened it since the
                 // turn ended (server-side seen witness, so every device agrees).
-                ...agentPhaseFields(s),
+                ...(phaseBySession.get(s.internalName) || { agentPhase: null, turnSeen: true, turnAt: null }),
                 lastActivityAt: s.lastActivityAt,
                 // For sessions armed with notify-on-finish, each completed turn
                 // adds to bellSeq so the phone treats a finished response like a

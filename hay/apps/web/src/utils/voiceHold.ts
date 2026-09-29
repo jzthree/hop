@@ -49,9 +49,26 @@ export type VoiceHoldOptions = {
   thresholdMs?: number;
 };
 
+// A ring of what the controller saw and did — key events with their
+// verdicts, recogniser lifecycle, why a hold ended. Read from the console
+// (window.__hopVoiceTrace) or shipped with the client diagnostics, so a
+// "dictation stopped and spaces started typing" report can be replayed
+// instead of guessed at.
+const TRACE_MAX = 240;
+export const voiceTrace: string[] = [];
+const trace = (line: string) => {
+  voiceTrace.push(`${new Date().toISOString().slice(11, 23)} ${line}`);
+  if (voiceTrace.length > TRACE_MAX) voiceTrace.splice(0, voiceTrace.length - TRACE_MAX);
+};
+if (typeof window !== "undefined") (window as unknown as { __hopVoiceTrace?: string[] }).__hopVoiceTrace = voiceTrace;
+
 export const createVoiceHold = (opts: VoiceHoldOptions) => {
   const threshold = opts.thresholdMs ?? 550;
   const MAX_HOLD_MS = 60000;
+  // A recogniser that ends this soon after starting, having heard nothing,
+  // was refused (no mic, no service), not silent: Chrome's own silence
+  // timeout is several seconds. Only refusals count toward giving up.
+  const REFUSED_MS = 1500;
   let timer = 0;
   let watchdog = 0;
   let active = false;
@@ -66,8 +83,9 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
   /** Consecutive recogniser restarts that produced nothing — a loop guard. */
   let emptyRestarts = 0;
 
-  const finish = (sendText: boolean) => {
+  const finish = (sendText: boolean, why = "") => {
     if (!active) return;
+    trace(`finish send=${sendText} why=${why} final=${JSON.stringify(finalText.slice(-40))} interim=${JSON.stringify(interimText.slice(-40))}`);
     active = false;
     pending = false;
     stopping = false;
@@ -91,7 +109,8 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     const Ctor = speechRecognitionCtor();
     // Silence here read as "voice randomly does nothing": the space vanished
     // (or didn't) and no overlay ever appeared, with no reason given.
-    if (!Ctor) { opts.notify("Voice input is not supported in this browser"); return; }
+    if (!Ctor) { trace("start: no recogniser"); opts.notify("Voice input is not supported in this browser"); return; }
+    trace(`start spacesTyped=${spacesTyped}`);
     active = true;
     stopping = false;
     emptyRestarts = 0;
@@ -103,7 +122,7 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     armWatchdog();
     window.addEventListener("blur", onWindowBlur);
     opts.setOverlay("");
-    if (!listen(Ctor)) { opts.notify("Voice input could not start"); finish(false); }
+    if (!listen(Ctor)) { opts.notify("Voice input could not start"); finish(false, "listen-failed"); }
   };
 
   // One recogniser session. The hold outlives it: browser recognisers end
@@ -117,6 +136,7 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     let r: RecognitionLike;
     try { r = new Ctor(); } catch { return false; }
     let heard = false;
+    const startedAt = Date.now();
     r.lang = navigator.language || "en-US";
     r.continuous = true;
     r.interimResults = true;
@@ -133,21 +153,35 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
       opts.setOverlay((finalText + interim).trim());
     };
     const ended = () => {
+      const age = Date.now() - startedAt;
+      trace(`rec end heard=${heard} age=${age}ms stopping=${stopping} current=${rec === r}`);
       if (!active || rec !== r) return;      // an old recogniser, or already finished
-      if (stopping) { finish(true); return; } // released: type what we have
+      if (stopping) { finish(true, "released"); return; } // released: type what we have
       // A finished phrase is folded in; the interim is gone with the session.
       interimText = "";
-      // Three recognisers in a row that heard nothing is the service refusing
-      // us, not silence — give the space bar back rather than spin forever.
-      if (!heard && ++emptyRestarts >= 3) { finish(true); return; }
+      // Silence is not a reason to stop: Space is still down, and the hold
+      // ending on its own is exactly what "dictation just cut out and then
+      // spaces typed" looks like from the chair. Only a recogniser that is
+      // REFUSING us — ending at once, three times, having heard nothing —
+      // gives the space bar back rather than spin forever.
+      if (!heard && age < REFUSED_MS) {
+        if (++emptyRestarts >= 3) { finish(true, "refused"); return; }
+      } else {
+        emptyRestarts = 0;
+      }
       opts.setOverlay(finalText.trim());
-      if (!listen(Ctor)) finish(true);
+      if (!listen(Ctor)) finish(true, "restart-failed");
     };
     r.onerror = (ev) => {
       const code = ev?.error || "unknown";
+      trace(`rec error ${code} stopping=${stopping} current=${rec === r}`);
+      // Our own stop() is finishing this hold with the words it has; an
+      // error the recogniser raises on the way out ("aborted") must not
+      // finish it again WITHOUT them.
+      if (stopping || rec !== r) return;
       // Quiet or interrupted while still held: not a failure, just this
       // recogniser's session ending — the onend that follows restarts it.
-      if (active && !stopping && (code === "no-speech" || code === "aborted")) return;
+      if (active && (code === "no-speech" || code === "aborted")) return;
       // EVERY real failure explains itself. Only mic-denial was surfaced
       // before; Chrome's cloud recogniser routinely fails with "network",
       // and that silent death read as "voice randomly doesn't work".
@@ -160,7 +194,7 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
       } else if (code !== "aborted") {
         opts.notify(`Voice input failed: ${code}`);
       }
-      finish(false);
+      finish(false, `error:${code}`);
     };
     r.onend = ended;
     rec = r;
@@ -170,6 +204,7 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
 
   const stop = () => {
     const r = rec;
+    trace("stop");
     stopping = true;
     try { r?.stop(); } catch { /* already gone */ }
     rec = null;
@@ -179,7 +214,7 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     // true — and since every space is deliberately eaten while active, that
     // is a terminal that cannot type a space AT ALL. onend arriving later is
     // harmless; finish() is a no-op once inactive.
-    finish(true);
+    finish(true, "stop");
   };
 
   // Last line of defence. Nothing should hold the microphone for a minute,
@@ -223,8 +258,10 @@ export const createVoiceHold = (opts: VoiceHoldOptions) => {
     }
     // A keypress carries no `code` in some engines; fall back to the key.
     const isSpace = ev.code === "Space" || (ev.type === "keypress" && ev.key === " ");
-    if (isSpace && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey
-        && !!speechRecognitionCtor() && (active || pending || opts.eligible())) {
+    if (isSpace && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
+      const eligible = active || pending || opts.eligible();
+      trace(`space ${ev.type}${ev.repeat ? " repeat" : ""} active=${active} pending=${pending} eligible=${eligible}`);
+      if (!speechRecognitionCtor() || !eligible) return undefined;
       if (ev.type === "keydown") {
         if (active) {
           // A genuine auto-repeat is the only thing that may be eaten while

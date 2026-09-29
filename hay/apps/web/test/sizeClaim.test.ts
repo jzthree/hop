@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claimOnAttach, claimOnClick, isPlainClick } from "../src/utils/sizeClaim";
+import { claimOnAttach, claimOnClick, claimOnTileFocus, isPlainClick, sizeIsForeign } from "../src/utils/sizeClaim";
 
 describe("claimOnAttach — only a deliberate open takes the size", () => {
   const base = { viewMode: "fit" as const, visible: true, deliberate: true };
@@ -38,5 +38,28 @@ describe("isPlainClick — the release of a drag is not a click", () => {
   it("a drag, or any release with a selection standing, is not", () => {
     expect(isPlainClick({ x: 100, y: 100 }, { x: 260, y: 100 }, false)).toBe(false);
     expect(isPlainClick({ x: 100, y: 100 }, { x: 100, y: 100 }, true)).toBe(false);
+  });
+});
+
+describe("claimOnTileFocus — a tile you engaged fits itself, a tile the wall pre-focused does not", () => {
+  const natural = { cols: 90, rows: 28 };
+  it("claims when a click lands on a tile wearing a full-screen size", () => {
+    expect(claimOnTileFocus({ deliberate: true, natural, current: { cols: 180, rows: 48 } })).toBe(true);
+  });
+  it("stays quiet when the session already fits, within rounding", () => {
+    expect(claimOnTileFocus({ deliberate: true, natural, current: { cols: 88, rows: 30 } })).toBe(false);
+    expect(claimOnTileFocus({ deliberate: true, natural, current: natural })).toBe(false);
+  });
+  it("never claims for the wall's own pre-focus of the current session", () => {
+    expect(claimOnTileFocus({ deliberate: false, natural, current: { cols: 180, rows: 48 } })).toBe(false);
+  });
+  it("needs a measurable tile and refuses a degenerate fit", () => {
+    expect(claimOnTileFocus({ deliberate: true, natural: null, current: { cols: 180, rows: 48 } })).toBe(false);
+    expect(claimOnTileFocus({ deliberate: true, natural: { cols: 12, rows: 3 }, current: { cols: 180, rows: 48 } })).toBe(false);
+  });
+  it("sizeIsForeign is the same tolerance the ⤢ badge uses", () => {
+    expect(sizeIsForeign({ cols: 93, rows: 30 }, natural)).toBe(false);
+    expect(sizeIsForeign({ cols: 120, rows: 28 }, natural)).toBe(true);
+    expect(sizeIsForeign({ cols: 90, rows: 40 }, natural)).toBe(true);
   });
 });

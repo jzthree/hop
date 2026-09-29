@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { installDragSelect } from "../utils/dragSelect";
+import { bufferLooksLikeClaude } from "../utils/voiceHold";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { safeParseServerMessage } from "hay-shared";
@@ -58,6 +60,8 @@ export const SecondaryPane = ({
   onSplit,
   onZoom
 }: Props) => {
+  const procLabelRef = useRef(procLabel);
+  procLabelRef.current = procLabel;
   const hostRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -77,6 +81,7 @@ export const SecondaryPane = ({
       cols: sizeRef.current.cols,
       rows: sizeRef.current.rows,
       fontSize,
+      macOptionClickForcesSelection: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: theme as never,
       scrollback: 2000,
@@ -86,6 +91,10 @@ export const SecondaryPane = ({
     term.loadAddon(fitAddon);
     enableMathHover(term, getMathTip());
     term.open(hostRef.current);
+    // Plain drag selects in Claude/Codex panes even though they track the
+    // mouse; the wheel still reaches them. See utils/dragSelect.ts.
+    const uninstallDragSelect = installDragSelect(term as never, hostRef.current, () =>
+      /^(claude|codex)$/i.test(procLabelRef.current || "") || bufferLooksLikeClaude(term as never));
     termRef.current = term;
 
     let shouldReconnect = true;
@@ -222,6 +231,7 @@ export const SecondaryPane = ({
       ro.disconnect();
       dataSub.dispose();
       try { wsRef.current?.close(); } catch { /* ignore */ }
+      uninstallDragSelect();
       term.dispose();
       termRef.current = null;
     };

@@ -17,6 +17,7 @@ import { enableMathHover } from "../utils/mathLinkProvider";
 import { getMathTip } from "../utils/mathTooltip";
 import { claimOnTileFocus, sizeIsForeign } from "../utils/sizeClaim";
 import { cardPhase, phaseLabel, phaseTitle } from "../utils/agentPhase";
+import { installDragSelect } from "../utils/dragSelect";
 import { urlAtCell, cellAtPoint } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
@@ -356,7 +357,7 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, codexApp = false, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender }: {
   /** The wall keeps a registry of live tiles' input senders (file drops). */
   onSender?: (send: ((data: string) => void) | null) => void;
   wsBase: string; room: string; userName: string; theme: object | undefined;
@@ -366,7 +367,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
    * pre-focusing the current session as it opened. Only a deliberate focus
    * takes the session's size — see claimOnTileFocus.
    */
-  live: boolean; deliberate: boolean; claudeApp: boolean; claimSize: boolean; activeCols?: number; activeRows?: number;
+  live: boolean; deliberate: boolean; claudeApp: boolean; codexApp?: boolean; claimSize: boolean; activeCols?: number; activeRows?: number;
   onFullscreen: () => void; onUnfocus: () => void; onNotice: (m: string) => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -427,6 +428,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
   // every session that came back through `hop restore`. The buffer's own
   // chrome is the honest witness; both callers share it.
   const looksLikeClaude = () => isClaudeSurface(claudeAppRef.current, termRef.current as never);
+  const codexAppRef = useRef(codexApp);
+  codexAppRef.current = codexApp;
   if (!voiceHoldRef.current) {
     voiceHoldRef.current = createVoiceHold({
       send: (data) => sendInputRef.current?.(data),
@@ -501,6 +504,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       cols: activeCols && activeCols > 1 ? activeCols : 80,
       rows: activeRows && activeRows > 1 ? activeRows : 24,
       scrollback: 2000,
+      macOptionClickForcesSelection: true,
       // Same scroll feel as the full-screen terminal: one wheel notch moves
       // 4 lines (xterm's default of 1 is the "tiles feel sluggish" report),
       // Shift+wheel blasts. Momentum is attached below.
@@ -532,6 +536,9 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
     }));
     enableMathHover(term, getMathTip()); // rendered math on hover, here too
     term.open(box);
+    // Plain drag selects in Claude/Codex tiles even though they track the
+    // mouse; the wheel still reaches them. See utils/dragSelect.ts.
+    const uninstallDragSelect = installDragSelect(term as never, box, () => looksLikeClaude() || codexAppRef.current);
     termRef.current = term;
     fitRef.current = fit;
     const inner = box.querySelector(".xterm") as HTMLElement | null;
@@ -751,6 +758,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       detachFlywheel();
       ro?.disconnect();
       sub.dispose();
+      uninstallDragSelect();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -3028,6 +3036,7 @@ export const SessionSwitcher = ({
               live={focusedKey === key}
               deliberate={deliberateFocusRef.current === key}
               claudeApp={appLabel(s) === "claude"}
+              codexApp={appLabel(s) === "codex"}
               claimSize={s.hasLocalCli !== true}
               activeCols={preview?.cols}
               activeRows={preview?.rows}

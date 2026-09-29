@@ -20,6 +20,7 @@ const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = re
 const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/auth-sessions');
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
+const { withCodexIdentity } = require('./lib/codex-identity');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
     createFailureTracker,
@@ -6459,7 +6460,8 @@ async function sweepRestoreReconcile() {
             if (!/[%$#\u276f>]\s*$/.test(last)) continue; // not an idle prompt yet
             try {
                 const e2 = await attachTerminalApiClient(name, exp.displayName, { actor: 'system', label: 'reconcile' });
-                const cmd = exp.command.endsWith('\n') ? exp.command : `${exp.command}\n`;
+                const pinned = withCodexIdentity(exp.command, name);
+                const cmd = pinned.endsWith('\n') ? pinned : `${pinned}\n`;
                 try { sendTerminalInput(e2, cmd); } finally { try { closeTerminalApiEntry(e2.id); } catch (e) {} }
                 exp.redrives += 1;
                 exp.lastDriveAt = now;
@@ -6817,7 +6819,11 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 // A fresh shell reports its own name once it has execed; that
                 // is our prompt-ready signal, and it beats guessing with a timer.
                 if (Date.now() - job.since < 400) continue;
-                const cmd = job.plan.command.endsWith('\n') ? job.plan.command : `${job.plan.command}\n`;
+                // A codex launch carries its hop session id in the thread's own
+                // config (lib/codex-identity.js): Codex's shared daemon would
+                // otherwise hand every session the FIRST session's identity.
+                const pinned = withCodexIdentity(job.plan.command, job.internalName);
+                const cmd = pinned.endsWith('\n') ? pinned : `${pinned}\n`;
                 try { sendTerminalInput(job.entry, cmd); } catch (e) { finish('write-failed'); continue; }
                 job.attempts += 1;
                 job.state = 'verify';
@@ -9609,7 +9615,7 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
     // Launch the room ON the relaunch command instead of typing it after the
     // shell is up: no prompt to race, nothing half-typed, no command echo.
     if (typeof opts.command === 'string' && opts.command) {
-        roomBody.command = opts.command;
+        roomBody.command = withCodexIdentity(opts.command, sessionName);
     }
     const response = await callExternalHayHostApi('/rooms', 'POST', roomBody, 2500);
     if (!response || response.status < 200 || response.status >= 300 || !response.data?.ok) {
@@ -13144,7 +13150,8 @@ happens until someone clicks it.
                     });
 
                     if (startup && autoStart !== false) {
-                        sendTerminalInput(entry, startup.endsWith('\n') ? startup : `${startup}\n`);
+                        const pinnedStartup = withCodexIdentity(startup, internalName);
+                        sendTerminalInput(entry, pinnedStartup.endsWith('\n') ? pinnedStartup : `${pinnedStartup}\n`);
                     }
 
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -13342,7 +13349,7 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'Missing command' }));
                         return;
                     }
-                    const line = String(command);
+                    const line = withCodexIdentity(String(command), entry.sessionName);
                     sendTerminalInput(entry, line.endsWith('\n') ? line : `${line}\n`);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true }));
@@ -16687,7 +16694,7 @@ async function main() {
         log(`${dryRun ? 'Would recover' : 'Recovering'} ${BOLD}${display}${RESET} (${kind}) in this terminal:`, RESET);
         log(`  ${DIM}${command}${RESET}`, RESET);
         if (dryRun) process.exit(0);
-        const child = spawn('/bin/zsh', ['-lc', command], { stdio: 'inherit', cwd: plan?.cwd || cwd, env: process.env });
+        const child = spawn('/bin/zsh', ['-lc', withCodexIdentity(command, target)], { stdio: 'inherit', cwd: plan?.cwd || cwd, env: process.env });
         child.on('exit', (code, signal) => process.exit(signal ? 1 : (code ?? 0)));
         return;
     }
@@ -17516,6 +17523,9 @@ async function main() {
         } else {
             console.log(`View: ${proxyUrl}`);
         }
+        // Name the session it was filed under, so a wrong one is visible at
+        // once (an inherited HOP_SESSION can belong to another session).
+        console.log(`Filed under ${getSessionDisplayName(session) || session}${wantSession ? '' : ' (from HOP_SESSION; pass --session <name> to file elsewhere)'}.`);
         // Same one-bell convention as `hop view` — the human is usually
         // waiting on this, and the link scrolls away unannounced otherwise.
         process.stdout.write('\x07');

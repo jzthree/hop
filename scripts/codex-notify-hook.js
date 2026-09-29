@@ -24,11 +24,33 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-function turnFilePath() {
+function turnsDir() {
   const home = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
   const dir = path.join(home, "claude-sessions"); // shared with the claude hook; hop reads <internal>.turn here
   try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
-  return path.join(dir, `${process.env.HOP_SESSION}.turn`);
+  return dir;
+}
+
+// WHICH hop session finished a turn. The environment says HOP_SESSION, but
+// under Codex's shared app-server daemon every session's notify ran with
+// the FIRST session's environment, so surf's turns were counted against
+// Accessibility-fork-codex (233 of them) and its own record sat at 1. The
+// thread is the truth: if another session's turn record already names this
+// root thread, the turn is that session's. (hop launches codex without the
+// daemon now; this keeps the sessions that predate the change honest.)
+function resolveHopSession(dir, rootId, envSession) {
+  if (!rootId) return envSession;
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((f) => f.endsWith(".turn")); } catch { return envSession; }
+  const owners = [];
+  for (const f of names) {
+    try {
+      const rec = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+      if (rec && rec.agent === "codex" && rec.sessionId === rootId) owners.push(f.slice(0, -".turn".length));
+    } catch { /* unreadable record */ }
+  }
+  if (owners.includes(envSession)) return envSession;
+  return owners.length === 1 ? owners[0] : envSession;
 }
 
 // A sub-agent's rollout names its parent in its first line (session_meta →
@@ -73,23 +95,26 @@ function rootThreadId(id) {
 // Same crash-safe write + same {sessionId, count, at} shape the Claude hook
 // uses, so hop's finishBump() reads one number regardless of which agent wrote.
 function bumpTurn(payload) {
-  const hopSession = process.env.HOP_SESSION;
-  if (!hopSession || !/^[A-Za-z0-9_-]+$/.test(hopSession)) return; // not a hop session
-  const file = turnFilePath();
+  const envSession = process.env.HOP_SESSION;
+  if (!envSession || !/^[A-Za-z0-9_-]+$/.test(envSession)) return; // not a hop session
+  const dir = turnsDir();
+  const rawThread = (payload && typeof payload["thread-id"] === "string") ? payload["thread-id"]
+             : (payload && typeof payload.thread_id === "string") ? payload.thread_id
+             : (payload && typeof payload.session_id === "string") ? payload.session_id : null;
+  const rootId = rootThreadId(rawThread);
+  const hopSession = resolveHopSession(dir, rootId, envSession);
+  const file = path.join(dir, `${hopSession}.turn`);
   let count = 0;
   try {
     const prev = JSON.parse(fs.readFileSync(file, "utf8"));
     if (prev && Number.isInteger(prev.count) && prev.count >= 0) count = prev.count;
   } catch { /* missing/corrupt -> start at 0 */ }
-  const threadId = (payload && typeof payload["thread-id"] === "string") ? payload["thread-id"]
-             : (payload && typeof payload.thread_id === "string") ? payload.thread_id
-             : (payload && typeof payload.session_id === "string") ? payload.session_id : null;
   const rec = JSON.stringify({
     // The thread id is the conversation (and the rollout file's name); the
     // turn id names one turn and matches nothing on disk. With multi-agent
     // codex the thread that finished may be a SUB-agent, which cannot be
     // resumed on its own — record the root, which can.
-    sessionId: rootThreadId(threadId),
+    sessionId: rootId,
     count: count + 1,
     at: new Date().toISOString(),
     agent: "codex"

@@ -22,6 +22,7 @@ import { getMathTip } from "./utils/mathTooltip";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
+import { installDragSelect } from "./utils/dragSelect";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -743,6 +744,14 @@ const App = () => {
     return screenLooksLikeClaude();
   };
   foregroundIsClaudeRef.current = foregroundIsClaude;
+  // Which agent the current session runs, by the daemon's hook records.
+  const currentSessionAgentRef = useRef<(() => "claude" | "codex" | null) | null>(null);
+  currentSessionAgentRef.current = () => {
+    const room = activeSessionRoomRef.current;
+    if (!room) return null;
+    const s = sessionsRef.current.find((x) => (x.internalName || x.name) === room);
+    return s?.agent || null;
+  };
   const drawerOpenRef = useRef(drawerOpen);
   drawerOpenRef.current = drawerOpen;
   const shortcutHelpRef = useRef(shortcutHelpOpen);
@@ -2098,6 +2107,9 @@ const App = () => {
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-terminal").trim()
         || "Menlo, Monaco, 'Courier New', monospace",
       fontSize,
+      // ⌥-drag always selects, iTerm's escape hatch for apps that track the
+      // mouse. (Plain drag selects too in agent sessions — utils/dragSelect.)
+      macOptionClickForcesSelection: true,
       lineHeight: 1.3,
       cursorBlink: true,
       scrollback: 50000,
@@ -2136,6 +2148,14 @@ const App = () => {
     // Unicode, the browser around the terminal draws properly.
     enableMathHover(terminal, getMathTip());
     terminal.open(containerRef.current);
+    // Plain drag selects in Claude/Codex sessions even though they track the
+    // mouse; the wheel still reaches them. See utils/dragSelect.ts.
+    // Hooked on the SCROLL wrapper, not xterm's host: a press in the gutter
+    // lands on the wrapper (which still starts a selection when tracking is
+    // off), and a capture listener only sees presses on its own subtree.
+    (terminal as any).__dragSelectCleanup = installDragSelect(terminal as never,
+      (containerRef.current.closest(".terminal-scroll") as HTMLElement | null) || containerRef.current, () =>
+      foregroundIsClaudeRef.current?.() === true || currentSessionAgentRef.current?.() === "codex");
 
     // GPU-accelerated rendering (same renderer VS Code uses). Must load after
     // open(). If WebGL isn't available (old GPU, blocklisted driver) the
@@ -3031,6 +3051,10 @@ const App = () => {
         if ((terminal as any).__overlayScrollbarCleanup) {
           (terminal as any).__overlayScrollbarCleanup();
           (terminal as any).__overlayScrollbarCleanup = null;
+        }
+        if ((terminal as any).__dragSelectCleanup) {
+          (terminal as any).__dragSelectCleanup();
+          (terminal as any).__dragSelectCleanup = null;
         }
         terminal.dispose();
         termRef.current = null;

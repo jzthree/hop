@@ -18,6 +18,8 @@ const WebSocket = require('ws');
 const { resolveActorFromHeaders, canActorAccessSession } = require('./lib/terminal-access');
 const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = require('./lib/naming-themes');
 const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/auth-sessions');
+const { agentPhase } = require('./lib/agent-phase');
+const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
     createFailureTracker,
@@ -5357,6 +5359,30 @@ function readTurnAt(internalName) {
         return Number.isFinite(at) ? at : 0;
     } catch (e) { return 0; }
 }
+// When the agent's current turn BEGAN (Claude's UserPromptSubmit hook; Codex
+// has no equivalent, so 0 there). Paired with readTurnAt by agentPhase().
+function readPromptAt(internalName) {
+    try {
+        const at = Date.parse(JSON.parse(fs.readFileSync(
+            path.join(CLAUDE_SESSIONS_DIR, `${internalName}.prompt`), 'utf8')).at);
+        return Number.isFinite(at) ? at : 0;
+    } catch (e) { return 0; }
+}
+// The wall's three agent colours, decided here so the web and the phone
+// agree: working / done-unread / done-read. Plain shells get null.
+function agentPhaseFields(s) {
+    if (!s.agent) return { agentPhase: null, turnSeen: true, turnAt: null };
+    const turnAt = readTurnAt(s.internalName);
+    const r = agentPhase({
+        agent: s.agent,
+        turnAt,
+        promptAt: readPromptAt(s.internalName),
+        lastActivityAt: Number(s.lastActivityAt) || 0,
+        lastUserSeenAt: Number(s.lastUserSeenAt) || 0,
+        userAttached: s.userAttached === true
+    });
+    return { agentPhase: r.phase, turnSeen: r.turnSeen, turnAt: turnAt || null };
+}
 // The newest published view's time (ms) for a session, from the manifest
 // the views summary already reads. `hop view` rings one bell per publish.
 function latestViewAtMs(internalName) {
@@ -5706,6 +5732,55 @@ function listClaudeSessionMetas() {
         if (meta) out.push({ internalName, ...meta });
     }
     return out;
+}
+
+// ---- Identity snapshots (lib/identity-snapshot.js) -------------------------
+// A second copy of the durable metas' user-authored fields — above all which
+// FOLDER each session is filed in — written at start, at stop and hourly.
+// The 2026-09-26 `stop --all` deleted every live session's records and the
+// rebuilt metas had no folder to go back to; the snapshot is what makes that
+// recoverable next time. restore re-files from the newest one.
+const IDENTITY_SNAPSHOT_DIR = path.join(HOME_DIR, 'restore-snapshots');
+function writeIdentitySnapshot(reason) {
+    try {
+        const snap = snapshotFromMetas(listClaudeSessionMetas(), sessionStore.folders, { reason });
+        fs.mkdirSync(IDENTITY_SNAPSHOT_DIR, { recursive: true, mode: 0o700 });
+        const file = path.join(IDENTITY_SNAPSHOT_DIR, snapshotFileName(snap.at));
+        writePrivateFile(file, JSON.stringify(snap, null, 1), 0o600);
+        for (const old of pruneList(fs.readdirSync(IDENTITY_SNAPSHOT_DIR))) {
+            try { fs.unlinkSync(path.join(IDENTITY_SNAPSHOT_DIR, old)); } catch (e) { /* best effort */ }
+        }
+        return file;
+    } catch (e) {
+        log(`[snapshot] could not write identity snapshot: ${e?.message || e}`, DIM);
+        return null;
+    }
+}
+function latestIdentitySnapshot() {
+    try {
+        const names = fs.readdirSync(IDENTITY_SNAPSHOT_DIR).filter((n) => /^identity-.*\.json$/.test(n)).sort();
+        if (!names.length) return null;
+        const file = path.join(IDENTITY_SNAPSHOT_DIR, names[names.length - 1]);
+        return { file, snapshot: JSON.parse(fs.readFileSync(file, 'utf8')) };
+    } catch (e) { return null; }
+}
+// Sessions whose meta has no folder at all but which the newest snapshot
+// remembers in a folder that still exists get their folder back. An
+// explicit `folderId: null` (unfiled on purpose) is respected.
+function refileFromIdentitySnapshot({ dryRun = false } = {}) {
+    const latest = latestIdentitySnapshot();
+    if (!latest) return [];
+    const plan = planRefiles(listClaudeSessionMetas(), latest.snapshot, sessionStore.folders);
+    for (const item of plan) {
+        const folderName = sessionStore.folders[item.folderId]?.name || item.folderId;
+        if (dryRun) { log(`  would re-file ${item.displayName} → ${folderName} (from ${path.basename(latest.file)})`, DIM); continue; }
+        const durable = readClaudeSessionMeta(item.internalName) || {};
+        writeClaudeSessionMeta(item.internalName, { ...durable, internalName: item.internalName, folderId: item.folderId });
+        rememberRuntimeSessionMetadata(item.internalName, { ...(getRuntimeSessionMetadata(item.internalName) || {}), folderId: item.folderId });
+        if (sessionStore.sessions[item.internalName]) moveSessionToFolder(item.internalName, item.folderId);
+        log(`  re-filed ${item.displayName} → ${folderName} (from ${path.basename(latest.file)})`, DIM);
+    }
+    return plan;
 }
 
 // Claude Code slugifies a project cwd for <config-root>/projects/<slug>/.
@@ -6448,6 +6523,11 @@ function resolveRestoreTargets(names, snapshot) {
     return { resolved, unknown };
 }
 async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = false, only = null } = {}) {
+    // Folders first: a session whose meta lost its folder (records deleted,
+    // meta rebuilt) is put back where the newest identity snapshot says it
+    // was, so the restored wall is filed the way the user left it.
+    const refiled = refileFromIdentitySnapshot({ dryRun });
+    if (refiled.length) log(`${dryRun ? 'Would re-file' : 'Re-filed'} ${refiled.length} session(s) into their folders from the identity snapshot.`, DIM);
     const snapshot = await listAllSessionEntriesRuntimeFirst();
     const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
     // Targeted redo (`hop restore <name>...`): the named sessions are planned
@@ -6822,7 +6902,9 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
 // The same script is registered for two events: SessionStart (records the
 // conversation id for `hop restore`) and Stop (bumps a per-turn counter a driver
 // can wait on). See scripts/claude-session-hook.js.
-const CLAUDE_HOOK_EVENTS = ['SessionStart', 'Stop', 'Notification', 'PreToolUse'];
+// UserPromptSubmit marks the START of a turn (with Stop's end, the wall
+// colours the session "working" / "done" — see lib/agent-phase.js).
+const CLAUDE_HOOK_EVENTS = ['SessionStart', 'Stop', 'Notification', 'PreToolUse', 'UserPromptSubmit'];
 // Notification (permission prompts, elicitation) and PreToolUse (the two tools
 // that open a dialog and wait) bump the per-session ASK record — "whenever an
 // agent asks me a question, notify me" (Jian). PreToolUse gets a matcher, or
@@ -11644,6 +11726,9 @@ happens until someone clicks it.
                 cwd: s.cwd,
                 foregroundProcess: s.foregroundProcess,
                 agent: s.agent || null,
+                // working / done + whether the human has opened it since the
+                // turn ended (server-side seen witness, so every device agrees).
+                ...agentPhaseFields(s),
                 lastActivityAt: s.lastActivityAt,
                 // For sessions armed with notify-on-finish, each completed turn
                 // adds to bellSeq so the phone treats a finished response like a
@@ -12570,13 +12655,16 @@ happens until someone clicks it.
             req.on('end', () => {
                 try {
                     const { name, internalName, folderId, index } = JSON.parse(body);
+                    // Unfiling is recorded as an explicit null: a meta with
+                    // NO folderId key is one that may have LOST it, and the
+                    // identity snapshot re-files those on restore.
                     const persistMembership = (target) => {
                         if (!target) return;
                         const durable = readClaudeSessionMeta(target) || {};
                         writeClaudeSessionMeta(target, {
                             ...durable,
                             internalName: target,
-                            folderId: folderId || undefined
+                            folderId: folderId || null
                         });
                     };
                     // Resolve like every other session endpoint: a live
@@ -19317,6 +19405,12 @@ async function main() {
         // per file, and a no-op when the folder doesn't exist yet.
         setTimeout(enforceUploadBudget, 20000).unref?.();
         setInterval(enforceUploadBudget, 3600000).unref?.();
+
+        // Identity snapshot (folders, names, origins): once the boot settles,
+        // then hourly. Cheap — one small file — and the reason restore can
+        // put sessions back in their folders after their records are lost.
+        setTimeout(() => writeIdentitySnapshot('start'), 30000).unref?.();
+        setInterval(() => writeIdentitySnapshot('hourly'), 3600000).unref?.();
     }
 
     if (DAEMON_FLAG) {
@@ -19324,6 +19418,7 @@ async function main() {
             if (shuttingDown) return;
             shuttingDown = true;
             log(`Cleaning up...`, YELLOW);
+            writeIdentitySnapshot('stop');
 
             stopTunnelHealthMonitor();
 

@@ -192,3 +192,14 @@ test('outside hop the hook is a no-op', () => {
   });
   assert.equal(fs.readdirSync(path.join(home, 'claude-sessions')).length, 0);
 });
+
+test('a submitted prompt is noted as the start of a turn, and a headless helper\'s is not', () => {
+  const home = freshHome();
+  runHook(home, 'alpha', { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt: 'do the thing' });
+  const rec = JSON.parse(fs.readFileSync(path.join(home, 'claude-sessions', 'alpha.prompt'), 'utf8'));
+  assert.equal(rec.sessionId, 'sess-1');
+  assert.ok(Number.isFinite(Date.parse(rec.at)));
+  // A nested claude (its env carries the parent's id) never marks the terminal's turn.
+  runHook(home, 'beta', { hook_event_name: 'UserPromptSubmit', session_id: 'child-1' }, { CLAUDE_CODE_SESSION_ID: 'parent-1' });
+  assert.equal(fs.existsSync(path.join(home, 'claude-sessions', 'beta.prompt')), false);
+});

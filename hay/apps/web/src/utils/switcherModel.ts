@@ -35,6 +35,9 @@ export type SwitcherSession = {
   foregroundProcess?: string;
   /** What the session runs, by its hooks' records: claude, codex, or nothing known. */
   agent?: "claude" | "codex" | null;
+  /** Server-decided: a turn in flight / the last turn finished; turnSeen = a human opened it since. */
+  agentPhase?: "working" | "done" | null;
+  turnSeen?: boolean;
   agentPermitted?: boolean;
   cols?: number;
   rows?: number;

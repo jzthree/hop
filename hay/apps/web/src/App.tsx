@@ -261,6 +261,10 @@ type SessionInfo = {
   createdBy?: "user" | "agent";
   createdVia?: string | null;
   agent?: "claude" | "codex" | null;
+  // Server-decided: a turn in flight, or the last one finished — and whether
+  // a human has opened the session since it finished (see lib/agent-phase.js).
+  agentPhase?: "working" | "done" | null;
+  turnSeen?: boolean;
   attentionReason?: string;
   attentionNote?: string;
   cols?: number;
@@ -3205,6 +3209,8 @@ const App = () => {
           createdBy: s.createdBy === "agent" ? "agent" : "user",
           createdVia: typeof s.createdVia === "string" ? s.createdVia : null,
           agent: s.agent === "claude" || s.agent === "codex" ? s.agent : null,
+          agentPhase: s.agentPhase === "working" || s.agentPhase === "done" ? s.agentPhase : null,
+          turnSeen: s.turnSeen !== false,
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
           rows: Number.isInteger(s.rows) ? s.rows : undefined,
           // These three were silently dropped here, so the switcher never saw
@@ -3966,7 +3972,7 @@ const App = () => {
         grab();
         setViewsOpen((v) => v ? null
           : (activeSessionRoomRef.current
-              ? { session: activeSessionRoomRef.current, dock: true }
+              ? { session: activeSessionRoomRef.current }
               : {}));
         return;
       }
@@ -4160,7 +4166,7 @@ const App = () => {
               // DOCKED and scoped: in full-screen mode you almost always want
               // THIS session's results, read beside the live terminal rather
               // than over it. The panel's own toggle widens to the fleet.
-              onClick={() => setViewsOpen({ session: session.room, dock: true })}
+              onClick={() => setViewsOpen({ session: session.room })}
             >
               Views
               {(() => {
@@ -4214,7 +4220,7 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
-            onOpenViews={(scope) => setViewsOpen({ session: scope, dock: true })}
+            onOpenViews={(scope) => setViewsOpen({ session: scope })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
           />
@@ -4878,7 +4884,7 @@ const App = () => {
             tileWsBase={resolveWsUrl()}
             onFocusSession={focusSessionInPlace}
             folders={folders}
-            onOpenViews={(scope) => setViewsOpen({ session: scope, dock: true })}
+            onOpenViews={(scope) => setViewsOpen({ session: scope })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {

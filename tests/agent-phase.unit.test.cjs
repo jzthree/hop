@@ -2,7 +2,7 @@
 // from the records hop keeps, the same way for the web and the phone.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { agentPhase } = require('../lib/agent-phase');
+const { agentPhase, screenSaysWorking } = require('../lib/agent-phase');
 
 const NOW = 1_800_000_000_000;
 const s = (o) => agentPhase({ agent: 'claude', now: NOW, ...o });
@@ -44,4 +44,21 @@ test('a user attached right now has read whatever just finished', () => {
 test('an agent session that has never completed a turn and is quiet has no phase', () => {
   assert.equal(s({ turnAt: 0, lastActivityAt: NOW - 60_000 }).phase, null);
   assert.equal(s({ turnAt: 0, lastActivityAt: NOW - 1_000 }).phase, 'working');
+});
+
+test('the live screen decides when it was read: an idle composer is DONE however recent the repaint', () => {
+  // Codex idle at "› Ask Codex to do anything", tips rotating, user typing: fresh output, no turn.
+  const r = agentPhase({ agent: 'codex', turnAt: NOW - 60_000, lastActivityAt: NOW - 1_000, lastUserSeenAt: NOW, screenWorking: false, now: NOW });
+  assert.equal(r.phase, 'done');
+  // A silent long think still shows "esc to interrupt": working, whatever the timestamps say.
+  assert.equal(s({ turnAt: NOW - 60_000, lastActivityAt: NOW - 120_000, screenWorking: true }).phase, 'working');
+  // No screen read (null): the timing rules apply as before.
+  assert.equal(agentPhase({ agent: 'codex', turnAt: NOW - 60_000, lastActivityAt: NOW - 1_000, screenWorking: null, now: NOW }).phase, 'working');
+});
+
+test('screenSaysWorking reads both TUIs\' in-flight line', () => {
+  assert.equal(screenSaysWorking('⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 1 agent'), true);
+  assert.equal(screenSaysWorking('• Working (12s • esc to interrupt)'), true);
+  assert.equal(screenSaysWorking('› Ask Codex to do anything\n  ? for shortcuts'), false);
+  assert.equal(screenSaysWorking(''), false);
 });

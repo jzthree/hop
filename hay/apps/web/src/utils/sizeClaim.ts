@@ -56,3 +56,36 @@ export const isPlainClick = (
   if (!down) return true;
   return Math.hypot(up.x - down.x, up.y - down.y) <= slopPx;
 };
+
+/**
+ * CLOSE ENOUGH is the right size. A tile that renders the session scaled
+ * by ~0.9 is visually free; a claim is for sizes that are genuinely
+ * foreign (a full-screen leftover on a wall tile), not for two walls
+ * disagreeing about rounding — that disagreement, claimed, was two
+ * browsers re-sizing every session back and forth on every open.
+ */
+export const sizeIsForeign = (current: Size, natural: Size): boolean => {
+  const closeCols = Math.abs(current.cols - natural.cols) <= Math.max(3, Math.round(natural.cols * 0.15));
+  const closeRows = Math.abs(current.rows - natural.rows) <= Math.max(2, Math.round(natural.rows * 0.15));
+  return !(closeCols && closeRows);
+};
+
+/**
+ * A wall tile going live because the human ENGAGED it — a click, Enter,
+ * starting or creating a session there — is the same act as opening a
+ * session full screen, and takes the size the same way: only when what the
+ * session is wearing is foreign to the tile. The wall pre-focusing the
+ * current session as it opens is not an act (nobody clicked), and a tile
+ * that already fits has nothing to claim — a claim there would be a resize
+ * on every wall open, the fight the size-ownership rules exist to end.
+ */
+export const claimOnTileFocus = (o: {
+  deliberate: boolean;
+  natural: Size | null;
+  current: Size | null;
+}): boolean => {
+  if (!o.deliberate || !o.natural) return false;
+  if (o.natural.cols < 20 || o.natural.rows < 5) return false;
+  if (!o.current) return true;
+  return sizeIsForeign(o.current, o.natural);
+};

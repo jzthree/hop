@@ -15,6 +15,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { enableMathHover } from "../utils/mathLinkProvider";
 import { getMathTip } from "../utils/mathTooltip";
+import { claimOnTileFocus, sizeIsForeign } from "../utils/sizeClaim";
 import { urlAtCell, cellAtPoint } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
@@ -354,11 +355,17 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender }: {
   /** The wall keeps a registry of live tiles' input senders (file drops). */
   onSender?: (send: ((data: string) => void) | null) => void;
   wsBase: string; room: string; userName: string; theme: object | undefined;
-  live: boolean; claudeApp: boolean; claimSize: boolean; activeCols?: number; activeRows?: number;
+  /**
+   * `live` says the tile is the focused one; `deliberate` says the human
+   * put it there (click, Enter, start, create) rather than the wall
+   * pre-focusing the current session as it opened. Only a deliberate focus
+   * takes the session's size — see claimOnTileFocus.
+   */
+  live: boolean; deliberate: boolean; claudeApp: boolean; claimSize: boolean; activeCols?: number; activeRows?: number;
   onFullscreen: () => void; onUnfocus: () => void; onNotice: (m: string) => void;
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -367,6 +374,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
   const rescaleRef = useRef<() => void>(() => {});
   // Wired by the live effect; watch mode leaves them null so keys go nowhere.
   const sendInputRef = useRef<((data: string) => void) | null>(null);
+  const deliberateRef = useRef(deliberate);
+  deliberateRef.current = deliberate;
   // When the link addon last opened something from this tile — so the click
   // that follows its mouseup does not open the same URL a second time.
   const lastLinkOpenAtRef = useRef(0);
@@ -782,13 +791,9 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     // for sizes that are genuinely foreign (full-screen leftovers), not for
     // disagreements about rounding.
     const cur = termRef.current;
-    if (cur) {
-      const closeCols = Math.abs(cur.cols - dims.cols) <= Math.max(3, Math.round(dims.cols * 0.15));
-      const closeRows = Math.abs(cur.rows - dims.rows) <= Math.max(2, Math.round(dims.rows * 0.15));
-      if (closeCols && closeRows) {
-        lastClaimRef.current = { cols: dims.cols, rows: dims.rows, at: performance.now() };
-        return;
-      }
+    if (cur && !sizeIsForeign({ cols: cur.cols, rows: cur.rows }, { cols: dims.cols, rows: dims.rows })) {
+      lastClaimRef.current = { cols: dims.cols, rows: dims.rows, at: performance.now() };
+      return;
     }
     lastClaimRef.current = { cols: dims.cols, rows: dims.rows, at: performance.now() };
     const sep = wsBase.includes("?") ? "&" : "?";
@@ -931,6 +936,31 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
     let reconnectTimer = 0;
     let reconnectAttempt = 0;
     const pendingInput: Array<{ data: string; at: number }> = [];
+    // Engaging a tile is an act on it, the same as opening the session full
+    // screen, and takes the size the same way — through THIS socket, as an
+    // attach claim, so ownership moves here and the election's active_size
+    // confirms the fit (the handler below resizes the tile to it). Until
+    // now a clicked tile only ever attached at the session's current size
+    // and fitted itself on the first keystroke; a session wearing a
+    // full-screen size stayed a wall of tiny text when clicked ("clicking
+    // the tile does not enter the terminal, but full screen does"). Once
+    // per focus: a reconnect is the same socket healing, not a new act.
+    let focusClaimDone = false;
+    const claimFitOnFocus = (sock: WebSocket) => {
+      if (focusClaimDone) return;
+      focusClaimDone = true;
+      const fitAddon = fitRef.current;
+      const boxEl = boxRef.current;
+      const t = termRef.current;
+      if (!fitAddon || !boxEl || !t || boxEl.clientWidth < 60 || boxEl.clientHeight < 40) return;
+      const dims = fitAddon.proposeDimensions();
+      const natural = dims?.cols && dims?.rows ? { cols: dims.cols, rows: dims.rows } : null;
+      if (!natural || !claimOnTileFocus({ deliberate: deliberateRef.current, natural, current: { cols: t.cols, rows: t.rows } })) return;
+      lastClaimRef.current = { cols: natural.cols, rows: natural.rows, at: performance.now() };
+      try {
+        sock.send(JSON.stringify({ type: "resize", cols: natural.cols, rows: natural.rows, claim: "attach", user: true }));
+      } catch { /* closing; the next act re-claims */ }
+    };
     // Sub-second drops stay invisible: the "reconnecting…" chrome waits out
     // a grace window, and the first retry goes immediately — a tunnel
     // restart or a waking laptop usually reconnects before either fires.
@@ -963,6 +993,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, claudeApp, claimSize, a
         if (disposed || ws !== sock) return;
         reconnectAttempt = 0;
         markLive();
+        claimFitOnFocus(sock);
         window.setTimeout(() => rescaleRef.current(), 30);
         const cutoff = Date.now() - 15000;
         for (const pend of pendingInput) {
@@ -1614,7 +1645,11 @@ export const SessionSwitcher = ({
       else sessionStorage.removeItem("hay_switcher_focus");
     } catch { /* private mode */ }
   }, [focusedKey]);
-  useEffect(() => { if (!open) setFocusedKey(null); }, [open]);
+  // The key the HUMAN focused (click, Enter, start, create), as opposed to
+  // the wall pre-focusing the current session as it opens. The live tile
+  // takes the session's size only for the former.
+  const deliberateFocusRef = useRef<string | null>(null);
+  useEffect(() => { if (!open) { setFocusedKey(null); deliberateFocusRef.current = null; } }, [open]);
   useEffect(() => { if (!interactiveTiles) setFocusedKey(null); }, [interactiveTiles]);
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
@@ -2002,6 +2037,7 @@ export const SessionSwitcher = ({
     if (!current) return;
     initialFocusDoneRef.current = true;
     const key = sessionKey(current);
+    deliberateFocusRef.current = null; // the wall's own pre-focus, not an act
     setFocusedKey(key);
     const idx = navIndexByKey.get(key);
     if (typeof idx === "number") {
@@ -2242,6 +2278,7 @@ export const SessionSwitcher = ({
   const focusInPlace = (session: SwitcherSession) => {
     const key = sessionKey(session);
     filterInputRef.current?.blur();
+    deliberateFocusRef.current = key;
     setFocusedKey(key);
     onFocusSession?.(session);
     const idx = flatNav.findIndex((x) => sessionKey(x) === key);
@@ -2291,6 +2328,7 @@ export const SessionSwitcher = ({
         kick.onerror = () => { try { kick.close(); } catch { /* refused */ } };
       } catch { /* daemon will surface it as starting on the next poll */ }
       onNotice("Starting " + (session.displayName || session.name) + "…");
+      deliberateFocusRef.current = key;
       setFocusedKey(key);
       onFocusSession?.(session);
       onRefresh();
@@ -2703,6 +2741,7 @@ export const SessionSwitcher = ({
           if (hiddenByOrigin) setOriginScope("all");
           if (taken.parked) setParkedOpen(true);
           const key = sessionKey(taken);
+          deliberateFocusRef.current = key;
           setFocusedKey(key);
           if (visible) {
             const idx = navIndexByKey.get(key);
@@ -2746,6 +2785,7 @@ export const SessionSwitcher = ({
       // The id is minted server-side now; the display name is what the user
       // typed. Keys ride on the id, labels on the name.
       onFocusSession?.({ name: data.displayName || data.name, displayName: data.displayName || data.name, active: false, starting: true, internalName: data.internalName || data.name });
+      deliberateFocusRef.current = data.internalName || data.name;
       setFocusedKey(data.internalName || data.name);
       onRefresh();
     } catch {
@@ -2976,6 +3016,7 @@ export const SessionSwitcher = ({
               userName={userName || "user"}
               theme={terminalTheme}
               live={focusedKey === key}
+              deliberate={deliberateFocusRef.current === key}
               claudeApp={appLabel(s) === "claude"}
               claimSize={s.hasLocalCli !== true}
               activeCols={preview?.cols}

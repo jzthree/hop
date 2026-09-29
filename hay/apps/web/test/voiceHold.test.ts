@@ -261,7 +261,7 @@ describe("hold-space dictation", () => {
     expect(FakeRecognition.last).not.toBe(first);
   });
 
-  it("gives the space bar back when recognisers keep ending without hearing anything", () => {
+  it("gives the space bar back when recognisers REFUSE — ending at once, three times, hearing nothing", () => {
     const hold = makeHold();
     hold.handleKey(keydown());
     vi.advanceTimersByTime(500);
@@ -271,6 +271,36 @@ describe("hold-space dictation", () => {
     FakeRecognition.last!.onend?.();
     expect(hold.isActive()).toBe(false);
     expect(overlays[overlays.length - 1]).toBe(null);
+  });
+
+  it("silence never ends a hold that is still held — sessions timing out are replaced for as long as Space is down", () => {
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    // Chrome's no-speech comes after seconds of silence, session after session.
+    for (let i = 0; i < 6; i++) {
+      vi.advanceTimersByTime(8000);
+      FakeRecognition.last!.onerror?.({ error: "no-speech" });
+      FakeRecognition.last!.onend?.();
+      expect(hold.isActive()).toBe(true);
+      expect(overlays[overlays.length - 1]).not.toBe(null);
+    }
+    // Still held, still listening: an auto-repeat is eaten, not typed.
+    expect(pressSpace(hold, { repeat: true }).typed).toBe(false);
+    hold.handleKey(keyup());
+    expect(hold.isActive()).toBe(false);
+  });
+
+  it("an 'aborted' error raised while we are stopping does not throw the words away", () => {
+    const hold = makeHold();
+    hold.handleKey(keydown());
+    vi.advanceTimersByTime(500);
+    FakeRecognition.last!.onresult?.({ resultIndex: 0, results: [Object.assign([{ transcript: "keep this" }], { isFinal: true })] } as never);
+    const r = FakeRecognition.last!;
+    hold.handleKey(keyup());          // stop(): finishes with the words
+    r.onerror?.({ error: "aborted" }); // the recogniser objecting on its way out
+    r.onend?.();
+    expect(sent.filter((d) => d !== "\x7f")).toEqual(["keep this"]);
   });
 
   it("a recogniser that never ends cannot kill the space bar", () => {

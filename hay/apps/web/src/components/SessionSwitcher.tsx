@@ -18,6 +18,7 @@ import { getMathTip } from "../utils/mathTooltip";
 import { claimOnTileFocus, sizeIsForeign } from "../utils/sizeClaim";
 import { cardPhase, phaseLabel, phaseTitle } from "../utils/agentPhase";
 import { installDragSelect } from "../utils/dragSelect";
+import { enableViewBlocks } from "../utils/viewBlocks";
 import { urlAtCell, cellAtPoint } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
@@ -116,7 +117,7 @@ type Props = {
   onFind?: () => void;
   // Open the Views panel. No argument = the whole fleet (header button); an
   // internalName = just that session (a card's chip).
-  onOpenViews?: (session?: string) => void;
+  onOpenViews?: (session?: string, item?: string) => void;
 };
 
 type Sheet = {
@@ -357,9 +358,11 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, codexApp = false, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, codexApp = false, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender, onOpenView }: {
   /** The wall keeps a registry of live tiles' input senders (file drops). */
   onSender?: (send: ((data: string) => void) | null) => void;
+  /** An inline hop view card's Open: the reader for that session, on that item. */
+  onOpenView?: (session: string, item: string) => void;
   wsBase: string; room: string; userName: string; theme: object | undefined;
   /**
    * `live` says the tile is the focused one; `deliberate` says the human
@@ -430,6 +433,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
   const looksLikeClaude = () => isClaudeSurface(claudeAppRef.current, termRef.current as never);
   const codexAppRef = useRef(codexApp);
   codexAppRef.current = codexApp;
+  const onOpenViewRef = useRef(onOpenView);
+  onOpenViewRef.current = onOpenView;
   if (!voiceHoldRef.current) {
     voiceHoldRef.current = createVoiceHold({
       send: (data) => sendInputRef.current?.(data),
@@ -505,6 +510,9 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       rows: activeRows && activeRows > 1 ? activeRows : 24,
       scrollback: 2000,
       macOptionClickForcesSelection: true,
+      // Decorations (inline hop view cards, utils/viewBlocks.ts) are a
+      // proposed xterm API; this is the switch that lets them register.
+      allowProposedApi: true,
       // Same scroll feel as the full-screen terminal: one wheel notch moves
       // 4 lines (xterm's default of 1 is the "tiles feel sluggish" report),
       // Shift+wheel blasts. Momentum is attached below.
@@ -535,6 +543,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       window.open(target, "_blank", "noopener");
     }));
     enableMathHover(term, getMathTip()); // rendered math on hover, here too
+    const uninstallViewBlocks = enableViewBlocks(term as never, (b) => onOpenViewRef.current?.(b.session, b.name));
     term.open(box);
     // Plain drag selects in Claude/Codex tiles even though they track the
     // mouse; the wheel still reaches them. See utils/dragSelect.ts.
@@ -758,6 +767,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       detachFlywheel();
       ro?.disconnect();
       sub.dispose();
+      uninstallViewBlocks();
       uninstallDragSelect();
       term.dispose();
       termRef.current = null;
@@ -3051,6 +3061,7 @@ export const SessionSwitcher = ({
               onUnfocus={() => setFocusedKey(null)}
               onNotice={onNotice}
               onSender={(fn) => { if (fn) tileSendersRef.current.set(key, fn); else tileSendersRef.current.delete(key); }}
+              onOpenView={(scope, item) => onOpenViews?.(scope, item)}
             />
           </div>
         ) : (

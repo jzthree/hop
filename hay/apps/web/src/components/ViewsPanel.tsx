@@ -65,6 +65,9 @@ type Props = {
   // the screen's edge was farther from where the eye already is. The dock
   // stays available for a caller that wants it.
   dock?: boolean;
+  // Open straight on this item (its file name within `session`), e.g. from
+  // an inline hop view card in the terminal.
+  item?: string;
   onClose: () => void;
 };
 
@@ -176,7 +179,7 @@ const DEFAULT_DOCK_W = 760;
 const clampDockW = (w: number) =>
   Math.max(560, Math.min(Math.round(window.innerWidth * 0.75), w));
 
-export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Props) => {
+export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [preview, setPreview] = useState<ViewItem | null>(null);
@@ -276,7 +279,8 @@ export const ViewsPanel = ({ session, sessions = [], dock = false, onClose }: Pr
   useEffect(() => {
     if (!items || !canPreview()) return;
     if (preview && flatRows.some((r) => r.path === preview.path)) return;
-    setPreview(flatRows[0] ?? null);
+    const asked = item ? flatRows.find((r) => r.name === item) : null;
+    setPreview(asked ?? flatRows[0] ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, flatRows]);
 

@@ -17702,7 +17702,28 @@ async function main() {
             // worse than sharing it.
             if (title) meta[name] = { ...(meta[name] || {}), title };
             published.push(name);
-            console.log(`View: ${state.url}/view/${encodeURIComponent(session)}/${encodeURIComponent(name)}/inline`);
+            const viewUrl = `${state.url}/view/${encodeURIComponent(session)}/${encodeURIComponent(name)}/inline`;
+            console.log(`View: ${viewUrl}`);
+            // On a terminal, a small card where the delivery happened: an OSC
+            // 7701 the hop web client turns into an inline block (title,
+            // size, thumbnail, Open), followed by the text box every other
+            // terminal shows. Piped output stays one plain line.
+            if (process.stdout.isTTY) {
+                let bytes = 0;
+                try { bytes = fs.statSync(path.join(destDir, name)).size; } catch (e) { /* unknown */ }
+                const payload = Buffer.from(JSON.stringify({ session, name, title: title || undefined, bytes, url: viewUrl })).toString('base64');
+                const W = Math.max(40, Math.min(72, (process.stdout.columns || 80) - 2));
+                const trim = (t, n) => (t.length > n ? t.slice(0, n - 1) + '…' : t);
+                const kb = bytes ? ` · ${Math.max(1, Math.round(bytes / 1024))} KB` : '';
+                const l1 = trim(title || name, W - 4);
+                const l2 = trim(`${title ? name : 'hop view'}${kb}`, W - 4);
+                const pad = (t) => t + ' '.repeat(Math.max(0, W - 4 - t.length));
+                process.stdout.write(`\x1b]7701;hop-view;${payload}\x07`);
+                console.log(`${DIM}┌─ ◧ hop view ${'─'.repeat(Math.max(0, W - 15))}┐${RESET}`);
+                console.log(`${DIM}│ ${RESET}${BOLD}${pad(l1)}${RESET}${DIM} │${RESET}`);
+                console.log(`${DIM}│ ${pad(l2)} │${RESET}`);
+                console.log(`${DIM}└${'─'.repeat(W - 2)}┘${RESET}`);
+            }
         }
         if (published.length) writeViewMeta(session, meta);
         if (published.length) {

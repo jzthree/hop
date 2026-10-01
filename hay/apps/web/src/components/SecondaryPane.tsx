@@ -82,6 +82,9 @@ export const SecondaryPane = ({
       rows: sizeRef.current.rows,
       fontSize,
       macOptionClickForcesSelection: true,
+      // Decorations (inline hop view cards, utils/viewBlocks.ts) are a
+      // proposed xterm API; this is the switch that lets them register.
+      allowProposedApi: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: theme as never,
       scrollback: 2000,

@@ -266,6 +266,8 @@ type SessionInfo = {
   // a human has opened the session since it finished (see lib/agent-phase.js).
   agentPhase?: "working" | "done" | null;
   turnSeen?: boolean;
+  // Scheduled check-backs waiting on this session (hop checkback).
+  checkbacks?: number;
   attentionReason?: string;
   attentionNote?: string;
   cols?: number;
@@ -3235,6 +3237,7 @@ const App = () => {
           agent: s.agent === "claude" || s.agent === "codex" ? s.agent : null,
           agentPhase: s.agentPhase === "working" || s.agentPhase === "done" ? s.agentPhase : null,
           turnSeen: s.turnSeen !== false,
+          checkbacks: Number(s.checkbacks) > 0 ? Number(s.checkbacks) : undefined,
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
           rows: Number.isInteger(s.rows) ? s.rows : undefined,
           // These three were silently dropped here, so the switcher never saw

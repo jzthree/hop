@@ -3191,6 +3191,38 @@ class HopMCPServer {
         inputSchema: { type: 'object', properties: {} }
       },
       {
+        name: 'hop_checkback',
+        description: 'Schedule a CHECK-BACK: hop types `message` into a session later (and submits it) when a trigger fires and the session is idle — the reliable way to "check back in 30 minutes" or "when the job finishes". Give exactly one trigger: `in` (45m, 2h), `at` (15:00, 3pm, ISO), `every` (period, ≥1m), `when_idle` (next time the session is not working; `idle_for` to require a quiet spell), `when_file` (path exists; `changed`: true = changes from now), `when_cmd` (shell command exits 0, polled). Omit `session` to target THIS session. Use it on yourself to guarantee your own follow-ups.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            message: { type: 'string', description: 'What to type into the session when the trigger fires — a prompt for the agent there (or a shell command for a plain terminal).' },
+            session: { type: 'string', description: 'Target session (display name or id). Default: the session this MCP runs in.' },
+            in: { type: 'string', description: 'Duration from now: 30m, 2h, 1h30m.' },
+            at: { type: 'string', description: 'A clock time (15:00, 3pm — today, else tomorrow) or ISO date-time.' },
+            every: { type: 'string', description: 'Repeat period (≥1m). With `until` to stop.' },
+            until: { type: 'string', description: 'For `every`: last moment (same formats as `at`).' },
+            when_idle: { type: 'boolean', description: 'Fire the next time the session is not working.' },
+            idle_for: { type: 'string', description: 'With when_idle: require this much quiet first (e.g. 10m).' },
+            when_file: { type: 'string', description: 'Fire when this path exists (or, with changed, changes).' },
+            changed: { type: 'boolean', description: 'With when_file: fire on a change from the file\'s current state rather than on existence.' },
+            when_cmd: { type: 'string', description: 'Fire when this shell command exits 0 (polled every `every`, default 1m).' },
+            force: { type: 'boolean', description: 'Type even if the session is mid-turn (default: wait for idle).' }
+          },
+          required: ['message']
+        }
+      },
+      {
+        name: 'hop_list_checkbacks',
+        description: 'List scheduled check-backs (pending by default; all=true includes delivered/cancelled).',
+        inputSchema: { type: 'object', properties: { all: { type: 'boolean' }, session: { type: 'string', description: 'Only this session.' } } }
+      },
+      {
+        name: 'hop_cancel_checkback',
+        description: 'Cancel a pending check-back by id, or every pending one for a session.',
+        inputSchema: { type: 'object', properties: { id: { type: 'string' }, session: { type: 'string' } } }
+      },
+      {
         name: 'hop_list_terminals',
         description: 'List terminal API sessions (created via hop_create_terminal or hop_attach_terminal).',
         inputSchema: { type: 'object', properties: {} }
@@ -3751,6 +3783,28 @@ class HopMCPServer {
     switch (name) {
       case 'hop_list_sessions':
         return this.wrapApiResult(await this.callApi('GET', '/api/sessions'), { endpoint: '/api/sessions' });
+      case 'hop_checkback': {
+        const a = args || {};
+        const session = a.session || process.env.HOP_SESSION || null;
+        if (!session) return this.wrapApiResult({ error: 'No session: pass `session` (this MCP is not running inside a hop session).' }, { endpoint: '/api/checkbacks' });
+        const body = {
+          session, message: a.message, force: a.force === true,
+          in: a.in, at: a.at, every: a.every, until: a.until,
+          idle: a.when_idle === true || undefined, idleFor: a.idle_for,
+          file: a.when_file, changed: a.changed === true || undefined,
+          cmd: a.when_cmd, cwd: process.cwd()
+        };
+        return this.wrapApiResult(await this.callApi('POST', '/api/checkbacks', body), { endpoint: '/api/checkbacks' });
+      }
+      case 'hop_list_checkbacks': {
+        const a = args || {};
+        const r = await this.callApi('GET', '/api/checkbacks');
+        if (this.isApiFailurePayload(r)) return this.wrapApiResult(r, { endpoint: '/api/checkbacks' });
+        const items = (r.items || []).filter((c) => (a.all || c.status === 'pending') && (!a.session || c.session === a.session || c.sessionName === a.session));
+        return this.wrapApiResult({ items }, { endpoint: '/api/checkbacks' });
+      }
+      case 'hop_cancel_checkback':
+        return this.wrapApiResult(await this.callApi('POST', '/api/checkbacks/cancel', { id: (args || {}).id, session: (args || {}).session || (!(args || {}).id ? process.env.HOP_SESSION : undefined) }), { endpoint: '/api/checkbacks/cancel' });
       case 'hop_list_terminals': {
         const listed = await this.callApi('GET', '/api/terminals');
         if (!this.isApiFailurePayload(listed) && Array.isArray(listed.terminals)) {

@@ -21,6 +21,7 @@ const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const { withCodexIdentity } = require('./lib/codex-identity');
+const checkbacks = require('./lib/checkbacks');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
     createFailureTracker,
@@ -5817,6 +5818,95 @@ function refileFromIdentitySnapshot({ dryRun = false } = {}) {
         log(`  re-filed ${item.displayName} → ${folderName} (from ${path.basename(latest.file)})`, DIM);
     }
     return plan;
+}
+
+// ---- Check-backs (lib/checkbacks.js) ---------------------------------------
+// A message hop types into a session later, on a trigger: a time, a period,
+// the session going idle, a file appearing/changing, a command succeeding.
+// Durable in ~/.hop2/checkbacks.json; swept every 15s by the daemon.
+const CHECKBACKS_FILE = path.join(HOME_DIR, 'checkbacks.json');
+let checkbackStore = null;
+function loadCheckbacks() {
+    if (checkbackStore) return checkbackStore;
+    try { checkbackStore = JSON.parse(fs.readFileSync(CHECKBACKS_FILE, 'utf8')); }
+    catch (e) { checkbackStore = { items: [] }; }
+    if (!checkbackStore || !Array.isArray(checkbackStore.items)) checkbackStore = { items: [] };
+    return checkbackStore;
+}
+function saveCheckbacks() {
+    try { writePrivateFile(CHECKBACKS_FILE, JSON.stringify(loadCheckbacks(), null, 1), 0o600); }
+    catch (e) { log(`[checkback] could not save: ${e?.message || e}`, YELLOW); }
+}
+function pendingCheckbacksFor(internalName) {
+    return loadCheckbacks().items.filter((c) => c.status === 'pending' && c.session === internalName).length;
+}
+// Prune delivered/cancelled records older than a day so the file stays small.
+function pruneCheckbacks(now = Date.now()) {
+    const store = loadCheckbacks();
+    const before = store.items.length;
+    store.items = store.items.filter((c) => c.status === 'pending' || (now - (c.deliveredAt || c.cancelledAt || c.createdAt || 0)) < 86_400_000);
+    if (store.items.length !== before) saveCheckbacks();
+}
+function runShellProbe(command, cwd) {
+    return new Promise((resolve) => {
+        try {
+            execFile('/bin/sh', ['-c', command], { cwd: cwd || HOME_DIR, timeout: 20000, maxBuffer: 1024 * 1024 }, (err) => {
+                resolve(err ? (Number.isInteger(err.code) ? err.code : 1) : 0);
+            });
+        } catch (e) { resolve(1); }
+    });
+}
+let checkbackSweepBusy = false;
+async function runCheckbackSweep() {
+    if (shuttingDown || checkbackSweepBusy) return;
+    const store = loadCheckbacks();
+    const pending = store.items.filter((c) => c.status === 'pending');
+    if (!pending.length) return;
+    checkbackSweepBusy = true;
+    const now = Date.now();
+    try {
+        // One session snapshot for the whole sweep: who is working, who exists.
+        let phaseBy = new Map(), entryBy = new Map();
+        try {
+            const snap = await listAllSessionEntriesRuntimeFirst();
+            for (const e of snap.entries) entryBy.set(e.internalName, e);
+            phaseBy = await agentPhaseFieldsForAll(snap.entries.filter((e) => pending.some((c) => c.session === e.internalName)));
+        } catch (e) { /* host busy: timers and files still evaluate; idle waits */ }
+        let dirty = false;
+        for (const cb of pending) {
+            const entry = entryBy.get(cb.session);
+            const phase = phaseBy.get(cb.session)?.agentPhase ?? (entry ? null : undefined);
+            const ctx = { phase, idleSince: entry ? Number(entry.lastActivityAt) || 0 : 0 };
+            const t = cb.trigger || {};
+            try {
+                if (t.kind === 'file') {
+                    try { ctx.fileMtime = fs.statSync(t.path).mtimeMs; } catch (e) { ctx.fileMtime = null; }
+                } else if (t.kind === 'cmd' && checkbacks.cmdDue(cb, now)) {
+                    ctx.cmdExit = await runShellProbe(t.command, t.cwd);
+                    t.nextCheck = now + (t.everyMs || 60000);
+                    dirty = true;
+                }
+                if (!cb.firedAt && checkbacks.triggerFired(cb, ctx, now)) { cb.firedAt = now; dirty = true; }
+                if (!cb.firedAt) continue;
+                if (!entry) {
+                    // The session is gone (deleted): nothing to type into.
+                    if (now - cb.firedAt > 86_400_000) { cb.status = 'cancelled'; cb.cancelledAt = now; cb.lastError = 'session not found'; dirty = true; }
+                    continue;
+                }
+                if (!checkbacks.mayDeliver(cb, ctx)) continue; // mid-turn: next sweep
+                const e2 = await attachTerminalApiClient(cb.session, entry.displayName || cb.session, { actor: 'system', label: 'checkback' });
+                try { sendTerminalInput(e2, `${cb.message}\r`); }
+                finally { setTimeout(() => { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }, 1500).unref?.(); }
+                Object.assign(cb, checkbacks.afterDelivery(cb, now));
+                dirty = true;
+                log(`[checkback] ${cb.id} → ${entry.displayName || cb.session}: ${JSON.stringify(cb.message.slice(0, 80))}${cb.status === 'pending' ? ' (recurs)' : ''}`, DIM);
+            } catch (e) {
+                cb.lastError = String(e?.message || e); dirty = true;
+            }
+        }
+        if (dirty) saveCheckbacks();
+        pruneCheckbacks(now);
+    } finally { checkbackSweepBusy = false; }
 }
 
 // Claude Code slugifies a project cwd for <config-root>/projects/<slug>/.
@@ -11771,6 +11861,8 @@ happens until someone clicks it.
                 // working / done + whether the human has opened it since the
                 // turn ended (server-side seen witness, so every device agrees).
                 ...(phaseBySession.get(s.internalName) || { agentPhase: null, turnSeen: true, turnAt: null }),
+                // Scheduled check-backs waiting on this session (hop checkback).
+                checkbacks: pendingCheckbacksFor(s.internalName) || undefined,
                 lastActivityAt: s.lastActivityAt,
                 // For sessions armed with notify-on-finish, each completed turn
                 // adds to bellSeq so the phone treats a finished response like a
@@ -12936,6 +13028,71 @@ happens until someone clicks it.
         }
 
         // API: Delete session
+        // API: check-backs — list / schedule / cancel (lib/checkbacks.js)
+        if (parsedUrl.pathname === '/api/checkbacks' && req.method === 'GET') {
+            const now = Date.now();
+            const items = loadCheckbacks().items.map((c) => ({ ...c, sessionName: getSessionDisplayName(c.session) || c.session, line: checkbacks.describe(c, now) }));
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ items, now }));
+            return;
+        }
+        if (parsedUrl.pathname === '/api/checkbacks' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const input = JSON.parse(body || '{}');
+                    const target = resolveSessionInternalName(input.session, input.internalName);
+                    if (!target || !(hopSessionExists(target) || getEffectiveSessionConfig(target))) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Session not found' }));
+                        return;
+                    }
+                    const now = Date.now();
+                    const cb = checkbacks.normalizeCheckback({
+                        ...input,
+                        session: target,
+                        createdBy: resolveActor(req) === 'agent' ? 'agent' : 'user',
+                        // A file watched for CHANGE starts from its current mtime.
+                        baselineMtime: input.file && input.changed ? (() => { try { return fs.statSync(String(input.file)).mtimeMs; } catch (e) { return null; } })() : undefined
+                    }, now);
+                    const store = loadCheckbacks();
+                    store.items.push(cb);
+                    saveCheckbacks();
+                    log(`[checkback] scheduled ${cb.id} for ${getSessionDisplayName(target) || target}: ${checkbacks.describe(cb, now)}`, DIM);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, checkback: { ...cb, sessionName: getSessionDisplayName(target) || target, line: checkbacks.describe(cb, now) } }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: e?.message || 'Invalid request' }));
+                }
+            });
+            return;
+        }
+        if (parsedUrl.pathname === '/api/checkbacks/cancel' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const { id, session } = JSON.parse(body || '{}');
+                    const store = loadCheckbacks();
+                    const target = session ? resolveSessionInternalName(session, session) : null;
+                    let n = 0;
+                    for (const c of store.items) {
+                        if (c.status !== 'pending') continue;
+                        if ((id && c.id === id) || (!id && target && c.session === target)) { c.status = 'cancelled'; c.cancelledAt = Date.now(); n++; }
+                    }
+                    if (n) saveCheckbacks();
+                    res.writeHead(n ? 200 : 404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(n ? { ok: true, cancelled: n } : { error: 'No such pending check-back' }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
         if (parsedUrl.pathname === '/api/sessions/delete' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -16036,6 +16193,7 @@ const HELP_SECTIONS = [
         `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
         `hop claude-hook status|remove   Check or remove the hook`,
+        `hop checkback ...          Type a message into a session later: --in 30m, --at 15:00, --every 2h, --when-idle, --when-file, --when-cmd`,
         `hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`,
         `hop agent-skill status|remove   Check or remove the skills`,
         `hop claude-skill ...      Backward-compatible Claude-only alias`,
@@ -17250,6 +17408,63 @@ async function main() {
         const renamed = display && display !== internal;
         log(`${BOLD}${display || internal}${RESET}${renamed ? `  ${DIM}(internal: ${internal})${RESET}` : ''}`, GREEN);
         log(`hop view targets this session automatically; from a scrubbed subprocess, pass ${CYAN}--session ${internal}${RESET}.`, DIM);
+        process.exit(0);
+    }
+
+    // hop checkback — have hop type a message into a session later, on a
+    // trigger (a time, a period, idle, a file, a command). For humans, and
+    // for agents that promise to "check back in 30 minutes" and don't.
+    if (process.argv[2] === 'checkback') {
+        const argv = process.argv.slice(3);
+        const flagValue = (name) => { const i = argv.indexOf(name); return i !== -1 && i + 1 < argv.length ? argv[i + 1] : null; };
+        const has = (name) => argv.includes(name);
+        const usage = () => {
+            log('Usage: hop checkback [--session <name>] (--in 45m | --at 15:00 | --every 2h [--until <when>] | --when-idle [--idle-for 10m] | --when-file <path> [--changed] | --when-cmd <command> [--every 5m]) [--force] "<message to type>"', YELLOW);
+            log('       hop checkback --list        hop checkback --cancel <id>        hop checkback --cancel-all [--session <name>]', DIM);
+            log('The message is typed into the session (and submitted) when the trigger fires and the agent is idle; --force types at once.', DIM);
+            log('Inside a session --session defaults to this one. Examples:', DIM);
+            log('  hop checkback --in 30m "Check the training job and report the loss curve"', DIM);
+            log('  hop checkback --session surf --when-cmd "test -f results/af.csv" "The AF results are in: summarise them"', DIM);
+            log('  hop checkback --when-idle --idle-for 15m "You have been idle 15 minutes: write the status note"', DIM);
+        };
+        const state = isServerRunning();
+        if (!state) { log('Hop is not running.', YELLOW); process.exit(1); }
+        if (has('--list')) {
+            const r = await callLocalApi(state, '/api/checkbacks', 'GET');
+            const items = (r?.data?.items || []).filter((c) => has('--all') || c.status === 'pending');
+            if (!items.length) { log(has('--all') ? 'No check-backs.' : 'No pending check-backs.', DIM); process.exit(0); }
+            for (const c of items) console.log(c.line.replace(c.session, c.sessionName || c.session));
+            process.exit(0);
+        }
+        if (has('--cancel') || has('--cancel-all')) {
+            const body = has('--cancel') ? { id: flagValue('--cancel') } : { session: flagValue('--session') || process.env.HOP_SESSION || null };
+            if (has('--cancel-all') && !body.session) { log('--cancel-all needs --session <name> (or run it inside the session).', RED); process.exit(1); }
+            const r = await callLocalApi(state, '/api/checkbacks/cancel', 'POST', body);
+            if (!r?.data?.ok) { log(r?.data?.error || 'Cancel failed', RED); process.exit(1); }
+            log(`Cancelled ${r.data.cancelled} check-back(s).`, GREEN);
+            process.exit(0);
+        }
+        const consumed = new Set(['--session', '--in', '--at', '--every', '--until', '--idle-for', '--when-file', '--when-cmd']);
+        const positional = [];
+        for (let i = 0; i < argv.length; i++) {
+            if (consumed.has(argv[i])) { i++; continue; }
+            if (argv[i].startsWith('--')) continue;
+            positional.push(argv[i]);
+        }
+        const message = positional.join(' ').trim();
+        const session = flagValue('--session') || process.env.HOP_SESSION || '';
+        if (!message || !session) { usage(); if (!session) log('No session: pass --session <name> or run inside a hop session.', RED); process.exit(1); }
+        const body = {
+            session, message, force: has('--force'),
+            in: flagValue('--in') || undefined, at: flagValue('--at') || undefined,
+            every: flagValue('--every') || undefined, until: flagValue('--until') || undefined,
+            idle: has('--when-idle') || undefined, idleFor: flagValue('--idle-for') || undefined,
+            file: flagValue('--when-file') || undefined, changed: has('--changed') || undefined,
+            cmd: flagValue('--when-cmd') || undefined, cwd: process.cwd()
+        };
+        const r = await callLocalApi(state, '/api/checkbacks', 'POST', body);
+        if (!r?.data?.ok) { log(r?.data?.error || 'Could not schedule', RED); usage(); process.exit(1); }
+        log(`Scheduled: ${r.data.checkback.line.replace(r.data.checkback.session, r.data.checkback.sessionName)}`, GREEN);
         process.exit(0);
     }
 
@@ -19457,6 +19672,11 @@ async function main() {
         // put sessions back in their folders after their records are lost.
         setTimeout(() => writeIdentitySnapshot('start'), 30000).unref?.();
         setInterval(() => writeIdentitySnapshot('hourly'), 3600000).unref?.();
+
+        // Check-backs: typed into their sessions when their trigger fires
+        // and the session is idle. 15s is finer than any trigger needs.
+        setTimeout(runCheckbackSweep, 20000).unref?.();
+        setInterval(runCheckbackSweep, 15000).unref?.();
     }
 
     if (DAEMON_FLAG) {

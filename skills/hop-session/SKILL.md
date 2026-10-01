@@ -112,6 +112,27 @@ second entry to find isn't a hand-off, it's a scavenger hunt. If you
 genuinely need a standalone room not tied to any session (exposing a service
 nobody will think of as "part of" this conversation), pass `--standalone`.
 
+## Checking back later — make hop remember, not yourself
+
+You cannot wake yourself up later: a promise to "check back in 30 minutes"
+is kept only if something types into your session then. hop does that for
+you. Schedule a check-back and END your turn; hop types the message into
+this session (and submits it) when the trigger fires and you are idle.
+
+```bash
+hop checkback --in 30m "Check job 123's loss curve and report whether it has plateaued"
+hop checkback --when-cmd "squeue -j 123 | grep -q COMPLETED" --every 5m "Job 123 finished: collect outputs and summarise"
+hop checkback --when-file results/af.csv "The AF results are in: summarise them for the user"
+hop checkback --every 2h --until 18:00 "Status check: anything blocked?"
+hop checkback --list      hop checkback --cancel <id>
+```
+
+Over MCP the same is `hop_checkback` (`in` / `at` / `every` / `when_idle` /
+`when_file` / `when_cmd`), `hop_list_checkbacks`, `hop_cancel_checkback`.
+Write the message as the prompt your future self needs — it arrives with
+no other context. Never poll in a loop or sleep to wait for a job; schedule
+a check-back and finish.
+
 ## Asking for attention — two tiers
 
 **Finished something, or pausing normally?** Ring the bell:

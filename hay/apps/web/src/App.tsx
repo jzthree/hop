@@ -23,6 +23,7 @@ import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
+import { enableViewBlocks } from "./utils/viewBlocks";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -702,7 +703,7 @@ const App = () => {
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   // Published views (`hop view`). `session` scopes the panel to one session;
   // an object with none open it fleet-wide. Null = closed.
-  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean } | null>(null);
+  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string } | null>(null);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   // Claude Code titles its process with a bare version number; hop's session
@@ -2112,6 +2113,9 @@ const App = () => {
       // ⌥-drag always selects, iTerm's escape hatch for apps that track the
       // mouse. (Plain drag selects too in agent sessions — utils/dragSelect.)
       macOptionClickForcesSelection: true,
+      // Decorations (inline hop view cards, utils/viewBlocks.ts) are a
+      // proposed xterm API; this is the switch that lets them register.
+      allowProposedApi: true,
       lineHeight: 1.3,
       cursorBlink: true,
       scrollback: 50000,
@@ -2149,6 +2153,9 @@ const App = () => {
     // KaTeX, a click pins it. What `hop math` could only approximate in
     // Unicode, the browser around the terminal draws properly.
     enableMathHover(terminal, getMathTip());
+    // `hop view` deliveries become small inline cards where they printed;
+    // Open lands in the Views reader on that item.
+    (terminal as any).__viewBlocksCleanup = enableViewBlocks(terminal as never, (b) => setViewsOpen({ session: b.session, item: b.name }));
     terminal.open(containerRef.current);
     // Plain drag selects in Claude/Codex sessions even though they track the
     // mouse; the wheel still reaches them. See utils/dragSelect.ts.
@@ -3053,6 +3060,10 @@ const App = () => {
         if ((terminal as any).__overlayScrollbarCleanup) {
           (terminal as any).__overlayScrollbarCleanup();
           (terminal as any).__overlayScrollbarCleanup = null;
+        }
+        if ((terminal as any).__viewBlocksCleanup) {
+          (terminal as any).__viewBlocksCleanup();
+          (terminal as any).__viewBlocksCleanup = null;
         }
         if ((terminal as any).__dragSelectCleanup) {
           (terminal as any).__dragSelectCleanup();
@@ -4247,7 +4258,7 @@ const App = () => {
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
-            onOpenViews={(scope) => setViewsOpen({ session: scope })}
+            onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
           />
@@ -4911,7 +4922,7 @@ const App = () => {
             tileWsBase={resolveWsUrl()}
             onFocusSession={focusSessionInPlace}
             folders={folders}
-            onOpenViews={(scope) => setViewsOpen({ session: scope })}
+            onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {
@@ -5055,7 +5066,7 @@ const App = () => {
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}
       {viewsOpen && (
-        <ViewsPanel session={viewsOpen.session} sessions={sessions} dock={viewsOpen.dock}
+        <ViewsPanel session={viewsOpen.session} item={viewsOpen.item} sessions={sessions} dock={viewsOpen.dock}
                     onClose={() => setViewsOpen(null)} />
       )}
     </div>

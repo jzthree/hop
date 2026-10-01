@@ -303,6 +303,11 @@ hop view --list          # what this session published
 hop view --rm x.png      # unpublish
 ```
 
+On the web, every delivery also shows as a small inline card right where
+`hop view` printed it — title, file, size, a thumbnail for an image, and
+an Open button that lands the Views reader on that item. Plain terminals
+and the phone see the same delivery as a text box.
+
 HTML, PDF, images, video and markdown all render (markdown is converted at
 serve time — headings, tables, fenced code). `--title` is what a human sees
 in the session's Views list, so it is worth writing properly. Published files

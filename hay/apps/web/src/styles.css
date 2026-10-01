@@ -3834,6 +3834,44 @@ body.pane-dragging { user-select: none; }
   background: #22a06b;
   color: #04170d;
 }
+/* Inline `hop view` delivery cards (utils/viewBlocks.ts): an xterm
+   decoration over the four-line text box the CLI printed, sized in cells
+   by xterm; the card fills it. */
+.view-block-host { overflow: hidden; pointer-events: auto; }
+.view-block {
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+  color: var(--ink);
+  font-family: var(--font-ui, system-ui, sans-serif);
+  cursor: pointer;
+  user-select: none;
+}
+.view-block:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.view-block-thumb { height: 100%; max-width: 38%; object-fit: cover; border-radius: 4px; background: var(--bg-alt); }
+.view-block-glyph { font-size: 20px; line-height: 1; flex-shrink: 0; }
+.view-block-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.view-block-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.view-block-meta { font-size: 11px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.view-block-open {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+  cursor: pointer;
+}
+
 /* A scheduled check-back (hop checkback): hop will type into this session later. */
 .switcher-chip.checkback {
   background: var(--bg-alt);

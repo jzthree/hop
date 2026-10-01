@@ -12085,7 +12085,23 @@ happens until someone clicks it.
                     // wall's own truth for the folder (saved, runtime and
                     // durable layers merged); the durable meta alone missed
                     // sessions filed before folders were written there.
-                    const folderId = config.folderId || meta?.folderId || null;
+                    // The fork is filed where its source is — and when the
+                    // source is itself an unfiled fork, where the nearest
+                    // filed ancestor is, so a fork of a fork lands beside
+                    // the family instead of loose at the root.
+                    const folderId = (() => {
+                        let cur = source;
+                        const seen = new Set();
+                        for (let hops = 0; cur && hops < 8 && !seen.has(cur); hops++) {
+                            seen.add(cur);
+                            const cfg = getEffectiveSessionConfig(cur) || {};
+                            const m = readClaudeSessionMeta(cur);
+                            const fid = cfg.folderId || m?.folderId || null;
+                            if (fid && sessionStore.folders[fid]) return fid;
+                            cur = m?.forkedFrom || null;
+                        }
+                        return null;
+                    })();
                     rememberRuntimeSessionMetadata(forkInternal, {
                         type: 'terminal',
                         displayName: forkName,

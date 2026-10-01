@@ -3834,6 +3834,13 @@ body.pane-dragging { user-select: none; }
   background: #22a06b;
   color: #04170d;
 }
+/* A scheduled check-back (hop checkback): hop will type into this session later. */
+.switcher-chip.checkback {
+  background: var(--bg-alt);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
 .switcher-chip.phase.done-read {
   background: var(--bg-alt);
   color: var(--ink-muted);

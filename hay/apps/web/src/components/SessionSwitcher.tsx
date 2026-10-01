@@ -2996,6 +2996,11 @@ export const SessionSwitcher = ({
             </span>
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
+          {!!s.checkbacks && (
+            <span className="switcher-chip checkback" title={`${s.checkbacks} scheduled check-back${s.checkbacks === 1 ? "" : "s"} will be typed into this session (hop checkback --list)`}>
+              ⏰ {s.checkbacks}
+            </span>
+          )}
           {phase && (
             <span className={`switcher-chip phase ${phase}`} title={phaseTitle(phase)}>
               <span className="phase-dot" aria-hidden="true" />{phaseLabel(phase)}

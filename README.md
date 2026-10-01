@@ -245,6 +245,32 @@ curl -X POST http://127.0.0.1:$PORT/api/sessions/fork \
   -d '{"name":"angler","target":"codex"}'     # omit target to fork with the same tool
 ```
 
+### Check back later (`hop checkback`)
+
+Agents promise to "check back in 30 minutes" and then don't — Codex
+especially. A check-back makes hop do the remembering: a message that hop
+types into a session (and submits) when a trigger fires, once the session
+is idle, so it lands at the prompt like something you typed.
+
+```bash
+hop checkback --in 30m "Check the training job and report the loss curve"      # inside a session: this one
+hop checkback --session surf --at 15:00 "Summarise today's AF results for me"
+hop checkback --session surf --every 2h --until 18:00 "Status?"
+hop checkback --when-idle --idle-for 15m "Idle 15 minutes: write the status note and stop"
+hop checkback --when-file results/af.csv "The AF results are in: summarise them"   # --changed: on change, not existence
+hop checkback --when-cmd "squeue -j 123 | grep -q COMPLETED" --every 5m "Job 123 finished — collect its outputs"
+hop checkback --list            hop checkback --cancel <id>            hop checkback --cancel-all --session surf
+```
+
+Triggers: a moment (`--in 45m`, `--at 15:00` / `3pm` / ISO), a period
+(`--every`, with `--until`), the session going idle (`--when-idle`, optionally
+after a quiet spell), a file appearing or changing (`--when-file`), a shell
+command succeeding (`--when-cmd`, polled). Delivery waits for the agent to
+finish its turn unless `--force`. Check-backs are durable (`~/.hop2/checkbacks.json`)
+and survive daemon restarts; the wall shows ⏰ on a session that has one
+waiting. Agents get the same over MCP (`hop_checkback`, `hop_list_checkbacks`,
+`hop_cancel_checkback`) and are told to use it on themselves.
+
 ### Render LaTeX math (`hop math`)
 
 Glance at a formula without leaving the terminal:
@@ -424,6 +450,7 @@ Hop uses the external Hay host runtime for PTY hosting and session recovery.
 | `hop` | Start hop daemon/tunnel if needed, then launch a local terminal. Unnamed launches do not reuse a session that already has a local CLI attached. |
 | `hop start` | Start the hop daemon and print QR codes |
 | `hop attach [session]` | Attach to an existing terminal session |
+| `hop checkback …` | Type a message into a session later: `--in`, `--at`, `--every`, `--when-idle`, `--when-file`, `--when-cmd`; `--list`, `--cancel` |
 | `hop attach all` | Attach sequentially to all terminal sessions |
 | `hop local [session]` | Start a daemonless local terminal (`[session]` attaches if it exists) |
 | `hop stop` | Stop the hop daemon (terminal sessions keep running) |

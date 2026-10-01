@@ -38,6 +38,8 @@ export type SwitcherSession = {
   /** Server-decided: a turn in flight / the last turn finished; turnSeen = a human opened it since. */
   agentPhase?: "working" | "done" | null;
   turnSeen?: boolean;
+  /** Scheduled check-backs waiting on this session (hop checkback). */
+  checkbacks?: number;
   agentPermitted?: boolean;
   cols?: number;
   rows?: number;

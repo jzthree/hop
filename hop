@@ -5165,14 +5165,24 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         cols,
         rows,
         source: `terminal-api-${opts.actor || 'user'}`,
-        cwd: sessionCwd
+        cwd: sessionCwd,
+        ...(opts.typeOnly ? { replay: 0, nudge: false } : {})
     });
     const ws = new WebSocket(wsUrl);
     let open = false;
     let closed = false;
     const pendingPayloads = [];
+    // Resolves once the socket is open (true) or failed (false). Anything
+    // emitted before then is queued and flushed in ONE burst on open — a
+    // typed message and its Enter arriving together read as a paste to a
+    // TUI composer (Codex: typed, never sent). Callers that type should
+    // await this first.
+    let resolveReady = null;
+    const attachT0 = Date.now();
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
 
     const adapterBundle = {
+        ready,
         emit: (payload) => {
             if (closed || !payload) return;
             if (open && ws.readyState === WebSocket.OPEN) {
@@ -5192,6 +5202,7 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
     ws.on('open', () => {
         if (closed) return;
         open = true;
+        if (process.env.HOP_CHECKBACK_DEBUG && label === 'checkback') log(`[checkback] ws open after ${Date.now() - attachT0}ms`, DIM);
         while (pendingPayloads.length > 0 && ws.readyState === WebSocket.OPEN) {
             const payload = pendingPayloads.shift();
             if (payload) {
@@ -5207,10 +5218,17 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         } catch (e) {
             parsed = null;
         }
+        // Attached for real once the room has answered (hello, then the
+        // snapshot): input sent before that is held and lands as one burst.
+        if (process.env.HOP_CHECKBACK_DEBUG && label === 'checkback' && parsed) log(`[checkback] ws message ${parsed.type} after ${Date.now() - attachT0}ms`, DIM);
+        if (resolveReady && parsed && (parsed.type === 'snapshot' || parsed.type === 'hello')) {
+            resolveReady(true); resolveReady = null;
+        }
         handleTerminalApiServerMessage(terminalId, parsed);
     });
 
     ws.on('close', () => {
+        if (resolveReady) { resolveReady(false); resolveReady = null; }
         if (closed) return;
         closed = true;
         closeTerminalApiEntry(terminalId);
@@ -5881,6 +5899,55 @@ function runShellProbe(command, cwd) {
         } catch (e) { resolve(1); }
     });
 }
+// Type a message into a session and SUBMIT it the way a person does: the
+// text first, Enter on its own a beat later, and a second Enter if the
+// composer still holds the text. One write with the Enter glued to the
+// text was taken by Codex's composer as a paste — the message sat there
+// typed and never sent (the surf session, 2026-10-01). The MCP's
+// agent-turn path has always sent them as separate writes; this is that.
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+// Is the message still sitting in the composer (the `›` line) — typed, not sent?
+async function composerStillHolds(internalName, message) {
+    try {
+        const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
+        const raw = hostRes?.data?.data;
+        if (typeof raw !== 'string' || !raw) return false;
+        const compact = (t) => String(t).replace(/\s+/g, '');
+        const needle = compact(message).slice(0, 24);
+        if (!needle) return false;
+        const lines = stripAnsiForSearch(raw).split('\n').map((l) => compact(l)).filter(Boolean).slice(-12);
+        // The composer is the LAST prompt line on screen; Codex also echoes a
+        // submitted prompt with the same glyph higher up, which is not it.
+        const prompts = lines.filter((l) => l.startsWith('›') || l.startsWith('❯'));
+        const composer = prompts.length ? prompts[prompts.length - 1] : '';
+        const holds = composer.includes(needle);
+        if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] composer check holds=${holds} needle=${needle} tail=${JSON.stringify(lines.slice(-4).map((l) => l.slice(0, 40)))}`, DIM);
+        return holds;
+    } catch (e) { if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] composer check failed: ${e?.message || e}`, DIM); return false; }
+}
+async function typeAndSubmit(entry, internalName, message) {
+    // The attach returns before its socket is open; type only once it is,
+    // or the text and the Enter leave in one burst (see adapterBundle.ready).
+    const t0 = Date.now();
+    const dbg = (m) => { if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] +${Date.now() - t0}ms ${m}`, DIM); };
+    dbg(`typeAndSubmit: ready=${typeof entry?.adapter?.ready}`);
+    try { const r = await Promise.race([entry?.adapter?.ready || Promise.resolve('none'), sleepMs(4000).then(() => 'timeout')]); dbg(`ready → ${r}`); } catch (e) { /* type anyway */ }
+    await sleepMs(300);
+    dbg('typing text');
+    sendTerminalInput(entry, message);
+    // Codex folds keys that arrive within ~half a second of the text into a
+    // paste, Enter included (measured: 400ms failed, 1s submitted).
+    await sleepMs(1000);
+    dbg('sending Enter');
+    sendTerminalInput(entry, '\r');
+    for (let attempt = 0; attempt < 2; attempt++) {
+        await sleepMs(1500);
+        if (!(await composerStillHolds(internalName, message))) return;
+        if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] Enter did not take (attempt ${attempt + 1}); sending it again`, DIM);
+        sendTerminalInput(entry, '\r');
+    }
+}
+
 let checkbackSweepBusy = false;
 async function runCheckbackSweep() {
     if (shuttingDown || checkbackSweepBusy) return;
@@ -5919,9 +5986,9 @@ async function runCheckbackSweep() {
                     continue;
                 }
                 if (!checkbacks.mayDeliver(cb, ctx)) continue; // mid-turn: next sweep
-                const e2 = await attachTerminalApiClient(cb.session, entry.displayName || cb.session, { actor: 'system', label: 'checkback' });
-                try { sendTerminalInput(e2, `${cb.message}\r`); }
-                finally { setTimeout(() => { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }, 1500).unref?.(); }
+                const e2 = await attachTerminalApiClient(cb.session, entry.displayName || cb.session, { actor: 'system', label: 'checkback', typeOnly: true });
+                try { await typeAndSubmit(e2, cb.session, cb.message); }
+                finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
                 Object.assign(cb, checkbacks.afterDelivery(cb, now));
                 dirty = true;
                 log(`[checkback] ${cb.id} → ${entry.displayName || cb.session}: ${JSON.stringify(cb.message.slice(0, 80))}${cb.status === 'pending' ? ' (recurs)' : ''}`, DIM);
@@ -9964,6 +10031,11 @@ function buildExternalHayWsUrl(sessionName, options = {}) {
     if (options.source) params.set('source', String(options.source));
     if (options.claim) params.set('claim', String(options.claim));
     if (options.cwd) params.set('cwd', String(options.cwd));
+    // A client that only TYPES wants neither a snapshot nor the attach
+    // nudge: the nudge (a one-column resize and back) makes Codex's TUI
+    // pause input for ~4s, so keys sent meanwhile land as one paste.
+    if (Number.isFinite(options.replay)) params.set('replay', String(Math.max(0, Math.floor(Number(options.replay)))));
+    if (options.nudge === false) params.set('nudge', '0');
     return `ws://127.0.0.1:${port}/ws?${params.toString()}`;
 }
 

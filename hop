@@ -22,6 +22,7 @@ const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const checkbacks = require('./lib/checkbacks');
+const digestReads = require('./lib/digest-reads');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
     createFailureTracker,
@@ -5818,6 +5819,30 @@ function refileFromIdentitySnapshot({ dryRun = false } = {}) {
         log(`  re-filed ${item.displayName} → ${folderName} (from ${path.basename(latest.file)})`, DIM);
     }
     return plan;
+}
+
+// ---- Briefing read witness (lib/digest-reads.js) ---------------------------
+// Which briefing stories the human has actually seen, at what strength,
+// reported by every client and kept as one union here — so "new" means the
+// same on the phone and the laptop, and the generator knows whether a
+// thread may be told as a delta or must be retold cold.
+const DIGEST_READS_FILE = path.join(HOME_DIR, 'digest-reads.json');
+let digestReadStore = null;
+function loadDigestReads() {
+    if (digestReadStore) return digestReadStore;
+    try { digestReadStore = JSON.parse(fs.readFileSync(DIGEST_READS_FILE, 'utf8')); } catch (e) { digestReadStore = { reads: {} }; }
+    if (!digestReadStore || typeof digestReadStore !== 'object') digestReadStore = { reads: {} };
+    if (!digestReadStore.reads) digestReadStore.reads = {};
+    return digestReadStore;
+}
+let digestReadsSaveTimer = null;
+function saveDigestReadsSoon() {
+    if (digestReadsSaveTimer) return;
+    digestReadsSaveTimer = setTimeout(() => {
+        digestReadsSaveTimer = null;
+        try { writePrivateFile(DIGEST_READS_FILE, JSON.stringify(loadDigestReads()), 0o600); } catch (e) { /* next report retries */ }
+    }, 1000);
+    digestReadsSaveTimer.unref?.();
 }
 
 // ---- Check-backs (lib/checkbacks.js) ---------------------------------------
@@ -13028,6 +13053,33 @@ happens until someone clicks it.
         }
 
         // API: Delete session
+        // API: briefing reads — the union of what every device witnessed.
+        if (parsedUrl.pathname === '/api/digest/reads' && req.method === 'GET') {
+            const store = loadDigestReads();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ reads: store.reads, editionsSeen: [...digestReads.editionsSeen(store)] }));
+            return;
+        }
+        if (parsedUrl.pathname === '/api/digest/reads' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 256 * 1024) req.destroy(); });
+            req.on('end', () => {
+                try {
+                    const { reads } = JSON.parse(body || '{}');
+                    const store = loadDigestReads();
+                    const changed = digestReads.mergeReads(store, Array.isArray(reads) ? reads.slice(0, 500) : []);
+                    const pruned = digestReads.pruneReads(store);
+                    if (changed || pruned) saveDigestReadsSoon();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, changed }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+
         // API: check-backs — list / schedule / cancel (lib/checkbacks.js)
         if (parsedUrl.pathname === '/api/checkbacks' && req.method === 'GET') {
             const now = Date.now();

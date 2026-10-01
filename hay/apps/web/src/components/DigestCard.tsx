@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createReadWitness, wordCount } from "../utils/readWitness";
 import type { SwitcherSession } from "../utils/switcherModel";
 
 // The briefing, on the desktop wall — the same editions the iOS app renders,
@@ -63,6 +64,18 @@ export const DigestCard = ({ sessions, onOpen }: {
   onOpen: (session: SwitcherSession) => void;
 }) => {
   const [editions, setEditions] = useState<Edition[]>([]);
+  // The read witness: dwell on a visible story, with the human present,
+  // reports glimpsed/read to the daemon; opening a session from a story
+  // reports acted. The daemon's union across devices feeds the "new"
+  // badge below and tells the generator what may be told as a delta.
+  const witnessRef = useRef<ReturnType<typeof createReadWitness> | null>(null);
+  if (!witnessRef.current) {
+    witnessRef.current = createReadWitness((reads) => {
+      fetch("/api/digest/reads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reads }), keepalive: true })
+        .catch(() => { /* offline: the next batch carries it */ });
+    });
+  }
+  useEffect(() => () => { witnessRef.current?.dispose(); witnessRef.current = null; }, []);
   const [dismissed, setDismissed] = useState(() => {
     try { return localStorage.getItem(DISMISS_KEY) || ""; } catch { return ""; }
   });
@@ -83,9 +96,13 @@ export const DigestCard = ({ sessions, onOpen }: {
       // the very first briefing, before an archive exists.
       Promise.all([
         fetch("/assets/digest-archive.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/assets/digest.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
-      ]).then(([archive, latest]: [{ editions?: Edition[] } | null, Edition | null]) => {
+        fetch("/assets/digest.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch("/api/digest/reads", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
+      ]).then(([archive, latest, serverReads]: [{ editions?: Edition[] } | null, Edition | null, { editionsSeen?: string[] } | null]) => {
         if (cancelled) return;
+        // Editions any device has witnessed are not "new" here either.
+        const seenElsewhere = Array.isArray(serverReads?.editionsSeen) ? serverReads!.editionsSeen! : [];
+        if (seenElsewhere.length) setSeen((prev) => { const next = new Set(prev); for (const x of seenElsewhere) next.add(x); saveSeen(next); return next; });
         let list: Edition[] = Array.isArray(archive?.editions) ? archive!.editions! : [];
         if (latest?.summary && (!list.length || list[0]?.generated_at !== latest.generated_at)) {
           list = [latest, ...list];
@@ -171,7 +188,8 @@ export const DigestCard = ({ sessions, onOpen }: {
     );
   }
 
-  const openItem = (session: string) => {
+  const openItem = (session: string, edition?: string) => {
+    if (edition) witnessRef.current?.acted(edition, session);
     const t = find(session);
     if (t) onOpen(t);
   };
@@ -237,8 +255,9 @@ export const DigestCard = ({ sessions, onOpen }: {
                 {open && (ed.items || []).map((item) => (
                   <button
                     key={item.session + item.headline}
+                    ref={witnessRef.current!.ref({ edition: s || "", item: item.session, words: wordCount(item.headline + " " + (item.why || "")) })}
                     className={"digest-item " + urgencyClass(item.urgency)}
-                    onClick={() => openItem(item.session)}
+                    onClick={() => openItem(item.session, s)}
                   >
                     <span className="digest-dateline">{sessionLabel(item.session)}</span>
                     <span className="digest-headline">{item.headline}</span>
@@ -271,11 +290,11 @@ export const DigestCard = ({ sessions, onOpen }: {
                     into the live session. */}
                 {open && (
                   <div className="digest-thread">
-                    <button className="digest-open-session" onClick={() => openItem(g.session)}>
+                    <button className="digest-open-session" onClick={() => openItem(g.session, newest?.at)}>
                       open {sessionLabel(g.session)} →
                     </button>
                     {g.items.map((item, i) => (
-                      <div key={i} className={"digest-thread-item " + urgencyClass(item.urgency)}>
+                      <div key={i} ref={witnessRef.current!.ref({ edition: item.at || "", item: g.session, words: wordCount(item.headline + " " + (item.why || "")) })} className={"digest-thread-item " + urgencyClass(item.urgency)}>
                         <span className="digest-when">{ago(item.at)}</span>
                         <span className="digest-headline">{item.headline}</span>
                         {item.why ? <span className="digest-why">{item.why}</span> : null}

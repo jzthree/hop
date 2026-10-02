@@ -17,7 +17,14 @@ type DigestItem = {
   headline: string;
   why?: string;
   urgency?: string;
+  // The chief-of-staff page: decide / watch / done, and an "also" roll-up
+  // of headline-only items. Older editions have no slot and render flat.
+  slot?: "decide" | "watch" | "done" | "also";
+  recommendation?: string;
+  replies?: string[];
 };
+const SLOT_LABEL: Record<string, string> = { decide: "Decide", watch: "Watch", done: "Done" };
+const SLOT_ORDER = ["decide", "watch", "done"];
 
 type Edition = {
   generated_at?: string;
@@ -199,6 +206,63 @@ export const DigestCard = ({ sessions, onOpen }: {
     try { localStorage.setItem(MODE_KEY, m); } catch { /* ok */ }
   };
 
+  // One edition's page. New editions carry slots: Decide, Watch, Done as
+  // sections, then "Also" as a row of session chips — the roll-up that keeps
+  // a tap into each session without a paragraph each. Older editions (no
+  // slot) render as the flat list they were written as.
+  const renderItem = (item: DigestItem, s?: string) => (
+    <button
+      key={item.session + item.headline}
+      ref={witnessRef.current!.ref({ edition: s || "", item: item.session, words: wordCount(item.headline + " " + (item.why || "") + " " + (item.recommendation || "")) })}
+      className={"digest-item " + urgencyClass(item.urgency)}
+      onClick={() => openItem(item.session, s)}
+    >
+      <span className="digest-dateline">{sessionLabel(item.session)}</span>
+      <span className="digest-headline">{item.headline}</span>
+      {item.why ? <span className="digest-why">{item.why}</span> : null}
+      {item.recommendation ? <span className="digest-reco">→ {item.recommendation}</span> : null}
+      {item.replies?.length ? (
+        <span className="digest-replies">{item.replies.map((r) => <span key={r} className="digest-reply">{r}</span>)}</span>
+      ) : null}
+    </button>
+  );
+  const renderEdition = (ed: Edition, s?: string) => {
+    const items = ed.items || [];
+    if (!items.some((it) => it.slot)) return items.map((it) => renderItem(it, s));
+    const also = items.filter((it) => it.slot === "also");
+    return (
+      <>
+        {SLOT_ORDER.map((slot) => {
+          const rows = items.filter((it) => it.slot === slot);
+          if (!rows.length) return null;
+          return (
+            <div key={slot} className={"digest-slot slot-" + slot}>
+              <div className="digest-slot-head">{SLOT_LABEL[slot]}</div>
+              {rows.map((it) => renderItem(it, s))}
+            </div>
+          );
+        })}
+        {also.length ? (
+          <div className="digest-also">
+            <span className="digest-slot-head">Also</span>
+            {also.map((it) => (
+              <button
+                key={it.session}
+                ref={witnessRef.current!.ref({ edition: s || "", item: it.session, words: wordCount(it.headline) })}
+                className="digest-also-chip"
+                title={it.headline}
+                onClick={() => openItem(it.session, s)}
+              >
+                <span className="digest-also-name">{sessionLabel(it.session)}</span>
+                <span className="digest-also-head">{it.headline}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </>
+    );
+  };
+
   const toggleEdition = (s?: string) => {
     if (!s) return;
     setOpenEditions((prev) => {
@@ -252,18 +316,7 @@ export const DigestCard = ({ sessions, onOpen }: {
                   <span className="digest-edition-summary">{ed.summary}</span>
                   <span className="digest-caret">{open ? "▾" : "▸"}</span>
                 </button>
-                {open && (ed.items || []).map((item) => (
-                  <button
-                    key={item.session + item.headline}
-                    ref={witnessRef.current!.ref({ edition: s || "", item: item.session, words: wordCount(item.headline + " " + (item.why || "")) })}
-                    className={"digest-item " + urgencyClass(item.urgency)}
-                    onClick={() => openItem(item.session, s)}
-                  >
-                    <span className="digest-dateline">{sessionLabel(item.session)}</span>
-                    <span className="digest-headline">{item.headline}</span>
-                    {item.why ? <span className="digest-why">{item.why}</span> : null}
-                  </button>
-                ))}
+                {open && renderEdition(ed, s)}
               </section>
             );
           })}
@@ -298,6 +351,7 @@ export const DigestCard = ({ sessions, onOpen }: {
                         <span className="digest-when">{ago(item.at)}</span>
                         <span className="digest-headline">{item.headline}</span>
                         {item.why ? <span className="digest-why">{item.why}</span> : null}
+                        {item.recommendation ? <span className="digest-reco">→ {item.recommendation}</span> : null}
                       </div>
                     ))}
                   </div>

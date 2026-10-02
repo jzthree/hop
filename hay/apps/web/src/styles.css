@@ -4874,6 +4874,9 @@ body.pane-dragging { user-select: none; }
   gap: 10px;
   pointer-events: none;
 }
+/* A swipe-opened HUD waits for a decision, so its cards take clicks. */
+.switch-hud.waits .switch-hud-window { pointer-events: auto; }
+.switch-hud.waits .switch-hud-card { cursor: pointer; }
 .switch-hud-window {
   position: relative;
   width: min(88vw, 780px);

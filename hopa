@@ -78,7 +78,13 @@ const VERBS = {
   'ws rm':           { tool: 'hop_delete_workspace', pos: ['name'] },
 
   'permit':          { tool: 'hop_set_agent_permission', pos: ['name'], preset: { allowed: true } },
-  'block':           { tool: 'hop_set_agent_permission', pos: ['name'], preset: { allowed: false } }
+  'block':           { tool: 'hop_set_agent_permission', pos: ['name'], preset: { allowed: false } },
+
+  // Check-backs: a message hop types into a session later, on a trigger
+  // (--in 30m, --at 15:00, --every 2h, --when-idle, --when-file, --when-cmd).
+  'checkback':       { tool: 'hop_checkback', pos: ['message'] },
+  'checkback ls':    { tool: 'hop_list_checkbacks', pos: [] },
+  'checkback rm':    { tool: 'hop_cancel_checkback', pos: ['id'] }
 };
 
 const GROUP_ALIASES = { t: 'term' };
@@ -108,6 +114,9 @@ const USAGE = `hopa — agent-facing hop CLI (terminal orchestration; no admin v
 
   hopa ws ls|new|show|save|load|rm    workspaces
   hopa permit <session> | block <session>   allow/deny agent access
+  hopa checkback "<message>" --in 30m | --at 15:00 | --every 2h | --when-idle | --when-file <p> | --when-cmd <c>
+                                             have hop type the message into this session later (--session <name> for another)
+  hopa checkback ls | checkback rm <id>      list / cancel
 
   hopa tool <tool_name> ['{json}']    raw passthrough to any MCP tool
   hopa tools                          list every tool with its arguments

@@ -480,8 +480,14 @@ const App = () => {
   // while you cycle (⌘J/⌘L held / two-finger swipe) and commits on release — like
   // ⌘Tab. Frozen ring so neighbours don't reshuffle mid-cycle (same rule as
   // the iOS swipe order). Ref mirror for the keyup/wheel listeners.
-  const [switchHud, setSwitchHud] = useState<{ ring: SessionInfo[]; index: number } | null>(null);
-  const switchHudRef = useRef<{ ring: SessionInfo[]; index: number } | null>(null);
+  // via: how the HUD was opened. "keys" (⌘J/⌘L) lands on the modifier's
+  // release — the hold IS the deciding time. "wheel" (a two-finger swipe)
+  // has no release, so it waits: ⏎ or a click on a card switches, esc
+  // cancels, and a quiet spell closes it without switching. It used to
+  // commit 320ms after the swipe settled, i.e. while you were still looking.
+  const [switchHud, setSwitchHud] = useState<{ ring: SessionInfo[]; index: number; via: "keys" | "wheel" } | null>(null);
+  const switchHudRef = useRef<{ ring: SessionInfo[]; index: number; via: "keys" | "wheel" } | null>(null);
+  const hudPickRef = useRef<((index: number) => void) | null>(null);
   switchHudRef.current = switchHud;
   // Server-owned folders (Manual mode). Kept in App because the sessions
   // fetch already carries them.
@@ -1508,12 +1514,17 @@ const App = () => {
     lastSentSizeRef.current = { cols, rows };
     const deliberate = claim === "attach" && deliberateAttachRef.current;
     if (deliberate) deliberateAttachRef.current = false;
+    // An explicit Fit says "use MY size" even over someone typing now;
+    // opening/clicking only takes the size from an idle or absent owner.
+    const take = takeSizeRef.current;
+    takeSizeRef.current = false;
     sendMessage({
       type: "resize",
       cols,
       rows,
       ...(claim ? { claim } : {}),
-      ...(deliberate ? { user: true } : {})
+      ...(deliberate ? { user: true } : {}),
+      ...(take ? { take: true } : {})
     });
   };
 
@@ -1522,6 +1533,8 @@ const App = () => {
    * here. Quiet when the session is already at our fit, so an ordinary click
    * (or a selection drag) never pushes a resize.
    */
+  // Set by an explicit Fit: the next resize carries take:true.
+  const takeSizeRef = useRef(false);
   const claimSizeHere = (force = false) => {
     if (!force && !claimOnClick({
       viewMode: viewModeRef.current,
@@ -1531,6 +1544,7 @@ const App = () => {
     })) return;
     attachClaimPendingRef.current = true;
     deliberateAttachRef.current = true;
+    if (force) takeSizeRef.current = true;
     fitToViewport();
     handleResize();
   };
@@ -3923,10 +3937,10 @@ const App = () => {
       [...sessionsRef.current]
         .filter((s) => s.type !== "port")
         .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
-    const hudStep = (dir: 1 | -1) => {
+    const hudStep = (dir: 1 | -1, via: "keys" | "wheel" = "keys") => {
       const open = switchHudRef.current;
       if (open) {
-        setSwitchHud({ ring: open.ring, index: Math.min(open.ring.length - 1, Math.max(0, open.index + dir)) });
+        setSwitchHud({ ...open, index: Math.min(open.ring.length - 1, Math.max(0, open.index + dir)) });
         return;
       }
       const ring = hudRing();
@@ -3934,7 +3948,7 @@ const App = () => {
       const curKey = activeSessionRoomRef.current;
       const cur = ring.findIndex((s) => s.name === curKey || s.internalName === curKey);
       const start = cur < 0 ? 0 : cur;
-      setSwitchHud({ ring, index: Math.min(ring.length - 1, Math.max(0, start + dir)) });
+      setSwitchHud({ ring, index: Math.min(ring.length - 1, Math.max(0, start + dir)), via });
     };
     const hudCommit = () => {
       const open = switchHudRef.current;
@@ -3987,12 +4001,21 @@ const App = () => {
       const mod = isMacPlatform
         ? event.metaKey && !event.ctrlKey && !event.altKey
         : event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey;
+      // esc cancels the HUD whether or not the modifier is still held — the
+      // hint promises it, and with ⌘ down it used to fall through.
+      if (event.key === "Escape" && switchHudRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        hudCancel();
+        return;
+      }
       if (!mod) {
-        if (event.key === "Escape" && switchHudRef.current) {
-          event.preventDefault();
-          event.stopPropagation();
-          hudCancel();
-          return;
+        // A swipe-opened HUD waits for a decision: ⏎ switches, ← → step.
+        if (switchHudRef.current?.via === "wheel") {
+          if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); hudCommit(); return; }
+          if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+            event.preventDefault(); event.stopPropagation(); hudStep(event.key === "ArrowRight" ? 1 : -1, "wheel"); return;
+          }
         }
         if (event.key === "Escape" && (drawerOpenRef.current || shortcutHelpRef.current)) {
           event.preventDefault();
@@ -4075,7 +4098,8 @@ const App = () => {
     // target, ⌘Tab-style. Any keyup counts: the modifier's own release AND
     // releasing it while another key is up both leave the flag false.
     const onKeyUp = (event: KeyboardEvent) => {
-      if (!switchHudRef.current) return;
+      const open = switchHudRef.current;
+      if (!open || open.via !== "keys") return; // a swipe-opened HUD lands on ⏎ or a click, not on a key release
       if (!(isMacPlatform ? event.metaKey : event.ctrlKey)) hudCommit();
     };
     window.addEventListener("keyup", onKeyUp, true);
@@ -4085,20 +4109,34 @@ const App = () => {
     // swipe never fires. Steps per 60pt of travel, settles into a commit.
     let wheelAccum = 0;
     let wheelTimer: number | null = null;
+    const HUD_IDLE_CLOSE_MS = 8000;
     const onWheel = (event: WheelEvent) => {
       if (!session) return;
       const el = event.target as Element | null;
       if (el?.closest(".switcher-scroll, .views-panel, .drawer, input, textarea, [contenteditable]")) return;
       if (Math.abs(event.deltaX) <= Math.abs(event.deltaY) * 1.3) return;
+      // A swipe never opens the HUD over a keyboard-held one.
+      if (switchHudRef.current && switchHudRef.current.via !== "wheel") return;
       event.preventDefault();
       wheelAccum += event.deltaX;
       while (Math.abs(wheelAccum) >= 60) {
         const dir: 1 | -1 = wheelAccum > 0 ? 1 : -1;
         wheelAccum -= dir * 60;
-        hudStep(dir);
+        hudStep(dir, "wheel");
       }
+      // The gesture settling is NOT a decision. The HUD stays until ⏎ or a
+      // click (switch) or esc; left alone, it closes without switching.
       if (wheelTimer) window.clearTimeout(wheelTimer);
-      wheelTimer = window.setTimeout(() => { wheelAccum = 0; hudCommit(); }, 320);
+      wheelTimer = window.setTimeout(() => {
+        wheelAccum = 0;
+        if (switchHudRef.current?.via === "wheel") hudCancel();
+      }, HUD_IDLE_CLOSE_MS);
+    };
+    hudPickRef.current = (index: number) => {
+      const open = switchHudRef.current;
+      if (!open) return;
+      switchHudRef.current = { ...open, index };
+      hudCommit();
     };
     window.addEventListener("wheel", onWheel, { passive: false, capture: true });
     return () => {
@@ -4129,7 +4167,7 @@ const App = () => {
         const curKey = session?.room ?? sessionLabel;
         const SLOT = 152; // card 140 + gap 12; must match .switch-hud CSS
         return (
-          <div className="switch-hud" aria-hidden="true">
+          <div className={"switch-hud" + (switchHud.via === "wheel" ? " waits" : "")} aria-hidden="true">
             <div className="switch-hud-window">
               <div className="switch-hud-strip"
                    style={{ transform: `translateX(-${switchHud.index * SLOT + 70}px)` }}>
@@ -4141,7 +4179,8 @@ const App = () => {
                     <div key={key}
                          className={"switch-hud-card"
                                     + (isTarget ? " is-target" : "")
-                                    + (isCurrent ? " is-current" : "")}>
+                                    + (isCurrent ? " is-current" : "")}
+                         onClick={() => hudPickRef.current?.(i)}>
                       <span className="switch-hud-name">{s.displayName || s.name}</span>
                       {isCurrent && <span className="switch-hud-now">now</span>}
                     </div>
@@ -4150,7 +4189,9 @@ const App = () => {
               </div>
             </div>
             <div className="switch-hud-hint">
-              {isMacPlatform ? "⌘J / ⌘L step · release ⌘ to switch" : "Ctrl+Shift+J / +L step · release to switch"} · esc cancels
+              {switchHud.via === "wheel"
+                ? "swipe or ← → to step · ⏎ or click to switch · esc cancels"
+                : `${isMacPlatform ? "⌘J / ⌘L step · release ⌘ to switch" : "Ctrl+Shift+J / +L step · release to switch"} · esc cancels`}
             </div>
           </div>
         );

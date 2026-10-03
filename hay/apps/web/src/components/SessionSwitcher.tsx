@@ -118,6 +118,8 @@ type Props = {
   // Open the Views panel. No argument = the whole fleet (header button); an
   // internalName = just that session (a card's chip).
   onOpenViews?: (session?: string, item?: string) => void;
+  /** The ⏰ chip: what hop will type into this session, and when. */
+  onOpenCheckbacks?: (session: string) => void;
 };
 
 type Sheet = {
@@ -1282,7 +1284,8 @@ export const SessionSwitcher = ({
   onOpenSettings,
   onToggleKeyboard,
   onFind,
-  onOpenViews
+  onOpenViews,
+  onOpenCheckbacks
 }: Props) => {
   // View state survives a REFRESH but not a new tab: sessionStorage, not
   // localStorage. Reloading the page (or hop reconnecting) used to dump the
@@ -3007,9 +3010,16 @@ export const SessionSwitcher = ({
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
           {!!s.checkbacks && (
-            <span className="switcher-chip checkback" title={`${s.checkbacks} scheduled check-back${s.checkbacks === 1 ? "" : "s"} will be typed into this session (hop checkback --list)`}>
+            <button
+              type="button"
+              className="switcher-chip checkback"
+              title={`${s.checkbacks} scheduled check-back${s.checkbacks === 1 ? "" : "s"} will be typed into this session — click to see what is waiting`}
+              aria-label={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} waiting on ${s.displayName}`}
+              onClick={(e) => { e.stopPropagation(); onOpenCheckbacks?.(key); }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
               ⏰ {s.checkbacks}
-            </span>
+            </button>
           )}
           {phase && (
             <span className={`switcher-chip phase ${phase}`} title={phaseTitle(phase)}>

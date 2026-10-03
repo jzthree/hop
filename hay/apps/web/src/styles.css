@@ -3878,7 +3878,28 @@ body.pane-dragging { user-select: none; }
   color: var(--ink);
   border: 1px solid var(--line);
   font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
 }
+.switcher-chip.checkback:hover { border-color: var(--accent); }
+/* The check-backs window (components/CheckbacksPanel.tsx). */
+.checkbacks-panel { width: min(560px, 92vw); max-height: min(78vh, 680px); }
+.checkbacks-session { font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--ink); }
+.checkbacks-list { overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.checkback-row { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: var(--panel); }
+.checkback-row.pending { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 6%, var(--panel)); }
+.checkback-row.pending.fired { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.checkback-row.delivered, .checkback-row.cancelled { opacity: 0.72; }
+.checkback-when { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.checkback-message { margin-top: 3px; font-size: 13px; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.checkback-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.checkback-state { font-size: 11px; color: var(--ink-muted); }
+.checkback-cancel { font: inherit; font-size: 11.5px; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg-alt); color: var(--ink); cursor: pointer; }
+.checkback-cancel:hover { border-color: var(--err); color: var(--err); }
+.checkbacks-past-head { font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted); margin-top: 4px; }
+.checkbacks-empty { color: var(--ink-muted); font-size: 13px; margin: 6px 2px; }
+.checkbacks-hint { color: var(--ink-muted); font-size: 11.5px; margin: 6px 2px 0; }
+.checkbacks-hint code { font-family: var(--font-mono); }
 .switcher-chip.phase.done-read {
   background: var(--bg-alt);
   color: var(--ink-muted);

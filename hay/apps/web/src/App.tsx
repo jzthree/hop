@@ -24,6 +24,7 @@ import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
+import { CheckbacksPanel } from "./components/CheckbacksPanel";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -710,6 +711,8 @@ const App = () => {
   // Published views (`hop view`). `session` scopes the panel to one session;
   // an object with none open it fleet-wide. Null = closed.
   const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string } | null>(null);
+  // The ⏰ chip's window: what is waiting on a session.
+  const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(null);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   // Claude Code titles its process with a bare version number; hop's session
@@ -4310,6 +4313,7 @@ const App = () => {
             onNotice={showToast}
             tileWsBase={resolveWsUrl()}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
+            onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
           />
@@ -4974,6 +4978,7 @@ const App = () => {
             onFocusSession={focusSessionInPlace}
             folders={folders}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
+            onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             onOpenSettings={() => {
@@ -5116,6 +5121,14 @@ const App = () => {
       )}
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}
+      {checkbacksOpen && (
+        <CheckbacksPanel
+          session={checkbacksOpen}
+          sessionName={sessions.find((s) => (s.internalName || s.name) === checkbacksOpen)?.displayName || checkbacksOpen}
+          onClose={() => setCheckbacksOpen(null)}
+          onChanged={() => { void fetchSessions({ showLoading: false }); }}
+        />
+      )}
       {viewsOpen && (
         <ViewsPanel session={viewsOpen.session} item={viewsOpen.item} sessions={sessions} dock={viewsOpen.dock}
                     onClose={() => setViewsOpen(null)} />

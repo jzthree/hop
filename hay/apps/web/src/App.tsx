@@ -3497,9 +3497,18 @@ const App = () => {
   // lands full-screen in the terminal you were just typing in. State-only:
   // while the wall is open the full-screen socket stays down (one client per
   // tab); the wall-close deliberate attach performs the actual connect.
+  // Opening a session IS reading it. The daemon's seen witness says so on
+  // the next poll (≤5s); the card should not wait for it — mark the turn
+  // read locally now, and poll soon so the daemon's own verdict replaces
+  // the local one.
+  const markTurnSeenLocally = (key: string) => {
+    setSessions((prev) => prev.map((s) => ((s.internalName || s.name) === key && s.turnSeen === false ? { ...s, turnSeen: true } : s)));
+    window.setTimeout(() => { void fetchSessions({ showLoading: false }); }, 900);
+  };
   const focusSessionInPlace = (nextSession: SessionInfo) => {
     const targetRoom = nextSession.internalName || nextSession.name;
     if ((session?.room ?? null) === targetRoom) return;
+    markTurnSeenLocally(targetRoom);
     const markers = loadSeenMarkers();
     markers[targetRoom] = { out: nextSession.lastActivityAt || 0, bell: nextSession.bellSeq || 0 };
     saveSeenMarkers(markers);
@@ -3519,6 +3528,7 @@ const App = () => {
   };
 
   const switchSession = (nextSession: SessionInfo) => {
+    markTurnSeenLocally(nextSession.internalName || nextSession.name);
     const targetRoom = nextSession.internalName || nextSession.name;
     const nextPath = buildSessionPath(targetRoom);
     const currentRoom = session?.room ?? sessionLabel;

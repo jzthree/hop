@@ -4601,6 +4601,9 @@ body.pane-dragging { user-select: none; }
 .digest-thread-item .digest-when { grid-row: 1; }
 .digest-thread-item .digest-headline { grid-column: 2; }
 .digest-thread-item .digest-why { grid-column: 2; }
+/* The recommendation and replies sit under the story, never in the clock column. */
+.digest-thread-item .digest-reco { grid-column: 2; }
+.digest-thread-item .digest-replies { grid-column: 2; }
 .digest-thread-item.needs .digest-headline { color: #e5484d; }
 .digest-thread-item.blocked .digest-headline { color: #e79d13; }
 .digest-thread-item.done .digest-headline { color: #30a46c; }

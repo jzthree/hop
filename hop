@@ -5110,6 +5110,12 @@ function closeTerminalApiEntry(terminalId) {
         terminalApiStreams.delete(terminalId);
     }
     clearTerminalEventBuffer(terminalId);
+    // Detach the room client too. This only dropped the daemon's record and
+    // left the socket open, so every check-back delivery and reconcile
+    // redrive left a ghost "checkback"/"reconcile" client on the session
+    // (57 on one room) — idle presence chips across the top bar. The
+    // adapter's close() calls back here with the entry already gone.
+    if (entry?.adapter?.close) { try { entry.adapter.close(); } catch (e) { /* already closing */ } }
 }
 
 function handleTerminalApiServerMessage(terminalId, parsed) {

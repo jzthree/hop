@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { RoomManager } from "../src/rooms";
+import { RoomManager, getDefaultViewerColors, setDefaultViewerColors } from "../src/rooms";
 import type { PtyFactory } from "../src/pty";
 
 type Message = { type: string; [key: string]: unknown };
@@ -766,6 +766,28 @@ describe("Room", () => {
       const factory: PtyFactory = () => {
         ptyInstance = new FakePty() as unknown as FakePty;
         return ptyInstance as any;
+
+    it("a NEW headless room answers with the colors the last viewer (of any room) had — a light theme stays light", () => {
+      const ptys: FakePty[] = [];
+      const factory: PtyFactory = () => { const p = new FakePty(); ptys.push(p); return p as any; };
+      const manager = new RoomManager(factory);
+      const first = manager.getRoom("seen", { cols: 80, rows: 24 }, "/tmp");
+      // The browser attached on a white theme (its bg/fg ride on the attach URL).
+      first.setClientColors("ffffff", "1f2328");
+      expect(getDefaultViewerColors()).toEqual({ bg: "ffffff", fg: "1f2328" });
+
+      // The next room is created by the daemon and probed by Codex before any
+      // browser attaches: it is told white, not the dark default.
+      manager.getRoom("fresh", { cols: 80, rows: 24 }, "/tmp");
+      ptys[1].emit("\x1b]10;?\x07\x1b]11;?\x1b\\");
+      const answered = ptys[1].writes.join("");
+      expect(answered).toContain("]11;rgb:ffff/ffff/ffff");
+      expect(answered).toContain("]10;rgb:1f1f/2323/2828");
+
+      // Garbage never replaces a good answer; the dark default is restorable.
+      expect(setDefaultViewerColors("#fff", "nope")).toBe(false);
+      expect(setDefaultViewerColors("0d1117", "e6edf3")).toBe(true);
+    });
       };
       const manager = new RoomManager(factory);
       const room = manager.getRoom(roomId, initialSize, "/tmp");

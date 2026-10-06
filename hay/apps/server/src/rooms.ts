@@ -87,6 +87,27 @@ export type ClientInfo = {
   nudge?: boolean;
 };
 
+// The colors of the LAST viewer anyone had, host-wide. A room usually
+// starts headless — the daemon creates it, the app launches and asks "what's
+// your background?" within milliseconds, and the browser attaches only
+// after — so a per-room memory of "its own last viewer" is empty exactly
+// when it is needed. Codex and Claude pick light vs dark from this answer
+// ONCE, at startup: told the dark default, Codex drew a charcoal composer
+// box on the user's white theme for the rest of the session. The newest
+// viewer's colors are what the user is looking at; every new room answers
+// with them until a viewer of its own says otherwise. Persisted by the host
+// so a restart (restore, keeper re-adoption) keeps the answer.
+const viewerColors = { bg: "0d1117", fg: "e6edf3" };
+const HEX6 = /^[0-9a-f]{6}$/i;
+/** Remember the viewer's colors for every room created from now on. Returns true when they changed. */
+export function setDefaultViewerColors(bg?: string | null, fg?: string | null): boolean {
+  let changed = false;
+  if (bg && HEX6.test(bg) && bg.toLowerCase() !== viewerColors.bg) { viewerColors.bg = bg.toLowerCase(); changed = true; }
+  if (fg && HEX6.test(fg) && fg.toLowerCase() !== viewerColors.fg) { viewerColors.fg = fg.toLowerCase(); changed = true; }
+  return changed;
+}
+export const getDefaultViewerColors = () => ({ ...viewerColors });
+
 export type RoomCreateOptions = {
   cwd: string;
   env?: Record<string, string>;
@@ -286,9 +307,9 @@ export class Room extends EventEmitter {
   // getOutputSince hand out stable cursors into an ever-trimming ring.
   private outputStart = 0;
   // Last viewer's terminal colors (6-hex, no '#'), used to answer OSC 10/11
-  // while headless. Defaults to the web client's dark surface.
-  private clientBg = "0d1117";
-  private clientFg = "e6edf3";
+  // while headless. Starts as the host-wide last viewer's (see viewerColors).
+  private clientBg = viewerColors.bg;
+  private clientFg = viewerColors.fg;
   private alternateScreen = false;
   // Enhanced keyboard reporting requested by the remote app (kitty keyboard protocol
   // or xterm modifyOtherKeys). Tracked like alternateScreen so a reattaching client
@@ -1364,8 +1385,9 @@ export class Room extends EventEmitter {
    */
   /** Remember the viewer's terminal colors for headless OSC 10/11 answers. */
   setClientColors(bg?: string | null, fg?: string | null) {
-    if (bg && /^[0-9a-f]{6}$/i.test(bg)) this.clientBg = bg.toLowerCase();
-    if (fg && /^[0-9a-f]{6}$/i.test(fg)) this.clientFg = fg.toLowerCase();
+    if (bg && HEX6.test(bg)) this.clientBg = bg.toLowerCase();
+    if (fg && HEX6.test(fg)) this.clientFg = fg.toLowerCase();
+    setDefaultViewerColors(bg, fg);
   }
 
   getOutputSince(

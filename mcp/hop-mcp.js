@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('fs');
+const { resolveCallerSession: resolveCallerSessionLib, sessionFromEnvLine: sessionFromEnvLineLib } = require(require('path').join(__dirname, '..', 'lib', 'session-identity'));
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -2951,6 +2952,43 @@ class TerminalStreamManager {
   }
 }
 
+// WHICH session this MCP server serves — by the process tree, not the
+// inherited HOP_SESSION alone (lib/session-identity.js). Under Codex's
+// shared app-server daemon the inherited value belonged to the first
+// session; the verdict is then "ambiguous", and tools that default to the
+// caller's session ask for it explicitly instead of guessing.
+let callerSessionMemo = null;
+function readProcForIdentity(pid) {
+  const fs = require('fs');
+  const { execFileSync } = require('child_process');
+  try {
+    if (process.platform === 'linux') {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      let command = ''; try { command = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').replace(/\0/g, ' ').trim(); } catch { /* gone */ }
+      let session = null; try { const env = fs.readFileSync(`/proc/${pid}/environ`).toString('utf8'); const mm = /(?:^|\0)HOP_SESSION=([A-Za-z0-9_-]+)/.exec(env); session = mm ? mm[1] : null; } catch { /* not ours */ }
+      return { ppid: Number(after[1]) || 0, command, session };
+    }
+    const line = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }).trim();
+    const mm = /^\s*(\d+)\s+(.*)$/s.exec(line);
+    if (!mm) return null;
+    let session = null;
+    try { session = sessionFromEnvLineLib(execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }), mm[2]); } catch { /* no env access */ }
+    return { ppid: Number(mm[1]) || 0, command: mm[2], session };
+  } catch { return null; }
+}
+function callerSession() {
+  if (callerSessionMemo) return callerSessionMemo;
+  let hostPid = null;
+  try {
+    const fs = require('fs'); const os = require('os'); const path = require('path');
+    const st = JSON.parse(fs.readFileSync(path.join(process.env.HOP_HOME || path.join(os.homedir(), '.hop2'), '.hay-host-state'), 'utf8'));
+    hostPid = Number.isInteger(st.pid) ? st.pid : null;
+  } catch { /* no host state: env is all there is */ }
+  callerSessionMemo = resolveCallerSessionLib({ pid: process.pid, hostPid, envSession: process.env.HOP_SESSION || null, readProc: readProcForIdentity });
+  return callerSessionMemo;
+}
+
 class HopMCPServer {
   constructor() {
     this.agentId = randomUUID();
@@ -3755,7 +3793,11 @@ class HopMCPServer {
     if (name === 'hop_current_session') {
       // Answerable WITHOUT a daemon: the env fact stands on its own, and an
       // agent asking "where am I" mid-outage still deserves the truth.
-      const internal = process.env.HOP_SESSION || null;
+      const who = callerSession();
+      const internal = who.ok ? who.session : null;
+      if (!internal && who.reason === 'shared-daemon') {
+        return this.wrapApiResult({ insideHopSession: false, ambiguous: true, reason: who.reason, note: who.note, envSession: process.env.HOP_SESSION || null }, { endpoint: 'local' });
+      }
       const payload = {
         insideHopSession: !!internal,
         internalName: internal,
@@ -3785,8 +3827,9 @@ class HopMCPServer {
         return this.wrapApiResult(await this.callApi('GET', '/api/sessions'), { endpoint: '/api/sessions' });
       case 'hop_checkback': {
         const a = args || {};
-        const session = a.session || process.env.HOP_SESSION || null;
-        if (!session) return this.wrapApiResult({ error: 'No session: pass `session` (this MCP is not running inside a hop session).' }, { endpoint: '/api/checkbacks' });
+        const who = callerSession();
+        const session = a.session || (who.ok ? who.session : null);
+        if (!session) return this.wrapApiResult({ error: `No session: pass \`session\`. ${who.note || ''}`.trim() }, { endpoint: '/api/checkbacks' });
         const body = {
           session, message: a.message, force: a.force === true,
           in: a.in, at: a.at, every: a.every, until: a.until,
@@ -3804,7 +3847,7 @@ class HopMCPServer {
         return this.wrapApiResult({ items }, { endpoint: '/api/checkbacks' });
       }
       case 'hop_cancel_checkback':
-        return this.wrapApiResult(await this.callApi('POST', '/api/checkbacks/cancel', { id: (args || {}).id, session: (args || {}).session || (!(args || {}).id ? process.env.HOP_SESSION : undefined) }), { endpoint: '/api/checkbacks/cancel' });
+        return this.wrapApiResult(await this.callApi('POST', '/api/checkbacks/cancel', { id: (args || {}).id, session: (args || {}).session || (!(args || {}).id && callerSession().ok ? callerSession().session : undefined) }), { endpoint: '/api/checkbacks/cancel' });
       case 'hop_list_terminals': {
         const listed = await this.callApi('GET', '/api/terminals');
         if (!this.isApiFailurePayload(listed) && Array.isArray(listed.terminals)) {

@@ -21,6 +21,7 @@ const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const { withCodexIdentity } = require('./lib/codex-identity');
+const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const digestReads = require('./lib/digest-reads');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
@@ -5101,6 +5102,7 @@ if (DAEMON_FLAG && TERMINAL_API_IDLE_TTL_MS > 0) {
 }
 
 function closeTerminalApiEntry(terminalId) {
+    const entry = terminalApiSessions.get(terminalId);
     terminalApiSessions.delete(terminalId);
     const streams = terminalApiStreams.get(terminalId);
     if (streams) {
@@ -8105,6 +8107,56 @@ function isProcessAlive(pid) {
     } catch (e) {
         return false;
     }
+}
+
+// WHICH session this CLI process is in — by the process tree (its shell's
+// place under the host), not by the inherited HOP_SESSION alone; see
+// lib/session-identity.js. Cached: the tree does not change mid-command.
+let callerSessionMemo = null;
+function readProcForIdentity(pid) {
+    try {
+        if (process.platform === 'linux') {
+            const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+            const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+            const ppid = Number(after[1]) || 0;
+            let command = '';
+            try { command = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').replace(/\0/g, ' ').trim(); } catch (e) { /* gone */ }
+            let session = null;
+            try { const env = fs.readFileSync(`/proc/${pid}/environ`).toString('utf8'); const m = /(?:^|\0)HOP_SESSION=([A-Za-z0-9_-]+)/.exec(env); session = m ? m[1] : null; } catch (e) { /* not ours */ }
+            return { ppid, command, session };
+        }
+        const line = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }).trim();
+        if (!line) return null;
+        const m = /^\s*(\d+)\s+(.*)$/s.exec(line);
+        if (!m) return null;
+        let session = null;
+        try { session = sessionFromEnvLine(execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }), m[2]); } catch (e) { /* no env access */ }
+        return { ppid: Number(m[1]) || 0, command: m[2], session };
+    } catch (e) { return null; }
+}
+function callerSession() {
+    if (callerSessionMemo) return callerSessionMemo;
+    const host = readHayHostStateFile();
+    callerSessionMemo = resolveCallerSession({
+        pid: process.pid,
+        hostPid: host && Number.isInteger(host.pid) ? host.pid : null,
+        envSession: process.env.HOP_SESSION || null,
+        readProc: readProcForIdentity
+    });
+    if (process.env.HOP_IDENTITY_DEBUG) {
+        process.stderr.write(`[identity] host=${host?.pid} env=${process.env.HOP_SESSION || ''} → ${JSON.stringify({ ok: callerSessionMemo.ok, session: callerSessionMemo.session, via: callerSessionMemo.via, reason: callerSessionMemo.reason })}\n`);
+        for (const c of callerSessionMemo.chain) process.stderr.write(`[identity]   ${c.pid} ${c.command.slice(0, 90)}\n`);
+    }
+    return callerSessionMemo;
+}
+// The session a CLI command acts on when none was named: the verified one,
+// or nothing — with the reason printed — never an inherited guess.
+function callerSessionOrExplain(what) {
+    const r = callerSession();
+    if (r.ok) { if (r.note) log(r.note, DIM); return r.session; }
+    log(r.note || 'Not inside a hop session.', YELLOW);
+    log(`${what} needs an explicit target: ${CYAN}--session <name>${RESET}`, DIM);
+    return null;
 }
 
 function readHayHostStateFile() {
@@ -16956,7 +17008,7 @@ async function main() {
         const args = process.argv.slice(3);
         const dryRun = args.includes('--dry-run') || args.includes('-n');
         const named = args.find((a) => !a.startsWith('-')) || null;
-        const here = process.env.HOP_SESSION || null;
+        const here = callerSession().ok ? callerSession().session : null;
         if (!named && !here) {
             log(`Run ${CYAN}hop recover${RESET} inside a hop session, or name one: ${CYAN}hop recover <session>${RESET}`, YELLOW);
             process.exit(1);
@@ -17530,11 +17582,13 @@ async function main() {
     // INTERNAL name, invisible in any UI once the session is renamed, so
     // this resolves the display name humans actually see. --json for agents.
     if (process.argv[2] === 'whoami') {
-        const internal = process.env.HOP_SESSION || '';
+        const who = callerSession();
+        const internal = who.ok ? who.session : '';
         const asJson = process.argv.includes('--json');
+        if (who.ok && who.note && !asJson) log(who.note, DIM);
         if (!internal) {
-            if (asJson) { console.log(JSON.stringify({ insideHopSession: false })); process.exit(1); }
-            log('Not inside a hop session (HOP_SESSION is unset).', YELLOW);
+            if (asJson) { console.log(JSON.stringify({ insideHopSession: false, reason: who.reason || null, note: who.note || null, envSession: process.env.HOP_SESSION || null })); process.exit(1); }
+            log(who.note || 'Not inside a hop session (HOP_SESSION is unset).', YELLOW);
             log(`Publishing from here needs an explicit target: ${CYAN}hop view --session <name> …${RESET}`, DIM);
             process.exit(1);
         }
@@ -17583,7 +17637,7 @@ async function main() {
             process.exit(0);
         }
         if (has('--cancel') || has('--cancel-all')) {
-            const body = has('--cancel') ? { id: flagValue('--cancel') } : { session: flagValue('--session') || process.env.HOP_SESSION || null };
+            const body = has('--cancel') ? { id: flagValue('--cancel') } : { session: flagValue('--session') || callerSessionOrExplain('hop checkback --cancel-all') };
             if (has('--cancel-all') && !body.session) { log('--cancel-all needs --session <name> (or run it inside the session).', RED); process.exit(1); }
             const r = await callLocalApi(state, '/api/checkbacks/cancel', 'POST', body);
             if (!r?.data?.ok) { log(r?.data?.error || 'Cancel failed', RED); process.exit(1); }
@@ -17598,8 +17652,8 @@ async function main() {
             positional.push(argv[i]);
         }
         const message = positional.join(' ').trim();
-        const session = flagValue('--session') || process.env.HOP_SESSION || '';
-        if (!message || !session) { usage(); if (!session) log('No session: pass --session <name> or run inside a hop session.', RED); process.exit(1); }
+        const session = flagValue('--session') || callerSessionOrExplain('hop checkback') || '';
+        if (!message || !session) { usage(); process.exit(1); }
         const body = {
             session, message, force: has('--force'),
             in: flagValue('--in') || undefined, at: flagValue('--at') || undefined,
@@ -17622,7 +17676,7 @@ async function main() {
         }
         // The message rides the ASK record too, so the phone can say WHAT is
         // needed instead of a bare "wants you" (see readAsk / attentionReason).
-        const hs = process.env.HOP_SESSION;
+        const hs = callerSession().ok ? callerSession().session : null;
         if (hs && /^[A-Za-z0-9_-]+$/.test(hs)) {
             try {
                 const file = path.join(CLAUDE_SESSIONS_DIR, `${hs}.ask`);
@@ -17687,7 +17741,12 @@ async function main() {
         // So: explicit --session wins, the environment is the convenience
         // default, and having neither is an ERROR that says how to fix it —
         // never a quiet write into the void.
-        const session = wantSession || process.env.HOP_SESSION || '';
+        // Explicit --session wins; otherwise the VERIFIED caller session (by
+        // the process tree), and with neither this is an error that says why
+        // — never a quiet write into another session's views.
+        const session = wantSession || (callerSession().ok ? callerSession().session : '') || '';
+        if (!wantSession && !session && !wantList) { callerSessionOrExplain('hop view'); process.exit(1); }
+        if (!wantSession && callerSession().note && callerSession().ok) log(callerSession().note, DIM);
         const destDir = path.join(VIEWS_DIR, session);
 
         if (wantList) {
@@ -17810,7 +17869,7 @@ async function main() {
             // three requests past its purpose because nothing in the output
             // ever said "not the session you are in" — the human asked where
             // their files were, and they were in the other room.
-            const here = process.env.HOP_SESSION || '';
+            const here = callerSession().ok ? callerSession().session : '';
             if (here && here === session) {
                 log(`Session: ${session} (this terminal)`, DIM);
             } else if (here) {
@@ -17851,7 +17910,8 @@ async function main() {
         }
         const state = isServerRunning();
         if (!state) { printNotRunningError(); process.exit(1); }
-        const caller = process.env.HOP_SESSION || null;
+        const caller = callerSession().ok ? callerSession().session : null;
+        if (!caller && !flags.has('--standalone') && callerSession().reason === 'shared-daemon') log(callerSession().note, YELLOW);
         const standalone = flags.has('--standalone') || !caller;
         const label = positional[1] || `port-${port}`;
         const name = standalone ? label : `${caller}-${label}`;

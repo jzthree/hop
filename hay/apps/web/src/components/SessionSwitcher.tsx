@@ -19,7 +19,7 @@ import { claimOnTileFocus, sizeIsForeign } from "../utils/sizeClaim";
 import { cardPhase, phaseLabel, phaseTitle } from "../utils/agentPhase";
 import { installDragSelect } from "../utils/dragSelect";
 import { enableViewBlocks } from "../utils/viewBlocks";
-import { urlAtCell, cellAtPoint } from "../utils/urlAtCell";
+import { urlAtCell, cellAtPoint, oscUrlAtCell } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { CwdField } from "./CwdField";
@@ -396,10 +396,12 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
     const rowsEl = boxRef.current?.querySelector(".xterm-rows") as HTMLElement | null;
     const cell = cellAtPoint(screen, rowsEl, term.cols, term.rows, clientX, clientY);
     const buf = term.buffer.active;
-    const url = cell ? urlAtCell(
+    // A URL in the text, reassembled across rows — or the OSC 8 target a
+    // TUI hung on a title (Codex's markdown links), which has no URL text.
+    const url = cell ? (urlAtCell(
       (i) => { const l = buf.getLine(i); return l ? { text: l.translateToString(false), wrapped: l.isWrapped } : null; },
       buf.length, term.cols, buf.viewportY + cell.row, cell.col
-    ) : null;
+    ) || oscUrlAtCell(term, buf.viewportY + cell.row, cell.col)) : null;
     // Diagnostics for "clicking a link in a tile does nothing" reports:
     // localStorage.hay_debug_links=1 prints what the click resolved to.
     try {
@@ -525,6 +527,16 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       fontFamily: monoStack,
       cursorBlink: false,
       disableStdin: true,
+      // OSC 8 hyperlinks (Codex's markdown links show a title, the URL rides
+      // underneath): without a handler xterm throws up a confirm() dialog,
+      // which read as "the link does nothing". Open it like any other link.
+      linkHandler: {
+        activate: (event, uri) => {
+          event.preventDefault();
+          lastLinkOpenAtRef.current = Date.now();
+          window.open(uri, "_blank", "noopener");
+        }
+      },
       theme: theme as never
     });
     const fit = new FitAddon();

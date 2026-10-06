@@ -16,7 +16,7 @@ import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSea
 import { createVoiceHold, speechRecognitionCtor } from "./utils/voiceHold";
 import { tabTitle } from "./utils/tabTitle";
 import { remoteAppOwnsScreen } from "./utils/echoGuard";
-import { urlAtCell, cellAtPoint } from "./utils/urlAtCell";
+import { urlAtCell, cellAtPoint, oscUrlAtCell } from "./utils/urlAtCell";
 import { enableMathHover } from "./utils/mathLinkProvider";
 import { getMathTip } from "./utils/mathTooltip";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
@@ -2147,6 +2147,15 @@ const App = () => {
       scrollSensitivity: 4,
       fastScrollSensitivity: 12,
       minimumContrastRatio: contrastFloorFor(themeMode),
+      // OSC 8 hyperlinks — Codex prints a markdown link as its title with the
+      // URL underneath. xterm's default for these is a confirm() dialog;
+      // open them like the addon's links instead.
+      linkHandler: {
+        activate: (event, uri) => {
+          event.preventDefault();
+          window.open(uri, "_blank", "noopener");
+        }
+      },
       theme: resolveTerminalTheme(themeMode)
     });
     const fitAddon = new FitAddon();
@@ -3866,7 +3875,7 @@ const App = () => {
     return urlAtCell(
       (i) => { const l = buf.getLine(i); return l ? { text: l.translateToString(false), wrapped: l.isWrapped } : null; },
       buf.length, term.cols, bufferRow, col
-    );
+    ) || oscUrlAtCell(term, bufferRow, col);
   }, []);
 
   // Enroll this device's platform authenticator (Touch ID / Face ID) as a

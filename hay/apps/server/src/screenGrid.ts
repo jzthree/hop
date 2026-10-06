@@ -16,7 +16,15 @@
 // room silently falls back to the raw-tail snapshot (+ wiggle), so a broken
 // dependency degrades to the old behavior instead of breaking attach.
 
+import { injectHyperlinks } from "./hyperlinks";
+
+type HeadlessCell = { getChars(): string; getWidth(): number; extended?: { urlId?: number } };
 type HeadlessTerminal = {
+  rows?: number;
+  cols?: number;
+  buffer?: { active: { length: number; getLine(y: number): { getCell(x: number): HeadlessCell | undefined } | undefined } };
+  // Internals the serialize addon drops (OSC 8 targets); read guardedly.
+  _core?: { _oscLinkService?: { getLinkData(id: number): { uri?: string } | undefined; _dataByLinkId?: Map<number, unknown> } };
   write(data: string, callback?: () => void): void;
   resize(cols: number, rows: number): void;
   loadAddon(addon: unknown): void;
@@ -96,6 +104,26 @@ export type ScreenGrid = {
   dispose(): void;
 };
 
+// The serialize addon drops OSC 8 hyperlinks; put them back from the
+// buffer's own link ids (see hyperlinks.ts). Skipped outright when the grid
+// has registered no link at all — the common case, at no cost.
+const withHyperlinks = (term: HeadlessTerminal, serialized: string, scrollback: number): string => {
+  try {
+    const svc = term._core?._oscLinkService;
+    const buf = term.buffer?.active;
+    if (!svc || !buf || !term.rows) return serialized;
+    if (svc._dataByLinkId && svc._dataByLinkId.size === 0) return serialized;
+    const rowCount = Math.min(buf.length, scrollback + term.rows);
+    return injectHyperlinks(serialized, {
+      cols: term.cols ?? 0, startRow: buf.length - rowCount, rowCount,
+      getCell: (y, x) => { const c = buf.getLine(y)?.getCell(x); return c ? { chars: c.getChars(), width: c.getWidth(), urlId: c.extended?.urlId || 0 } : null; },
+      uriOf: (id) => svc.getLinkData(id)?.uri
+    });
+  } catch {
+    return serialized;
+  }
+};
+
 export const createScreenGrid = (cols: number, rows: number): ScreenGrid | null => {
   if (!deps) return null;
   let term: HeadlessTerminal;
@@ -165,7 +193,8 @@ export const createScreenGrid = (cols: number, rows: number): ScreenGrid | null 
         term.write("", () => {
           if (disposed) { callback(null); return; }
           try {
-            callback(addon.serialize({ scrollback: Math.max(0, Math.min(scrollback, GRID_SCROLLBACK)) }));
+            const sb = Math.max(0, Math.min(scrollback, GRID_SCROLLBACK));
+            callback(withHyperlinks(term, addon.serialize({ scrollback: sb }), sb));
           } catch {
             callback(null);
           }

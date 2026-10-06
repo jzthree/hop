@@ -13,6 +13,32 @@
 export type CellLine = { text: string; wrapped: boolean };
 
 /**
+ * The OSC 8 hyperlink under a cell, if the app printed one. Codex renders a
+ * markdown link as its TITLE text carrying the URL as an OSC 8 target —
+ * "proposed next experiments" on screen, the hop view URL underneath — so
+ * there is no URL text for the regex-based addon or urlAtCell to find.
+ * xterm keeps the target on the cell (its link id) and in its link service;
+ * neither is public API, so this reads them guardedly and returns null on
+ * any other xterm. http(s) only: a file:// or custom-scheme target is not
+ * something a click in a browser can open.
+ */
+export const oscUrlAtCell = (term: unknown, bufferRow: number, col: number): string | null => {
+  try {
+    const t = term as {
+      buffer: { active: { getLine: (r: number) => { getCell: (c: number) => unknown } | undefined } };
+      _core?: { _oscLinkService?: { getLinkData: (id: number) => { uri?: string } | undefined } };
+    };
+    const cell = t.buffer.active.getLine(bufferRow)?.getCell(col) as { extended?: { urlId?: number } } | undefined;
+    const id = cell?.extended?.urlId;
+    if (!id) return null;
+    const uri = t._core?._oscLinkService?.getLinkData(id)?.uri;
+    return uri && /^https?:\/\//i.test(uri) ? uri : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
  * The (row, col) under a viewport point. With the DOM renderer each row is
  * an element, so the row comes from whichever one contains the point —
  * exact even when the terminal is scaled, cropped, or bottom-anchored

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { urlAtCell } from "../src/utils/urlAtCell";
+import { oscUrlAtCell, urlAtCell } from "../src/utils/urlAtCell";
 
 const COLS = 42;
 const pad = (s: string) => s.padEnd(COLS, " ");
@@ -46,5 +46,22 @@ describe("urlAtCell", () => {
   it("returns null with no URL under the cell", () => {
     const b = buf([["nothing here"]]);
     expect(urlAtCell(b.get, b.length, COLS, 0, 3)).toBeNull();
+  });
+});
+
+describe("oscUrlAtCell — the OSC 8 target under a title (Codex's markdown links)", () => {
+  const fakeTerm = (urlId: number | undefined, uri: string | undefined) => ({
+    buffer: { active: { getLine: (r: number) => (r === 3 ? { getCell: (c: number) => (c === 5 ? { extended: { urlId } } : {}) } : undefined) } },
+    _core: { _oscLinkService: { getLinkData: (id: number) => (id === 7 ? { uri } : undefined) } }
+  });
+  it("resolves the link's URL from the cell's link id", () => {
+    expect(oscUrlAtCell(fakeTerm(7, "https://hop.zhoulab.io/view/s_1/plan.html/inline"), 3, 5)).toBe("https://hop.zhoulab.io/view/s_1/plan.html/inline");
+  });
+  it("nothing for a plain cell, another row, a non-http target, or an xterm without the internals", () => {
+    expect(oscUrlAtCell(fakeTerm(7, "https://x.test/"), 3, 6)).toBeNull();
+    expect(oscUrlAtCell(fakeTerm(7, "https://x.test/"), 2, 5)).toBeNull();
+    expect(oscUrlAtCell(fakeTerm(undefined, "https://x.test/"), 3, 5)).toBeNull();
+    expect(oscUrlAtCell(fakeTerm(7, "file:///etc/hosts"), 3, 5)).toBeNull();
+    expect(oscUrlAtCell({ buffer: { active: { getLine: () => ({ getCell: () => ({ extended: { urlId: 7 } }) }) } } }, 3, 5)).toBeNull();
   });
 });

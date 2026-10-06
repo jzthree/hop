@@ -80,6 +80,21 @@ if (HOP_HOME.startsWith(os.tmpdir())) {
   }, 30000).unref();
 }
 const BUFFER_DIR = path.join(HOP_HOME, 'session-buffers');
+// The last viewer's terminal colors, kept across host restarts: a room that
+// starts headless answers an app's "what's your background?" (OSC 10/11)
+// with these, so Codex/Claude theme themselves light or dark to match what
+// the user actually looks at — restored rooms included.
+const VIEWER_COLORS_FILE = path.join(HOP_HOME, '.hay-viewer-colors');
+function loadViewerColors(hay) {
+    try {
+        const saved = JSON.parse(fs.readFileSync(VIEWER_COLORS_FILE, 'utf8'));
+        if (typeof hay.setDefaultViewerColors === 'function') hay.setDefaultViewerColors(saved.bg, saved.fg);
+    } catch (e) { /* none yet: the dark default */ }
+}
+function rememberViewerColors(hay, bg, fg) {
+    if (typeof hay.setDefaultViewerColors !== 'function') return;
+    if (!hay.setDefaultViewerColors(bg, fg)) return;
+    try { fs.writeFileSync(VIEWER_COLORS_FILE, JSON.stringify(hay.getDefaultViewerColors())); } catch (e) { /* best effort */ }
 const CLAUDE_SESSIONS_DIR = path.join(HOP_HOME, 'claude-sessions');
 
 // Scrub Claude Code SESSION markers from our environment before any PTY is
@@ -220,6 +235,7 @@ function normalizeEnv(rawEnv) {
 async function main() {
     const libPath = path.join(__dirname, '..', 'hay', 'apps', 'server', 'dist', 'lib.js');
     const hay = await import(pathToFileURL(libPath));
+    loadViewerColors(hay);
     const rooms = new hay.RoomManager(hay.createPty);
     const server = http.createServer(async (req, res) => {
         const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -439,6 +455,7 @@ async function main() {
         const clientFg = hex(wsUrl.searchParams.get('fg'));
         if (clientBg && typeof room.setClientColors === 'function') {
             room.setClientColors(clientBg, clientFg);
+            rememberViewerColors(hay, clientBg, clientFg);
         }
         // Tab identity forwarded by the daemon: the room evicts a same-key
         // predecessor on attach, so a phone's reconnect replaces its own

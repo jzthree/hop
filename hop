@@ -4788,7 +4788,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdAt: config?.createdAt,
             createdBy: effective?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
-            agent: sessionAgentKind(s.name),
+            agent: sessionAgentKind(name),
             localCliCount: clientSummary.localCliCount,
             hasLocalCli: clientSummary.hasLocalCli,
             ...getSessionSeenInfo(name)
@@ -17967,7 +17967,7 @@ async function main() {
         }
         // Name the session it was filed under, so a wrong one is visible at
         // once (an inherited HOP_SESSION can belong to another session).
-        console.log(`Filed under ${getSessionDisplayName(session) || session}${wantSession ? '' : ' (from HOP_SESSION; pass --session <name> to file elsewhere)'}.`);
+        console.log(`Filed under ${getSessionDisplayName(caller) || caller}.`);
         // Same one-bell convention as `hop view` — the human is usually
         // waiting on this, and the link scrolls away unannounced otherwise.
         process.stdout.write('\x07');

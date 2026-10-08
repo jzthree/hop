@@ -264,6 +264,7 @@ type SessionInfo = {
   createdBy?: "user" | "agent";
   createdVia?: string | null;
   agent?: "claude" | "codex" | null;
+  agentHome?: { dir: string; label: string; isDefault: boolean } | null;
   // Server-decided: a turn in flight, or the last one finished — and whether
   // a human has opened the session since it finished (see lib/agent-phase.js).
   agentPhase?: "working" | "done" | null;
@@ -3272,6 +3273,7 @@ const App = () => {
           createdBy: s.createdBy === "agent" ? "agent" : "user",
           createdVia: typeof s.createdVia === "string" ? s.createdVia : null,
           agent: s.agent === "claude" || s.agent === "codex" ? s.agent : null,
+          agentHome: s.agentHome && typeof s.agentHome.dir === "string" ? s.agentHome : null,
           agentPhase: s.agentPhase === "working" || s.agentPhase === "done" ? s.agentPhase : null,
           turnSeen: s.turnSeen !== false,
           checkbacks: Number(s.checkbacks) > 0 ? Number(s.checkbacks) : undefined,

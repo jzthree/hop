@@ -21,6 +21,7 @@ const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const { withCodexIdentity } = require('./lib/codex-identity');
+const agentHomesLib = require('./lib/agent-homes');
 const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const digestReads = require('./lib/digest-reads');
@@ -4678,7 +4679,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdAt: config?.createdAt,
             createdBy: config?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
-            agent: sessionAgentKind(s.name),
+            ...sessionAgentFields(s.name, config),
             localCliCount,
             hasLocalCli: clientSummary.hasLocalCli || localCliCount > 0 || s.hasLocalCli === true,
             ...getSessionSeenInfo(s.name)
@@ -4723,7 +4724,7 @@ function buildSessionEntries(haySessions, opts = {}) {
                 createdAt: config?.createdAt,
                 createdBy,
                 agentPermitted: config?.agentPermitted === true,
-                agent: sessionAgentKind(name),
+                ...sessionAgentFields(name, config),
                 localCliCount: clientSummary.localCliCount,
                 hasLocalCli: clientSummary.hasLocalCli,
                 ...getSessionSeenInfo(name)
@@ -4788,7 +4789,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdAt: config?.createdAt,
             createdBy: effective?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
-            agent: sessionAgentKind(name),
+            ...sessionAgentFields(name, config),
             localCliCount: clientSummary.localCliCount,
             hasLocalCli: clientSummary.hasLocalCli,
             ...getSessionSeenInfo(name)
@@ -5597,7 +5598,7 @@ function sessionAgentKind(internalName) {
 /** A codex rollout by its session id: the id is in the file's name. */
 function findCodexRolloutById(sessionId) {
     if (!sessionId || !/^[A-Za-z0-9-]{8,}$/.test(sessionId)) return null;
-    for (const root of getCodexConfigRoots()) {
+    for (const root of codexRolloutRoots()) {
         const sessions = path.join(root, 'sessions');
         let years = [];
         try { years = fs.readdirSync(sessions).sort().reverse(); } catch (e) { continue; }
@@ -5606,6 +5607,105 @@ function findCodexRolloutById(sessionId) {
             try { months = fs.readdirSync(path.join(sessions, y)).sort().reverse(); } catch (e) { continue; }
             for (const m of months) {
                 let days = [];
+// ---- Accounts (config roots) ---------------------------------------------
+// One Claude login per CLAUDE_CONFIG_DIR, one Codex login per CODEX_HOME
+// (lib/agent-homes.js). Discovered from the home directory, cached briefly:
+// the session list asks per session.
+let agentHomesCache = { at: 0, value: null };
+function listAgentHomes(agent) {
+    if (!agentHomesCache.value || Date.now() - agentHomesCache.at > 30_000) {
+        let entries = [];
+        try { entries = fs.readdirSync(os.homedir()); } catch (e) { /* none */ }
+        const exists = (p) => { try { fs.statSync(p); return true; } catch (e) { return false; } };
+        const opts = { homeDir: os.homedir(), entries, exists };
+        agentHomesCache = {
+            at: Date.now(),
+            value: {
+                claude: agentHomesLib.discoverAgentHomes('claude', { ...opts, envDir: process.env.CLAUDE_CONFIG_DIR || null }),
+                codex: agentHomesLib.discoverAgentHomes('codex', { ...opts, envDir: process.env.CODEX_HOME || null })
+            }
+        };
+    }
+    return agent ? (agentHomesCache.value[agent] || []) : agentHomesCache.value;
+}
+// Who each root is logged in as: `claude auth status` (JSON: loggedIn,
+// email) and `codex login status`, run with the root pinned. Both answer
+// in well under a second; cached for two minutes. Two roots can hold the
+// SAME account (a copy of a config dir), and a root can be logged out —
+// the wall shows both before anyone switches a session into it.
+const agentLoginCache = new Map(); // `${agent}:${dir}` -> { at, value }
+let agentBinCache = null;
+function agentBinary(agent) {
+    if (!agentBinCache) agentBinCache = {};
+    if (!(agent in agentBinCache)) {
+        let bin = null;
+        try { bin = execSync(`/bin/zsh -lc 'whence -p ${agent}'`, { encoding: 'utf8', timeout: 5000 }).trim().split('\n').pop() || null; } catch (e) { bin = null; }
+        agentBinCache[agent] = bin;
+    }
+    return agentBinCache[agent];
+}
+function probeAgentLogin(agent, home) {
+    const key = `${agent}:${home.dir}`;
+    const hit = agentLoginCache.get(key);
+    if (hit && Date.now() - hit.at < 120_000) return Promise.resolve(hit.value);
+    const bin = agentBinary(agent);
+    if (!bin) return Promise.resolve(null);
+    const env = { ...process.env };
+    const varName = agentHomesLib.ENV_VAR[agent];
+    if (home.isDefault) delete env[varName]; else env[varName] = home.dir;
+    const args = agent === 'claude' ? ['auth', 'status'] : ['login', 'status'];
+    return new Promise((resolve) => {
+        execFile(bin, args, { env, timeout: 8000, encoding: 'utf8' }, (err, stdout, stderr) => {
+            const out = `${stdout || ''}${stderr || ''}`;
+            let value = null;
+            if (agent === 'claude') {
+                try {
+                    const j = JSON.parse(out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1));
+                    value = { loggedIn: j.loggedIn === true, email: typeof j.email === 'string' ? j.email : null };
+                } catch (e) { value = null; }
+            } else if (out.trim()) {
+                value = { loggedIn: /logged in/i.test(out) && !/not logged in/i.test(out), email: null };
+            }
+            agentLoginCache.set(key, { at: Date.now(), value });
+            resolve(value);
+        });
+    });
+}
+async function listAgentHomesWithLogins() {
+    const all = listAgentHomes();
+    const out = {};
+    for (const agent of Object.keys(all)) {
+        out[agent] = await Promise.all(all[agent].map(async (h) => ({ ...h, login: await probeAgentLogin(agent, h) })));
+    }
+    return out;
+}
+
+/** Codex rollouts can live under any Codex account's root. */
+function codexRolloutRoots() {
+    return Array.from(new Set([...getCodexConfigRoots(), ...listAgentHomes('codex').map((h) => h.dir)]));
+}
+/**
+ * Which account a session's agent runs as. Claude: the root its SessionStart
+ * record saw (CLAUDE_CONFIG_DIR at launch; null = default), else the one the
+ * session was created with. Codex: CODEX_HOME from the session's env.
+ */
+function sessionAgentHome(internalName, agent, config) {
+    if (agent === 'claude') {
+        const rec = readClaudeSessionRecord(internalName);
+        const dir = rec ? (rec.configDir || null) : (config?.env?.CLAUDE_CONFIG_DIR || null);
+        return agentHomesLib.describeAgentHome(dir, 'claude', os.homedir());
+    }
+    if (agent === 'codex') {
+        return agentHomesLib.describeAgentHome(config?.env?.CODEX_HOME || null, 'codex', os.homedir());
+    }
+    return null;
+}
+/** The list's agent fields for one session: the tool, and the account it runs as. */
+function sessionAgentFields(internalName, config) {
+    const agent = sessionAgentKind(internalName);
+    return { agent, agentHome: agent ? sessionAgentHome(internalName, agent, config) : null };
+}
+
                 try { days = fs.readdirSync(path.join(sessions, y, m)).sort().reverse(); } catch (e) { continue; }
                 for (const d of days) {
                     const dir = path.join(sessions, y, m, d);
@@ -6032,7 +6132,7 @@ function claudeConfigRootsForRestore(recConfigDir) {
     push(path.join(os.homedir(), '.claude'));
     try {
         for (const dirEntry of fs.readdirSync(os.homedir())) {
-            if (/^\.claude[_-][A-Za-z0-9_-]+$/.test(dirEntry)) push(path.join(os.homedir(), dirEntry));
+            if (/^\.claude[_-]?[A-Za-z0-9][A-Za-z0-9_-]*$/.test(dirEntry)) push(path.join(os.homedir(), dirEntry));
         }
     } catch (e) { /* home unreadable — stick with the defaults */ }
     return roots;
@@ -6306,6 +6406,91 @@ function restorePlanForSession(entry) {
                     cwd,
                     warning: `recorded codex conversation ${String(turn.sessionId).slice(0, 8)}… has no rollout on this host — opening a plain shell instead`
                 };
+/**
+ * The environment a new session needs to run as `homeDir`'s account, for
+ * the agent its startup command launches. Null = nothing to pin (no agent,
+ * or the default account).
+ */
+function accountEnvForLaunch(launchCmd, homeDir) {
+    if (!homeDir) return null;
+    const word = (String(launchCmd || '').trim().split(/\s+/)[0] || '').split('/').pop();
+    const agent = word === 'codex' ? 'codex' : /^claude/.test(word) ? 'claude' : null;
+    if (!agent) return { error: 'An account applies only to a Claude or Codex session' };
+    const home = listAgentHomes(agent).find((h) => h.dir === homeDir);
+    if (!home) return { error: `No ${agent} account at ${homeDir}` };
+    return home.isDefault ? null : { env: agentHomesLib.envForAgentHome(agent, home.dir) };
+}
+
+/**
+ * Move a session to another account and relaunch it there, conversation
+ * intact: the transcript (Claude) or rollout (Codex) is copied to the same
+ * place under the new root — the old copy stays as history — the record and
+ * the session's env are re-pinned, and the session restarts through
+ * restore. Nothing changes while the agent is mid-turn.
+ */
+async function switchSessionAgentHome(name, homeDir) {
+    const internalName = resolveSessionInternalName(name, name);
+    if (!internalName) return { status: 404, body: { error: 'No such session' } };
+    const agent = sessionAgentKind(internalName);
+    if (!agent) return { status: 409, body: { error: 'Not a Claude or Codex session' } };
+    const home = listAgentHomes(agent).find((h) => h.dir === homeDir);
+    if (!home) return { status: 400, body: { error: `No ${agent} account at ${homeDir}` } };
+    const config = getSessionConfig(internalName) || getEffectiveSessionConfig(internalName) || {};
+    const current = sessionAgentHome(internalName, agent, config);
+    if (current && current.dir === home.dir) return { status: 200, body: { ok: true, unchanged: true, home } };
+
+    const probe = await restoreSavedSessions({ dryRun: true, includeAgents: true, only: [internalName], replaceIdleAgent: true });
+    const busy = (probe?.skipped || []).find((x) => /busy/.test(String(x.reason || '')));
+    if (busy) return { status: 409, body: { error: `${getSessionDisplayName(internalName) || internalName} is mid-turn — switch accounts when it is idle` } };
+
+    const copyInto = (file, fromRoot) => {
+        const target = fromRoot ? agentHomesLib.transcriptTarget(file, fromRoot, home.dir) : null;
+        if (!target) throw new Error(`conversation file ${file} is not under a known ${agent} root`);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        if (!fs.existsSync(target)) fs.copyFileSync(file, target);
+        return target;
+    };
+    let moved;
+    if (agent === 'claude') {
+        const rec = readClaudeSessionRecord(internalName);
+        if (!rec) return { status: 409, body: { error: 'No recorded Claude conversation to move' } };
+        const found = findClaudeTranscriptById(rec.sessionId);
+        if (!found) return { status: 409, body: { error: `Conversation ${rec.sessionId.slice(0, 8)}… has no transcript on this host` } };
+        const fromRoot = found.configDir || agentHomesLib.defaultHome('claude', os.homedir());
+        moved = copyInto(found.file, fromRoot);
+        // The newer layout keeps subagent transcripts in a sibling directory.
+        const sibling = found.file.endsWith('.jsonl') ? found.file.slice(0, -'.jsonl'.length) : null;
+        if (sibling && fs.existsSync(sibling) && fs.statSync(sibling).isDirectory()) {
+            const target = agentHomesLib.transcriptTarget(sibling, fromRoot, home.dir);
+            if (target && !fs.existsSync(target)) fs.cpSync(sibling, target, { recursive: true });
+        }
+        writeClaudeSessionRecord(internalName, {
+            ...rec,
+            configDir: home.isDefault ? null : home.dir,
+            launchCmd: agentHomesLib.stripConfigPrefix(rec.launchCmd || `claude --resume ${rec.sessionId}`),
+            updatedAt: new Date().toISOString()
+        });
+    } else {
+        const turn = readTurnInfo(internalName);
+        const rootId = turn?.sessionId ? codexRootThreadId(turn.sessionId) : null;
+        const file = rootId ? findCodexRolloutById(rootId) : null;
+        if (!file) return { status: 409, body: { error: 'No recorded Codex conversation to move' } };
+        moved = copyInto(file, codexRolloutRoots().find((r) => file.startsWith(r + path.sep)));
+    }
+    // The session's own env carries the account into every later launch.
+    const varName = agentHomesLib.ENV_VAR[agent];
+    const env = { ...(config.env || {}) };
+    delete env[varName];
+    if (!home.isDefault) env[varName] = home.dir;
+    const base = getSessionConfig(internalName) || getEffectiveSessionConfig(internalName);
+    if (base) setSessionConfig(internalName, { ...base, env: Object.keys(env).length ? env : undefined, updatedAt: new Date().toISOString() });
+
+    const result = await restoreSavedSessions({ includeAgents: true, only: [internalName], replaceIdleAgent: true });
+    const restarted = (result?.restored || []).length > 0;
+    log(`[account] ${internalName} (${agent}) → ${home.label} (${home.dir})${restarted ? ', relaunched' : ''}`, CYAN);
+    return { status: 200, body: { ok: true, home, moved, restarted, skipped: result?.skipped || [] } };
+}
+
             }
             return { command: `codex resume '${rootId.replace(/'/g, `'\\''`)}'`, cwd, agent: 'codex' };
         }
@@ -6706,8 +6891,12 @@ async function roomIsRedoable(entry) {
     } catch (e) { return { ok: false, reason: 'screen unavailable' }; }
     if (TRUST_PROMPT_RE.test(text)) return { ok: true, reason: 'parked at the workspace-trust dialog' };
     if (RESUME_PROMPT_RE.test(text)) return { ok: true, reason: 'parked at the resume prompt' };
-    if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: 'claude is running' };
-    if (fg && !isShellProcName(fg)) return { ok: false, reason: `${fg} is running` };
+    // An agent at its prompt is not redoable for a repair restore, but it
+    // IS safe to restart on purpose (an account switch): `agentIdle` says so
+    // — the screen shows no turn in flight ("esc to interrupt").
+    const agentIdle = !screenSaysWorking(text);
+    if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: 'claude is running', agentIdle };
+    if (fg && !isShellProcName(fg)) return { ok: false, reason: `${fg} is running`, agentIdle: agentIdle && /^(claude|codex|node)$/.test(fg.split('/').pop()) };
     // The grid text can carry stray control bytes a shell left on: ESC c
     // (reset), CSI sequences, and a trailing SGR mouse-report fragment
     // ("...% 35;11;17M") from an app that had mouse tracking on — angler
@@ -6749,7 +6938,7 @@ function resolveRestoreTargets(names, snapshot) {
     }
     return { resolved, unknown };
 }
-async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = false, only = null } = {}) {
+async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = false, only = null, replaceIdleAgent = false } = {}) {
     // Folders first: a session whose meta lost its folder (records deleted,
     // meta rebuilt) is put back where the newest identity snapshot says it
     // was, so the restored wall is filed the way the user left it.
@@ -6775,7 +6964,9 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
             const entry = snapshot.entries.find((e) => e.internalName === internalName);
             const verdict = await roomIsRedoable(entry);
             const display = getSessionDisplayName(internalName) || internalName;
-            if (!verdict.ok) {
+            // A deliberate restart (account switch) may replace an agent that
+            // sits idle at its prompt — never one mid-turn.
+            if (!verdict.ok && !(replaceIdleAgent && verdict.agentIdle)) {
                 skipped.push({ name: display, reason: `busy — ${verdict.reason}` });
                 onlySet.delete(internalName);
                 continue;
@@ -7157,7 +7348,7 @@ function getClaudeConfigRoots() {
     push(path.join(os.homedir(), '.claude'));
     try {
         for (const entry of fs.readdirSync(os.homedir())) {
-            if (/^\.claude[_-][A-Za-z0-9_-]+$/.test(entry)) push(path.join(os.homedir(), entry));
+            if (/^\.claude[_-]?[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry)) push(path.join(os.homedir(), entry));
         }
     } catch (e) { /* home unreadable — defaults stand */ }
     return roots.filter((p) => { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } });
@@ -12104,6 +12295,9 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
+                // Which account (config root) the agent runs as — the wall labels
+                // it when more than one is set up.
+                agentHome: s.agentHome || null,
                     const config = getEffectiveSessionConfig(source) || {};
                     const rec = readClaudeSessionRecord(source);
                     const meta = readClaudeSessionMeta(source);
@@ -12683,7 +12877,7 @@ happens until someone clicks it.
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo, startup } = JSON.parse(body);
+                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo, startup, agentHome } = JSON.parse(body);
                     // The web create form takes the directory as the user
                     // typed it, ~ included; the host only checks that the
                     // path exists, so an unexpanded ~ silently fell back to
@@ -12924,8 +13118,18 @@ happens until someone clicks it.
                     res.end(JSON.stringify({ ok: true }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
+                            // The account it runs as: a chosen non-default
+                            // root rides in the room's environment (and is
+                            // remembered there for restore).
+                            const homeEnv = accountEnvForLaunch(launchCmd, typeof agentHome === 'string' ? agentHome : null);
+                            if (homeEnv && homeEnv.error) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: homeEnv.error }));
+                                return;
+                            }
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
                 }
+                                env: homeEnv?.env || undefined,
             });
             return;
         }
@@ -13163,6 +13367,33 @@ happens until someone clicks it.
                     if (createdBy !== 'user' && createdBy !== 'agent') {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'createdBy must be "user" or "agent"' }));
+        if (parsedUrl.pathname === '/api/agent-homes' && req.method === 'GET') {
+            agentHomesCache.at = 0; // a fresh look: someone may have just logged in somewhere
+            listAgentHomesWithLogins().then((homes) => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(homes));
+            }).catch(() => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(listAgentHomes()));
+            });
+            return;
+        }
+        if (parsedUrl.pathname === '/api/sessions/agent-home' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const parsed = body ? JSON.parse(body) : {};
+                    const result = await switchSessionAgentHome(String(parsed.name || ''), String(parsed.home || ''));
+                    res.writeHead(result.status || 200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(result.body));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: `Switch failed: ${e?.message || e}` }));
+                }
+            });
+            return;
+        }
                         return;
                     }
                     const resolved = resolveSessionInternalName(name, internalName);

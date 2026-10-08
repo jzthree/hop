@@ -1,3 +1,20 @@
+/** One login of an agent: a config root on the host. */
+export type AgentHome = {
+  dir: string;
+  label: string;
+  isDefault: boolean;
+  /** Who the root is logged in as, when the host could ask (null = unknown). */
+  login?: { loggedIn: boolean; email: string | null } | null;
+};
+/** "fable · a@b.org", "claude2 · logged out", or just the label. */
+export const describeAccount = (h: AgentHome): string => {
+  const name = h.isDefault ? "default" : h.label;
+  if (!h.login) return name;
+  if (!h.login.loggedIn) return `${name} · logged out`;
+  return h.login.email ? `${name} · ${h.login.email}` : name;
+};
+export type AgentHomes = { claude: AgentHome[]; codex: AgentHome[] };
+
 // Tiered model for the mobile session switcher. Pure data shaping so it can be
 // unit-tested without the DOM: the component just renders what this returns.
 //
@@ -35,6 +52,8 @@ export type SwitcherSession = {
   foregroundProcess?: string;
   /** What the session runs, by its hooks' records: claude, codex, or nothing known. */
   agent?: "claude" | "codex" | null;
+  /** The account (config root) the agent runs as: CLAUDE_CONFIG_DIR / CODEX_HOME. */
+  agentHome?: AgentHome | null;
   /** Server-decided: a turn in flight / the last turn finished; turnSeen = a human opened it since. */
   agentPhase?: "working" | "done" | null;
   turnSeen?: boolean;

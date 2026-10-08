@@ -35,8 +35,7 @@ import {
   type SwitcherFolder,
   type SwitcherSession,
   type SwitcherSortMode,
-  insertAfter
-} from "../utils/switcherModel";
+  insertAfter, describeAccount, type AgentHome, type AgentHomes } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
@@ -124,7 +123,7 @@ type Props = {
 
 type Sheet = {
   session: SwitcherSession;
-  mode: "menu" | "rename" | "folder";
+  mode: "menu" | "rename" | "folder" | "account";
   // Viewport point the menu anchors to — the ... button or the long-press
   // finger position. A bottom sheet made the thumb travel the whole screen
   // for actions about the element it was already touching.
@@ -1704,6 +1703,19 @@ export const SessionSwitcher = ({
   // What a new session boots into: a plain shell, or straight into an agent.
   // Maps to the create API's `startup` command.
   const [createType, setCreateType] = useState<"terminal" | "claude" | "codex">("terminal");
+  // The agents' logins on the host (one per config root). Fetched when the
+  // wall opens; labels and pickers appear only where there is a choice.
+  const [agentHomes, setAgentHomes] = useState<AgentHomes>({ claude: [], codex: [] });
+  const loadAgentHomes = () => {
+    fetch("/api/agent-homes", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && Array.isArray(d.claude) && Array.isArray(d.codex)) setAgentHomes(d); })
+      .catch(() => { /* no accounts info: nothing labelled */ });
+  };
+  useEffect(() => { loadAgentHomes(); }, []);
+  const homesFor = (agent?: string | null): AgentHome[] => (agent === "claude" || agent === "codex" ? agentHomes[agent] : []);
+  // The account a NEW agent session starts in; "" = the agent's default.
+  const [createHome, setCreateHome] = useState("");
   const startupFor = (t: "terminal" | "claude" | "codex") => (t === "claude" ? "claude" : t === "codex" ? "codex" : "");
   // Rendered by BOTH create forms. submitCreate has always sent createType, but
   // only the top-bar form let you set it, so creating a session inside a folder
@@ -1721,6 +1733,19 @@ export const SessionSwitcher = ({
           onClick={() => setCreateType(t)}
         >{t === "terminal" ? "Terminal" : t === "claude" ? "Claude" : "Codex"}</button>
       ))}
+      {createType !== "terminal" && homesFor(createType).length > 1 && (
+        <select
+          className="create-account"
+          aria-label={`${createType === "claude" ? "Claude" : "Codex"} account`}
+          title="Which login this session runs as (its config directory)"
+          value={createHome}
+          onChange={(e) => setCreateHome(e.target.value)}
+        >
+          {homesFor(createType).map((h) => (
+            <option key={h.dir} value={h.isDefault ? "" : h.dir}>{describeAccount(h)}</option>
+          ))}
+        </select>
+      )}
     </div>
   );
   // When set, the next created session is filed here (the folder header's +).
@@ -2531,6 +2556,25 @@ export const SessionSwitcher = ({
 
   // Fork (same tool) or hand off (target names the other tool). One call
   // for both so the two can never disagree about the endpoint.
+  const switchAccount = async (s: SwitcherSession, home: AgentHome) => {
+    setSheet(null);
+    if (home.login && !home.login.loggedIn && !window.confirm(`The ${home.label} account is logged out. Switch anyway? You will need to run /login in the session.`)) return;
+    onNotice(`Moving ${s.displayName} to the ${home.label} account…`);
+    try {
+      const res = await fetch("/api/sessions/agent-home", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: sessionKey(s), home: home.dir })
+      });
+      const data = await res.json().catch(() => null) as { ok?: boolean; error?: string; restarted?: boolean } | null;
+      if (!res.ok || !data?.ok) { onNotice(data?.error || `Switch failed (${res.status})`); return; }
+      onNotice(data.restarted ? `${s.displayName} now runs as ${home.label}` : `${s.displayName} is set to ${home.label}; it switches on its next start`);
+      onRefresh();
+    } catch {
+      onNotice("Switch failed");
+    }
+  };
+
   const forkSession = async (s: SwitcherSession, target?: "claude" | "codex") => {
     setSheet(null);
     onNotice(target ? `Handing off to ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
@@ -2740,7 +2784,10 @@ export const SessionSwitcher = ({
       const res = await fetch("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: next, type: "terminal", port: null, startup: startupFor(createType), cwd: createCwd.trim() || undefined })
+        body: JSON.stringify({
+          name: next, type: "terminal", port: null, startup: startupFor(createType), cwd: createCwd.trim() || undefined,
+          agentHome: createType !== "terminal" && createHome && homesFor(createType).some((h) => h.dir === createHome) ? createHome : undefined
+        })
       });
       const data = await res.json().catch(() => ({} as { name?: string; displayName?: string; internalName?: string; error?: string }));
       if (!res.ok || !data.name) {
@@ -3033,6 +3080,18 @@ export const SessionSwitcher = ({
               ⏰ {s.checkbacks}
             </button>
           )}
+          {s.agentHome && homesFor(s.agent).length > 1 && (() => {
+            const known = homesFor(s.agent).find((h) => h.dir === s.agentHome?.dir);
+            const out = known?.login && !known.login.loggedIn;
+            return (
+              <span
+                className={"switcher-chip account" + (s.agentHome.isDefault ? " default" : "") + (out ? " logged-out" : "")}
+                title={`Runs as ${known ? describeAccount(known) : s.agentHome.label} — ${s.agentHome.dir}${out ? ". Logged out: run /login in the session, or switch it to another account." : ""}`}
+              >
+                {out ? "⚠ " : ""}{s.agentHome.label}
+              </span>
+            );
+          })()}
           {phase && (
             <span className={`switcher-chip phase ${phase}`} title={phaseTitle(phase)}>
               <span className="phase-dot" aria-hidden="true" />{phaseLabel(phase)}
@@ -3577,6 +3636,7 @@ export const SessionSwitcher = ({
               const width = 264;
               const estH = sheet.mode === "rename" ? 150
                 : sheet.mode === "folder" ? 100 + 34 * (folders.length + 3)
+                : sheet.mode === "account" ? 110 + 34 * homesFor(sheet.session.agent).length
                 : 330;
               const left = Math.min(Math.max(8, sheet.anchor.x - width), window.innerWidth - width - 8);
               let top = sheet.anchor.y + 8;
@@ -3604,6 +3664,34 @@ export const SessionSwitcher = ({
                 <button type="submit">Save</button>
                 <button type="button" onClick={() => setSheet({ session: sheetSession, mode: "menu", anchor: sheet.anchor })}>✕</button>
               </form>
+            ) : sheet.mode === "account" ? (
+              // Another login for this session: the daemon copies the
+              // conversation into that account's config root and relaunches
+              // the agent there (refused while it is mid-turn).
+              <>
+                <div className="switcher-sheet-note">
+                  Run {sheetSession.displayName} as another {sheetSession.agent === "codex" ? "Codex" : "Claude"} account.
+                  The conversation comes along; the agent restarts.
+                </div>
+                {homesFor(sheetSession.agent).map((h) => {
+                  const here = sheetSession.agentHome?.dir === h.dir;
+                  return (
+                    <button
+                      key={h.dir}
+                      type="button"
+                      className={here ? "current" : undefined}
+                      disabled={here}
+                      title={h.dir}
+                      onClick={() => { void switchAccount(sheetSession, h); }}
+                    >
+                      {describeAccount(h)}{here ? " ✓" : ""}
+                    </button>
+                  );
+                })}
+                <button type="button" className="back" onClick={() => setSheet({ session: sheetSession, mode: "menu", anchor: sheet.anchor })}>
+                  ← Back
+                </button>
+              </>
             ) : sheet.mode === "folder" ? (
               // Filing from the menu: drag-and-drop needs a pointer, a free
               // hand, and the folder on screen at the same time as the card —
@@ -3690,6 +3778,11 @@ export const SessionSwitcher = ({
                 >
                   Move to folder…
                 </button>
+                {homesFor(sheetSession.agent).length > 1 && (
+                  <button type="button" onClick={() => setSheet({ session: sheetSession, mode: "account", anchor: sheet.anchor })}>
+                    Account: {sheetSession.agentHome?.label || "default"}…
+                  </button>
+                )}
                 {sheetSession.type !== "port" && <div className="switcher-sheet-sep" aria-hidden="true" />}
                 {sheetSession.type !== "port" && (
                   <button type="button" onClick={toggleAgentAccess}>

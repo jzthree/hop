@@ -5589,24 +5589,6 @@ function readTurnInfo(internalName) {
  * the foreground process name, which reports codex as "node" and any
  * argv-launched restore as the wrapper shell. 'claude' | 'codex' | null.
  */
-function sessionAgentKind(internalName) {
-    if (readClaudeSessionRecord(internalName)?.sessionId) return 'claude';
-    const turn = readTurnInfo(internalName);
-    return turn ? turn.agent : null;
-}
-
-/** A codex rollout by its session id: the id is in the file's name. */
-function findCodexRolloutById(sessionId) {
-    if (!sessionId || !/^[A-Za-z0-9-]{8,}$/.test(sessionId)) return null;
-    for (const root of codexRolloutRoots()) {
-        const sessions = path.join(root, 'sessions');
-        let years = [];
-        try { years = fs.readdirSync(sessions).sort().reverse(); } catch (e) { continue; }
-        for (const y of years) {
-            let months = [];
-            try { months = fs.readdirSync(path.join(sessions, y)).sort().reverse(); } catch (e) { continue; }
-            for (const m of months) {
-                let days = [];
 // ---- Accounts (config roots) ---------------------------------------------
 // One Claude login per CLAUDE_CONFIG_DIR, one Codex login per CODEX_HOME
 // (lib/agent-homes.js). Discovered from the home directory, cached briefly:
@@ -5706,6 +5688,24 @@ function sessionAgentFields(internalName, config) {
     return { agent, agentHome: agent ? sessionAgentHome(internalName, agent, config) : null };
 }
 
+function sessionAgentKind(internalName) {
+    if (readClaudeSessionRecord(internalName)?.sessionId) return 'claude';
+    const turn = readTurnInfo(internalName);
+    return turn ? turn.agent : null;
+}
+
+/** A codex rollout by its session id: the id is in the file's name. */
+function findCodexRolloutById(sessionId) {
+    if (!sessionId || !/^[A-Za-z0-9-]{8,}$/.test(sessionId)) return null;
+    for (const root of codexRolloutRoots()) {
+        const sessions = path.join(root, 'sessions');
+        let years = [];
+        try { years = fs.readdirSync(sessions).sort().reverse(); } catch (e) { continue; }
+        for (const y of years) {
+            let months = [];
+            try { months = fs.readdirSync(path.join(sessions, y)).sort().reverse(); } catch (e) { continue; }
+            for (const m of months) {
+                let days = [];
                 try { days = fs.readdirSync(path.join(sessions, y, m)).sort().reverse(); } catch (e) { continue; }
                 for (const d of days) {
                     const dir = path.join(sessions, y, m, d);
@@ -6388,24 +6388,6 @@ function rebuildClaudeLaunch(launchCmd) {
 // start the shell in. For a claude session we use the cwd recorded by the hook
 // (where claude started), since `claude --resume` resolves the conversation from
 // that project directory.
-function restorePlanForSession(entry) {
-    let rec = readClaudeSessionRecord(entry.internalName);
-    // Codex has no SessionStart record; its notify hook leaves only the
-    // .turn naming the thread. Without this, every codex session came back
-    // as a bare shell with its conversation stranded.
-    if (!rec) {
-        const turn = readTurnInfo(entry.internalName);
-        if (turn && turn.agent === 'codex') {
-            const metaCwd = readClaudeSessionMeta(entry.internalName)?.cwd;
-            const cwd = metaCwd || entry.cwd;
-            // The hook may have named a sub-agent's thread; resume the root.
-            const rootId = codexRootThreadId(turn.sessionId);
-            if (!findCodexRolloutById(rootId)) {
-                return {
-                    command: null,
-                    cwd,
-                    warning: `recorded codex conversation ${String(turn.sessionId).slice(0, 8)}… has no rollout on this host — opening a plain shell instead`
-                };
 /**
  * The environment a new session needs to run as `homeDir`'s account, for
  * the agent its startup command launches. Null = nothing to pin (no agent,
@@ -6491,6 +6473,24 @@ async function switchSessionAgentHome(name, homeDir) {
     return { status: 200, body: { ok: true, home, moved, restarted, skipped: result?.skipped || [] } };
 }
 
+function restorePlanForSession(entry) {
+    let rec = readClaudeSessionRecord(entry.internalName);
+    // Codex has no SessionStart record; its notify hook leaves only the
+    // .turn naming the thread. Without this, every codex session came back
+    // as a bare shell with its conversation stranded.
+    if (!rec) {
+        const turn = readTurnInfo(entry.internalName);
+        if (turn && turn.agent === 'codex') {
+            const metaCwd = readClaudeSessionMeta(entry.internalName)?.cwd;
+            const cwd = metaCwd || entry.cwd;
+            // The hook may have named a sub-agent's thread; resume the root.
+            const rootId = codexRootThreadId(turn.sessionId);
+            if (!findCodexRolloutById(rootId)) {
+                return {
+                    command: null,
+                    cwd,
+                    warning: `recorded codex conversation ${String(turn.sessionId).slice(0, 8)}… has no rollout on this host — opening a plain shell instead`
+                };
             }
             return { command: `codex resume '${rootId.replace(/'/g, `'\\''`)}'`, cwd, agent: 'codex' };
         }
@@ -12204,6 +12204,9 @@ happens until someone clicks it.
                 cwd: s.cwd,
                 foregroundProcess: s.foregroundProcess,
                 agent: s.agent || null,
+                // Which account (config root) the agent runs as — the wall labels
+                // it when more than one is set up.
+                agentHome: s.agentHome || null,
                 // working / done + whether the human has opened it since the
                 // turn ended (server-side seen witness, so every device agrees).
                 ...(phaseBySession.get(s.internalName) || { agentPhase: null, turnSeen: true, turnAt: null }),
@@ -12295,9 +12298,6 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
-                // Which account (config root) the agent runs as — the wall labels
-                // it when more than one is set up.
-                agentHome: s.agentHome || null,
                     const config = getEffectiveSessionConfig(source) || {};
                     const rec = readClaudeSessionRecord(source);
                     const meta = readClaudeSessionMeta(source);
@@ -13027,8 +13027,18 @@ happens until someone clicks it.
                                 return;
                             }
                         } else if (isExternalTerminalBackend()) {
+                            // The account it runs as: a chosen non-default
+                            // root rides in the room's environment (and is
+                            // remembered there for restore).
+                            const homeEnv = accountEnvForLaunch(launchCmd, typeof agentHome === 'string' ? agentHome : null);
+                            if (homeEnv && homeEnv.error) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: homeEnv.error }));
+                                return;
+                            }
                             await ensureExternalRuntimeSession(internalName, cwd, displayName, {
                                 folderId: targetFolderId,
+                                env: homeEnv?.env || undefined,
                                 // Persist the launch so `hop restore` brings the
                                 // app back, not a bare shell. Plain terminals stay
                                 // runtime-only as before.
@@ -13118,18 +13128,8 @@ happens until someone clicks it.
                     res.end(JSON.stringify({ ok: true }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
-                            // The account it runs as: a chosen non-default
-                            // root rides in the room's environment (and is
-                            // remembered there for restore).
-                            const homeEnv = accountEnvForLaunch(launchCmd, typeof agentHome === 'string' ? agentHome : null);
-                            if (homeEnv && homeEnv.error) {
-                                res.writeHead(400, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ error: homeEnv.error }));
-                                return;
-                            }
                     res.end(JSON.stringify({ error: 'Invalid request body' }));
                 }
-                                env: homeEnv?.env || undefined,
             });
             return;
         }
@@ -13276,6 +13276,33 @@ happens until someone clicks it.
             }));
             return;
         }
+        if (parsedUrl.pathname === '/api/agent-homes' && req.method === 'GET') {
+            agentHomesCache.at = 0; // a fresh look: someone may have just logged in somewhere
+            listAgentHomesWithLogins().then((homes) => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(homes));
+            }).catch(() => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(listAgentHomes()));
+            });
+            return;
+        }
+        if (parsedUrl.pathname === '/api/sessions/agent-home' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const parsed = body ? JSON.parse(body) : {};
+                    const result = await switchSessionAgentHome(String(parsed.name || ''), String(parsed.home || ''));
+                    res.writeHead(result.status || 200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(result.body));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: `Switch failed: ${e?.message || e}` }));
+                }
+            });
+            return;
+        }
         if (parsedUrl.pathname === '/api/sessions/restore' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -13367,33 +13394,6 @@ happens until someone clicks it.
                     if (createdBy !== 'user' && createdBy !== 'agent') {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'createdBy must be "user" or "agent"' }));
-        if (parsedUrl.pathname === '/api/agent-homes' && req.method === 'GET') {
-            agentHomesCache.at = 0; // a fresh look: someone may have just logged in somewhere
-            listAgentHomesWithLogins().then((homes) => {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify(homes));
-            }).catch(() => {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify(listAgentHomes()));
-            });
-            return;
-        }
-        if (parsedUrl.pathname === '/api/sessions/agent-home' && req.method === 'POST') {
-            let body = '';
-            req.on('data', chunk => body += chunk);
-            req.on('end', async () => {
-                try {
-                    const parsed = body ? JSON.parse(body) : {};
-                    const result = await switchSessionAgentHome(String(parsed.name || ''), String(parsed.home || ''));
-                    res.writeHead(result.status || 200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify(result.body));
-                } catch (e) {
-                    res.writeHead(500, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: `Switch failed: ${e?.message || e}` }));
-                }
-            });
-            return;
-        }
                         return;
                     }
                     const resolved = resolveSessionInternalName(name, internalName);

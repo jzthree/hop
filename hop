@@ -4854,6 +4854,12 @@ async function listAllSessionEntriesRuntimeFirst() {
     return { entries, runtimeAvailable: runtime.runtimeAvailable, activeDisplayNames };
 }
 
+/** Stopped with "Stop & park": archived in the saved config or the durable meta. */
+function isSessionStopped(internalName) {
+    return getEffectiveSessionConfig(internalName)?.archived === true
+        || readClaudeSessionMeta(internalName)?.archived === true;
+}
+
 async function runtimeTerminalSessionExists(sessionName) {
     if (!sessionName) return false;
     const runtime = await listActiveSessionsRuntimeFirst();
@@ -12573,8 +12579,10 @@ happens until someone clicks it.
                         cwd: plan?.cwd || config.cwd,
                         updatedAt: new Date().toISOString()
                     };
-                    if (savedConfig) setSessionConfig(resolved, next);
-                    else rememberRuntimeSessionMetadata(resolved, next);
+                    // Always SAVED: a stopped session has no room, and a
+                    // runtime-only definition went with it — a stopped plain
+                    // terminal vanished from the list instead of parking.
+                    setSessionConfig(resolved, next);
                     const durable = readClaudeSessionMeta(resolved) || {};
                     writeClaudeSessionMeta(resolved, { ...durable, internalName: resolved, parked: true, archived: true, cwd: next.cwd });
                     // Stop the process — records, metas, and buffers all stay.
@@ -14475,6 +14483,19 @@ happens until someone clicks it.
         if (isExternalTerminalBackend()) {
             (async () => {
                 try {
+                    // A STOPPED session stays stopped: a viewer that still had
+                    // it open (a wall tile, the phone) reconnects the moment
+                    // its room ends, and creating the room again relaunched
+                    // the agent — "Stop & park" undid itself within a second
+                    // (retro, 2026-10-08, respawned twice). Only a deliberate
+                    // open clears the flag (the client unparks first); until
+                    // then a reconnect of a stopped, roomless session is
+                    // refused.
+                    if (isSessionStopped(sessionName) && !(await runtimeTerminalSessionExists(sessionName))) {
+                        socket.write('HTTP/1.1 409 Session Stopped\r\n\r\n');
+                        socket.destroy();
+                        return;
+                    }
                     await reconcileExternalRuntimeSessions();
                     await ensureExternalRuntimeSession(sessionName, sessionConfig?.cwd, getSessionDisplayName(sessionName), {
                         shell: sessionConfig?.shell,

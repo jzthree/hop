@@ -1500,7 +1500,7 @@ export const SessionSwitcher = ({
   // buttons — right-click is a shortcut, never a second vocabulary.
   const openWallMenu = (e: ReactMouseEvent) => {
     // Only the empty wall — a right-click on a card belongs to that card.
-    if ((e.target as HTMLElement)?.closest?.(".switcher-card, .switcher-group-label, .switcher-top")) return;
+    if ((e.target as HTMLElement)?.closest?.(".switcher-card, .switcher-row, .switcher-group-label, .switcher-top")) return;
     e.preventDefault();
     setMenu({
       x: e.clientX,
@@ -2359,14 +2359,21 @@ export const SessionSwitcher = ({
       onClose();
       return;
     }
-    // Opening a parked session IS unparking it — best-effort, never blocking
-    // the switch itself.
+    // Opening a parked session IS unparking it. Best-effort and not awaited
+    // for a parked one; a STOPPED one waits for it, because the daemon
+    // refuses to restart a stopped session until it is unparked (a viewer's
+    // reconnect must not undo "Stop & park").
     if (session.parked) {
-      fetch("/api/sessions/park", {
+      const unparked = fetch("/api/sessions/park", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ internalName: sessionKey(session), parked: false })
       }).catch(() => { /* daemon will still show it parked; harmless */ });
+      if (session.archived) {
+        onNotice("Resuming " + (session.displayName || session.name) + "…");
+        void unparked.then(() => handleTap({ ...session, parked: false, archived: false }));
+        return;
+      }
     }
     // A DEAD terminal session starts IN PLACE instead of falling through to
     // full screen — the last accidental door into the mode. Attaching is what

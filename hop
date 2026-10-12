@@ -2733,6 +2733,20 @@ const CLAUDE_UI_RE = /bypass permissions on|shift\+tab to cycle|Welcome back|esc
 const TRUST_PROMPT_RE = /Quick\s*safety\s*check|Yes,?\s*I\s*trust\s*this\s*folder|Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust/i;
 // Trust-dialog reading lives in lib/trust-dialog.js so it can be unit-tested.
 const { trustDialogWorkspace, trustDialogAnswer, samePath } = require('./lib/trust-dialog.js');
+// The transport cloudflared uses to reach Cloudflare's edge. Its default is
+// QUIC (UDP): on networks that shape or drop UDP — campus networks often do —
+// a lost packet stalls every request in flight on that connection for a
+// retransmit timeout, and keystrokes from a phone or laptop arrive in
+// 1–3 s bursts while the host itself is idle (measured 2026-10-11: QUIC
+// connection 0 had 120 timeout losses; one request in four took 1.2–2.9 s).
+// "http2" runs the tunnel over TCP instead. Set `tunnel_protocol` in
+// ~/.hop2 config ("quic" | "http2" | "auto") or HOP_TUNNEL_PROTOCOL.
+function getTunnelProtocol() {
+    const raw = String(process.env.HOP_TUNNEL_PROTOCOL || getHopConfig().tunnel_protocol || '').toLowerCase();
+    return raw === 'quic' || raw === 'http2' || raw === 'auto' ? raw : null;
+}
+const tunnelProtocolLine = () => { const p = getTunnelProtocol(); return p ? `protocol: ${p}\n` : ''; };
+
 function getResumeMode() {
     const mode = String(getHopConfig().resume_mode || '').toLowerCase();
     return mode === 'summary' || mode === 'ask' ? mode : 'full';
@@ -14729,7 +14743,7 @@ function startTunnel(isRestart = false) {
         const tunnelConfig = `
 url: http://${localTunnelHost}:${PROXY_PORT}
 tunnel: ${domainConfig.tunnelName}
-`;
+${tunnelProtocolLine()}`;
         writePrivateFile(tunnelConfigPath, tunnelConfig);
 
         const runArgs = ['tunnel', '--config', tunnelConfigPath, 'run'];
@@ -14907,7 +14921,7 @@ function startClientTunnel(isRestart = false) {
 url: http://127.0.0.1:${PROXY_PORT}
 tunnel: ${tunnelId}
 credentials-file: ${path.resolve(credentialsPath)}
-`;
+${tunnelProtocolLine()}`;
     writePrivateFile(tunnelConfigPath, tunnelConfig);
 
     const tunnel = spawn('cloudflared', ['tunnel', '--config', tunnelConfigPath, 'run'], {

@@ -6035,6 +6035,20 @@ function runShellProbe(command, cwd) {
 // agent-turn path has always sent them as separate writes; this is that.
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 // Is the message still sitting in the composer (the `›` line) — typed, not sent?
+/**
+ * Is this session's agent up and showing its own UI — the only thing a
+ * check-back may type into? Not running, a plain shell, a trust or resume
+ * dialog, or an unreadable screen are all "no".
+ */
+async function agentScreenReady(entry) {
+    if (!entry || entry.live !== true) return { ok: false, reason: 'waiting: the session is not running' };
+    const verdict = await roomIsRedoable(entry);
+    // roomIsRedoable says "not redoable, and here is whether the agent is
+    // idle" exactly when an agent's UI owns the screen.
+    if (!verdict.ok && verdict.agentIdle !== undefined) return { ok: true };
+    return { ok: false, reason: `waiting: no agent on screen (${verdict.reason})` };
+}
+
 async function composerStillHolds(internalName, message) {
     try {
         const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
@@ -6114,6 +6128,17 @@ async function runCheckbackSweep() {
                     continue;
                 }
                 if (!checkbacks.mayDeliver(cb, ctx)) continue; // mid-turn: next sweep
+                // Type only into a RUNNING agent. Attaching to a stopped
+                // session creates its room — as a bare shell — and the
+                // message then ran as shell commands ("zsh: command not
+                // found: Collect"); worse, that shell made restore think the
+                // session was up and skip it (surf, alphagenome, 2026-10-12
+                // after a reboot). Wait until the agent's own UI is on screen.
+                const ready = await agentScreenReady(entry);
+                if (!ready.ok) {
+                    if (cb.lastError !== ready.reason) { cb.lastError = ready.reason; dirty = true; }
+                    continue;
+                }
                 const e2 = await attachTerminalApiClient(cb.session, entry.displayName || cb.session, { actor: 'system', label: 'checkback', typeOnly: true });
                 try { await typeAndSubmit(e2, cb.session, cb.message); }
                 finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
@@ -6398,8 +6423,13 @@ function rebuildClaudeLaunch(launchCmd) {
             if (!valued && out.includes(t)) continue;
             out.push(t);
             if (valued) out.push(tokens[++i]);
+            continue;
         }
-        // bare positional (initial prompt) — dropped
+        // A bare positional is the initial PROMPT, and everything after it
+        // is prompt text too — split on spaces, its words included things
+        // like "--source-ref" and "-q", which were kept as flags and made
+        // claude exit at once on every restore (pulse-1004-claude-o3).
+        break;
     }
     return out.join(' ');
 }
@@ -6979,6 +7009,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
         const { resolved, unknown } = resolveRestoreTargets(only, snapshot);
         for (const name of unknown) skipped.push({ name, reason: 'no such session' });
         onlySet = resolved;
+        let closedAny = false;
         for (const internalName of resolved) {
             if (!live.has(internalName)) continue;
             const entry = snapshot.entries.find((e) => e.internalName === internalName);
@@ -7013,7 +7044,13 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
             }
             log(`  ${display}: closed the ${verdict.reason} left by the last restore`, DIM);
             live.delete(internalName);
+            closedAny = true;
         }
+        // The keeper ends the old terminal a beat AFTER the room closes. A
+        // relaunch inside that beat was refused ("already running"), and
+        // then the old one exited too — both sessions vanished (alphagenome,
+        // angler-codex-claude-codex, 2026-10-12). Let the old ones go first.
+        if (closedAny) await new Promise((r) => setTimeout(r, 2000));
     }
     const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !live.has(e.internalName));
     // Primary source: the SessionStart-hook records. Add any recorded session that
@@ -13334,7 +13371,11 @@ happens until someone clicks it.
                     const result = await restoreSavedSessions({
                         dryRun: parsed.dryRun === true,
                         includeAgents: parsed.includeAgents === true,
-                        only: Array.isArray(parsed.only) ? parsed.only.filter((n) => typeof n === 'string').slice(0, 200) : null
+                        only: Array.isArray(parsed.only) ? parsed.only.filter((n) => typeof n === 'string').slice(0, 200) : null,
+                        // Restart named agents that sit idle at their prompt
+                        // (never one mid-turn) — e.g. one resumed the wrong
+                        // conversation. Only together with `only`.
+                        replaceIdleAgent: parsed.replaceIdleAgent === true && Array.isArray(parsed.only)
                     });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(result));
@@ -14511,7 +14552,24 @@ happens until someone clicks it.
                         return;
                     }
                     await reconcileExternalRuntimeSessions();
-                    await ensureExternalRuntimeSession(sessionName, sessionConfig?.cwd, getSessionDisplayName(sessionName), {
+                    // A dead session that holds an agent conversation comes
+                    // back AS that agent, whoever opens it — a viewer, a
+                    // check-back, a tile. Creating a bare shell here left
+                    // surf a zsh prompt after a reboot (a check-back's attach
+                    // beat restore by two seconds, and restore then skipped
+                    // the "running" session). Same plan restore would use.
+                    let revive = null;
+                    if (!sessionConfig?.startup && !(await runtimeTerminalSessionExists(sessionName))) {
+                        try {
+                            const plan = restorePlanForSession({ internalName: sessionName, cwd: sessionConfig?.cwd, startup: sessionConfig?.startup, autoStart: sessionConfig?.autoStart });
+                            if (plan?.command) {
+                                revive = plan;
+                                log(`[ws] ${sessionName}: not running — starting it as its agent (${plan.command.slice(0, 80)})`, DIM);
+                            }
+                        } catch (e) { /* no plan: a plain shell, as before */ }
+                    }
+                    await ensureExternalRuntimeSession(sessionName, revive?.cwd || sessionConfig?.cwd, getSessionDisplayName(sessionName), {
+                        command: revive?.command || undefined,
                         shell: sessionConfig?.shell,
                         env: sessionConfig?.env,
                         cols: sessionConfig?.cols,

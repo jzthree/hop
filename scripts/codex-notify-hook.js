@@ -38,7 +38,17 @@ function turnsDir() {
 // thread is the truth: if another session's turn record already names this
 // root thread, the turn is that session's. (hop launches codex without the
 // daemon now; this keeps the sessions that predate the change honest.)
+//
+// Retired (2026-10-12): every codex hop launches now carries its own session
+// in the per-thread overrides (lib/codex-identity.js), so HOP_SESSION is the
+// truth — and the "another record already names this thread" rule did harm:
+// once a record held the wrong thread, every later turn of that thread was
+// filed there for good. The hand-off session angler-codex-claude-codex lost
+// its whole conversation to angler-codex that way, and after a reboot
+// angler-codex resumed the hand-off's thread instead of its own. Kept only
+// for a launch with no session in its environment.
 function resolveHopSession(dir, rootId, envSession) {
+  if (envSession) return envSession;
   if (!rootId) return envSession;
   let names = [];
   try { names = fs.readdirSync(dir).filter((f) => f.endsWith(".turn")); } catch { return envSession; }
@@ -58,7 +68,9 @@ function resolveHopSession(dir, rootId, envSession) {
 // file — a long thread's rollout runs to hundreds of MB. Any failure leaves
 // the id as given; hop resolves it again at restore time.
 function findRollout(id) {
-  const root = path.join(os.homedir(), ".codex", "sessions");
+  // The account's own root: a session running as another Codex login keeps
+  // its rollouts under that CODEX_HOME.
+  const root = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
   const walk = (dir, depth) => {
     let names = [];
     try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
@@ -101,14 +113,24 @@ function bumpTurn(payload) {
   const rawThread = (payload && typeof payload["thread-id"] === "string") ? payload["thread-id"]
              : (payload && typeof payload.thread_id === "string") ? payload.thread_id
              : (payload && typeof payload.session_id === "string") ? payload.session_id : null;
-  const rootId = rootThreadId(rawThread);
+  let rootId = rootThreadId(rawThread);
   const hopSession = resolveHopSession(dir, rootId, envSession);
   const file = path.join(dir, `${hopSession}.turn`);
   let count = 0;
+  let prev = null;
   try {
-    const prev = JSON.parse(fs.readFileSync(file, "utf8"));
+    prev = JSON.parse(fs.readFileSync(file, "utf8"));
     if (prev && Number.isInteger(prev.count) && prev.count >= 0) count = prev.count;
   } catch { /* missing/corrupt -> start at 0 */ }
+  // A thread Codex never saved cannot be the conversation. Codex's helper
+  // threads (the approval "guardian", among others) finish turns and notify
+  // like any other, but have no rollout — recording one replaced the real
+  // thread, and restore then had nothing to resume (alphagenome came back a
+  // bare shell). Keep the saved thread already on record.
+  if (rootId && !findRollout(rootId) && prev && typeof prev.sessionId === "string"
+      && prev.sessionId !== rootId && findRollout(prev.sessionId)) {
+    rootId = prev.sessionId;
+  }
   const rec = JSON.stringify({
     // The thread id is the conversation (and the rollout file's name); the
     // turn id names one turn and matches nothing on disk. With multi-agent

@@ -439,7 +439,23 @@ async function main() {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
     });
+    // Compressed when the client offers it (every browser does). A Codex
+    // scroll redraws ~6.7 KB per wheel tick and compresses 4.3x with a full
+    // window (2.3x with a small one: consecutive frames repeat the screen) —
+    // the difference between a trackpad flick queueing ~400 KB/s behind the
+    // tunnel and ~90 KB/s. Level 1: the CPU cost is a fraction of a ms.
+    // HAY_WS_DEFLATE=0 turns it off. Browsers only: the hop CLI and other
+    // local clients attach over loopback, where compressing buys nothing.
     const wss = new WebSocketServer({ noServer: true });
+    const wssDeflate = process.env.HAY_WS_DEFLATE === '0' ? wss : new WebSocketServer({
+        noServer: true,
+        perMessageDeflate: {
+            zlibDeflateOptions: { level: 1 },
+            threshold: 256,
+            concurrencyLimit: 16
+        }
+    });
+    if (wssDeflate !== wss) wssDeflate.on('connection', (ws, req) => wss.emit('connection', ws, req));
 
     server.on('upgrade', (req, socket, head) => {
         const wsUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
@@ -447,8 +463,9 @@ async function main() {
             socket.destroy();
             return;
         }
-        wss.handleUpgrade(req, socket, head, (ws) => {
-            wss.emit('connection', ws, req);
+        const target = /Mozilla\//.test(String(req.headers['user-agent'] || '')) ? wssDeflate : wss;
+        target.handleUpgrade(req, socket, head, (ws) => {
+            target.emit('connection', ws, req);
         });
     });
 
@@ -554,6 +571,7 @@ async function main() {
         } catch (e) { }
         try {
             wss.close();
+            if (wssDeflate !== wss) wssDeflate.close();
         } catch (e) { }
         server.close(() => process.exit(0));
         setTimeout(() => process.exit(0), 500).unref();

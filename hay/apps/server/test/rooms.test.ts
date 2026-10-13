@@ -146,7 +146,7 @@ describe("Room", () => {
     expect(readMessages(phone).some((m) => m.type === "active_size" && m.clientId === "phone")).toBe(true);
   });
 
-  it("broadcasts pty output to all clients", () => {
+  it("broadcasts pty output to all clients", async () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {
       ptyInstance = new FakePty() as unknown as FakePty;
@@ -162,6 +162,7 @@ describe("Room", () => {
     room.attachClient({ id: "b", name: "Blake", colorIndex: 1, cols: 80, rows: 24 }, socketB);
 
     ptyInstance?.emit("hello");
+    await new Promise((r) => setTimeout(r, 20)); // output is batched (Room.queueOutput)
 
     const outputsA = findMessages(socketA, "output");
     const outputsB = findMessages(socketB, "output");
@@ -962,6 +963,7 @@ describe("Room", () => {
       expect(String(snapshot.data)).toContain("LATE-MARKER-XYZ");
       // After the snapshot the stream flows live again, no duplication.
       pty().emit("AFTER-MARKER\r\n");
+      await new Promise((r) => setTimeout(r, 20)); // output is batched
       const after = readMessages(socket).filter((m) => m.type === "output");
       expect(after.some((m) => String(m.data).includes("AFTER-MARKER"))).toBe(true);
       expect(after.some((m) => String(m.data).includes("LATE-MARKER-XYZ"))).toBe(false);

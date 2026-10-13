@@ -803,11 +803,17 @@ async function withLifecycleLock(op, fn, { waitMs = 120_000, onWait } = {}) {
 // Marker so the authenticator setup QR is only shown on first run (UX only; no auth logic).
 const AUTH_QR_SHOWN_FILE = path.join(HOME_DIR, '.auth_qr_shown');
 // A keeper-backed host re-adopts every running terminal (replaying each
-// screen) BEFORE it opens its port; with 30 rooms that took ~8 s, so a 5 s
+// screen) BEFORE it opens its port. With 30 rooms that took ~8 s, then ~41 s
+// once one replay timed out (2026-10-12), so first a 5 s and then a 25 s
 // limit killed each new host mid-adoption and spawned the next — a restart
-// loop that left hop with no host (2026-10-12). Stays under the spawn
-// lock's 30 s staleness so a waiting spawner never starts a rival.
-const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 25000);
+// loop that left hop with no host, and took the daemon down with it ("Fatal:
+// Hay host did not open its port in time") while a `hop restore` was in
+// flight, which the CLI reported as "socket hang up". This is now a ceiling,
+// not the expected wait: the spawner keeps waiting while the host process is
+// alive (see waitForHayHostPort), gives up early only once it has died, and
+// refreshes the spawn lock as it waits so a rival spawner never mistakes a
+// long adoption for a stale lock.
+const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 180000);
 const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_CACHE_MS', 10000);
 const HAY_HOST_HOME_HASH = crypto.createHash('sha256').update(path.resolve(HOME_DIR)).digest('hex').slice(0, 24);
 const HAY_HOST_HOME_FLAG = `--hop-home-hash=${HAY_HOST_HOME_HASH}`;
@@ -9711,6 +9717,27 @@ async function stopExternalHayHostProcess(hostState, timeoutMs = 1500) {
     return !isProcessAlive(pid);
 }
 
+// Wait for a freshly spawned host to open its port. Adopting a big fleet from
+// the pty-keeper can take a minute or more, so the wait is bounded by the
+// host's LIFE first and the ceiling second: a host that dies returns at once
+// instead of burning the whole ceiling, and one still working keeps the spawn
+// lock's mtime fresh so a concurrent spawner (30 s staleness rule) never calls
+// the lock stale and starts a rival host mid-adoption.
+async function waitForHayHostPort(started, ceilingMs) {
+    const deadline = Date.now() + ceilingMs;
+    let lastLockTouch = 0;
+    while (Date.now() < deadline) {
+        if (await waitForPort(started.port, '127.0.0.1', 1000, 120)) return true;
+        if (!isProcessAlive(started.pid)) return false;
+        if (Date.now() - lastLockTouch > 5000) {
+            lastLockTouch = Date.now();
+            const now = new Date();
+            try { fs.utimesSync(HAY_HOST_SPAWN_LOCK, now, now); } catch (e) { /* lock gone — nothing to refresh */ }
+        }
+    }
+    return false;
+}
+
 function markExternalHayHostResponsive(host) {
     const recovered = hayHostProbeFailures.recordSuccess(Number(host?.pid));
     if (recovered) {
@@ -9837,6 +9864,9 @@ async function ensureExternalHayHostReadyOnce() {
                 if (spawned && isProcessAlive(spawned.pid) && await probeExternalHayHostFromHost(spawned, 1500)) {
                     return markExternalHayHostResponsive(spawned);
                 }
+                // The winner releases the lock on success and failure alike;
+                // once it is gone there is nothing left to wait for.
+                if (!fs.existsSync(HAY_HOST_SPAWN_LOCK)) break;
             }
             // Winner never delivered — fall through and spawn ourselves.
         }
@@ -9922,10 +9952,13 @@ async function ensureExternalHayHostReadyOnce() {
         throw new Error(`Hay host failed to start; see ${hayHostLogFile}`);
     }
 
-    const ready = await waitForPort(started.port, '127.0.0.1', HAY_HOST_READY_TIMEOUT_MS, 120);
+    const ready = await waitForHayHostPort(started, HAY_HOST_READY_TIMEOUT_MS);
     if (!ready) {
+        const died = !isProcessAlive(started.pid);
         await stopExternalHayHostProcess(started);
-        throw new Error(`Hay host did not open its port in time; see ${hayHostLogFile}`);
+        throw new Error(died
+            ? `Hay host (pid ${started.pid}) exited before opening its port; see ${hayHostLogFile}`
+            : `Hay host did not open its port within ${Math.round(HAY_HOST_READY_TIMEOUT_MS / 1000)}s (still adopting its terminals? HOP_HAY_HOST_READY_TIMEOUT_MS raises the ceiling); see ${hayHostLogFile}`);
     }
     const healthy = await probeExternalHayHostFromHost(started, 1500);
     if (!healthy) {
@@ -17564,7 +17597,13 @@ async function main() {
         try {
             res = await callLocalApi(state, '/api/sessions/restore', 'POST', { dryRun, includeAgents, only: only.length ? only : undefined });
         } catch (e) {
-            log(`Restore request failed: ${e.message}`, RED);
+            // "socket hang up" here means the daemon closed the connection
+            // without answering: it was restarted, or died (e.g. its host
+            // never came up), while the restore was in flight. Nothing about
+            // the restore itself failed, so say what to do next.
+            const gone = !isServerRunning();
+            log(`Restore request failed: ${e.message}${gone ? ' — the daemon went away mid-request' : ''}.`, RED);
+            log(`  ${DIM}Check ${CYAN}hop logs${RESET}${DIM} (look for "Fatal:" or "Cleaning up"), then run ${CYAN}hop restore${RESET}${DIM} again — it only recreates sessions that are not running.${RESET}`, RESET);
             process.exit(1);
         }
         if (!res || res.status < 200 || res.status >= 300) {

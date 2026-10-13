@@ -802,7 +802,12 @@ async function withLifecycleLock(op, fn, { waitMs = 120_000, onWait } = {}) {
 }
 // Marker so the authenticator setup QR is only shown on first run (UX only; no auth logic).
 const AUTH_QR_SHOWN_FILE = path.join(HOME_DIR, '.auth_qr_shown');
-const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 5000);
+// A keeper-backed host re-adopts every running terminal (replaying each
+// screen) BEFORE it opens its port; with 30 rooms that took ~8 s, so a 5 s
+// limit killed each new host mid-adoption and spawned the next — a restart
+// loop that left hop with no host (2026-10-12). Stays under the spawn
+// lock's 30 s staleness so a waiting spawner never starts a rival.
+const HAY_HOST_READY_TIMEOUT_MS = parsePositiveIntEnv('HOP_HAY_HOST_READY_TIMEOUT_MS', 25000);
 const HAY_HOST_DISCOVERY_CACHE_MS = parsePositiveIntEnv('HOP_HAY_HOST_DISCOVERY_CACHE_MS', 10000);
 const HAY_HOST_HOME_HASH = crypto.createHash('sha256').update(path.resolve(HOME_DIR)).digest('hex').slice(0, 24);
 const HAY_HOST_HOME_FLAG = `--hop-home-hash=${HAY_HOST_HOME_HASH}`;

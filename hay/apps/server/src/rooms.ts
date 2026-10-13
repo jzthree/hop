@@ -142,6 +142,11 @@ export type RoomSummary = {
 // 6MB still exceeds every reader: the deep-history replay asks 1.5MB, the
 // serialized attach reads the grid, and `hop restore` persists 64KB tails.
 // Override with HAY_SNAPSHOT_BUFFER_BYTES for deeper rings at GC's expense.
+// DEC private modes worth restoring on adopt: cursor keys, mouse (any
+// flavour and encoding), focus events, alternate screen, bracketed paste,
+// cursor visibility.
+const TRACKED_DEC_MODES = new Set(["1", "25", "47", "1000", "1002", "1003", "1004", "1005", "1006", "1015", "1047", "1049", "2004"]);
+
 const MAX_BUFFER_SIZE = (() => {
   const env = Number(process.env.HAY_SNAPSHOT_BUFFER_BYTES);
   return Number.isFinite(env) && env > 0 ? env : 6_000_000;
@@ -321,6 +326,13 @@ export class Room extends EventEmitter {
   private mouseReporting = false;
   private mouseSgr = false;
   private cursorHidden = false;
+  // The DEC private modes an app set (alternate screen, mouse, focus,
+  // bracketed paste…), exactly. An app sets them once at startup; a host
+  // restart rebuilds the room from a bounded replay that no longer holds
+  // that moment, so the room forgot Codex was full-screen and the wheel
+  // scrolled the page instead of the app (2026-10-12). The host saves
+  // modePrefix() and puts it back in front of the replay on adopt.
+  private decModes = new Map<string, boolean>();
   private controlSequenceTail = "";
   private oscBuffer = "";
   private cleanupTimer: NodeJS.Timeout | null = null;
@@ -678,10 +690,13 @@ export class Room extends EventEmitter {
 
     let nextMouseReporting = hasNewRis ? false : this.mouseReporting;
     let nextMouseSgr = hasNewRis ? false : this.mouseSgr;
+    const modesBefore = this.modePrefix();
+    if (hasNewRis) this.decModes.clear();
     while ((match = regex.exec(stateInput)) !== null) {
       const params = match[1].split(";").filter(Boolean);
       const mode = match[2];
       for (const param of params) {
+        if (TRACKED_DEC_MODES.has(param)) this.decModes.set(param, mode === "h");
         if (param === "25") {
           nextCursorHidden = mode === "l";
         } else if (param === "47" || param === "1047" || param === "1049") {
@@ -737,6 +752,9 @@ export class Room extends EventEmitter {
       this.cursorHidden = nextCursorHidden;
       stateChanged = true;
     }
+
+    const modesAfter = this.modePrefix();
+    if (modesAfter !== modesBefore) this.emit("modes", modesAfter);
 
     if (stateChanged) {
       this.emit("pty_state", {
@@ -1204,6 +1222,22 @@ export class Room extends EventEmitter {
   // omit cells until the app happens to repaint (for example, on scroll).
   // Begin tracking at TUI entry; dependency loading is shared and normally
   // finishes first, but the callback covers a TUI that starts immediately.
+  /**
+   * The escape sequences that put a fresh terminal into this app's current
+   * modes: the alternate screen first (so the rest apply to it), then each
+   * mode that is on, and a hidden cursor. "" for a plain shell.
+   */
+  modePrefix(): string {
+    let alt = "", rest = "";
+    for (const [mode, on] of this.decModes) {
+      if (mode === "25") { if (!on) rest += "\x1b[?25l"; continue; }
+      if (!on) continue;
+      if (mode === "1049" || mode === "1047" || mode === "47") alt = `\x1b[?${mode}h`;
+      else rest += `\x1b[?${mode}h`;
+    }
+    return alt + rest;
+  }
+
   private startTuiGrid() {
     if (!SERIALIZED_ATTACH_ENABLED || this.grid || this.gridStartPending || this.gridUnavailable || this.ended) return;
     if (!this.alternateScreen && !this.mouseReporting) return;
@@ -1244,7 +1278,11 @@ export class Room extends EventEmitter {
             const nl = tail.indexOf("\n");
             if (nl !== -1 && nl < 8192) tail = tail.slice(nl + 1);
           }
-          this.grid.write(tail);
+          // The tail rarely reaches back to where the app set its modes
+          // (an adopted room's saved prefix sits at the very front of the
+          // ring): put the room's current modes first, or the grid serializes
+          // a full-screen app as a plain shell. The tail's own changes win.
+          this.grid.write(this.modePrefix() + tail);
         }
       }
     }

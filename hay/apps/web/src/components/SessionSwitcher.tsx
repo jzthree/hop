@@ -37,6 +37,7 @@ import {
   type SwitcherSortMode,
   insertAfter, describeAccount, type AgentHome, type AgentHomes } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
+import { isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
 
@@ -693,8 +694,13 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
         if (ev.type === "keydown") sendInputRef.current?.("\x1b[13;2u");
         return false;
       }
-      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === "Enter") {
+      // On a Mac only ⌘⏎ — Ctrl⏎ goes to the app (see fullscreenChord.ts).
+      if (isFullscreenChord(ev)) {
         if (ev.type === "keydown") onFullscreenRef.current();
+        return false;
+      }
+      if (isAppCtrlEnter(ev) && (kbdEnhancedRef.current || looksLikeClaude())) {
+        if (ev.type === "keydown") sendInputRef.current?.("\x1b[13;5u");
         return false;
       }
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key === ".") {

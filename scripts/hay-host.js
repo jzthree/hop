@@ -162,9 +162,29 @@ const watchedRooms = new WeakSet();
 // restore <name>`): their records must survive the close, exactly as they
 // survive a host shutdown. Consumed once, on the next session_end.
 const preserveRecordsOnClose = new Set();
+// Each room's terminal modes (Room.modePrefix), saved as they change so a
+// re-adopted room starts in them: an app turns alternate screen and mouse
+// reporting on once, at startup, which a bounded replay no longer holds.
+const ROOM_MODES_DIR = path.join(HOP_HOME, 'room-modes');
+const roomModesFile = (id) => path.join(ROOM_MODES_DIR, `${id}.modes`);
+function loadRoomModes(id) {
+    if (!/^[A-Za-z0-9_.-]+$/.test(String(id || ''))) return '';
+    try { return fs.readFileSync(roomModesFile(id), 'utf8'); } catch (e) { return ''; }
+}
+function saveRoomModes(id, prefix) {
+    try {
+        if (!prefix) { fs.unlinkSync(roomModesFile(id)); return; }
+        fs.mkdirSync(ROOM_MODES_DIR, { recursive: true });
+        fs.writeFileSync(roomModesFile(id), prefix);
+    } catch (e) { /* best effort */ }
+}
 function watchRoomEnd(room) {
     if (!room || typeof room.on !== 'function' || watchedRooms.has(room)) return room;
     watchedRooms.add(room);
+    if (/^[A-Za-z0-9_.-]+$/.test(String(room.id || ''))) {
+        room.on('modes', (prefix) => saveRoomModes(String(room.id), String(prefix || '')));
+        if (typeof room.modePrefix === 'function') saveRoomModes(String(room.id), room.modePrefix());
+    }
     room.on('session_end', () => {
         if (shuttingDown) return;
         const id = String(room.id || '');
@@ -177,6 +197,7 @@ function watchRoomEnd(room) {
         // request to forget its conversation; that is an explicit delete's
         // job, daemon-side.
         try { fs.unlinkSync(path.join(BUFFER_DIR, `${id}.raw`)); } catch (e) { /* best effort */ }
+        try { fs.unlinkSync(roomModesFile(id)); } catch (e) { /* best effort */ }
     });
     return room;
 }

@@ -49,6 +49,7 @@ import {
 } from "./utils/paneTree";
 import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
 import type { ViewsSummary } from "./utils/switcherModel";
+import { isAppCtrlEnter, isFullscreenChord } from "./utils/fullscreenChord";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -2329,10 +2330,18 @@ const App = () => {
     terminal.attachCustomKeyEventHandler((event) => {
       // ⌘⏎ leaves full screen for the wall — the mirror of ⌘⏎ on a wall
       // tile entering it. One chord toggles the mode from either side.
-      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
+      // On a Mac only ⌘⏎ — Ctrl⏎ goes to the app (see fullscreenChord.ts).
+      if (isFullscreenChord(event)) {
         if (event.type === 'keydown') {
           event.preventDefault();
           setSwitcherOpen(true);
+        }
+        return false;
+      }
+      if (isAppCtrlEnter(event) && (remoteKbdEnhancedRef.current || foregroundIsClaude())) {
+        if (event.type === 'keydown') {
+          event.preventDefault();
+          handleUserInput('\x1b[13;5u');
         }
         return false;
       }

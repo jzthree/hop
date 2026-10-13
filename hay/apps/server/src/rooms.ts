@@ -142,6 +142,13 @@ export type RoomSummary = {
 // 6MB still exceeds every reader: the deep-history replay asks 1.5MB, the
 // serialized attach reads the grid, and `hop restore` persists 64KB tails.
 // Override with HAY_SNAPSHOT_BUFFER_BYTES for deeper rings at GC's expense.
+// Output batching (see Room.queueOutput). HAY_OUTPUT_BATCH_MS=0 turns it off.
+const OUTPUT_BATCH_MS = (() => {
+  const env = Number(process.env.HAY_OUTPUT_BATCH_MS);
+  return Number.isFinite(env) && env >= 0 ? env : 2;
+})();
+const OUTPUT_BATCH_MAX_MS = 16;
+
 // DEC private modes worth restoring on adopt: cursor keys, mouse (any
 // flavour and encoding), focus events, alternate screen, bracketed paste,
 // cursor visibility.
@@ -385,7 +392,7 @@ export class Room extends EventEmitter {
       this.updateTerminalState(data);
       this.startTuiGrid();
       this.answerTerminalQueriesIfHeadless(data);
-      this.broadcast({ type: "output", data });
+      this.queueOutput(data);
       this.emit("pty_output", { roomId: this.id, data, timestamp: now() });
     });
 
@@ -440,6 +447,9 @@ export class Room extends EventEmitter {
   }
 
   attachClient(info: ClientInfo, socket: SocketAdapter) {
+    // Output still waiting to go out belongs to the viewers already here;
+    // the newcomer's snapshot already contains it.
+    this.flushOutput();
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
@@ -581,6 +591,9 @@ export class Room extends EventEmitter {
         // Catch-up: output that arrived while the snapshot was being
         // serialized. Appended INSIDE the snapshot payload so snapshot and
         // delta land as one atomic parse — no frame between reset and delta.
+        // Batched output not yet sent is behind the serialize marker too:
+        // flushing now routes it into this client's catch-up.
+        this.flushOutput();
         const catchUp = client.snapshotCatchUp.join("");
         socket.send(JSON.stringify({
           type: "snapshot",
@@ -1075,6 +1088,7 @@ export class Room extends EventEmitter {
   }
 
   private sendActiveSize(client: ClientState, ownerId: string) {
+    this.flushOutput();
     client.socket.send(
       JSON.stringify({
         type: "active_size",
@@ -1086,6 +1100,7 @@ export class Room extends EventEmitter {
   }
 
   private broadcastActiveSize(client: ClientState) {
+    this.flushOutput();
     // Broadcast to OTHER clients (not the one typing)
     const payload = JSON.stringify({
       type: "active_size",
@@ -1100,7 +1115,42 @@ export class Room extends EventEmitter {
     }
   }
 
+  /**
+   * Live output is sent in screen-sized messages, not one per pty read:
+   * Codex writes a redraw in ~10 pieces, so one wheel tick was ten
+   * WebSocket messages through the tunnel (321 for 30 ticks). Pieces that
+   * arrive within OUTPUT_BATCH_MS of each other go out together, capped at
+   * OUTPUT_BATCH_MAX_MS after the first so a steady stream still flows.
+   */
+  private pendingOutput: string[] = [];
+  private pendingOutputSince = 0;
+  private outputFlushTimer: NodeJS.Timeout | null = null;
+
+  private queueOutput(data: string) {
+    if (OUTPUT_BATCH_MS <= 0) { this.broadcast({ type: "output", data }); return; }
+    const t = now();
+    if (this.pendingOutput.length === 0) this.pendingOutputSince = t;
+    this.pendingOutput.push(data);
+    if (this.outputFlushTimer) clearTimeout(this.outputFlushTimer);
+    if (t - this.pendingOutputSince >= OUTPUT_BATCH_MAX_MS) { this.flushOutput(); return; }
+    this.outputFlushTimer = setTimeout(() => this.flushOutput(), OUTPUT_BATCH_MS);
+  }
+
+  private flushOutput() {
+    if (this.outputFlushTimer) { clearTimeout(this.outputFlushTimer); this.outputFlushTimer = null; }
+    if (this.pendingOutput.length === 0) return;
+    const data = this.pendingOutput.length === 1 ? this.pendingOutput[0] : this.pendingOutput.join("");
+    this.pendingOutput = [];
+    this.sendToClients({ type: "output", data });
+  }
+
   private broadcast(message: ServerMessage) {
+    // Anything else keeps its place after the output that preceded it.
+    if ((message as { type?: string }).type !== "output") this.flushOutput();
+    this.sendToClients(message);
+  }
+
+  private sendToClients(message: ServerMessage) {
     const payload = JSON.stringify(message);
     const isOutput = (message as { type?: string }).type === "output";
     for (const client of this.clients.values()) {

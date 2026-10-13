@@ -91,10 +91,19 @@ function loadViewerColors(hay) {
         if (typeof hay.setDefaultViewerColors === 'function') hay.setDefaultViewerColors(saved.bg, saved.fg);
     } catch (e) { /* none yet: the dark default */ }
 }
+// Compared against what is on disk, not setDefaultViewerColors' "changed":
+// room.setClientColors already updates the defaults before this runs, so
+// that always said "unchanged" and the file was never written — every host
+// restart went back to the dark default (Codex's charcoal composer).
+let savedViewerColors = null;
 function rememberViewerColors(hay, bg, fg) {
     if (typeof hay.setDefaultViewerColors !== 'function') return;
-    if (!hay.setDefaultViewerColors(bg, fg)) return;
-    try { fs.writeFileSync(VIEWER_COLORS_FILE, JSON.stringify(hay.getDefaultViewerColors())); } catch (e) { /* best effort */ }
+    hay.setDefaultViewerColors(bg, fg);
+    const json = JSON.stringify(hay.getDefaultViewerColors());
+    if (savedViewerColors === null) { try { savedViewerColors = fs.readFileSync(VIEWER_COLORS_FILE, 'utf8'); } catch (e) { savedViewerColors = ''; } }
+    if (json === savedViewerColors) return;
+    try { fs.writeFileSync(VIEWER_COLORS_FILE, json); savedViewerColors = json; } catch (e) { /* best effort */ }
+}
 const CLAUDE_SESSIONS_DIR = path.join(HOP_HOME, 'claude-sessions');
 
 // Scrub Claude Code SESSION markers from our environment before any PTY is

@@ -50,6 +50,7 @@ import {
 import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord } from "./utils/fullscreenChord";
+import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -88,6 +89,9 @@ const getLocationRoom = () => {
 const buildSessionPath = (sessionName: string) => `/s/${encodeURIComponent(sessionName)}/`;
 
 const resolveWsUrl = () => {
+  // On the machine hop runs on, terminal sockets skip the tunnel.
+  const local = localWsBase();
+  if (local) return local;
   // Check for hop session config (when embedded in hop)
   const hopSession = (window as unknown as { __HOP_SESSION__?: { wsUrl?: string } }).__HOP_SESSION__;
   if (hopSession?.wsUrl) {
@@ -1761,7 +1765,7 @@ const App = () => {
     // dark) then match the screen instead of a guess.
     const surface = resolveTerminalTheme(themeMode);
     const hex = (c?: string) => (c || "").replace("#", "").slice(0, 6);
-    const url = `${wsUrl}?room=${encodeURIComponent(nextSession.room)}&name=${encodeURIComponent(
+    const url = `${wsUrl}${wsUrl.includes("?") ? "&" : "?"}room=${encodeURIComponent(nextSession.room)}&name=${encodeURIComponent(
       nextSession.name
     )}&cols=${cols}&rows=${rows}&replay=${replay}&bg=${hex(surface.background)}&fg=${hex(surface.foreground)}&device=${encodeURIComponent(resolveDeviceKey())}`;
 
@@ -1771,6 +1775,9 @@ const App = () => {
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    const viaLocalLink = isLocalLinkUrl(url);
+    let opened = false;
+    ws.addEventListener("open", () => { opened = true; });
     // When this socket began CONNECTING — the watchdog uses it to catch a
     // handshake that hangs (accepted TCP, WS upgrade never completes through
     // the tunnel): it fires no open/close/error, so nothing else can notice.
@@ -2043,6 +2050,9 @@ const App = () => {
     });
 
     ws.addEventListener("close", () => {
+      // The fast path refused or vanished: fall back to the tunnel, which
+      // the reconnect below then uses.
+      if (viaLocalLink && !opened) localLinkFailed();
       if (connectionNonce !== connectNonceRef.current) {
         return;
       }
@@ -2069,6 +2079,11 @@ const App = () => {
       // Error is usually followed by close, so don't double-schedule
     });
   };
+
+  // Once the same-machine fast path answers, reconnect onto it.
+  useEffect(() => {
+    startLocalLink(() => setReconnectToken((value) => value + 1));
+  }, []);
 
   useEffect(() => {
     if (!session || !terminalReady) {

@@ -10514,6 +10514,33 @@ function isDirectLoopbackRequest(req) {
     return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
 
+// Same-machine fast path. A browser on this Mac that opens hop through the
+// public hostname pays Cloudflare's round trip on every keystroke and scroll
+// tick (70–240 ms, spikes past 1 s, measured 2026-10-13) while the daemon is
+// a millisecond away. The page asks for a ticket over the tunnel and, if it
+// can open a WebSocket to 127.0.0.1 with it, attaches there instead. A ticket
+// stands in for the login that asked for it and only on a DIRECT loopback
+// connection, so a copy is worthless off this machine; revoking the login
+// ends its tickets too. Kept in memory: a daemon restart drops them, and the
+// page falls back to the tunnel and asks again.
+const LOCAL_LINK_TTL_MS = 12 * 3600 * 1000;
+const localLinkTickets = new Map(); // ticket -> { token, expiresAt }
+function issueLocalLinkTicket(sessionToken) {
+    const now = Date.now();
+    for (const [t, rec] of localLinkTickets) if (rec.expiresAt <= now) localLinkTickets.delete(t);
+    while (localLinkTickets.size >= 500) localLinkTickets.delete(localLinkTickets.keys().next().value);
+    const ticket = 'll_' + crypto.randomBytes(24).toString('base64url');
+    localLinkTickets.set(ticket, { token: sessionToken, expiresAt: now + LOCAL_LINK_TTL_MS });
+    return ticket;
+}
+function verifyLocalLinkTicket(ticket) {
+    const rec = localLinkTickets.get(ticket);
+    if (!rec) return null;
+    const session = rec.expiresAt > Date.now() ? authSessions.verify(rec.token) : null;
+    if (!session) localLinkTickets.delete(ticket);
+    return session;
+}
+
 // Every way a request can prove itself, in one place.
 //   cookie — a per-device login session (browser, hop-ios)
 //   token  — Authorization: Bearer <device session token>
@@ -10540,6 +10567,10 @@ function authenticateRequest(req, cookies, { queryToken = null } = {}) {
     }
     if (typeof queryToken === 'string' && queryToken) {
         if (queryToken === SESSION_SECRET && isDirectLoopbackRequest(req)) return { ok: true, via: 'ipc', session: null };
+        if (queryToken.startsWith('ll_') && isDirectLoopbackRequest(req)) {
+            const session = verifyLocalLinkTicket(queryToken);
+            if (session) return { ok: true, via: 'cookie', session };
+        }
         if (isAuthSessionToken(queryToken)) {
             const session = authSessions.verify(queryToken);
             if (session) return { ok: true, via: 'token', session };
@@ -10881,6 +10912,21 @@ function startAuthProxy(authEmitter) {
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ lastAuthAt }));
+            return;
+        }
+
+        // API: a ticket for the same-machine fast path (see issueLocalLinkTicket).
+        // Browsers only — it stands in for the login cookie.
+        if (parsedUrl.pathname === '/api/local-link' && req.method === 'GET') {
+            setNoCache(res);
+            const token = cookies[SESSION_COOKIE_NAME];
+            if (!isAuthenticated || auth.via !== 'cookie' || !isAuthSessionToken(token)) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'Unauthorized' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, port: PROXY_PORT, ticket: issueLocalLinkTicket(token) }));
             return;
         }
 
@@ -14522,6 +14568,17 @@ happens until someone clicks it.
         if (!isAuthenticated) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
             socket.destroy();
+            return;
+        }
+
+        // The fast-path probe: a page on the public hostname checking that
+        // this machine's daemon answers on loopback and takes its ticket.
+        if (parsedUrl.pathname === '/ws' && parsedUrl.query.probe === '1') {
+            const probe = new WebSocket.Server({ noServer: true });
+            probe.handleUpgrade(req, socket, head, (ws) => {
+                try { ws.send('ok'); ws.close(1000); } catch (e) { }
+                probe.close();
+            });
             return;
         }
 

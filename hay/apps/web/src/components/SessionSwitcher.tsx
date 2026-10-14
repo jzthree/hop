@@ -2590,12 +2590,12 @@ export const SessionSwitcher = ({
 
   const forkSession = async (s: SwitcherSession, target?: "claude" | "codex") => {
     setSheet(null);
-    onNotice(target ? `Handing off to ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
+    onNotice(target ? `Condensing for ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
     try {
       const res = await fetch("/api/sessions/fork", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: sessionKey(s), ...(target ? { target } : {}) })
+        body: JSON.stringify({ internalName: sessionKey(s), ...(target ? { target, condense: true } : {}) })
       });
       const data = await res.json().catch(() => ({} as { error?: string; name?: string; internalName?: string; kind?: string; extract?: { turns?: number; bytes?: number } }));
       if (!res.ok) {
@@ -3761,21 +3761,19 @@ export const SessionSwitcher = ({
                 <button type="button" onClick={() => { void forkSession(sheetSession); }}>
                   Fork session
                 </button>
-                {/* Crossing tools: the conversation is extracted to a document
-                    the new agent reads first (context handoff, not a resume).
-                    Offered for every terminal — the daemon knows what a
-                    restored session runs better than the process name here —
-                    minus the tool this one is visibly running already. */}
-                {sheetSession.type !== "port" && appLabel(sheetSession) !== "codex" && (
-                  <button type="button" onClick={() => { void forkSession(sheetSession, "codex"); }}>
-                    Continue in Codex…
+                {/* Continue in an agent: the conversation is condensed to a
+                    document the new agent reads first (a context handoff, not
+                    a resume). Into the OTHER tool that is the only way across;
+                    into the SAME tool it is a fresh start without the full,
+                    context-heavy history. Offered for every terminal — the
+                    daemon knows what a restored session runs better than the
+                    process name here. */}
+                {sheetSession.type !== "port" && (["claude", "codex"] as const).map((target) => (
+                  <button key={target} type="button" onClick={() => { void forkSession(sheetSession, target); }}>
+                    {appLabel(sheetSession) === target ? "Continue in fresh " : "Continue in "}
+                    {target === "codex" ? "Codex" : "Claude"}…
                   </button>
-                )}
-                {sheetSession.type !== "port" && appLabel(sheetSession) !== "claude" && (
-                  <button type="button" onClick={() => { void forkSession(sheetSession, "claude"); }}>
-                    Continue in Claude…
-                  </button>
-                )}
+                ))}
                 <button
                   type="button"
                   onClick={() => {

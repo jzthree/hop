@@ -870,6 +870,67 @@ test('fork falls past a poisoned record cwd to the durable one', async () => {
 });
 
 
+// "Continue in fresh Claude": the same agent, started over from the
+// condensed trajectory instead of resuming the full history. The new session
+// runs the SOURCE's claude launch (a fake one here, so no real agent starts)
+// with the prompt to read the extract first.
+test('condense into the same agent hands off the trajectory to a fresh session', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'condensesrc',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+
+  const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const configDir = path.join(tempDir, 'claude-cfg');
+  const projectDir = path.join(configDir, 'projects', tempDir.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(path.join(projectDir, `${sessionId}.jsonl`), [
+    { type: 'user', timestamp: '2026-10-13T10:00:00Z', message: { role: 'user', content: 'tune the scroll pacing' } },
+    { type: 'assistant', timestamp: '2026-10-13T10:00:05Z', message: { content: [{ type: 'text', text: 'Batched output to one message per redraw.' }] } }
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const argvFile = path.join(tempDir, 'fake-claude-argv.txt');
+  const fakeClaude = path.join(tempDir, 'claude-fake');
+  await fs.writeFile(fakeClaude, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\nsleep 30\n`, { mode: 0o755 });
+  await fs.mkdir(path.join(hopHome, 'claude-sessions'), { recursive: true });
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.json`), JSON.stringify({
+    sessionId, cwd: tempDir, configDir, launchCmd: `${fakeClaude} --model opus`,
+    updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const fresh = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', {
+    internalName: internal, target: 'claude', condense: true
+  });
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.data));
+  assert.equal(fresh.data.kind, 'handoff');
+  assert.match(fresh.data.name, /^condensesrc-cont\d*$/);
+  assert.equal(fresh.data.extract.turns, 1);
+  const extract = await fs.readFile(fresh.data.extract.path, 'utf8');
+  assert.match(extract, /tune the scroll pacing/);
+
+  let argv = '';
+  for (let i = 0; i < 40 && !argv; i++) {
+    await delay(150);
+    argv = await fs.readFile(argvFile, 'utf8').catch(() => '');
+  }
+  assert.match(argv, /^--model\nopus\n/, `the source's own claude launch, got ${JSON.stringify(argv)}`);
+  assert.ok(argv.includes(fresh.data.extract.path), 'the prompt names the extract');
+
+  const plain = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', {
+    internalName: internal, target: 'claude'
+  });
+  assert.equal(plain.status, 200);
+  assert.equal(plain.data.kind, 'claude', 'without condense, the same agent is a conversation fork');
+
+
+  for (const name of [internal, plain.data.internalName, fresh.data.internalName]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+      { name, internalName: name });
+  }
+});
+
+
 // The briefing generator's coverage signal: the server witnesses who was
 // looking at what, and when. Only a HUMAN-viewing attach may stamp it —
 // wall tiles are spectators and terminal-api clients are agents.

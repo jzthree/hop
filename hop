@@ -12432,7 +12432,7 @@ happens until someone clicks it.
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    const { name, internalName, target } = JSON.parse(body);
+                    const { name, internalName, target, condense } = JSON.parse(body);
                     const source = resolveSessionInternalName(name, internalName);
                     if (!source || !(hopSessionExists(source) || getEffectiveSessionConfig(source))) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -12473,8 +12473,11 @@ happens until someone clicks it.
                     // resume the other's transcript, so the conversation is
                     // extracted to a document the new agent reads before its
                     // first turn (scripts/trajectory-extract.js). Same tool,
-                    // or no target, is the conversation fork as before.
-                    const handoff = !!wantTarget && wantTarget !== sourceKind;
+                    // or no target, is the conversation fork as before —
+                    // unless `condense` asks for the handoff anyway: a fresh
+                    // session of the SAME agent that starts from the condensed
+                    // trajectory instead of the full, context-heavy history.
+                    const handoff = !!wantTarget && (wantTarget !== sourceKind || condense === true);
                     if (handoff && sourceKind === 'shell') {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'This session has no claude or codex conversation to hand off' }));
@@ -12485,7 +12488,7 @@ happens until someone clicks it.
                         : null;
 
                     const sourceDisplay = getSessionDisplayName(source) || source;
-                    const suffix = handoff ? '-' + wantTarget : '-fork';
+                    const suffix = !handoff ? '-fork' : wantTarget === sourceKind ? '-cont' : '-' + wantTarget;
                     let forkName = sourceDisplay + suffix;
                     let n = 2;
                     while (isDisplayNameInUse(forkName) || hopSessionExists(toInternalSessionName(forkName))) {
@@ -12520,7 +12523,10 @@ happens until someone clicks it.
                         writePrivateFile(extractPath, result.text);
                         const bytes = Buffer.byteLength(result.text);
                         const prompt = trajectoryExtract.handoffPrompt(extractPath, bytes, sourceKind);
-                        command = `${wantTarget} ${shq(prompt)}`;
+                        // A claude source keeps its own launch (config dir,
+                        // model, flags) when the receiver is claude too.
+                        const launcher = wantTarget === 'claude' && rec ? (rebuildClaudeLaunch(rec.launchCmd) || 'claude') : wantTarget;
+                        command = `${launcher} ${shq(prompt)}`;
                         kind = 'handoff';
                         extract = { path: extractPath, bytes, turns: result.turns, totalTurns: result.totalTurns };
                     } else if (rec) {

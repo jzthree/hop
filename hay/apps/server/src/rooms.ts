@@ -1226,7 +1226,7 @@ export class Room extends EventEmitter {
    * With a client attached, the real terminal answers and we stay silent.
    */
   private answerTerminalQueriesIfHeadless(data: string) {
-    if (this.clients.size > 0 || this.ended) return;
+    if (this.ended) return;
     if (data.indexOf("\x1b") === -1) return;
     let reply = "";
     // OSC 10/11: foreground / background color queries — answered with the
@@ -1234,12 +1234,29 @@ export class Room extends EventEmitter {
     // background (Claude Code picks light vs dark this way) matches what the
     // user is really looking at. Falls back to the dark default before any
     // client has ever attached.
+    //
+    // Answered even while browsers are attached: the web terminal swallows
+    // OSC 10/11 without replying, so "a client will answer" was never true
+    // for them, and a Codex started with a tile or a viewer open got no
+    // reply — it fell back to its dark palette and an unshaded input box
+    // (alphagenome, 2026-10-15). Only a local CLI attach sits in a real
+    // terminal that answers for itself.
+    const answersColors = [...this.clients.values()].some((client) => client.source === "local-cli");
     const osc = (n: number, hex: string) => {
       const p = (i: number) => hex.slice(i, i + 2).repeat(2);
       return `\x1b]${n};rgb:${p(0)}/${p(2)}/${p(4)}\x1b\\`;
     };
-    if (/\x1b\]10;\?(?:\x07|\x1b\\)/.test(data)) reply += osc(10, this.clientFg);
-    if (/\x1b\]11;\?(?:\x07|\x1b\\)/.test(data)) reply += osc(11, this.clientBg);
+    if (!answersColors) {
+      if (/\x1b\]10;\?(?:\x07|\x1b\\)/.test(data)) reply += osc(10, this.clientFg);
+      if (/\x1b\]11;\?(?:\x07|\x1b\\)/.test(data)) reply += osc(11, this.clientBg);
+    }
+    // The rest xterm.js answers itself, so only a room nobody watches does.
+    if (this.clients.size > 0) {
+      if (reply) {
+        try { this.pty.write(reply); } catch { /* pty gone */ }
+      }
+      return;
+    }
     // DA1: identify as a VT220-class terminal (matches xterm.js's own reply).
     if (/\x1b\[0?c/.test(data)) reply += "\x1b[?62;22c";
     // DSR 5 (status): "OK".

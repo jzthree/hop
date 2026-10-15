@@ -4889,6 +4889,9 @@ body.pane-dragging { user-select: none; }
 }
 .views-entry-count.fresh { background: var(--accent, #7c5cff); color: #fff; }
 .switcher-action.views-entry { width: auto; padding: 0 10px; gap: 6px; font-size: 12.5px; font-weight: 600; }
+/* The theme button carries a word too ("Light"), so it sizes like Views
+   rather than the 32px icon square. */
+.switcher-action.theme-entry { width: auto; padding: 0 10px; gap: 6px; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
 
 /* The switcher's header action is a fixed 32px square with a centred glyph —
    an inline dot would shove the icon off-centre, so it rides the corner. */

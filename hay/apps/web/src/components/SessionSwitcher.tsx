@@ -113,6 +113,10 @@ type Props = {
   userName?: string;
   terminalTheme?: object;
   onOpenSettings?: () => void;
+  // The page theme, switchable straight from the wall: the settings drawer
+  // lives in the full-screen view, and the hub (no session open) has none.
+  themeMode?: "system" | "light" | "dark";
+  onThemeChange?: (mode: "system" | "light" | "dark") => void;
   onToggleKeyboard?: () => void;
   onFind?: () => void;
   // Open the Views panel. No argument = the whole fleet (header button); an
@@ -1299,6 +1303,8 @@ export const SessionSwitcher = ({
   userName,
   terminalTheme,
   onOpenSettings,
+  themeMode,
+  onThemeChange,
   onToggleKeyboard,
   onFind,
   onOpenViews,
@@ -3344,6 +3350,18 @@ export const SessionSwitcher = ({
                 : (() => { const n = visibleSessions.reduce((k, s) => k + (s.views?.count || 0), 0); return n > 0 ? <span className="views-entry-count">{n}</span> : null; })()}
             </button>
           )}
+          {onThemeChange && themeMode && (() => {
+            const next = themeMode === "system" ? "light" : themeMode === "light" ? "dark" : "system";
+            const label = (m: string) => (m === "system" ? "Auto" : m === "light" ? "Light" : "Dark");
+            return (
+              <button type="button" className="switcher-action" onClick={() => onThemeChange(next)}
+                      aria-label={`Theme: ${label(themeMode)} — switch to ${label(next)}`}
+                      title={`Theme: ${label(themeMode)} — click for ${label(next)}`}>
+                <span aria-hidden="true">{themeMode === "light" ? "☀" : themeMode === "dark" ? "☾" : "◐"}</span>
+                {label(themeMode)}
+              </button>
+            );
+          })()}
           {onOpenSettings && (
             <button type="button" className="switcher-action" aria-label="Settings" title="Settings" onClick={onOpenSettings}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

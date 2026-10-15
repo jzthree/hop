@@ -870,6 +870,33 @@ test('fork falls past a poisoned record cwd to the durable one', async () => {
 });
 
 
+// A view the browser cannot display (pptx, zip) is saved instead of shown.
+// Opening it must still name the file — without a Content-Disposition name
+// the browser took the URL's last segment and every download read "inline".
+test('a view keeps its file name when opened, downloaded or range-read', async () => {
+  const dir = path.join(hopHome, 'views', 'nameprobe');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'deck v2.pptx'), Buffer.alloc(64, 1));
+  const head = (reqPath, extra = {}) => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port: state.port, path: reqPath, method: 'GET',
+      headers: { Authorization: `Bearer ${state.sessionSecret}`, ...extra } }, (res) => {
+      res.resume(); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers }));
+    });
+    req.on('error', reject); req.end();
+  });
+  const base = '/view/nameprobe/' + encodeURIComponent('deck v2.pptx');
+  const opened = await head(base + '/inline');
+  assert.equal(opened.status, 200);
+  assert.match(opened.headers['content-disposition'] || '', /^inline;.*filename\*=UTF-8''deck%20v2\.pptx/);
+  const saved = await head(base + '/download');
+  assert.match(saved.headers['content-disposition'] || '', /^attachment;.*filename="deck v2\.pptx"/);
+  const ranged = await head(base + '/inline', { Range: 'bytes=0-9' });
+  assert.equal(ranged.status, 206);
+  assert.match(ranged.headers['content-disposition'] || '', /deck%20v2\.pptx/);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+
 // "Continue in fresh Claude": the same agent, started over from the
 // condensed trajectory instead of resuming the full history. The new session
 // runs the SOURCE's claude launch (a fake one here, so no real agent starts)

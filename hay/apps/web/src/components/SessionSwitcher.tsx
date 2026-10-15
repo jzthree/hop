@@ -3354,7 +3354,7 @@ export const SessionSwitcher = ({
             const next = themeMode === "system" ? "light" : themeMode === "light" ? "dark" : "system";
             const label = (m: string) => (m === "system" ? "Auto" : m === "light" ? "Light" : "Dark");
             return (
-              <button type="button" className="switcher-action" onClick={() => onThemeChange(next)}
+              <button type="button" className="switcher-action theme-entry" onClick={() => onThemeChange(next)}
                       aria-label={`Theme: ${label(themeMode)} — switch to ${label(next)}`}
                       title={`Theme: ${label(themeMode)} — click for ${label(next)}`}>
                 <span aria-hidden="true">{themeMode === "light" ? "☀" : themeMode === "dark" ? "☾" : "◐"}</span>

@@ -647,7 +647,7 @@ describe("Room", () => {
   });
 
   describe("headless terminal-identity answers", () => {
-    it("answers color/DA/truecolor probes only while no client is attached", () => {
+    it("answers DA/truecolor probes only while no client is attached; colors whenever no real terminal is", () => {
       let ptyInstance: FakePty | null = null;
       const factory: PtyFactory = () => {
         ptyInstance = new FakePty() as unknown as FakePty;
@@ -663,8 +663,18 @@ describe("Room", () => {
       expect(answered).toContain("[?62;22c");
       expect(answered).toContain("P1+r524742");
 
-      // Attached: the real terminal answers; the room stays silent.
+      // A browser attached: xterm.js answers DA itself, but swallows OSC
+      // 10/11 without replying — the room still answers the color, or a
+      // Codex started under a viewer gets no reply and goes dark.
       room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, new FakeSocket());
+      ptyInstance!.writes.length = 0;
+      ptyInstance!.emit("\x1b]11;?\x07 \x1b[0c");
+      const withBrowser = ptyInstance!.writes.join("");
+      expect(withBrowser).toContain("]11;rgb:0d0d/1111/1717");
+      expect(withBrowser).not.toContain("[?62;22c");
+
+      // A local CLI attach sits in a real terminal that answers for itself.
+      room.attachClient({ id: "c", name: "cli", colorIndex: 1, cols: 80, rows: 24, source: "local-cli" }, new FakeSocket());
       ptyInstance!.writes.length = 0;
       ptyInstance!.emit("\x1b]11;?\x07");
       expect(ptyInstance!.writes.join("")).toBe("");

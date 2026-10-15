@@ -4351,6 +4351,8 @@ const App = () => {
             onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
+            themeMode={themeMode}
+            onThemeChange={setThemeMode}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -5016,6 +5018,8 @@ const App = () => {
             onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
+            themeMode={themeMode}
+            onThemeChange={setThemeMode}
             onOpenSettings={() => {
               setSwitcherOpen(false);
               setDrawerOpen(true);

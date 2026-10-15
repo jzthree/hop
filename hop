@@ -11917,6 +11917,7 @@ happens until someone clicks it.
                 }
                 res.writeHead(206, {
                     'Content-Type': viewType,
+                    'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`,
                     'Content-Length': end - start + 1,
                     'Content-Range': `bytes ${start}-${end}/${viewSize}`,
                     'Accept-Ranges': 'bytes'
@@ -11929,9 +11930,10 @@ happens until someone clicks it.
             // anything else in them.
             const downloadName = path.basename(target);
             const asciiName = downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-            const disposition = wantDownload
-                ? { 'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}` }
-                : {};
+            // Inline still names the file: a type the browser can't show
+            // (pptx, zip, octet-stream) is saved anyway, and without a name it
+            // took the URL's last segment — every such download read "inline".
+            const disposition = { 'Content-Disposition': `${wantDownload ? 'attachment' : 'inline'}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}` };
             res.writeHead(200, {
                 ...disposition,
                 'Content-Type': viewType,

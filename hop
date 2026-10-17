@@ -6128,6 +6128,18 @@ function readCodexAutomations() {
     codexAutomationCache = { at: Date.now(), items };
     return items;
 }
+// A one-shot (COUNT=1) whose start has passed. Codex leaves these ACTIVE
+// whether or not they ran — Accessibility's 10-15 follow-up never arrived in
+// its thread — so they are not "upcoming", and the card's count skips them.
+function codexAutomationPastDue(a, now = Date.now()) {
+    const rule = String(a?.rrule || '');
+    if (!/(^|[;:\n])COUNT=1(;|$|\n)/.test(rule)) return false;
+    const m = rule.match(/DTSTART:(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)/);
+    if (!m) return false;
+    const [, y, mo, d, h, mi, sec, z] = m;
+    const at = z ? Date.UTC(+y, +mo - 1, +d, +h, +mi, +sec) : new Date(+y, +mo - 1, +d, +h, +mi, +sec).getTime();
+    return at < now;
+}
 function codexAutomationsForSession(internalName) {
     const turn = readTurnInfo(internalName);
     if (!turn || turn.agent !== 'codex' || !turn.sessionId) return [];
@@ -12474,7 +12486,7 @@ happens until someone clicks it.
                 // Scheduled check-backs waiting on this session (hop checkback).
                 checkbacks: pendingCheckbacksFor(s.internalName) || undefined,
                 checkbackNext: nextCheckbackAt(s.internalName) || undefined,
-                codexAutomations: codexAutomationsForSession(s.internalName).filter((a) => a.status === 'ACTIVE').length || undefined,
+                codexAutomations: codexAutomationsForSession(s.internalName).filter((a) => a.status === 'ACTIVE' && !codexAutomationPastDue(a)).length || undefined,
                 lastActivityAt: s.lastActivityAt,
                 // For sessions armed with notify-on-finish, each completed turn
                 // adds to bellSeq so the phone treats a finished response like a

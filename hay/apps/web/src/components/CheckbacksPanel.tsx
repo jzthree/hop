@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   chipWhen, conditionLabel, dayHeading, describeRrule, describeState, describeTrigger, isTimed,
-  nextOfTrigger, orderForSession, timeOfDay, type Checkback, type CodexAutomation
+  nextOfTrigger, orderForSession, relative, timeOfDay, type Checkback, type CodexAutomation
 } from "../utils/checkbackText";
 
 // What is scheduled on a session, read like a reminders list: the timed ones
@@ -63,7 +63,13 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
   const rows = items ? orderForSession(items, session) : [];
   const pending = rows.filter((c) => c.status === "pending");
   const past = rows.filter((c) => c.status !== "pending").slice(0, 12);
-  const activeAutos = automations.filter((a) => a.status === "ACTIVE");
+  // A one-shot Codex automation whose time has passed is not upcoming:
+  // Codex keeps it ACTIVE whether or not it ran (some never arrive), so it
+  // folds away under "Past due" instead of heading the list as "Overdue".
+  const autoTimes = automations.map((auto) => ({ auto, r: describeRrule(auto.rrule, now) }));
+  const isPastDue = (r: { next: number | null }, rule: string) => /COUNT=1/.test(rule) && r.next !== null && r.next < now;
+  const activeAutos = autoTimes.filter(({ auto, r }) => auto.status === "ACTIVE" && !isPastDue(r, auto.rrule)).map(({ auto }) => auto);
+  const pastDueAutos = autoTimes.filter(({ auto, r }) => auto.status === "ACTIVE" && isPastDue(r, auto.rrule));
   const pausedAutos = automations.filter((a) => a.status !== "ACTIVE");
 
   // Everything with a clock time, hop's and Codex's together, soonest first.
@@ -158,6 +164,22 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
                   );
                 })}
               </section>
+            )}
+
+            {pastDueAutos.length > 0 && (
+              <details className="sched-fold">
+                <summary>Past due Codex automations ({pastDueAutos.length})</summary>
+                <p className="checkbacks-hint">Codex still lists these as active, but a one-shot follow-up is not always delivered — check the session before counting on it.</p>
+                {pastDueAutos.map(({ auto, r }) => (
+                  <div key={auto.id} className="sched-row codex past">
+                    <div className="sched-time tag">was due</div>
+                    <div className="sched-body">
+                      <div className="sched-title">{auto.name}</div>
+                      <div className="sched-meta">{r.next ? `${dayHeading(r.next, now) === "Due now" ? new Date(r.next).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : timeOfDay(r.next)} · ${relative(r.next, now)}` : r.label}</div>
+                    </div>
+                  </div>
+                ))}
+              </details>
             )}
 
             {pausedAutos.length > 0 && (

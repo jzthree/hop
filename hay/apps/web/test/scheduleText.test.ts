@@ -27,7 +27,7 @@ describe("reminder-list headings", () => {
   it("names today, tomorrow, and later days", () => {
     expect(dayHeading(at(2026, 10, 16, 18), now)).toBe("Today");
     expect(dayHeading(at(2026, 10, 17, 1), now)).toBe("Tomorrow");
-    expect(dayHeading(at(2026, 10, 15, 9), now)).toBe("Overdue");
+    expect(dayHeading(at(2026, 10, 15, 9), now)).toBe("Due now");
     expect(dayHeading(at(2026, 10, 20, 9), now)).not.toMatch(/Today|Tomorrow/);
   });
   it("labels a condition by what it waits on", () => {

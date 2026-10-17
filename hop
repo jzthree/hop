@@ -644,8 +644,11 @@ function rebuildViewManifest() {
                     // than a stored file: it can stop working when the server
                     // does, and `target` is the proxy itself, so a client can
                     // skip the redirect page the scan actually found.
-                    kind: m.kind === 'server' ? 'server' : 'file',
-                    target: m.kind === 'server' ? (m.target || '') : undefined,
+                    // 'link' points somewhere else entirely — a Nebula
+                    // notebook on its own server — and `app` says what opens it.
+                    kind: m.kind === 'server' ? 'server' : m.kind === 'link' ? 'link' : 'file',
+                    target: m.kind === 'server' || m.kind === 'link' ? (m.target || '') : undefined,
+                    app: m.kind === 'link' && m.app ? String(m.app) : undefined,
                     port: m.kind === 'server' ? m.port : undefined,
                     // Whether the proxied session behind a server row still
                     // EXISTS. A row whose session evaporated used to open the
@@ -16836,6 +16839,7 @@ const HELP_SECTIONS = [
         `hop view <file...>        Publish HTML/PDF/image/video/markdown behind hop's auth and print the link`,
         `hop view --title "..."    Say what the result IS — clients lead with this, not the filename`,
         `hop view --name x.md -    Publish what's on stdin (no temp file needed)`,
+        `hop view --nebula <nb>    Link a notebook on a Nebula server; opens in your Nebula UI (hop config nebula <url>)`,
         `hop view --list [--all]   What this session has published (--all: the whole fleet)`,
         `hop view --rm <name>      Unpublish one`,
         `hop view --clear [--all]  Clear published copies — frees hop's space, never touches source files`,
@@ -18158,8 +18162,9 @@ async function main() {
                 } catch (e) { /* publish under the name given */ }
             }
         }
+        const nebulaUrlArg = flagValue('--nebula-url');
         const consumed = new Set(['--title', title, '--name', stdinName, '--session', wantSessionArg,
-                                  '--list', '--rm', ...removals]);
+                                  '--nebula-url', nebulaUrlArg, '--list', '--rm', ...removals]);
         const files = argv.filter((a) => !consumed.has(a) && (a === '-' || !a.startsWith('-')));
         // WHICH session a result belongs to is the whole filing system: the
         // chip that lights, the panel it appears in, the conversation it
@@ -18218,6 +18223,80 @@ async function main() {
             rebuildViewManifest();
             log(`Removed ${gone} view${gone === 1 ? '' : 's'}.`, gone ? GREEN : RESET);
             process.exit(gone ? 0 : 1);
+        }
+        // A Nebula notebook is not a file to copy: it lives — and runs — on
+        // its Nebula server, often a cluster this machine reaches through a
+        // forwarded port (ssh -L 3000:…). The view is a LINK that opens the
+        // notebook in that Nebula UI, live kernel and all; the path is the
+        // one the Nebula server sees.
+        if (argv.includes('--nebula')) {
+            const base = String(nebulaUrlArg || process.env.HOP_NEBULA_URL || getHopConfig().nebula_url
+                || 'http://localhost:3000').replace(/\/+$/, '');
+            if (!/^https?:\/\/[^/\s]+$/.test(base)) {
+                log(`hop view --nebula: not a Nebula address: ${base}`, RED);
+                process.exit(2);
+            }
+            if (!files.length) {
+                log('Usage: hop view --nebula [--title "..."] [--nebula-url http://localhost:3000] <notebook path on the Nebula server>...', YELLOW);
+                log(`  Default Nebula: ${base}  (hop config nebula <url> to change it)`, DIM);
+                process.exit(1);
+            }
+            if (!session) { callerSessionOrExplain('hop view'); process.exit(2); }
+            const getJson = async (u) => {
+                try {
+                    const r = await fetch(u, { signal: AbortSignal.timeout(5000) });
+                    return { status: r.status, body: await r.json().catch(() => null) };
+                } catch (e) { return null; }
+            };
+            const health = await getJson(`${base}/api/health`);
+            const reachable = !!(health && health.status === 200 && health.body);
+            if (!reachable) {
+                log(`hop view: Nebula at ${base} is not answering — filing the link anyway; it opens once the server (or its port forward) is up.`, YELLOW);
+            }
+            const serverCwd = reachable && typeof health.body.cwd === 'string' ? health.body.cwd : null;
+            fs.mkdirSync(destDir, { recursive: true });
+            const meta = readViewMeta(session);
+            let failed = 0;
+            for (const raw of files) {
+                // Relative paths are the SERVER's relative paths: pin them to
+                // its working directory so the link means one notebook.
+                const nb = raw.startsWith('/') || !serverCwd ? raw : path.posix.join(serverCwd, raw);
+                if (reachable) {
+                    const st = await getJson(`${base}/api/fs/file-mtime?path=${encodeURIComponent(nb)}`);
+                    if (st && st.status === 404) {
+                        log(`hop view: Nebula has no notebook at ${nb}`, RED);
+                        failed += 1;
+                        continue;
+                    }
+                }
+                const target = `${base}/?file=${encodeURIComponent(nb)}`;
+                const label = path.posix.basename(nb);
+                const artifactName = `${label.replace(/[^\w.-]/g, '_')}.nebula.html`;
+                const attr = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+                // The redirect page is what older clients open; current ones
+                // read `target` from the metadata and go straight there.
+                fs.writeFileSync(path.join(destDir, artifactName), [
+                    '<!DOCTYPE html><html><head><meta charset="utf-8">',
+                    `<title>${attr(label)}</title>`,
+                    `<meta http-equiv="refresh" content="0;url=${attr(target)}">`,
+                    `</head><body>Opening <a href="${attr(target)}">${attr(label)}</a> in Nebula…</body></html>`
+                ].join(''));
+                meta[artifactName] = {
+                    ...(meta[artifactName] || {}),
+                    title: title || `${label} — Nebula notebook`,
+                    kind: 'link',
+                    app: 'nebula',
+                    target
+                };
+                console.log(`View: ${target}`);
+            }
+            writeViewMeta(session, meta);
+            rebuildViewManifest();
+            if (files.length > failed) {
+                console.log(`Filed under ${getSessionDisplayName(session) || session}.`);
+                process.stdout.write('\x07');
+            }
+            process.exit(failed ? 1 : 0);
         }
         if (files.length === 0) {
             log('Usage: hop view [--title "what this is"] <file...>', YELLOW);
@@ -18416,6 +18495,29 @@ async function main() {
     // Handle `hop config` command
     if (process.argv[2] === 'config') {
         const subCmd = process.argv[3];
+        // Where `hop view --nebula` links open: the Nebula UI as THIS
+        // machine reaches it (often a port forward to a cluster server).
+        if (subCmd === 'nebula') {
+            const value = String(process.argv[4] || '').trim().replace(/\/+$/, '');
+            const cfg = getHopConfig();
+            if (value === 'reset') {
+                delete cfg.nebula_url;
+                saveHopConfig(cfg);
+                log('Nebula links open at http://localhost:3000 (the default).', GREEN);
+            } else if (value) {
+                if (!/^https?:\/\/[^/\s]+$/.test(value)) {
+                    log(`Not a Nebula address: ${value} — e.g. http://localhost:3000`, RED);
+                    process.exit(1);
+                }
+                cfg.nebula_url = value;
+                saveHopConfig(cfg);
+                log(`Nebula links open at ${value}.`, GREEN);
+            } else {
+                log(`Nebula: ${BOLD}${cfg.nebula_url || 'http://localhost:3000'}${RESET}${cfg.nebula_url ? '' : ' (default)'}`, RESET);
+                log(`Change with: ${CYAN}hop config nebula <url>${RESET}   (reset: hop config nebula reset)`, DIM);
+            }
+            process.exit(0);
+        }
         // How restored sessions answer claude's resume question.
         if (subCmd === 'resume' || subCmd === 'resume-mode') {
             const modeArg = String(process.argv[4] || '').toLowerCase();

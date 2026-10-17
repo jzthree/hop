@@ -73,6 +73,18 @@ quotes), not dumped as raw text:
 generate_summary | hop view --name findings.md --title "What the profiler found" -
 ```
 
+A **Nebula notebook** is handed over as a link, not a copy — it lives (and
+runs) on its Nebula server, and the human opens it in their own Nebula UI
+with the kernel live. Give the path **as the Nebula server sees it** (a
+relative path is resolved against the server's working directory):
+
+```bash
+hop view --nebula --title "Fit diagnostics, run 12" /gpfs/data/lab/runs/fit.ipynb
+```
+
+The link opens at the human's Nebula address (`hop config nebula`, default
+`http://localhost:3000`); a notebook the server doesn't have is refused.
+
 Reach for this whenever the answer is long enough that reading it in a
 terminal is worse than reading it as a page: comparisons, tables of numbers,
 anything with structure. A table in the scrollback of a phone terminal is

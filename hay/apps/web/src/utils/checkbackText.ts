@@ -145,7 +145,7 @@ export const describeRrule = (rrule: string, now: number): { label: string; next
 export const dayHeading = (ms: number, now: number): string => {
   const startOf = (t: number) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
   const days = Math.round((startOf(ms) - startOf(now)) / DAY);
-  if (days < 0) return "Overdue";
+  if (days < 0) return "Due now";   // fired; hop types it once the agent is idle
   if (days === 0) return "Today";
   if (days === 1) return "Tomorrow";
   return new Date(ms).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });

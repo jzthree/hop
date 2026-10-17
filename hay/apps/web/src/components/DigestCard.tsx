@@ -220,9 +220,16 @@ export const DigestCard = ({ sessions, onOpen }: {
       <span className="digest-dateline">{sessionLabel(item.session)}</span>
       <span className="digest-headline">{item.headline}</span>
       {item.why ? <span className="digest-why">{item.why}</span> : null}
-      {item.recommendation ? <span className="digest-reco">→ {item.recommendation}</span> : null}
+      {item.recommendation ? (
+        <span className="digest-reco"><span className="digest-reco-label">Suggested</span>{item.recommendation}</span>
+      ) : null}
       {item.replies?.length ? (
-        <span className="digest-replies">{item.replies.map((r) => <span key={r} className="digest-reply">{r}</span>)}</span>
+        // The ways the agent offered to go — words, not buttons: the card
+        // opens the session, where the answer is given.
+        <span className="digest-replies">
+          <span className="digest-replies-label">Options</span>
+          {item.replies.map((r, i) => <span key={r} className="digest-reply">{i > 0 ? " · " : ""}{r}</span>)}
+        </span>
       ) : null}
     </button>
   );
@@ -237,7 +244,7 @@ export const DigestCard = ({ sessions, onOpen }: {
           if (!rows.length) return null;
           return (
             <div key={slot} className={"digest-slot slot-" + slot}>
-              <div className="digest-slot-head">{SLOT_LABEL[slot]}</div>
+              <div className="digest-slot-head">{SLOT_LABEL[slot]}<span className="digest-slot-count">{rows.length}</span></div>
               {rows.map((it) => renderItem(it, s))}
             </div>
           );
@@ -351,7 +358,9 @@ export const DigestCard = ({ sessions, onOpen }: {
                         <span className="digest-when">{ago(item.at)}</span>
                         <span className="digest-headline">{item.headline}</span>
                         {item.why ? <span className="digest-why">{item.why}</span> : null}
-                        {item.recommendation ? <span className="digest-reco">→ {item.recommendation}</span> : null}
+                        {item.recommendation ? (
+                          <span className="digest-reco"><span className="digest-reco-label">Suggested</span>{item.recommendation}</span>
+                        ) : null}
                       </div>
                     ))}
                   </div>

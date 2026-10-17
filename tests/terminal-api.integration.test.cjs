@@ -870,6 +870,30 @@ test('fork falls past a poisoned record cwd to the durable one', async () => {
 });
 
 
+// A Stop & parked session has no room and its saved definition lives only in
+// memory, so after a daemon restart only its durable record remains. It must
+// still be LISTED — parked and stopped — or the wall's parked section and
+// search lose it while opening it would still resume the conversation.
+test('a stopped & parked session known only from its record is listed, parked', async () => {
+  const name = 'parkedonlyrecord';
+  await fs.mkdir(path.join(hopHome, 'claude-sessions'), { recursive: true });
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${name}.meta`), JSON.stringify({
+    internalName: name, displayName: 'lightscope-probe', cwd: tempDir, createdBy: 'user', parked: true, archived: true
+  }), { mode: 0o600 });
+  try {
+    const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+    const hit = list.data.sessions.find((s) => s.internalName === name);
+    assert.ok(hit, 'the stopped session is in the list');
+    assert.equal(hit.displayName, 'lightscope-probe');
+    assert.equal(hit.parked, true);
+    assert.equal(hit.archived, true);
+    assert.equal(hit.live, false);
+  } finally {
+    await fs.rm(path.join(hopHome, 'claude-sessions', `${name}.meta`), { force: true });
+  }
+});
+
+
 // `hop view --nebula`: a notebook on a Nebula server becomes a LINK that
 // opens in the Nebula UI this machine reaches. A relative path is pinned to
 // the server's working directory, and a notebook the server doesn't have is

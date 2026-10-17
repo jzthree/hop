@@ -5088,3 +5088,53 @@ body.pane-dragging { user-select: none; }
 }
 .sched-fold { margin-top: 6px; }
 .sched-fold > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ink-muted); padding: 6px 2px; }
+
+/* Briefing, read as a page: the SECTION carries the urgency colour (a dot in
+   its heading, a rule beside each item); session names are quiet labels, not
+   a second set of red capitals; lines stop at a readable measure; the
+   agent's recommendation is a tinted "Suggested" note; the reply options are
+   words, since the card itself is what opens the session. */
+.digest-slot { margin-top: 12px; display: flex; flex-direction: column; }
+.digest-slot-head {
+  font-family: inherit; font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  display: flex; align-items: center; gap: 7px;
+  padding: 0 0 6px; border-bottom: 1px solid var(--line);
+}
+.digest-slot-head::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.digest-slot-count { font-weight: 600; color: var(--ink-muted); letter-spacing: 0; }
+.digest-slot .digest-item {
+  position: relative; margin: 0; border-radius: 0; gap: 3px;
+  padding: 10px 10px 11px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.digest-slot .digest-item::before {
+  content: ""; position: absolute; left: 4px; top: 12px; bottom: 12px; width: 3px; border-radius: 2px;
+  background: var(--ink-muted); opacity: 0.35;
+}
+.digest-slot.slot-decide .digest-item::before { background: #e5484d; opacity: 0.85; }
+.digest-slot.slot-watch .digest-item::before { background: #e79d13; opacity: 0.85; }
+.digest-slot.slot-done .digest-item::before { background: #30a46c; opacity: 0.85; }
+.digest-slot .digest-item .digest-dateline,
+.digest-slot .digest-item.needs .digest-dateline,
+.digest-slot .digest-item.blocked .digest-dateline,
+.digest-slot .digest-item.done .digest-dateline {
+  color: var(--ink-muted); text-transform: none; letter-spacing: 0; font-size: 11px; font-weight: 600;
+}
+.digest-headline { font-size: 13.5px; line-height: 1.35; }
+.digest-headline, .digest-why, .digest-reco, .digest-replies { max-width: 76ch; }
+.digest-why { font-size: 12.5px; line-height: 1.45; }
+.digest-reco {
+  font-style: normal; font-size: 12.5px; line-height: 1.4; margin-top: 4px;
+  padding: 5px 9px; border-radius: 7px; width: fit-content;
+  background: color-mix(in srgb, var(--accent, #7c5cff) 9%, transparent);
+}
+.digest-reco-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--accent, #7c5cff); margin-right: 7px;
+}
+.digest-replies { display: block; margin-top: 3px; font-size: 12px; color: var(--ink-muted); }
+.digest-replies-label { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; margin-right: 7px; }
+.digest-reply { font-family: inherit; font-size: inherit; padding: 0; border: none; border-radius: 0; background: none; color: var(--ink-muted); }
+/* The item is a <button>, whose global weight made every line bold. */
+.digest-item .digest-why, .digest-item .digest-replies, .digest-item .digest-reply { font-weight: 400; }
+.digest-item .digest-reco { font-weight: 500; }

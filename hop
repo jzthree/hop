@@ -1306,7 +1306,11 @@ function getEffectiveSessionConfig(name) {
             displayName: resolveDisplayNameClaim(name, durable.displayName),
             folderId: durable.folderId,
             createdBy: durable.createdBy,
-            cwd: durable.cwd
+            cwd: durable.cwd,
+            // A stopped session has nothing but this record; dropping its
+            // flags listed it as a live, unparked card that would not open.
+            ...(durable.parked !== undefined ? { parked: durable.parked } : {}),
+            ...(durable.archived !== undefined ? { archived: durable.archived } : {})
         };
     }
     const merged = { ...base };
@@ -4671,6 +4675,26 @@ function hopSessionExists(name) {
     return hayRooms.hasRoom(name) || activeSessions[name];
 }
 
+// Internal names whose durable record says Stop & park (archived). Re-read
+// only when the records directory changes — the list is polled every few
+// seconds and a directory listing plus ~100 small reads each time is waste.
+let stoppedDurableCache = { mtimeMs: -1, names: [] };
+function listStoppedDurableSessions() {
+    let st;
+    try { st = fs.statSync(CLAUDE_SESSIONS_DIR); } catch (e) { return []; }
+    if (st.mtimeMs === stoppedDurableCache.mtimeMs) return stoppedDurableCache.names;
+    const names = [];
+    let files = [];
+    try { files = fs.readdirSync(CLAUDE_SESSIONS_DIR).filter((f) => f.endsWith('.meta')); } catch (e) { /* none */ }
+    for (const f of files) {
+        const name = f.slice(0, -'.meta'.length);
+        if (!SESSION_NAME_RE.test(name)) continue;
+        if (readClaudeSessionMeta(name)?.archived === true) names.push(name);
+    }
+    stoppedDurableCache = { mtimeMs: st.mtimeMs, names };
+    return names;
+}
+
 function buildSessionEntries(haySessions, opts = {}) {
     const includeStoredTerminalSessions = opts.includeStoredTerminalSessions !== false;
     const sessionMap = new Map();
@@ -4822,6 +4846,37 @@ function buildSessionEntries(haySessions, opts = {}) {
             hasLocalCli: clientSummary.hasLocalCli,
             ...getSessionSeenInfo(name)
         });
+    }
+
+    // Stopped & parked sessions have no room, and their saved definition is
+    // in-memory only (no workspace file), so a daemon restart dropped them
+    // from every list — the wall's parked section, search, `hop ls` — while
+    // their durable record still says parked + archived and opening one
+    // still resumes the conversation. List them from that record.
+    if (includeStoredTerminalSessions) {
+        for (const name of listStoppedDurableSessions()) {
+            if (sessionMap.has(name)) continue;
+            const effective = getEffectiveSessionConfig(name) || {};
+            const clientSummary = getSessionClientSummary(name);
+            sessionMap.set(name, {
+                name,
+                windows: null,
+                attached: false,
+                type: 'terminal',
+                live: false,
+                displayName: effective.displayName || toDisplaySessionName(name),
+                folderId: effective.folderId || null,
+                internalName: name,
+                cwd: effective.cwd,
+                workspaceName: resolveSessionWorkspaceName(effective),
+                createdBy: effective.createdBy || 'user',
+                agentPermitted: effective.agentPermitted === true,
+                ...sessionAgentFields(name, effective),
+                localCliCount: clientSummary.localCliCount,
+                hasLocalCli: clientSummary.hasLocalCli,
+                ...getSessionSeenInfo(name)
+            });
+        }
     }
 
     const folderIndex = new Map();

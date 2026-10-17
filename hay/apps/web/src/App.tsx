@@ -276,6 +276,8 @@ type SessionInfo = {
   turnSeen?: boolean;
   // Scheduled check-backs waiting on this session (hop checkback).
   checkbacks?: number;
+  checkbackNext?: number;
+  codexAutomations?: number;
   attentionReason?: string;
   attentionNote?: string;
   cols?: number;
@@ -3301,6 +3303,8 @@ const App = () => {
           agentPhase: s.agentPhase === "working" || s.agentPhase === "done" ? s.agentPhase : null,
           turnSeen: s.turnSeen !== false,
           checkbacks: Number(s.checkbacks) > 0 ? Number(s.checkbacks) : undefined,
+          checkbackNext: Number(s.checkbackNext) > 0 ? Number(s.checkbackNext) : undefined,
+          codexAutomations: Number(s.codexAutomations) > 0 ? Number(s.codexAutomations) : undefined,
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
           rows: Number.isInteger(s.rows) ? s.rows : undefined,
           // These three were silently dropped here, so the switcher never saw

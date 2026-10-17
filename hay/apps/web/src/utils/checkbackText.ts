@@ -71,3 +71,104 @@ export const orderForSession = (items: Checkback[], session: string): Checkback[
   const done = mine.filter((c) => c.status !== "pending").sort((a, b) => ((b.deliveredAt || b.cancelledAt || b.createdAt || 0) - (a.deliveredAt || a.cancelledAt || a.createdAt || 0)));
   return [...pending, ...done];
 };
+
+// Codex's own scheduled jobs ("automations"), as the daemon reads them from
+// ~/.codex/automations for the thread a session runs. Codex runs them; hop
+// only shows them beside its own.
+export type CodexAutomation = {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  prompt: string;
+  rrule: string;
+  thread: string;
+  updatedAt?: number | null;
+};
+
+const PERIOD_MS: Record<string, number> = { MINUTELY: MIN, HOURLY: HOUR, DAILY: DAY, WEEKLY: 7 * DAY };
+
+const parseDtstart = (v: string): number | null => {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/.exec(v.trim());
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, z] = m;
+  return z
+    ? Date.UTC(+y, +mo - 1, +d, +h, +mi, +s)
+    : new Date(+y, +mo - 1, +d, +h, +mi, +s).getTime();
+};
+
+/** An RRULE (with optional DTSTART) as words, and its next run when that can be known. */
+export const describeRrule = (rrule: string, now: number): { label: string; next: number | null } => {
+  let start: number | null = null;
+  const parts: Record<string, string> = {};
+  for (const line of rrule.split(/\r?\n/)) {
+    const [key, ...rest] = line.split(":");
+    const value = rest.join(":");
+    if (key === "DTSTART") start = parseDtstart(value);
+    else for (const kv of (key === "RRULE" ? value : line).split(";")) {
+      const [k, v] = kv.split("=");
+      if (k && v !== undefined) parts[k.trim()] = v.trim();
+    }
+  }
+  const freq = parts.FREQ || "";
+  const interval = Math.max(1, Number(parts.INTERVAL) || 1);
+  const count = Number(parts.COUNT) || 0;
+  if (count === 1 && start !== null) return { label: `at ${clock(start)}`, next: start };
+  const step = PERIOD_MS[freq] ? PERIOD_MS[freq] * interval : 0;
+  if (parts.BYHOUR !== undefined && (freq === "DAILY" || freq === "WEEKLY")) {
+    // Floating local times, one or more hours a day.
+    const hours = parts.BYHOUR.split(",").map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    const minute = Number(parts.BYMINUTE) || 0;
+    let next: number | null = null;
+    for (let dayOffset = 0; dayOffset < 2 && next === null; dayOffset++) {
+      for (const h of hours) {
+        const d = new Date(now);
+        d.setDate(d.getDate() + dayOffset);
+        d.setHours(h, minute, 0, 0);
+        if (d.getTime() > now) { next = d.getTime(); break; }
+      }
+    }
+    const mm = String(minute).padStart(2, "0");
+    const label = hours.length > 3 ? `${hours.length}× a day` : `daily at ${hours.map((h) => `${h}:${mm}`).join(", ")}`;
+    return { label, next };
+  }
+  if (step) {
+    const label = `every ${period(step)}`;
+    if (start === null) return { label, next: null };
+    const k = now <= start ? 0 : Math.ceil((now - start) / step);
+    return { label, next: start + k * step };
+  }
+  return { label: freq ? freq.toLowerCase() : "scheduled", next: start };
+};
+
+/** "Today" / "Tomorrow" / "Mon, Oct 19" — the day heading a time sits under. */
+export const dayHeading = (ms: number, now: number): string => {
+  const startOf = (t: number) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  const days = Math.round((startOf(ms) - startOf(now)) / DAY);
+  if (days < 0) return "Overdue";
+  if (days === 0) return "Today";
+  if (days === 1) return "Tomorrow";
+  return new Date(ms).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+};
+
+/** The clock time alone ("4:30 PM"), for the left column of a day's list. */
+export const timeOfDay = (ms: number): string =>
+  new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+/** Short words for the chip: "in 12m" under an hour, else the clock time (with the day when not today). */
+export const chipWhen = (ms: number, now: number): string =>
+  ms - now < HOUR && ms > now ? relative(ms, now) : clock(ms);
+
+/** A condition trigger in a few words, for the "when something happens" list. */
+export const conditionLabel = (t: CheckbackTrigger): { tag: string; detail: string } => {
+  switch (t.kind) {
+    case "cmd": return { tag: "on check", detail: t.command };
+    case "file": return { tag: t.baselineMtime ? "on change" : "on file", detail: t.path };
+    case "idle": return { tag: "on idle", detail: t.afterMs ? `after ${period(t.afterMs)} idle` : "the next time the agent is idle" };
+    default: return { tag: "", detail: "" };
+  }
+};
+
+export const isTimed = (t: CheckbackTrigger) => t.kind === "at" || t.kind === "every";
+export const nextOfTrigger = (t: CheckbackTrigger): number | null =>
+  t.kind === "at" ? t.at : t.kind === "every" ? t.next : null;

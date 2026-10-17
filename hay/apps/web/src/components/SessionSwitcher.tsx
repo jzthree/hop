@@ -38,6 +38,7 @@ import {
   insertAfter, describeAccount, type AgentHome, type AgentHomes } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
+import { chipWhen } from "../utils/checkbackText";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
 
@@ -3087,18 +3088,29 @@ export const SessionSwitcher = ({
             </span>
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
-          {!!s.checkbacks && (
-            <button
-              type="button"
-              className="switcher-chip checkback"
-              title={`${s.checkbacks} scheduled check-back${s.checkbacks === 1 ? "" : "s"} will be typed into this session — click to see what is waiting`}
-              aria-label={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} waiting on ${s.displayName}`}
-              onClick={(e) => { e.stopPropagation(); onOpenCheckbacks?.(key); }}
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              ⏰ {s.checkbacks}
-            </button>
-          )}
+          {(!!s.checkbacks || !!s.codexAutomations) && (() => {
+            // What is scheduled here, hop's and Codex's own: the chip says WHEN
+            // the next timed one is due ("in 12m", "4:30 PM"), or that it is
+            // waiting on something (a job, a file) when nothing has a time.
+            const total = (s.checkbacks || 0) + (s.codexAutomations || 0);
+            const when = s.checkbackNext ? chipWhen(s.checkbackNext, Date.now()) : "waiting";
+            return (
+              <button
+                type="button"
+                className="switcher-chip checkback"
+                title={`${total} scheduled${s.codexAutomations ? ` (${s.codexAutomations} Codex automation${s.codexAutomations === 1 ? "" : "s"})` : ""}${s.checkbackNext ? ` — next ${when}` : " — waiting on a condition"}. Click to see the list.`}
+                aria-label={`${total} scheduled on ${s.displayName}`}
+                onClick={(e) => { e.stopPropagation(); onOpenCheckbacks?.(key); }}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="5" width="18" height="16" rx="3" /><path d="M3 10h18M8 3v4M16 3v4" />
+                </svg>
+                <span>{when}</span>
+                {total > 1 && <span className="checkback-count">{total}</span>}
+              </button>
+            );
+          })()}
           {s.agentHome && homesFor(s.agent).length > 1 && (() => {
             const known = homesFor(s.agent).find((h) => h.dir === s.agentHome?.dir);
             const out = known?.login && !known.login.loggedIn;

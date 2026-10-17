@@ -59,6 +59,10 @@ export type SwitcherSession = {
   turnSeen?: boolean;
   /** Scheduled check-backs waiting on this session (hop checkback). */
   checkbacks?: number;
+  /** When the soonest TIMED one is due (ms); absent when all wait on a condition. */
+  checkbackNext?: number;
+  /** Active Codex automations aimed at this session's conversation. */
+  codexAutomations?: number;
   agentPermitted?: boolean;
   cols?: number;
   rows?: number;

@@ -1,10 +1,15 @@
 import { useEffect, useState } from "react";
-import { describeState, describeTrigger, orderForSession, type Checkback } from "../utils/checkbackText";
+import {
+  chipWhen, conditionLabel, dayHeading, describeRrule, describeState, describeTrigger, isTimed,
+  nextOfTrigger, orderForSession, timeOfDay, type Checkback, type CodexAutomation
+} from "../utils/checkbackText";
 
-// What is waiting on a session: the check-backs hop will type into it, when,
-// and the recent ones it already typed. Opened from the ⏰ chip on a card.
-// Pending ones can be cancelled here; scheduling stays with `hop checkback`
-// and the agent's own MCP tool.
+// What is scheduled on a session, read like a reminders list: the timed ones
+// under their day, the ones waiting on something (a job, a file, idle) in a
+// list of their own, the Codex automations aimed at the same conversation
+// beside hop's, and the recent past folded away. Opened from a card's chip.
+// hop's own can be cancelled here; scheduling stays with `hop checkback` and
+// the agent's MCP tool, and Codex's automations with Codex.
 
 type Props = {
   session: string;
@@ -15,16 +20,26 @@ type Props = {
   onChanged?: () => void;
 };
 
+type Timed =
+  | { source: "hop"; at: number; cb: Checkback }
+  | { source: "codex"; at: number; auto: CodexAutomation; rule: string };
+
 export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Props) => {
   const [items, setItems] = useState<Checkback[] | null>(null);
+  const [automations, setAutomations] = useState<CodexAutomation[]>([]);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
   const now = Date.now();
 
   const load = () => {
-    fetch("/api/checkbacks", { cache: "no-store" })
+    fetch(`/api/checkbacks?session=${encodeURIComponent(session)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d) => { setItems(Array.isArray(d?.items) ? d.items : []); setFailed(false); })
+      .then((d) => {
+        setItems(Array.isArray(d?.items) ? d.items : []);
+        setAutomations(Array.isArray(d?.automations) ? d.automations : []);
+        setFailed(false);
+      })
       .catch(() => { setFailed(true); setItems([]); });
   };
   useEffect(() => { load(); }, [session]);
@@ -47,14 +62,37 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
 
   const rows = items ? orderForSession(items, session) : [];
   const pending = rows.filter((c) => c.status === "pending");
-  const past = rows.filter((c) => c.status !== "pending").slice(0, 8);
+  const past = rows.filter((c) => c.status !== "pending").slice(0, 12);
+  const activeAutos = automations.filter((a) => a.status === "ACTIVE");
+  const pausedAutos = automations.filter((a) => a.status !== "ACTIVE");
+
+  // Everything with a clock time, hop's and Codex's together, soonest first.
+  const timed: Timed[] = [
+    ...pending.filter((c) => isTimed(c.trigger)).map((cb) => ({ source: "hop" as const, at: nextOfTrigger(cb.trigger) ?? now, cb })),
+    ...activeAutos.map((auto) => { const r = describeRrule(auto.rrule, now); return { source: "codex" as const, at: r.next ?? Number.MAX_SAFE_INTEGER, auto, rule: r.label }; })
+  ].sort((a, b) => a.at - b.at);
+  const days: Array<[string, Timed[]]> = [];
+  for (const t of timed) {
+    const head = t.at === Number.MAX_SAFE_INTEGER ? "Repeating" : dayHeading(t.at, now);
+    const last = days[days.length - 1];
+    if (last && last[0] === head) last[1].push(t); else days.push([head, [t]]);
+  }
+  const waiting = pending.filter((c) => !isTimed(c.trigger));
+  const nothing = timed.length === 0 && waiting.length === 0;
+
+  const message = (key: string, text: string) => (
+    <div className={"sched-message" + (open === key ? " open" : "")}
+         onClick={() => setOpen((o) => (o === key ? null : key))}
+         title={open === key ? "" : "Click to read it all"}>{text}</div>
+  );
+  const who = (c: Checkback) => (c.createdBy === "agent" ? "the agent" : "you");
 
   return (
     <>
       <div className="views-backdrop" onClick={onClose} />
-      <div className="views-panel checkbacks-panel" role="dialog" aria-label={`Check-backs for ${sessionName}`}>
+      <div className="views-panel checkbacks-panel" role="dialog" aria-label={`Scheduled for ${sessionName}`}>
         <div className="views-head">
-          <span className="views-badge">⏰ Check-backs</span>
+          <span className="views-badge">Scheduled</span>
           <span className="checkbacks-session">{sessionName}</span>
           <span className="views-head-spacer" />
           <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>
@@ -62,32 +100,100 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
         {items === null ? (
           <p className="checkbacks-empty">Loading…</p>
         ) : failed ? (
-          <p className="checkbacks-empty">Could not load check-backs.</p>
+          <p className="checkbacks-empty">Could not load what is scheduled.</p>
         ) : (
           <div className="checkbacks-list">
-            {pending.length === 0 && <p className="checkbacks-empty">Nothing waiting on this session.</p>}
-            {pending.map((c) => (
-              <div key={c.id} className={"checkback-row pending" + (c.firedAt ? " fired" : "")}>
-                <div className="checkback-when">{describeTrigger(c.trigger, now)}{c.force ? " · typed even mid-turn" : ""}</div>
-                <div className="checkback-message">{c.message}</div>
-                <div className="checkback-foot">
-                  <span className="checkback-state">{describeState(c, now)} · by {c.createdBy === "agent" ? "the agent" : "you"}</span>
-                  <button type="button" className="checkback-cancel" disabled={busy === c.id} onClick={() => cancel(c.id)}>Cancel</button>
-                </div>
-              </div>
-            ))}
-            {past.length > 0 && (
-              <>
-                <div className="checkbacks-past-head">Recent</div>
-                {past.map((c) => (
-                  <div key={c.id} className={"checkback-row " + c.status}>
-                    <div className="checkback-when">{describeState(c, now)} · {describeTrigger(c.trigger, now)}</div>
-                    <div className="checkback-message">{c.message}</div>
+            {nothing && <p className="checkbacks-empty">Nothing scheduled on this session.</p>}
+
+            {days.map(([head, list]) => (
+              <section key={head} className="sched-day">
+                <div className="sched-day-head">{head}</div>
+                {list.map((t) => t.source === "hop" ? (
+                  <div key={t.cb.id} className={"sched-row" + (t.cb.firedAt ? " fired" : "")}>
+                    <div className="sched-time">{t.at === Number.MAX_SAFE_INTEGER ? "—" : timeOfDay(t.at)}</div>
+                    <div className="sched-body">
+                      {message(t.cb.id, t.cb.message)}
+                      <div className="sched-meta">
+                        {t.cb.trigger.kind === "every" ? describeTrigger(t.cb.trigger, now) : chipWhen(t.at, now)}
+                        {t.cb.firedAt ? " · due, waiting for the agent to be idle" : ""}
+                        {t.cb.force ? " · typed even mid-turn" : ""} · by {who(t.cb)}
+                      </div>
+                    </div>
+                    <button type="button" className="checkback-cancel" disabled={busy === t.cb.id} onClick={() => cancel(t.cb.id)}>Cancel</button>
+                  </div>
+                ) : (
+                  <div key={"codex-" + t.auto.id} className="sched-row codex">
+                    <div className="sched-time">{t.at === Number.MAX_SAFE_INTEGER ? "—" : timeOfDay(t.at)}</div>
+                    <div className="sched-body">
+                      <div className="sched-title">{t.auto.name}</div>
+                      {message("codex-" + t.auto.id, t.auto.prompt)}
+                      <div className="sched-meta">Codex automation · {t.rule}{t.at !== Number.MAX_SAFE_INTEGER && t.at < now ? " · past due" : ""}</div>
+                    </div>
+                    <span className="sched-owner" title="Codex runs this one; manage it in Codex">Codex</span>
                   </div>
                 ))}
-              </>
+              </section>
+            ))}
+
+            {waiting.length > 0 && (
+              <section className="sched-day">
+                <div className="sched-day-head">When something happens</div>
+                {waiting.map((c) => {
+                  const cond = conditionLabel(c.trigger);
+                  return (
+                    <div key={c.id} className={"sched-row" + (c.firedAt ? " fired" : "")}>
+                      <div className="sched-time tag">{cond.tag}</div>
+                      <div className="sched-body">
+                        {message(c.id, c.message)}
+                        <div className="sched-meta">
+                          <code className="sched-cond" title={cond.detail}>{cond.detail}</code>
+                        </div>
+                        <div className="sched-meta">
+                          {c.firedAt ? "happened · waiting for the agent to be idle" : c.trigger.kind === "cmd" ? describeTrigger(c.trigger, now).replace(/^when `.*` succeeds · /, "") : "watching"}
+                          {c.lastError && !c.firedAt ? ` · ${c.lastError}` : ""} · by {who(c)}
+                        </div>
+                      </div>
+                      <button type="button" className="checkback-cancel" disabled={busy === c.id} onClick={() => cancel(c.id)}>Cancel</button>
+                    </div>
+                  );
+                })}
+              </section>
             )}
-            <p className="checkbacks-hint">Schedule one with <code>hop checkback</code> inside the session, or the agent does it itself over MCP.</p>
+
+            {pausedAutos.length > 0 && (
+              <details className="sched-fold">
+                <summary>Paused Codex automations ({pausedAutos.length})</summary>
+                {pausedAutos.map((a) => (
+                  <div key={a.id} className="sched-row codex past">
+                    <div className="sched-time tag">paused</div>
+                    <div className="sched-body">
+                      <div className="sched-title">{a.name}</div>
+                      <div className="sched-meta">{describeRrule(a.rrule, now).label}</div>
+                    </div>
+                  </div>
+                ))}
+              </details>
+            )}
+
+            {past.length > 0 && (
+              <details className="sched-fold">
+                <summary>Recent ({past.length})</summary>
+                {past.map((c) => (
+                  <div key={c.id} className={"sched-row past " + c.status}>
+                    <div className="sched-time tag">{c.status === "delivered" ? "sent" : "cancelled"}</div>
+                    <div className="sched-body">
+                      {message(c.id, c.message)}
+                      <div className="sched-meta">{describeState(c, now)}</div>
+                    </div>
+                  </div>
+                ))}
+              </details>
+            )}
+
+            <p className="checkbacks-hint">
+              hop types these into the session when they come due and the agent is idle. Schedule with <code>hop checkback</code> or
+              the agent's <code>hop_checkback</code> tool; Codex automations are run by Codex.
+            </p>
           </div>
         )}
       </div>

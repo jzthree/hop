@@ -6025,6 +6025,61 @@ function saveCheckbacks() {
 function pendingCheckbacksFor(internalName) {
     return loadCheckbacks().items.filter((c) => c.status === 'pending' && c.session === internalName).length;
 }
+// When the soonest TIMED check-back on a session is due (ms), or null when
+// everything waiting is a condition (a job, a file, idle) with no clock time.
+function nextCheckbackAt(internalName) {
+    let next = null;
+    for (const c of loadCheckbacks().items) {
+        if (c.status !== 'pending' || c.session !== internalName) continue;
+        const t = c.trigger || {};
+        const at = t.kind === 'at' ? t.at : t.kind === 'every' ? t.next : null;
+        if (Number.isFinite(at) && (next === null || at < next)) next = at;
+    }
+    return next;
+}
+
+// Codex keeps its own scheduled jobs ("automations", ~/.codex/automations/
+// <id>/automation.toml) aimed at a THREAD. Agents in hop's Codex sessions
+// create them, so a session's schedule is incomplete without them. Read-only
+// here: Codex owns and runs them. Cached briefly; the files change rarely.
+let codexAutomationCache = { at: 0, items: [] };
+function readCodexAutomations() {
+    if (Date.now() - codexAutomationCache.at < 30_000) return codexAutomationCache.items;
+    const root = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'automations');
+    const items = [];
+    let names = [];
+    try { names = fs.readdirSync(root); } catch (e) { /* none */ }
+    for (const name of names) {
+        let text = '';
+        try { text = fs.readFileSync(path.join(root, name, 'automation.toml'), 'utf8'); } catch (e) { continue; }
+        const field = (k) => {
+            const m = text.match(new RegExp(`^${k}\\s*=\\s*(?:"((?:[^"\\\\]|\\\\.)*)"|(\\S+))`, 'm'));
+            if (!m) return null;
+            return m[1] !== undefined ? m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\') : m[2];
+        };
+        const thread = field('target_thread_id');
+        if (!thread) continue;
+        items.push({
+            id: field('id') || name,
+            name: field('name') || name,
+            kind: field('kind') || 'automation',
+            status: field('status') || 'ACTIVE',
+            prompt: field('prompt') || '',
+            rrule: field('rrule') || '',
+            thread,
+            updatedAt: Number(field('updated_at')) || null
+        });
+    }
+    codexAutomationCache = { at: Date.now(), items };
+    return items;
+}
+function codexAutomationsForSession(internalName) {
+    const turn = readTurnInfo(internalName);
+    if (!turn || turn.agent !== 'codex' || !turn.sessionId) return [];
+    // The notify hook already records the ROOT thread — the one automations
+    // target — so no rollout walk here (the wall polls this list).
+    return readCodexAutomations().filter((a) => a.thread === turn.sessionId);
+}
 // Prune delivered/cancelled records older than a day so the file stays small.
 function pruneCheckbacks(now = Date.now()) {
     const store = loadCheckbacks();
@@ -6081,7 +6136,10 @@ async function composerStillHolds(internalName, message) {
         return holds;
     } catch (e) { if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] composer check failed: ${e?.message || e}`, DIM); return false; }
 }
-async function typeAndSubmit(entry, internalName, message) {
+// `submitKey`: Enter by default. Codex treats Enter DURING a turn as a steer —
+// it interrupts the model to inject the message — and Tab as "queue it for
+// when this turn ends"; a forced check-back typed into a busy Codex queues.
+async function typeAndSubmit(entry, internalName, message, submitKey = '\r') {
     // The attach returns before its socket is open; type only once it is,
     // or the text and the Enter leave in one burst (see adapterBundle.ready).
     const t0 = Date.now();
@@ -6094,13 +6152,13 @@ async function typeAndSubmit(entry, internalName, message) {
     // Codex folds keys that arrive within ~half a second of the text into a
     // paste, Enter included (measured: 400ms failed, 1s submitted).
     await sleepMs(1000);
-    dbg('sending Enter');
-    sendTerminalInput(entry, '\r');
+    dbg(submitKey === '\t' ? 'sending Tab (queue)' : 'sending Enter');
+    sendTerminalInput(entry, submitKey);
     for (let attempt = 0; attempt < 2; attempt++) {
         await sleepMs(1500);
         if (!(await composerStillHolds(internalName, message))) return;
-        if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] Enter did not take (attempt ${attempt + 1}); sending it again`, DIM);
-        sendTerminalInput(entry, '\r');
+        if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] submit did not take (attempt ${attempt + 1}); sending it again`, DIM);
+        sendTerminalInput(entry, submitKey);
     }
 }
 
@@ -6154,7 +6212,9 @@ async function runCheckbackSweep() {
                     continue;
                 }
                 const e2 = await attachTerminalApiClient(cb.session, entry.displayName || cb.session, { actor: 'system', label: 'checkback', typeOnly: true });
-                try { await typeAndSubmit(e2, cb.session, cb.message); }
+                // Forced into a Codex mid-turn: queue (Tab), never steer (Enter).
+                const queueIntoCodex = phase === 'working' && readTurnInfo(cb.session)?.agent === 'codex';
+                try { await typeAndSubmit(e2, cb.session, cb.message, queueIntoCodex ? '\t' : '\r'); }
                 finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
                 Object.assign(cb, checkbacks.afterDelivery(cb, now));
                 dirty = true;
@@ -12358,6 +12418,8 @@ happens until someone clicks it.
                 ...(phaseBySession.get(s.internalName) || { agentPhase: null, turnSeen: true, turnAt: null }),
                 // Scheduled check-backs waiting on this session (hop checkback).
                 checkbacks: pendingCheckbacksFor(s.internalName) || undefined,
+                checkbackNext: nextCheckbackAt(s.internalName) || undefined,
+                codexAutomations: codexAutomationsForSession(s.internalName).filter((a) => a.status === 'ACTIVE').length || undefined,
                 lastActivityAt: s.lastActivityAt,
                 // For sessions armed with notify-on-finish, each completed turn
                 // adds to bellSeq so the phone treats a finished response like a
@@ -13619,8 +13681,12 @@ happens until someone clicks it.
         if (parsedUrl.pathname === '/api/checkbacks' && req.method === 'GET') {
             const now = Date.now();
             const items = loadCheckbacks().items.map((c) => ({ ...c, sessionName: getSessionDisplayName(c.session) || c.session, line: checkbacks.describe(c, now) }));
+            // ?session=: also the Codex automations aimed at that session's thread.
+            const forSession = typeof parsedUrl.query.session === 'string' && parsedUrl.query.session
+                ? resolveSessionInternalName(parsedUrl.query.session, parsedUrl.query.session) : null;
+            const automations = forSession ? codexAutomationsForSession(forSession) : undefined;
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ items, now }));
+            res.end(JSON.stringify({ items, now, ...(automations ? { automations } : {}) }));
             return;
         }
         if (parsedUrl.pathname === '/api/checkbacks' && req.method === 'POST') {

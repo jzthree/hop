@@ -145,6 +145,32 @@ Write the message as the prompt your future self needs — it arrives with
 no other context. Never poll in a loop or sleep to wait for a job; schedule
 a check-back and finish.
 
+**How it arrives.** hop types the message only when you are idle (between
+turns), so it lands as a normal new prompt for both Claude and Codex — you
+need not think about Enter vs Tab. A forced one (`--force`, typed even
+mid-turn) is queued into a busy Codex with Tab, never sent with Enter, which
+in Codex would interrupt the running turn to steer it; Claude queues a
+mid-turn message on its own.
+
+**Your own scheduler, or hop's?** If your agent has a built-in scheduler
+(Claude Code's `/loop` and wakeups, Codex automations), it is fine for a
+plain "remind me in 30 minutes" inside a session that will stay up. Use
+hop's when any of these matter — they are what only hop does here:
+
+- **Wait on a condition, not a clock:** a job finishing (`--when-cmd`), a
+  file appearing or changing (`--when-file`), the agent going idle.
+- **Survive restarts:** hop's schedule lives in the daemon, so it still
+  fires after the agent, the terminal or the Mac restarts — it waits until
+  the agent is back on screen, and never types into a bare shell.
+- **Reach another terminal:** schedule into a different session
+  (`--session <name>`) — hand work to another agent, Claude or Codex alike.
+- **Be visible:** the human sees every pending one on the session card and
+  can cancel it there.
+
+When one wait has several exits (done / failed / deadline), cancel the
+others once one fires (`hop checkback --cancel <id>`) — they don't cancel
+each other.
+
 ## Asking for attention — two tiers
 
 **Finished something, or pausing normally?** Ring the bell:

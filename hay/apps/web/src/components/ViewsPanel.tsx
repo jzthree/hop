@@ -46,7 +46,10 @@ type ViewItem = {
   mtime?: number;
   // "server" is a LIVE proxied localhost server (`hop port`), not a stored
   // file: it stops working when the server does, which a file never does.
-  kind?: "file" | "server";
+  // "link" points at another app entirely — a Nebula notebook on its own
+  // server — opened at `target`; `app` names what opens it.
+  kind?: "file" | "server" | "link";
+  app?: string;
   // For a server, the proxy itself. The manifest scan can only see the
   // redirect page `hop port` leaves behind; going straight to the proxy skips
   // a visible flash and a round trip.
@@ -104,6 +107,7 @@ export const hasUnseenViews = (
 // that the column stops lining up. The tag also survives a monospace column.
 const kindOf = (name: string, kind?: string) => {
   if (kind === "server") return "LIVE";
+  if (kind === "link") return "NB";
   const ext = (name.split(".").pop() || "").toLowerCase();
   if (["csv", "tsv"].includes(ext)) return "TBL";
   if (["mp3", "m4a", "wav", "flac", "aac", "ogg", "opus"].includes(ext)) return "AUD";
@@ -128,13 +132,13 @@ const formatBytes = (n?: number) => {
 };
 
 const hrefFor = (item: ViewItem) =>
-  item.kind === "server" && item.target ? item.target : item.path;
+  (item.kind === "server" || item.kind === "link") && item.target ? item.target : item.path;
 
 // The stored file itself, as an attachment: the daemon's /download mode
 // serves the markdown an agent wrote rather than the page it renders into.
 // Only files — a server is live, there is nothing to save.
 const downloadHrefFor = (item: ViewItem) =>
-  item.kind === "server" ? null : item.path.replace(/\/inline$/, "") + "/download";
+  item.kind === "server" || item.kind === "link" ? null : item.path.replace(/\/inline$/, "") + "/download";
 
 // A hidden same-origin anchor with `download`: the row is already an <a>
 // (anchors cannot nest), and window.open would show the file, not save it.
@@ -371,7 +375,8 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
   };
 
   const copyLink = (item: ViewItem) => {
-    const url = location.origin + hrefFor(item);
+    const href = hrefFor(item);
+    const url = /^https?:\/\//.test(href) ? href : location.origin + href;
     navigator.clipboard?.writeText(url).then(() => {
       setCopied(item.path);
       window.setTimeout(() => setCopied((c) => (c === item.path ? null : c)), 1400);
@@ -447,12 +452,16 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
   const rowsFor = (key: string, rows: ViewItem[]) => rows.map((item) => {
     const fresh = (item.mtime || 0) > (seenAtOpen[key] || 0);
     const isServer = item.kind === "server";
+    const isLink = item.kind === "link";
     const selected = preview?.path === item.path;
     // A server has no meaningful size and its filename is an implementation
     // detail (the redirect page) — it is a door, not a document, so say what
     // it is instead.
+    const linkHost = isLink ? (() => { try { return new URL(item.target || "").host; } catch { return ""; } })() : "";
     const meta = isServer
       ? "live server"
+      : isLink
+      ? [item.app === "nebula" ? "Nebula notebook" : "link", linkHost, relativeTime((item.mtime || 0) * 1000, now)].filter(Boolean).join(" · ")
       : [
           // The filename is only worth a line of its own when the title isn't
           // already showing it.
@@ -464,7 +473,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
       <a
         key={item.path}
         className={"views-row" + (fresh ? " fresh" : "")
-          + (isServer ? " server" : "") + (selected ? " selected" : "")}
+          + (isServer || isLink ? " server" : "") + (selected ? " selected" : "")}
         href={hrefFor(item)}
         target="_blank"
         rel="noopener"
@@ -487,7 +496,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
           <button type="button" className="views-act"
                   title="Open in a new tab" aria-label="Open in a new tab"
                   onClick={() => window.open(hrefFor(item), "_blank", "noopener")}>↗</button>
-          {!isServer && (
+          {!isServer && !isLink && (
             <button type="button" className="views-act"
                     title="Download" aria-label={`Download ${item.name}`}
                     onClick={() => triggerDownload(item)}>⤓</button>
@@ -496,7 +505,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
                   title={copied === item.path ? "Copied" : "Copy link"}
                   aria-label="Copy link"
                   onClick={() => copyLink(item)}>{copied === item.path ? "✓" : "⧉"}</button>
-          {!isServer && (
+          {!isServer && !isLink && (
             /* The FILE, not the page: ?download=1 serves the published bytes as
                an attachment under their real name (md/csv/json raw, not the
                rendered view). A window.open, not an anchor: anchors can't nest
@@ -556,8 +565,24 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
   // stay iframes — sandboxed only for LIVE servers (an arbitrary dev app
   // must not frame-bust the wall); our own files skip the sandbox, because a
   // sandboxed iframe disables the browser's PDF viewer.
+  // A notebook lives in its own app: the pane says where it opens rather
+  // than framing Nebula (another origin, often reached over a forwarded port).
+  const linkFile = (() => {
+    if (!preview || preview.kind !== "link") return "";
+    try { return new URL(preview.target || "").searchParams.get("file") || ""; } catch { return ""; }
+  })();
   const page = showPreview && (
-    preview.kind !== "server" && isImage(preview.name) ? (
+    preview.kind === "link" ? (
+      <div className="views-link-card">
+        <div className="views-link-app">{preview.app === "nebula" ? "Nebula notebook" : "Link"}</div>
+        <div className="views-link-title">{preview.title || preview.name}</div>
+        {linkFile && <code className="views-link-path">{linkFile}</code>}
+        <a className="views-link-open" href={preview.target} target="_blank" rel="noopener">
+          Open in {preview.app === "nebula" ? "Nebula" : "a new tab"} ↗
+        </a>
+        <div className="views-link-host">{(() => { try { return new URL(preview.target || "").host; } catch { return ""; } })()}</div>
+      </div>
+    ) : preview.kind !== "server" && isImage(preview.name) ? (
       <div className="views-media"><img src={preview.path} alt={preview.title || preview.name} /></div>
     ) : preview.kind !== "server" && isVideo(preview.name) ? (
       <div className="views-media"><video src={preview.path} controls autoPlay={false} /></div>
@@ -600,7 +625,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
       <span className="views-head-spacer" />
       {preview && (
         <span className="views-nav-acts">
-          {preview.kind !== "server" && (
+          {preview.kind !== "server" && preview.kind !== "link" && (
             <button type="button" className="views-act"
                     title="Download" aria-label={`Download ${preview.name}`}
                     onClick={() => triggerDownload(preview)}>⤓</button>

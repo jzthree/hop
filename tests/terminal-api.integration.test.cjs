@@ -870,6 +870,51 @@ test('fork falls past a poisoned record cwd to the durable one', async () => {
 });
 
 
+// `hop view --nebula`: a notebook on a Nebula server becomes a LINK that
+// opens in the Nebula UI this machine reaches. A relative path is pinned to
+// the server's working directory, and a notebook the server doesn't have is
+// refused rather than filed as a dead link.
+test('hop view --nebula files a link to the notebook on its Nebula server', async () => {
+  const { execFile } = require('node:child_process');
+  const nebula = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    res.setHeader('Content-Type', 'application/json');
+    if (u.pathname === '/api/health') return res.end(JSON.stringify({ status: 'ok', cwd: '/srv/lab' }));
+    if (u.pathname === '/api/fs/file-mtime') {
+      if (u.searchParams.get('path') === '/srv/lab/runs/fit.ipynb') return res.end(JSON.stringify({ mtime: 1 }));
+      res.statusCode = 404; return res.end(JSON.stringify({ detail: 'File not found' }));
+    }
+    res.statusCode = 404; res.end('{}');
+  });
+  await new Promise((r) => nebula.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${nebula.address().port}`;
+  const run = (args) => new Promise((resolve) => execFile(process.execPath,
+    [path.join(__dirname, '..', 'hop'), 'view', '--session', 'nebulaprobe', ...args],
+    { env: daemonEnv, timeout: 30000 }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, out: stdout + stderr })));
+  try {
+    const ok = await run(['--nebula', '--nebula-url', base, '--title', 'Fit results', 'runs/fit.ipynb']);
+    assert.equal(ok.code, 0, ok.out);
+    const want = `${base}/?file=${encodeURIComponent('/srv/lab/runs/fit.ipynb')}`;
+    assert.ok(ok.out.includes(`View: ${want}`), ok.out);
+
+    const missing = await run(['--nebula', '--nebula-url', base, 'runs/gone.ipynb']);
+    assert.notEqual(missing.code, 0);
+    assert.match(missing.out, /no notebook at \/srv\/lab\/runs\/gone\.ipynb/);
+
+    const views = await requestJson(state.port, state.sessionSecret, 'GET', '/api/views');
+    const mine = views.data.items.filter((i) => i.session === 'nebulaprobe');
+    assert.equal(mine.length, 1, JSON.stringify(mine));
+    assert.equal(mine[0].kind, 'link');
+    assert.equal(mine[0].app, 'nebula');
+    assert.equal(mine[0].title, 'Fit results');
+    assert.equal(mine[0].target, want);
+  } finally {
+    nebula.close();
+    await fs.rm(path.join(hopHome, 'views', 'nebulaprobe'), { recursive: true, force: true });
+  }
+});
+
+
 // A view the browser cannot display (pptx, zip) is saved instead of shown.
 // Opening it must still name the file — without a Content-Disposition name
 // the browser took the URL's last segment and every download read "inline".

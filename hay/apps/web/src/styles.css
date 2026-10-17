@@ -5035,3 +5035,18 @@ body.pane-dragging { user-select: none; }
 }
 .math-tip-hint { margin-top: 4px; font-size: 10px; color: var(--ink-muted); }
 .math-tip-error { font-family: var(--font-mono); color: var(--err); }
+
+/* A Views row that opens in another app (a Nebula notebook): the pane is a
+   door, not a frame. */
+.views-link-card {
+  margin: auto; max-width: 460px; padding: 28px 24px; display: flex; flex-direction: column;
+  align-items: center; gap: 10px; text-align: center;
+}
+.views-link-app { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-muted); }
+.views-link-title { font-size: 17px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.views-link-path { font-size: 12px; color: var(--ink-muted); overflow-wrap: anywhere; }
+.views-link-open {
+  margin-top: 6px; padding: 8px 16px; border-radius: 8px; background: var(--accent, #7c5cff);
+  color: #fff; font-weight: 600; text-decoration: none;
+}
+.views-link-host { font-size: 12px; color: var(--ink-muted); }

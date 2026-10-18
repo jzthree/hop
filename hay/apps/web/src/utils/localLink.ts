@@ -11,12 +11,19 @@
 // services on this device"); the probe waits while that prompt is up. It runs
 // beside the tunnel connection, so waiting costs nothing.
 const PROBE_TIMEOUT_MS = 120_000;
-const RETRY_AFTER_FAILURE_MS = 30_000;
+// After the fast path drops (almost always a daemon restart, which takes a
+// few seconds), look again soon and back off: 1 s, 2 s, 4 s … 30 s, then
+// stop until the next drop. A flat 30 s left a tab on the slow tunnel and
+// then yanked it back with a second reconnect half a minute later.
+const RETRY_BASE_MS = 1_000;
+const RETRY_MAX_MS = 30_000;
+const RETRY_LIMIT = 10;
 const OPT_OUT_KEY = "hop.localLink"; // "off" disables the fast path in this browser
 
 let localBase: string | null = null;
 let probing = false;
 let retryTimer = 0;
+let retries = -1; // -1: the fast path never worked here, so a failure is final
 let onFound: (() => void) | null = null;
 
 export const isLocalLinkUrl = (url: string) => /^ws:\/\/127\.0\.0\.1:\d+\//.test(url);
@@ -64,9 +71,18 @@ function probe(port: number, ticket: string): Promise<boolean> {
   });
 }
 
+function scheduleRetry() {
+  if (retries < 0 || retries >= RETRY_LIMIT) return;
+  const delay = Math.min(RETRY_BASE_MS * 2 ** retries, RETRY_MAX_MS);
+  retries += 1;
+  window.clearTimeout(retryTimer);
+  retryTimer = window.setTimeout(() => void attempt(), delay);
+}
+
 async function attempt() {
   if (probing || localBase) return;
   probing = true;
+  let found = false;
   try {
     const res = await fetch("/api/local-link", { credentials: "same-origin", cache: "no-store" });
     if (!res.ok) return;
@@ -74,11 +90,14 @@ async function attempt() {
     if (!Number.isInteger(body.port) || typeof body.ticket !== "string") return;
     if (!(await probe(body.port as number, body.ticket))) return;
     localBase = `ws://127.0.0.1:${body.port}/ws?token=${encodeURIComponent(body.ticket)}`;
+    found = true;
+    retries = 0;
     onFound?.();
   } catch {
     /* no fast path; the tunnel works as before */
   } finally {
     probing = false;
+    if (!found) scheduleRetry();
   }
 }
 
@@ -90,12 +109,11 @@ export function startLocalLink(found: () => void) {
   void attempt();
 }
 
-// A terminal socket to the fast path closed before it opened (the daemon
-// restarted and forgot the ticket, or it stopped): use the tunnel, and look
-// again a little later with a fresh ticket.
+// A terminal socket to the fast path closed before it opened (the daemon is
+// restarting, or stopped): use the tunnel meanwhile, and look again shortly.
 export function localLinkFailed() {
   if (!localBase) return;
   localBase = null;
-  window.clearTimeout(retryTimer);
-  retryTimer = window.setTimeout(() => void attempt(), RETRY_AFTER_FAILURE_MS);
+  retries = 0;
+  scheduleRetry();
 }

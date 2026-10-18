@@ -10651,24 +10651,30 @@ function isDirectLoopbackRequest(req) {
 // can open a WebSocket to 127.0.0.1 with it, attaches there instead. A ticket
 // stands in for the login that asked for it and only on a DIRECT loopback
 // connection, so a copy is worthless off this machine; revoking the login
-// ends its tickets too. Kept in memory: a daemon restart drops them, and the
-// page falls back to the tunnel and asks again.
-const LOCAL_LINK_TTL_MS = 12 * 3600 * 1000;
-const localLinkTickets = new Map(); // ticket -> { token, expiresAt }
+// ends its tickets too. Signed rather than remembered: a ticket names the
+// login and its expiry under an HMAC keyed by the daemon's persistent
+// secret, so it outlives a daemon restart. (Kept in memory, every restart
+// knocked each tab off the fast path onto the tunnel and, half a minute
+// later, back again — two drops per deploy.)
+const LOCAL_LINK_TTL_MS = 7 * 24 * 3600 * 1000;
+function localLinkSignature(body) {
+    return crypto.createHmac('sha256', String(SESSION_SECRET)).update('local-link:' + body).digest('base64url');
+}
 function issueLocalLinkTicket(sessionToken) {
-    const now = Date.now();
-    for (const [t, rec] of localLinkTickets) if (rec.expiresAt <= now) localLinkTickets.delete(t);
-    while (localLinkTickets.size >= 500) localLinkTickets.delete(localLinkTickets.keys().next().value);
-    const ticket = 'll_' + crypto.randomBytes(24).toString('base64url');
-    localLinkTickets.set(ticket, { token: sessionToken, expiresAt: now + LOCAL_LINK_TTL_MS });
-    return ticket;
+    const session = authSessions.verify(sessionToken);
+    if (!session) return null;
+    const body = `${session.id}.${(Date.now() + LOCAL_LINK_TTL_MS).toString(36)}`;
+    return `ll_${body}.${localLinkSignature(body)}`;
 }
 function verifyLocalLinkTicket(ticket) {
-    const rec = localLinkTickets.get(ticket);
-    if (!rec) return null;
-    const session = rec.expiresAt > Date.now() ? authSessions.verify(rec.token) : null;
-    if (!session) localLinkTickets.delete(ticket);
-    return session;
+    const m = /^ll_([A-Za-z0-9_-]+)\.([0-9a-z]+)\.([A-Za-z0-9_-]+)$/.exec(String(ticket || ''));
+    if (!m) return null;
+    const body = `${m[1]}.${m[2]}`;
+    const want = Buffer.from(localLinkSignature(body));
+    const got = Buffer.from(m[3]);
+    if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) return null;
+    if (parseInt(m[2], 36) <= Date.now()) return null;
+    return authSessions.list().find((s) => s.id === m[1]) || null;
 }
 
 // Every way a request can prove itself, in one place.

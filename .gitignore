@@ -33,4 +33,6 @@ demo-output/
 
 # hop-ios digest: runtime artifact the daemon serves (written by tools/digest.mjs)
 hay-web/assets/digest.json
+# Every briefing edition — session history. Never commit it (it leaked here once).
+hay-web/assets/digest-archive.json
 hay-web/assets/view/

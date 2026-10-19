@@ -3468,7 +3468,7 @@ function renderClaimPage(registration, token, landingHost) {
     <p><a href="${dl}"><button type="button">Download credentials.json</button></a></p>
     <h2>Then run</h2>
     <pre>brew install cloudflared
-npm install -g hop2@stable
+npm install -g hop2
 hop client ./credentials.json --hostname ${host}</pre>
     <p>On first launch hop asks you to set a password and shows a QR code for two-factor
     authentication. After that, open <a href="https://${host}">${host}</a> from any browser.</p>
@@ -3943,7 +3943,7 @@ Your hop URL: https://${user.hostname}
 
 1. Install hop and cloudflared (the package was renamed from hop-shell):
    brew install cloudflared
-   npm install -g hop2@stable
+   npm install -g hop2
 
 2. Start hop with credentials:
    hop client ./credentials.json
@@ -3980,7 +3980,7 @@ Then run hop client again to set up fresh credentials.
     log(`  - README.md         (setup instructions)`, RESET);
     log(`\n${YELLOW}Send this folder to ${username}.${RESET}`, YELLOW);
     log(`\nThey should:`, RESET);
-    log(`  1. Install hop:  ${CYAN}brew install cloudflared && npm install -g hop2@stable${RESET}`, RESET);
+    log(`  1. Install hop:  ${CYAN}brew install cloudflared && npm install -g hop2${RESET}`, RESET);
     log(`  2. Run:          ${CYAN}hop client ./credentials.json${RESET}`, RESET);
     log(`  3. Set up their password + TOTP on first run`, RESET);
     log(`\nTheir URL will be: https://${user.hostname}`, CYAN);

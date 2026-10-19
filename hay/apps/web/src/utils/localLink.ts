@@ -32,6 +32,19 @@ export const isLocalLinkUrl = (url: string) => /^ws:\/\/127\.0\.0\.1:\d+\//.test
 // or null to use the page's host.
 export const localWsBase = () => localBase;
 
+// The base a socket should dial NOW: the fast path while it works, else the
+// tunnel base it was given. Wall tiles and panes ask on every (re)connect —
+// holding the fast-path url from their first render, they kept redialing it
+// after it died (a daemon restart, a lapsed ticket) and only full screen,
+// which falls back, could connect.
+export const currentWsBase = (tunnelBase: string) => localBase ?? tunnelBase;
+
+// Any terminal socket that closed: one dialed on the fast path that never
+// opened means the fast path is down for every socket on the page.
+export function noteSocketClosed(url: string, opened: boolean) {
+  if (!opened && isLocalLinkUrl(url)) localLinkFailed();
+}
+
 export function localLinkEligible(
   loc: { protocol: string; hostname: string } = window.location,
   ua: string = navigator.userAgent,

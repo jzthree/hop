@@ -39,6 +39,7 @@ import {
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
 import { chipWhen } from "../utils/checkbackText";
+import { currentWsBase, noteSocketClosed } from "../utils/localLink";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
 
@@ -839,11 +840,12 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       return;
     }
     lastClaimRef.current = { cols: dims.cols, rows: dims.rows, at: performance.now() };
-    const sep = wsBase.includes("?") ? "&" : "?";
+    const base = currentWsBase(wsBase);
+    const sep = base.includes("?") ? "&" : "?";
     // Claim-only socket: no replay, closed as soon as the claim is sent. The
     // watch poll then repaints at the new size.
     const sock = new WebSocket(
-      wsBase + sep + "room=" + encodeURIComponent(room)
+      base + sep + "room=" + encodeURIComponent(room)
       + "&name=" + encodeURIComponent((userName || "user") + " (wall)")
       + "&source=monitor&replay=0&cols=" + dims.cols + "&rows=" + dims.rows
     );
@@ -970,10 +972,11 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
     // plenty, and preview → live becomes the SAME renderer painting the same
     // bytes at the same geometry. Full screen keeps WebGL.
     setConn("live");
-    const sep = wsBase.includes("?") ? "&" : "?";
-    const wsUrl = () =>
-      wsBase + sep + "room=" + encodeURIComponent(room) + "&name=" + encodeURIComponent(userName || "user")
+    const wsUrl = () => {
+      const base = currentWsBase(wsBase);
+      return base + (base.includes("?") ? "&" : "?") + "room=" + encodeURIComponent(room) + "&name=" + encodeURIComponent(userName || "user")
       + "&replay=65536&nudge=0&cols=" + term.cols + "&rows=" + term.rows;
+    };
     let ws: WebSocket | null = null;
     let disposed = false;
     let reconnectTimer = 0;
@@ -1030,9 +1033,12 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       if (disposed) return;
       window.clearTimeout(reconnectTimer);
       if (ws) { try { ws.close(); } catch { /* replacing */ } }
-      const sock = new WebSocket(wsUrl());
+      const url = wsUrl();
+      const sock = new WebSocket(url);
       ws = sock;
+      let opened = false;
       sock.onopen = () => {
+        opened = true;
         if (disposed || ws !== sock) return;
         reconnectAttempt = 0;
         markLive();
@@ -1091,6 +1097,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
         } catch { /* non-JSON frame */ }
       };
       sock.onclose = () => {
+        noteSocketClosed(url, opened);
         if (disposed || ws !== sock) return;
         scheduleReconnect();
       };
@@ -2397,9 +2404,10 @@ export const SessionSwitcher = ({
     if (session.type !== "port" && !session.active && interactiveTiles && tileWsBase) {
       const key = sessionKey(session);
       try {
-        const sep = tileWsBase.includes("?") ? "&" : "?";
+        const base = currentWsBase(tileWsBase);
+        const sep = base.includes("?") ? "&" : "?";
         const kick = new WebSocket(
-          tileWsBase + sep + "room=" + encodeURIComponent(key)
+          base + sep + "room=" + encodeURIComponent(key)
           + "&name=" + encodeURIComponent((userName || "user") + " (start)")
           + "&replay=0&nudge=0&cols=80&rows=24"
         );

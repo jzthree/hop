@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isLocalLinkUrl, localLinkEligible } from "../src/utils/localLink";
+import { currentWsBase, isLocalLinkUrl, localLinkEligible, noteSocketClosed } from "../src/utils/localLink";
 
 const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36";
 const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
@@ -20,5 +20,11 @@ describe("same-machine fast path", () => {
   it("recognises a fast-path socket url", () => {
     expect(isLocalLinkUrl("ws://127.0.0.1:13575/ws?token=ll_x&room=a")).toBe(true);
     expect(isLocalLinkUrl("wss://hop.zhoulab.io/ws?room=a")).toBe(false);
+  });
+  it("hands tiles the tunnel base while there is no fast path", () => {
+    expect(currentWsBase("wss://hop.zhoulab.io/ws")).toBe("wss://hop.zhoulab.io/ws");
+    // A tunnel socket that never opened says nothing about the fast path.
+    noteSocketClosed("wss://hop.zhoulab.io/ws?room=a", false);
+    expect(currentWsBase("wss://hop.zhoulab.io/ws")).toBe("wss://hop.zhoulab.io/ws");
   });
 });

@@ -8,6 +8,7 @@ import { PaneButtons, PaneIcon, type DragHandle } from "./PaneLayout";
 import { enableMathHover } from "../utils/mathLinkProvider";
 import { getMathTip } from "../utils/mathTooltip";
 import type { Side } from "../utils/paneTree";
+import { currentWsBase, noteSocketClosed } from "../utils/localLink";
 
 // A lightweight additional pane: its own WS attach + xterm for one session,
 // typing forwarded when focused. A FOCUSED pane claims its box size (crisp
@@ -115,14 +116,17 @@ export const SecondaryPane = ({
     };
 
     const connect = () => {
-      const sep = wsUrl.includes("?") ? "&" : "?";
-      const ws = new WebSocket(
-        `${wsUrl}${sep}room=${encodeURIComponent(sessionName)}&name=${encodeURIComponent(userName + " (pane)")}` +
-          `&cols=${sizeRef.current.cols}&rows=${sizeRef.current.rows}`
-      );
+      // The fast path while it works, else the tunnel url this pane was given.
+      const base = currentWsBase(wsUrl);
+      const sep = base.includes("?") ? "&" : "?";
+      const url = `${base}${sep}room=${encodeURIComponent(sessionName)}&name=${encodeURIComponent(userName + " (pane)")}` +
+          `&cols=${sizeRef.current.cols}&rows=${sizeRef.current.rows}`;
+      const ws = new WebSocket(url);
       wsRef.current = ws;
       showConnecting();
+      let opened = false;
       ws.onopen = () => {
+        opened = true;
         everConnected = true;
         attempt = 0; // a healed link earns a fresh immediate retry next time
         window.clearTimeout(chromeTimer);
@@ -167,6 +171,7 @@ export const SecondaryPane = ({
         }
       };
       ws.onclose = () => {
+        noteSocketClosed(url, opened);
         if (!shouldReconnect) return;
         showConnecting();
         // Immediate first retry: most drops are a tunnel blip that has

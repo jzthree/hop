@@ -88,10 +88,12 @@ const getLocationRoom = () => {
 
 const buildSessionPath = (sessionName: string) => `/s/${encodeURIComponent(sessionName)}/`;
 
-const resolveWsUrl = () => {
-  // On the machine hop runs on, terminal sockets skip the tunnel.
-  const local = localWsBase();
-  if (local) return local;
+// On the machine hop runs on, terminal sockets skip the tunnel.
+const resolveWsUrl = () => localWsBase() ?? resolveTunnelWsUrl();
+
+// The page's own socket url. Wall tiles and panes take this and choose the
+// fast path per connect (currentWsBase), so a dead fast path never strands them.
+const resolveTunnelWsUrl = () => {
   // Check for hop session config (when embedded in hop)
   const hopSession = (window as unknown as { __HOP_SESSION__?: { wsUrl?: string } }).__HOP_SESSION__;
   if (hopSession?.wsUrl) {
@@ -4350,7 +4352,7 @@ const App = () => {
             }}
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
-            tileWsBase={resolveWsUrl()}
+            tileWsBase={resolveTunnelWsUrl()}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
@@ -4975,7 +4977,7 @@ const App = () => {
                     <SecondaryPane
                       sessionName={leaf.session as string}
                       procLabel={paneProc === "zsh" || paneProc === "bash" ? "" : paneProc}
-                      wsUrl={resolveWsUrl()}
+                      wsUrl={resolveTunnelWsUrl()}
                       userName={name}
                       cols={120}
                       rows={30}
@@ -5015,7 +5017,7 @@ const App = () => {
             }}
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
-            tileWsBase={resolveWsUrl()}
+            tileWsBase={resolveTunnelWsUrl()}
             onFocusSession={focusSessionInPlace}
             folders={folders}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}

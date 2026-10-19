@@ -3467,7 +3467,8 @@ function renderClaimPage(registration, token, landingHost) {
     subdomain, so keep it as you would an SSH key.</p>
     <p><a href="${dl}"><button type="button">Download credentials.json</button></a></p>
     <h2>Then run</h2>
-    <pre>npm install -g hop-shell
+    <pre>brew install cloudflared
+npm install -g hop2@stable
 hop client ./credentials.json --hostname ${host}</pre>
     <p>On first launch hop asks you to set a password and shows a QR code for two-factor
     authentication. After that, open <a href="https://${host}">${host}</a> from any browser.</p>
@@ -3920,7 +3921,11 @@ async function exportUserCredentials(username) {
 
     // Copy credentials
     const exportCredentials = path.join(exportDir, 'credentials.json');
+    // cloudflared writes its credentials read-only, so a copy from an earlier
+    // export cannot be overwritten — re-exporting failed with EACCES.
+    try { fs.unlinkSync(exportCredentials); } catch (e) { /* first export */ }
     fs.copyFileSync(credentialsFile, exportCredentials);
+    fs.chmodSync(exportCredentials, 0o600);
 
     // Create config.yml with hostname for client convenience
     const exportConfig = `hostname: ${user.hostname}
@@ -3936,8 +3941,9 @@ Your hop URL: https://${user.hostname}
 
 ## Quick Start
 
-1. Install hop globally:
-   npm install -g hop-shell
+1. Install hop and cloudflared (the package was renamed from hop-shell):
+   brew install cloudflared
+   npm install -g hop2@stable
 
 2. Start hop with credentials:
    hop client ./credentials.json
@@ -3954,12 +3960,12 @@ Your hop URL: https://${user.hostname}
 - credentials.json contains your tunnel secret - keep it safe!
 - On first run, you MUST set up password + TOTP authentication
 - Anyone accessing your URL will need YOUR password and TOTP code
-- Your credentials are stored in ~/.hop-shell/clients/<tunnel-id>/
+- Your credentials are stored in ~/.hop2/clients/<tunnel-id>/
 
 ## Troubleshooting
 
 If you need to reset your password/TOTP:
-   rm -rf ~/.hop-shell/clients/
+   rm -rf ~/.hop2/clients/
 
 Then run hop client again to set up fresh credentials.
 `;
@@ -3974,7 +3980,7 @@ Then run hop client again to set up fresh credentials.
     log(`  - README.md         (setup instructions)`, RESET);
     log(`\n${YELLOW}Send this folder to ${username}.${RESET}`, YELLOW);
     log(`\nThey should:`, RESET);
-    log(`  1. Install hop:  ${CYAN}npm install -g hop-shell${RESET}`, RESET);
+    log(`  1. Install hop:  ${CYAN}brew install cloudflared && npm install -g hop2@stable${RESET}`, RESET);
     log(`  2. Run:          ${CYAN}hop client ./credentials.json${RESET}`, RESET);
     log(`  3. Set up their password + TOTP on first run`, RESET);
     log(`\nTheir URL will be: https://${user.hostname}`, CYAN);

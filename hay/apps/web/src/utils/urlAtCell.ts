@@ -67,7 +67,23 @@ export const cellAtPoint = (
 };
 
 const URL_CHAR = /^[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]/;
-const URL_RE = /https?:\/\/[^\s"'`<>]+/g;
+// Only characters a URL can carry unescaped: prose glued to the end of one
+// ("…/inline)—all", a CJK sentence) is not part of it.
+const URL_RE = /https?:\/\/[A-Za-z0-9._~:/?#@!$&()*+,;=%[\]-]+/g;
+
+// Sentence punctuation after a URL is not part of it, nor is a closing
+// bracket with no opener inside the URL — "(see https://x/y)" — while
+// "https://x/Foo_(bar)" keeps its own.
+const trimUrlEnd = (url: string) => {
+  let u = url;
+  for (;;) {
+    const last = u[u.length - 1];
+    if (/[.,;:!?]/.test(last)) { u = u.slice(0, -1); continue; }
+    const open = { ")": "(", "]": "[" }[last as ")" | "]"];
+    if (open && u.split(open).length <= u.split(last).length - 1) { u = u.slice(0, -1); continue; }
+    return u;
+  }
+};
 
 /**
  * Does `next` read as the hard-broken continuation of `prev` at width `cols`?
@@ -138,7 +154,7 @@ export const urlAtCell = (
   URL_RE.lastIndex = 0;
   while ((m = URL_RE.exec(text)) !== null) {
     if (offset >= m.index && offset <= m.index + m[0].length) {
-      return m[0].replace(/[.,;:!?)\]}]+$/, "");
+      return trimUrlEnd(m[0]);
     }
   }
   return null;

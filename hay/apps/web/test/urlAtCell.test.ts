@@ -43,6 +43,20 @@ describe("urlAtCell", () => {
     expect(urlAtCell(c.get, c.length, COLS, 0, 5)).toBe("https://example.com/0123456789012345678901");
   });
 
+  it("prose glued to the end is not part of the URL", () => {
+    const b = buf([["(at https://x.test/v/a.html/inline)\u2014all"]]);
+    expect(urlAtCell(b.get, b.length, COLS, 0, 8)).toBe("https://x.test/v/a.html/inline");
+    const c = buf([["see https://x.test/a\u3002\u7136\u540e"]]);
+    expect(urlAtCell(c.get, c.length, COLS, 0, 8)).toBe("https://x.test/a");
+  });
+
+  it("a closing bracket stays when the URL opened it", () => {
+    const b = buf([["https://x.test/Foo_(bar)."]]);
+    expect(urlAtCell(b.get, b.length, COLS, 0, 5)).toBe("https://x.test/Foo_(bar)");
+    const c = buf([["(https://x.test/Foo_(bar))"]]);
+    expect(urlAtCell(c.get, c.length, COLS, 0, 5)).toBe("https://x.test/Foo_(bar)");
+  });
+
   it("returns null with no URL under the cell", () => {
     const b = buf([["nothing here"]]);
     expect(urlAtCell(b.get, b.length, COLS, 0, 3)).toBeNull();

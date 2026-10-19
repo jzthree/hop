@@ -207,6 +207,8 @@ async function startDaemon() {
     ...process.env,
     HOP_HOME: hopHome,
     HOP_NO_TUNNEL: '1',
+    // Never the real ~/.codex: tests plant their own rollouts here.
+    CODEX_HOME: path.join(tempDir, 'codex_home'),
     PATH: `${binDir}:${process.env.PATH || ''}`,
     CLOUDFLARED_LOG: cloudflaredLog
   };
@@ -1061,6 +1063,44 @@ test('a session whose display name has spaces can be renamed and forked', async 
   assert.equal(rename.status, 200, JSON.stringify(rename.data));
 
   for (const name of [internal, fork.data.internalName]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+      { name, internalName: name });
+  }
+});
+
+
+// A session continued from the Codex app has no turn record until its first
+// turn finishes in hop — and until then Continue-in-Claude refused it as a
+// plain shell. Its record names the app thread, and that thread's rollout
+// is the conversation to hand off (hop's own fork of it holds only a pointer).
+test('a Codex-app session hands off to claude before its first turn in hop', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'codexappsrc',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const threadId = '01a14846-0000-7000-8000-00000000abcd';
+  const day = path.join(daemonEnv.CODEX_HOME, 'sessions', '2026', '10', '18');
+  await fs.mkdir(day, { recursive: true });
+  await fs.writeFile(path.join(day, `rollout-2026-10-18T10-00-00-${threadId}.jsonl`), [
+    { type: 'session_meta', timestamp: '2026-10-18T10:00:00Z', payload: { id: threadId, cwd: tempDir } },
+    { type: 'event_msg', timestamp: '2026-10-18T10:00:01Z', payload: { type: 'user_message', message: 'find grant opportunities for the lab' } },
+    { type: 'response_item', timestamp: '2026-10-18T10:00:05Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'NSF MCB fits best.' }] } }
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const metaPath = path.join(hopHome, 'claude-sessions', `${internal}.meta`);
+  const meta = JSON.parse(await fs.readFile(metaPath, 'utf8').catch(() => '{}'));
+  await fs.writeFile(metaPath, JSON.stringify({ ...meta, internalName: internal, fromCodexApp: threadId }), { mode: 0o600 });
+
+  const handoff = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', {
+    internalName: internal, target: 'claude'
+  });
+  assert.equal(handoff.status, 200, JSON.stringify(handoff.data));
+  assert.equal(handoff.data.kind, 'handoff');
+  const extract = await fs.readFile(handoff.data.extract.path, 'utf8');
+  assert.match(extract, /find grant opportunities for the lab/);
+
+  for (const name of [internal, handoff.data.internalName]) {
     await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
       { name, internalName: name });
   }

@@ -65,6 +65,35 @@ test('codex rollout: user turns deduped, assistant paired, id readable', async (
     assert.equal(await codexRolloutId(file), 'abc-123');
 });
 
+// A long Codex thread continues in a segment file in a later day folder;
+// the handoff reads the thread from its first file, not just the newest.
+test('codex thread split across segment files is read whole, oldest first', async () => {
+    const dir = tmp();
+    const id = '01a14846-f12b-79b0-a607-19de9fdc0dbf';
+    const day1 = path.join(dir, '.codex', 'sessions', '2026', '10', '17');
+    const day2 = path.join(dir, '.codex', 'sessions', '2026', '10', '18');
+    fs.mkdirSync(day1, { recursive: true });
+    fs.mkdirSync(day2, { recursive: true });
+    const first = path.join(day1, `rollout-2026-10-17T00-12-51-${id}.jsonl`);
+    const later = path.join(day2, `rollout-2026-10-18T21-44-03-${id}_01a1520b-6e45-7560-af50-845d3f9983d4.jsonl`);
+    jsonl(first, [
+        { type: 'session_meta', timestamp: '2026-10-17T00:12:51.000Z', payload: { id, cwd: '/Users/me/grants' } },
+        { type: 'event_msg', timestamp: '2026-10-17T00:13:00.000Z', payload: { type: 'user_message', message: 'find grant opportunities' } }
+    ]);
+    jsonl(later, [
+        { type: 'session_meta', timestamp: '2026-10-18T21:44:03.000Z', payload: { id, cwd: '/Users/me/grants' } },
+        { type: 'event_msg', timestamp: '2026-10-18T21:45:00.000Z', payload: { type: 'user_message', message: 'draft the PO email' } }
+    ]);
+    // An unrelated thread in the same folder stays out.
+    jsonl(path.join(day2, 'rollout-2026-10-18T09-00-00-11111111-2222-3333-4444-555555555555.jsonl'), [
+        { type: 'event_msg', timestamp: '2026-10-18T09:00:01.000Z', payload: { type: 'user_message', message: 'unrelated work' } }
+    ]);
+    const r = await extractConversation(later, { tool: 'codex' });
+    assert.equal(r.totalTurns, 2);
+    assert.ok(r.text.indexOf('find grant opportunities') < r.text.indexOf('draft the PO email'));
+    assert.ok(!r.text.includes('unrelated work'));
+});
+
 test('handoff prompt names the file, its size, and the source tool', () => {
     const p = handoffPrompt('/x/handoff.md', 5 * 1024, 'claude');
     assert.match(p, /Read the ENTIRE file \/x\/handoff\.md \(5KB\)/);

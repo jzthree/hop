@@ -16,6 +16,7 @@
 // Streams line by line: real transcripts run to hundreds of MB.
 
 const fs = require('fs');
+const path = require('path');
 const readline = require('readline');
 
 const NOISE_PREFIXES = [
@@ -170,10 +171,36 @@ async function codexRolloutId(file) {
  * character budget fills — the most recent context is what the receiver
  * needs — then harness noise is dropped.
  */
+// Every file of one Codex thread, oldest first. Codex starts a new segment
+// file (rollout-<time>-<thread>_<segment>.jsonl) partway through a long
+// thread, so the newest file alone is only its last stretch — a handoff from
+// it carried the final hour of a two-day conversation. Segments live in the
+// day folders under the same sessions/ root.
+function codexThreadSegments(file) {
+    const id = (/rollout-[0-9T-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(path.basename(file)) || [])[1];
+    const sessions = path.resolve(path.dirname(file), '..', '..', '..');
+    if (!id || path.basename(sessions) !== 'sessions') return [file];
+    const found = [];
+    const list = (dir) => { try { return fs.readdirSync(dir); } catch { return []; } };
+    for (const y of list(sessions)) for (const m of list(path.join(sessions, y))) for (const d of list(path.join(sessions, y, m))) {
+        for (const n of list(path.join(sessions, y, m, d))) {
+            if (n.endsWith('.jsonl') && n.includes(`-${id}`)) found.push(path.join(sessions, y, m, d, n));
+        }
+    }
+    found.sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+    return found.includes(file) ? found : [file];
+}
+
 async function extractConversation(file, { maxChars = 800000, tool } = {}) {
     const kind = tool || detectTool(file);
     if (kind === 'gemini') throw new Error('Gemini transcripts are not supported for handoff');
-    const turns = kind === 'codex' ? await readCodexTurns(file) : await readClaudeTurns(file);
+    let turns;
+    if (kind === 'codex') {
+        turns = [];
+        for (const f of codexThreadSegments(file)) turns.push(...await readCodexTurns(f));
+    } else {
+        turns = await readClaudeTurns(file);
+    }
     const selected = [];
     let total = 0;
     for (let i = turns.length - 1; i >= 0; i--) {

@@ -12615,7 +12615,13 @@ happens until someone clicks it.
                     // says "node" and cannot), or a plain shell.
                     const turn = readTurnInfo(source);
                     const codexId = turn?.agent === 'codex' ? codexRootThreadId(turn.sessionId) : null;
-                    const runsCodex = !!codexId
+                    // A session continued from the Codex app names its thread
+                    // in its record from the start; the turn file only comes
+                    // with its first finished turn in hop, and until then the
+                    // session read as a plain shell ("no claude or codex
+                    // conversation to hand off").
+                    const codexAppId = /^[0-9a-f-]{36}$/.test(String(meta?.fromCodexApp || '')) ? meta.fromCodexApp : null;
+                    const runsCodex = !!codexId || !!codexAppId
                         || /codex/i.test(String(config.foregroundProcess || ''))
                         || /codex/i.test(String(getRuntimeSessionMetadata(source)?.foregroundProcess || ''));
                     const sourceKind = rec ? 'claude' : runsCodex ? 'codex' : 'shell';
@@ -12640,7 +12646,10 @@ happens until someone clicks it.
                         return;
                     }
                     const codexRollout = sourceKind === 'codex'
-                        ? ((codexId && findCodexRolloutById(codexId)) || resolveCodexTranscriptByCwd(cwd))
+                        // The app thread itself, not hop's fork of it: a fork's
+                        // rollout points back at its parent instead of copying
+                        // the history, so it alone reads as an empty conversation.
+                        ? ((codexId && findCodexRolloutById(codexId)) || (codexAppId && findCodexRolloutById(codexAppId)) || resolveCodexTranscriptByCwd(cwd))
                         : null;
 
                     const sourceDisplay = getSessionDisplayName(source) || source;

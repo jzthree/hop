@@ -976,6 +976,18 @@ ensurePrivateDir(LOG_DIR);
 ensurePrivateDir(WORKSPACES_DIR);
 ensurePrivateDir(RUNTIME_DATA_DIR);
 
+// A session name made from free text (a Codex thread title, a display name
+// from before names were checked): runs of anything outside the name
+// alphabet become one dash, accents fold to their letters, and an empty
+// result falls back. "Find grant opportunities and draft" →
+// "Find-grant-opportunities-and-draft".
+function sessionNameFromText(text, fallback = 'session', max = 40) {
+    const slug = String(text || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-{2,}/g, '-').replace(/^[-_]+|[-_]+$/g, '')
+        .slice(0, max).replace(/[-_]+$/, '');
+    return slug || fallback;
+}
+
 function toInternalSessionName(displayName) {
     if (!displayName || typeof displayName !== 'string') return null;
     if (!SESSION_NAME_RE.test(displayName)) return null;
@@ -1422,7 +1434,11 @@ function isDisplayNameInUse(displayName) {
 // the internal name so it always renames the session the user clicked.
 function renameSessionDisplayName(oldDisplayName, newDisplayName, explicitInternalName) {
     const resolvedOldDisplayName = resolveDisplayNameAlias(oldDisplayName);
-    if (!SESSION_NAME_RE.test(resolvedOldDisplayName)) {
+    // A session addressed by its internal name can always be renamed — that
+    // is how one carrying a malformed old name (spaces, from a Codex title)
+    // gets a valid one.
+    const explicitOk = !!(explicitInternalName && SESSION_NAME_RE.test(explicitInternalName));
+    if (!explicitOk && !SESSION_NAME_RE.test(resolvedOldDisplayName)) {
         const err = new Error('Invalid old name');
         err.status = 400;
         throw err;
@@ -12629,10 +12645,13 @@ happens until someone clicks it.
 
                     const sourceDisplay = getSessionDisplayName(source) || source;
                     const suffix = !handoff ? '-fork' : wantTarget === sourceKind ? '-cont' : '-' + wantTarget;
-                    let forkName = sourceDisplay + suffix;
+                    // The fork's name is also its internal name, so it must be
+                    // a valid one even when the source's display name is not.
+                    const forkBase = SESSION_NAME_RE.test(sourceDisplay) ? sourceDisplay : sessionNameFromText(sourceDisplay);
+                    let forkName = forkBase + suffix;
                     let n = 2;
                     while (isDisplayNameInUse(forkName) || hopSessionExists(toInternalSessionName(forkName))) {
-                        forkName = sourceDisplay + suffix + n;
+                        forkName = forkBase + suffix + n;
                         n += 1;
                     }
                     const forkInternal = toInternalSessionName(forkName);
@@ -12659,7 +12678,7 @@ happens until someone clicks it.
                         const stage = path.join(HOME_DIR, 'uploads', forkInternal);
                         fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
                         const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-                        const extractPath = path.join(stage, `handoff-from-${sourceDisplay}-${stamp}.md`);
+                        const extractPath = path.join(stage, `handoff-from-${forkBase}-${stamp}.md`);
                         writePrivateFile(extractPath, result.text);
                         const bytes = Buffer.byteLength(result.text);
                         const prompt = trajectoryExtract.handoffPrompt(extractPath, bytes, sourceKind);

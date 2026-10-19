@@ -1027,6 +1027,46 @@ test('condense into the same agent hands off the trajectory to a fresh session',
 });
 
 
+// A session continued from the Codex app used to carry the thread's title
+// verbatim ("Find grant opportunities and draft") — spaces a session name
+// may not hold, so renaming it and Continue-in both failed. Such a session
+// can still be renamed by its internal name and forked under a valid name.
+test('a session whose display name has spaces can be renamed and forked', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'spacedsrc',
+    cwd: tempDir
+  }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const metaPath = path.join(hopHome, 'claude-sessions', `${internal}.meta`);
+  const meta = JSON.parse(await fs.readFile(metaPath, 'utf8').catch(() => '{}'));
+  await fs.writeFile(metaPath, JSON.stringify({ ...meta, internalName: internal, displayName: 'Find grant opportunities' }), { mode: 0o600 });
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.json`), JSON.stringify({
+    sessionId: '22222222-3333-4444-5555-666666666666', cwd: tempDir, launchCmd: 'claude',
+    updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const before = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  assert.equal(before.data.sessions.find((s) => s.internalName === internal)?.displayName, 'Find grant opportunities');
+
+  const fork = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', {
+    internalName: internal
+  });
+  assert.equal(fork.status, 200, JSON.stringify(fork.data));
+  assert.match(fork.data.internalName, /^[A-Za-z0-9_-]+$/);
+
+  const rename = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename', {
+    oldName: 'Find grant opportunities', newName: 'grant-search', internalName: internal
+  });
+  assert.equal(rename.status, 200, JSON.stringify(rename.data));
+
+  for (const name of [internal, fork.data.internalName]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
+      { name, internalName: name });
+  }
+});
+
+
 // The briefing generator's coverage signal: the server witnesses who was
 // looking at what, and when. Only a HUMAN-viewing attach may stamp it —
 // wall tiles are spectators and terminal-api clients are agents.

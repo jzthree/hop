@@ -151,7 +151,12 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
     : "Disconnected";
 
   return (
-    <div className="desktop-view" role="dialog" aria-label="Remote desktop">
+    // Keys typed here are the desktop's (or its sign-in form's), never the
+    // wall's underneath: its type-to-filter took every printable, and its
+    // arrows and Escape would steer the wall while you worked remotely.
+    <div className="desktop-view" role="dialog" aria-label="Remote desktop"
+         onKeyDown={(e) => e.nativeEvent.stopPropagation()}
+         onKeyUp={(e) => e.nativeEvent.stopPropagation()}>
       <div className="desktop-bar">
         <span className="views-badge">Desktop</span>
         <span className={"desktop-status " + status.kind}>{label}</span>

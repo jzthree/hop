@@ -161,6 +161,7 @@ type Sheet = {
 export const terminalMayTakeFocus = () => {
   const ae = document.activeElement as HTMLElement | null;
   if (!ae || ae === document.body) return true;
+  if (ae.closest?.(".desktop-view")) return false; // the remote desktop has the keyboard
   if (ae.closest?.(".switcher-live-tile, .switcher-focus-tile")) return true;
   return !ae.matches?.("input, textarea, [contenteditable]");
 };

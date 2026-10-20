@@ -481,9 +481,10 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
         onMouseLeave={() => setArmedDelete((a) => (a === item.path ? null : a))}
       >
         {isImage(item.name)
-          // The file is its own thumbnail — one lazy request, and a list of
-          // plots becomes scannable at a glance.
-          ? <img className="views-thumb" src={item.path} loading="lazy" alt="" />
+          // A small server-made thumbnail (the daemon falls back to the file
+          // itself): a list of plots scannable at a glance, without pulling
+          // every full image through the tunnel to draw it.
+          ? <img className="views-thumb" src={item.path.replace(/\/inline$/, "/thumb")} loading="lazy" decoding="async" alt="" />
           : <span className="views-kind" aria-hidden="true">{kindOf(item.name, item.kind)}</span>}
         <span className="views-row-text">
           <span className="views-title">{item.title || item.name}</span>

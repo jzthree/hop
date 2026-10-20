@@ -2746,6 +2746,60 @@ function saveHopConfig(config) {
     writePrivateFile(HOP_CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
+// --- View thumbnails ---
+// Small JPEGs for the Views list, made once per file version with macOS's
+// sips (ImageMagick elsewhere, when installed) and kept under the hop home.
+// A few at a time: a list opening asks for a screenful at once. No tool, or
+// a failure → null, and the caller serves the file itself as before.
+const VIEW_THUMB_DIR = path.join(HOME_DIR, 'cache', 'view-thumbs');
+const VIEW_THUMB_PX = 160;
+const VIEW_THUMB_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.tif', '.tiff', '.bmp']);
+const viewThumbQueue = [];
+const viewThumbWaiting = new Map();
+let viewThumbRunning = 0;
+let viewThumbTool;
+function findViewThumbTool() {
+    if (viewThumbTool !== undefined) return viewThumbTool;
+    const has = (bin) => { try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch (e) { return false; } };
+    viewThumbTool = process.platform === 'darwin' && has('sips') ? 'sips' : has('magick') ? 'magick' : has('convert') ? 'convert' : null;
+    return viewThumbTool;
+}
+function viewThumbnail(file, done) {
+    const ext = path.extname(file).toLowerCase();
+    const tool = VIEW_THUMB_EXTS.has(ext) ? findViewThumbTool() : null;
+    if (!tool) { done(null); return; }
+    let st;
+    try { st = fs.statSync(file); } catch (e) { done(null); return; }
+    const key = crypto.createHash('sha1').update(`${file}\0${st.size}\0${st.mtimeMs}`).digest('hex');
+    const out = path.join(VIEW_THUMB_DIR, key + '.jpg');
+    if (fs.existsSync(out)) { done(out); return; }
+    if (viewThumbWaiting.has(out)) { viewThumbWaiting.get(out).push(done); return; }
+    viewThumbWaiting.set(out, [done]);
+    viewThumbQueue.push({ file, out, tool });
+    pumpViewThumbs();
+}
+function pumpViewThumbs() {
+    while (viewThumbRunning < 3 && viewThumbQueue.length) {
+        const { file, out, tool } = viewThumbQueue.shift();
+        viewThumbRunning++;
+        try { fs.mkdirSync(VIEW_THUMB_DIR, { recursive: true }); } catch (e) { /* the write below fails */ }
+        const tmp = `${out}.${process.pid}.tmp.jpg`;
+        const args = tool === 'sips'
+            ? ['-Z', String(VIEW_THUMB_PX), '-s', 'format', 'jpeg', '-s', 'formatOptions', '70', file, '--out', tmp]
+            : (tool === 'magick' ? ['convert'] : []).concat([`${file}[0]`, '-thumbnail', `${VIEW_THUMB_PX}x${VIEW_THUMB_PX}>`, '-quality', '70', tmp]);
+        execFile(tool === 'magick' ? 'magick' : tool, args, { timeout: 15000 }, (err) => {
+            viewThumbRunning--;
+            let result = null;
+            if (!err) { try { fs.renameSync(tmp, out); result = out; } catch (e) { /* none */ } }
+            try { fs.unlinkSync(tmp); } catch (e) { /* renamed or never made */ }
+            const waiters = viewThumbWaiting.get(out) || [];
+            viewThumbWaiting.delete(out);
+            for (const w of waiters) { try { w(result); } catch (e) { /* the response went away */ } }
+            pumpViewThumbs();
+        });
+    }
+}
+
 // --- Remote desktop ---
 // hop carries a VNC server that is already on the machine (macOS Screen
 // Sharing, or x11vnc/wayvnc on Linux) through its own authenticated link:
@@ -12616,7 +12670,7 @@ happens until someone clicks it.
         // file name. The legacy /assets/view/<s>/<f> form redirects here, so
         // an edge-cached response is at worst a redirect, never the bytes.
         const viewMatch = (req.method === 'GET' || req.method === 'HEAD')
-            && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download)?$/);
+            && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download|\/thumb)?$/);
         if (viewMatch) {
             // /download: the stored file itself, as an attachment — the
             // markdown an agent wrote rather than the page it renders into,
@@ -12632,6 +12686,23 @@ happens until someone clicks it.
                 return;
             }
             const viewExt = path.extname(target).toLowerCase();
+            // /thumb: a small JPEG for the Views list. The list used to load
+            // every image whole as its own thumbnail — 39 MB through the
+            // tunnel to draw one screen of rows, with the view you picked
+            // queued behind it.
+            if (viewMatch[3] === '/thumb') {
+                viewThumbnail(target, (thumb) => {
+                    if (!thumb) {
+                        res.writeHead(302, { Location: `/view/${viewMatch[1]}/${viewMatch[2]}/inline` });
+                        res.end();
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': fs.statSync(thumb).size, 'Cache-Control': 'private, max-age=86400' });
+                    if (req.method === 'HEAD') { res.end(); return; }
+                    fs.createReadStream(thumb).pipe(res);
+                });
+                return;
+            }
             // ?download=1 — the FILE, not the page: the bytes the agent
             // published, under their real name, as an attachment. Rendered
             // kinds (md/csv/json) come back raw here, not as the HTML the

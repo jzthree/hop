@@ -1526,3 +1526,45 @@ test('the desktop pipe is off by default and, once on, carries bytes both ways',
     vnc.close();
   }
 });
+
+test('a view image has a small thumbnail; other kinds fall back to the file', async () => {
+  const dir = path.join(hopHome, 'views', 'thumbprobe');
+  await fs.mkdir(dir, { recursive: true });
+  // A 400x300 PNG, written by hand: one solid-colour row repeated.
+  const zlib = require('node:zlib');
+  const w = 400, h = 300;
+  const crc = (buf) => { let c = ~0; for (const b of buf) { c ^= b; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return ~c >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(w * 3, 0x80)]);
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(Buffer.concat(Array(h).fill(row)))), chunk('IEND', Buffer.alloc(0))]);
+  await fs.writeFile(path.join(dir, 'plot.png'), png);
+  await fs.writeFile(path.join(dir, 'notes.pdf'), Buffer.alloc(64, 1));
+  const get = (reqPath) => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port: state.port, path: reqPath, method: 'GET',
+      headers: { Authorization: `Bearer ${state.sessionSecret}` } }, (res) => {
+      const parts = []; res.on('data', (d) => parts.push(d));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(parts) }));
+    });
+    req.on('error', reject); req.end();
+  });
+  try {
+    const thumb = await get('/view/thumbprobe/plot.png/thumb');
+    if (thumb.status === 200) {
+      assert.equal(thumb.headers['content-type'], 'image/jpeg');
+      assert.ok(thumb.body.length < png.length, 'smaller than the image itself');
+      const again = await get('/view/thumbprobe/plot.png/thumb');
+      assert.deepEqual(again.body, thumb.body, 'served from the cache the second time');
+    } else {
+      // No image tool on this machine: the file itself, as before.
+      assert.equal(thumb.status, 302);
+      assert.equal(thumb.headers.location, '/view/thumbprobe/plot.png/inline');
+    }
+    const pdf = await get('/view/thumbprobe/notes.pdf/thumb');
+    assert.equal(pdf.status, 302);
+    assert.equal((await get('/view/thumbprobe/missing.png/thumb')).status, 404);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

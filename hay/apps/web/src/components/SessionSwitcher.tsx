@@ -40,6 +40,7 @@ import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
 import { chipWhen } from "../utils/checkbackText";
 import { currentWsBase, noteSocketClosed } from "../utils/localLink";
+import { watchLiveness } from "../utils/socketLiveness";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
 
@@ -1035,6 +1036,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       if (ws) { try { ws.close(); } catch { /* replacing */ } }
       const url = wsUrl();
       const sock = new WebSocket(url);
+      watchLiveness(sock); // a hung or silently dead socket closes, and so reconnects
       ws = sock;
       let opened = false;
       sock.onopen = () => {

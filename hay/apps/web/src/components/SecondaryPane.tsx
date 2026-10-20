@@ -9,6 +9,7 @@ import { enableMathHover } from "../utils/mathLinkProvider";
 import { getMathTip } from "../utils/mathTooltip";
 import type { Side } from "../utils/paneTree";
 import { currentWsBase, noteSocketClosed } from "../utils/localLink";
+import { watchLiveness } from "../utils/socketLiveness";
 
 // A lightweight additional pane: its own WS attach + xterm for one session,
 // typing forwarded when focused. A FOCUSED pane claims its box size (crisp
@@ -122,6 +123,7 @@ export const SecondaryPane = ({
       const url = `${base}${sep}room=${encodeURIComponent(sessionName)}&name=${encodeURIComponent(userName + " (pane)")}` +
           `&cols=${sizeRef.current.cols}&rows=${sizeRef.current.rows}`;
       const ws = new WebSocket(url);
+      watchLiveness(ws); // a hung or silently dead socket closes, and so reconnects
       wsRef.current = ws;
       showConnecting();
       let opened = false;

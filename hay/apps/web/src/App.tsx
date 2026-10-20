@@ -51,6 +51,7 @@ import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPan
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord } from "./utils/fullscreenChord";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
+import { watchLiveness } from "./utils/socketLiveness";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -1778,6 +1779,9 @@ const App = () => {
     shouldReconnectRef.current = true;
 
     const ws = new WebSocket(url);
+    // An open socket that went silent (the far end gone while the laptop
+    // slept) closes, and so reconnects, instead of looking connected.
+    watchLiveness(ws);
     wsRef.current = ws;
     const viaLocalLink = isLocalLinkUrl(url);
     let opened = false;

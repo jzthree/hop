@@ -5173,7 +5173,7 @@ body.pane-dragging { user-select: none; }
   --phone-glow: #7c3aed;
   --phone-pill: #f2f3f5;
   --phone-raised: #f2f3f5;
-  --phone-surface: #ffffff;
+  --phone-surface: #f3f4f7;
 }
 :root[data-theme="dark"] .switcher-phone {
   --phone-attention: #f0a53a;

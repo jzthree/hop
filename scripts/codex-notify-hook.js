@@ -22,7 +22,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { spawn, execFileSync } = require("node:child_process");
 
 function turnsDir() {
   const home = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
@@ -61,6 +61,32 @@ function resolveHopSession(dir, rootId, envSession) {
   }
   if (owners.includes(envSession)) return envSession;
   return owners.length === 1 ? owners[0] : envSession;
+}
+
+// Codex's shared app-server daemon runs the notify of every thread it
+// serves with ITS OWN environment — the session that happened to start it.
+// One started inside one session filed another session's turns as its own,
+// so that record named the other conversation and `hop recover` there
+// brought the wrong one back. Under the daemon
+// HOP_SESSION says nothing about the thread. Codex runs this hook through
+// whatever notify chain is configured (Computer Use wraps it), so walk up
+// to the first codex process and look at how it runs.
+function underSharedCodexDaemon() {
+  let pid = process.ppid;
+  for (let i = 0; i < 8 && pid > 1; i++) {
+    let row = "";
+    let args = "";
+    try {
+      row = execFileSync("ps", ["-o", "ppid=,comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
+      args = execFileSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
+    } catch { return false; }
+    const m = /^(\d+)\s+(.*)$/.exec(row);
+    if (!m) return false;
+    // The executable itself, not any command line that mentions it.
+    if (path.basename(m[2]) === "codex") return /\sapp-server(\s|$)/.test(args);
+    pid = Number(m[1]);
+  }
+  return false;
 }
 
 // A sub-agent's rollout names its parent in its first line (session_meta →
@@ -114,7 +140,10 @@ function bumpTurn(payload) {
              : (payload && typeof payload.thread_id === "string") ? payload.thread_id
              : (payload && typeof payload.session_id === "string") ? payload.session_id : null;
   let rootId = rootThreadId(rawThread);
-  const hopSession = resolveHopSession(dir, rootId, envSession);
+  // Under the shared daemon the environment is another session's: the
+  // turn goes only to a record that already names this thread, else nowhere.
+  const hopSession = underSharedCodexDaemon() ? resolveHopSession(dir, rootId, null) : resolveHopSession(dir, rootId, envSession);
+  if (!hopSession) return;
   const file = path.join(dir, `${hopSession}.turn`);
   let count = 0;
   let prev = null;

@@ -61,3 +61,40 @@ test('other event types count nothing', () => {
   run(home, 'alpha', { type: 'something-else', 'thread-id': 'thread-A' });
   assert.equal(turn(home, 'alpha'), null);
 });
+
+// Codex's shared app-server daemon runs every thread's notify with the
+// environment of whichever session started it. A parent whose command line
+// says app-server stands in for it here.
+// The daemon is an executable named codex running `app-server`: a copy of
+// node under that name, running the hook, stands in for it.
+const runAsDaemon = (home, session, json) => {
+  const bin = path.join(home, 'bin'); fs.mkdirSync(bin, { recursive: true });
+  const codex = path.join(bin, 'codex');
+  if (!fs.existsSync(codex)) fs.symlinkSync(process.execPath, codex);
+  const script = path.join(bin, 'daemon.js');
+  fs.writeFileSync(script, 'require("child_process").execFileSync(process.execPath, process.argv.slice(3), { stdio: "inherit" })');
+  return require('node:child_process').spawnSync(codex, [script, 'app-server', HOOK, json], {
+    env: { ...process.env, HOP_HOME: home, HOP_SESSION: session, CODEX_HOME: path.join(home, 'codex') }
+  });
+};
+
+test("under Codex's shared daemon a turn is not filed against the daemon's session", () => {
+  const home = freshHome();
+  saveRollout(home, 'thread-starter'); saveRollout(home, 'thread-other');
+  fs.writeFileSync(path.join(home, 'claude-sessions', 'starter.turn'), JSON.stringify({ sessionId: 'thread-starter', count: 4, at: '2026-10-14T00:00:00.000Z', agent: 'codex' }));
+  fs.writeFileSync(path.join(home, 'claude-sessions', 'other.turn'), JSON.stringify({ sessionId: 'thread-other', count: 7, at: '2026-10-14T00:00:00.000Z', agent: 'codex' }));
+  // Another session's thread finishes a turn inside the daemon the starter session started.
+  const daemon = runAsDaemon(home, 'starter', JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 'thread-other', 'turn-id': 't1' }));
+  assert.equal(daemon.status, 0, String(daemon.stderr));
+  assert.equal(turn(home, 'starter').sessionId, 'thread-starter', "the starter's record keeps its own thread");
+  assert.equal(turn(home, 'starter').count, 4, 'and is not counted');
+  assert.equal(turn(home, 'other').count, 8, 'the turn goes to the record that names the thread');
+});
+
+test('under the shared daemon a thread no record names is filed nowhere', () => {
+  const home = freshHome();
+  saveRollout(home, 'thread-new');
+  const daemon = runAsDaemon(home, 'starter', JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 'thread-new', 'turn-id': 't1' }));
+  assert.equal(daemon.status, 0, String(daemon.stderr));
+  assert.equal(turn(home, 'starter'), null, 'no record is invented for the daemon session');
+});

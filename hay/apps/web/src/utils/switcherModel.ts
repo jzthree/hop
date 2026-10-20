@@ -54,6 +54,8 @@ export type SwitcherSession = {
   agent?: "claude" | "codex" | null;
   /** The account (config root) the agent runs as: CLAUDE_CONFIG_DIR / CODEX_HOME. */
   agentHome?: AgentHome | null;
+  /** The model the agent is running, from its own log (e.g. claude-opus-5-5, gpt-6-astra). */
+  agentModel?: string | null;
   /** Server-decided: a turn in flight / the last turn finished; turnSeen = a human opened it since. */
   agentPhase?: "working" | "done" | null;
   turnSeen?: boolean;
@@ -63,6 +65,8 @@ export type SwitcherSession = {
   checkbackNext?: number;
   /** Active Codex automations aimed at this session's conversation. */
   codexAutomations?: number;
+  /** How much the human uses it: decayed count of opens/prompts (daemon). */
+  interactionScore?: number;
   agentPermitted?: boolean;
   cols?: number;
   rows?: number;
@@ -93,7 +97,7 @@ export type SessionOriginScope = "user" | "agent" | "all";
 //   recent  — attention-first tiers + project-grouped tail (the default)
 //   project — every session grouped strictly by workdir
 //   manual  — a flat, user-dragged order the client persists
-export type SwitcherSortMode = "recent" | "project" | "manual";
+export type SwitcherSortMode = "recent" | "project" | "manual" | "used";
 
 export type SwitcherGroup = {
   label: string;
@@ -335,6 +339,23 @@ const splitIntoFolders = (
   };
 };
 
+/**
+ * "Most used": by how often the HUMAN interacts with each session (opens it
+ * on any device, prompts it) — a decayed score the daemon keeps, so the phone
+ * and the web agree. Score ties fall back to recency.
+ */
+export const groupByUse = (sessions: SwitcherSession[]): SwitcherGroup[] => {
+  const score = (s: SwitcherSession) => s.interactionScore || 0;
+  const sorted = [...sessions].sort((a, b) => score(b) - score(a) || activity(b) - activity(a));
+  const used = sorted.filter((s) => score(s) >= 0.5);
+  // Below the threshold the score is noise; recency says more.
+  const rare = sessions.filter((s) => score(s) < 0.5).sort((a, b) => activity(b) - activity(a));
+  const groups: SwitcherGroup[] = [];
+  if (used.length) groups.push({ label: "Active", rows: used });
+  if (rare.length) groups.push({ label: "Less active", rows: rare });
+  return groups;
+};
+
 export const buildSwitcherModel = (
   sessions: SwitcherSession[],
   currentRoom: string | null,
@@ -378,6 +399,9 @@ export const buildSwitcherModel = (
   if (sortMode === "manual") {
     const split = splitIntoFolders(sessions, folders, manualOrder);
     return { mode: "manual", rows: split.loose, folders: split.folders };
+  }
+  if (sortMode === "used") {
+    return { mode: "project", groups: groupByUse(sessions) };
   }
 
   const current = sessions.find((s) => isCurrent(s, currentRoom)) ?? null;
@@ -432,4 +456,74 @@ export const relativeTime = (ts: number, nowMs: number) => {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
+};
+
+/**
+ * The short name people use for a model: claude-opus-5-5 → "opus",
+ * gpt-6-astra → "astra", gpt-5.6-sol → "sol"; anything unrecognised passes
+ * through minus a "claude-" prefix.
+ */
+export const shortModelName = (model?: string | null): string | null => {
+  if (!model) return null;
+  const m = model.toLowerCase().replace(/\[.*\]$/, "");
+  const claude = /^claude-(?:\d[\d.-]*-)?([a-z]+)/.exec(m);
+  if (claude) return claude[1];
+  const gptNamed = /^gpt-[\d.]+-([a-z][a-z-]*)$/.exec(m);
+  if (gptNamed) return gptNamed[1];
+  return m.replace(/^claude-/, "");
+};
+
+/**
+ * The screen lines worth showing in a phone row's preview — the iOS app's
+ * rule (AppModel.meaningfulTailIndices), so both phones show the same five
+ * lines: the last `wanted` non-blank lines that are not agent chrome (key
+ * hints, a bare prompt, box-drawing borders). Returns row indices.
+ */
+const PREVIEW_NOISE = ["bypass permissions", "esc to interrupt", "shift+tab to cycle", "? for shortcuts", "ctrl+c to"];
+const BOX_CHARS = new Set(Array.from("─│╭╮╰╯┌┐└┘├┤┬┴┼━┃▏▕▁▔█▀▄· "));
+export const meaningfulTailIndices = (screen: string, wanted: number): number[] => {
+  const kept: number[] = [];
+  screen.split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    const lower = line.toLowerCase();
+    if (PREVIEW_NOISE.some((n) => lower.includes(n))) return;
+    const chars = Array.from(line);
+    if (chars.length <= 2) return;
+    const box = chars.filter((c) => BOX_CHARS.has(c)).length;
+    if (box / chars.length >= 0.6) return;
+    kept.push(i);
+  });
+  return kept.slice(-wanted);
+};
+
+/** The iOS app's compact clock: "now", "12s", "3m", "4h", "2d". */
+export const shortRelativeTime = (ts: number, nowMs: number) => {
+  if (!ts) return "";
+  const s = Math.floor((nowMs - ts) / 1000);
+  if (s < 10) return "now";
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+};
+
+/** Why a session wants you, in the iOS row's words. */
+export const phoneAttentionLabel = (s: Pick<SwitcherSession, "attentionReason" | "attentionNote">) => {
+  switch (s.attentionReason) {
+    case "ask": return s.attentionNote ? `asking: ${s.attentionNote}` : "asking";
+    case "finished": return "finished";
+    case "view": return s.attentionNote ? `published: ${s.attentionNote}` : "published a view";
+    case "working": return "still working — pinged";
+    default: return "rang the bell";
+  }
+};
+
+/** The toolbar summary, iOS's fleetSummaryCompact: "34/36 · 3 want you (+1) · 2 parked". */
+export const fleetSummaryCompact = (shown: number, total: number, wanting: number, hiddenWanting: number, parked: number) => {
+  const scope = shown === total ? `${shown}` : `${shown}/${total}`;
+  const parkedNote = parked > 0 ? ` · ${parked} parked` : "";
+  if (wanting <= 0) return `${scope} · quiet${parkedNote}`;
+  const note = hiddenWanting > 0 ? ` (+${hiddenWanting})` : "";
+  return `${scope} · ${wanting} want${wanting === 1 ? "s" : ""} you${note}${parkedNote}`;
 };

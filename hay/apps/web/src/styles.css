@@ -2331,6 +2331,20 @@ button.primary {
   white-space: nowrap;
 }
 
+/* On a phone-width screen the title gets up to two lines: it is what a card
+   is read for, more than its screen, and one narrow line cut most names. */
+@media (max-width: 768px) {
+  .switcher-card-name {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
+  }
+}
+
 .switcher-chip {
   flex-shrink: 0;
   font-size: 8px;
@@ -5138,3 +5152,521 @@ body.pane-dragging { user-select: none; }
 /* The item is a <button>, whose global weight made every line bold. */
 .digest-item .digest-why, .digest-item .digest-replies, .digest-item .digest-reply { font-weight: 400; }
 .digest-item .digest-reco { font-weight: 500; }
+/* Codex app threads: one row per thread, the verb on the right. */
+.codex-app-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: var(--panel); color: var(--ink); cursor: pointer; }
+.codex-app-row:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.codex-app-row:disabled { cursor: progress; opacity: 0.7; }
+.codex-app-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.codex-app-title { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.codex-app-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.codex-app-verb { font-size: 12px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+.codex-app-error { color: var(--err); }
+
+/* ── Phone layout: the iOS app's sessions screen (≤600px) ──
+   Same toolbar (scope pill · summary · ⋯ ＋ pill), pinned search capsule,
+   and the app's rows. Palette = the app's: amber wants-you, green live,
+   blue working, hop purple glow. */
+.switcher-phone {
+  --phone-attention: #d4841a;
+  --phone-live: #1f9e5b;
+  --phone-working: #2b7bc4;
+  --phone-glow: #7c3aed;
+  --phone-pill: #f2f3f5;
+  --phone-raised: #f2f3f5;
+  --phone-surface: #ffffff;
+}
+:root[data-theme="dark"] .switcher-phone {
+  --phone-attention: #f0a53a;
+  --phone-live: #35d47a;
+  --phone-working: #5aa7e0;
+  --phone-glow: #a855f7;
+  --phone-pill: #000000;
+  --phone-raised: #161b22;
+  --phone-surface: #0d1117;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .switcher-phone {
+    --phone-attention: #f0a53a;
+    --phone-live: #35d47a;
+    --phone-working: #5aa7e0;
+    --phone-glow: #a855f7;
+    --phone-pill: #000000;
+    --phone-raised: #161b22;
+    --phone-surface: #0d1117;
+  }
+}
+
+/* Above the scrolling list: the ⋯ menu opens out of the bar and over it
+   (the bar's backdrop blur makes it its own stacking context). */
+.switcher-phone .switcher-top { border-bottom: none; position: relative; z-index: 5; }
+.phone-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 6px;
+}
+.phone-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 44px;
+  padding: 0 6px;
+  border-radius: 22px;
+  background: var(--phone-pill);
+  border: 0.5px solid var(--line);
+  flex-shrink: 0;
+}
+.phone-logo { width: 30px; height: 22px; margin: 0 4px 0 6px; color: var(--phone-glow); flex-shrink: 0; }
+.phone-pill-btn svg { width: 22px; height: 22px; flex-shrink: 0; }
+.phone-scope {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 4px;
+  height: 100%;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--phone-glow);
+}
+/* The native picker sits invisibly over the label: iOS Safari then shows its
+   own wheel, the closest thing the web has to the app's menu picker. */
+.phone-scope select {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  font-size: 16px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.phone-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 20px;
+  background: transparent;
+  color: var(--phone-glow);
+  cursor: pointer;
+}
+.phone-pill-btn:active { background: var(--bg-alt); }
+.phone-summary {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+}
+.phone-summary.wants { color: var(--phone-attention); cursor: pointer; }
+
+.phone-menu-backdrop { position: fixed; inset: 0; z-index: 40; }
+.phone-menu {
+  position: absolute;
+  z-index: 41;
+  top: calc(env(safe-area-inset-top, 0px) + 56px);
+  right: 12px;
+  width: min(270px, calc(100vw - 24px));
+  max-height: calc(100dvh - 90px);
+  overflow-y: auto;
+  border-radius: 14px;
+  background: var(--panel);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.28);
+  border: 0.5px solid var(--line);
+  animation: phone-menu-in 0.16s ease-out;
+  transform-origin: top right;
+}
+@keyframes phone-menu-in { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: none; } }
+.phone-menu-section + .phone-menu-section { border-top: 6px solid color-mix(in srgb, var(--line) 60%, transparent); }
+.phone-menu-section:empty { display: none; }
+.phone-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px 0 8px;
+  border: none;
+  background: none;
+  color: var(--ink);
+  font-size: 16px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.phone-menu-item + .phone-menu-item { border-top: 0.5px solid var(--line); }
+.phone-menu-item:active { background: var(--bg-alt); }
+.phone-menu-check { width: 18px; text-align: center; font-weight: 600; font-size: 14px; }
+.phone-menu-label { flex: 1; }
+.phone-menu-note { font-size: 13px; color: var(--phone-glow); }
+.phone-menu-icon { display: inline-flex; width: 22px; justify-content: center; color: var(--ink); opacity: 0.85; }
+
+.phone-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  margin: 2px 12px 8px;
+  padding: 0 12px;
+  border-radius: 19px;
+  background: var(--phone-raised);
+  border: 0.5px solid var(--line);
+  color: var(--ink-muted);
+}
+.phone-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 16px; /* 16px: below it iOS Safari zooms the page on focus */
+  font-family: inherit;
+  -webkit-appearance: none;
+}
+.phone-search input::-webkit-search-cancel-button { display: none; }
+.phone-search-clear {
+  border: none;
+  background: var(--ink-muted);
+  color: var(--phone-raised);
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  font-size: 10px;
+  line-height: 18px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.switcher-phone .switcher-scroll { padding: 8px 0 calc(env(safe-area-inset-bottom, 0px) + 24px); scrollbar-gutter: auto; }
+.switcher-phone .switcher-scroll > :not(.switcher-grid) { margin-left: 12px; margin-right: 12px; }
+.switcher-phone:not(.phone-list) .switcher-grid { padding: 0 12px; }
+
+/* The list: one inset-grouped section, as SwiftUI draws it. */
+.phone-list .switcher-grid {
+  display: block;
+  margin: 0 12px 18px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.phone-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px 10px 12px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.phone-row + .phone-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 40px;
+  right: 0;
+  border-top: 0.5px solid var(--line);
+}
+.phone-row.wants { background: color-mix(in srgb, var(--phone-attention) 13%, var(--panel)); }
+.phone-row:active { background: var(--bg-alt); }
+.phone-row.kbd-selected { box-shadow: inset 0 0 0 2px var(--accent); }
+.phone-row-dot {
+  position: relative;
+  flex: 0 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+}
+.phone-row-dot > span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ink-muted) 35%, transparent);
+}
+.phone-row-dot.live > span { background: var(--phone-live); box-shadow: 0 0 5px color-mix(in srgb, var(--phone-live) 70%, transparent); }
+.phone-row-dot.done > span { background: var(--phone-live); box-shadow: 0 0 5px color-mix(in srgb, var(--phone-live) 70%, transparent); }
+.phone-row-dot.working > span { background: var(--phone-working); animation: phone-sonar 1.6s ease-out infinite; }
+.phone-row-dot.wants::before {
+  content: "";
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--phone-attention) 22%, transparent);
+}
+.phone-row-dot.wants > span {
+  position: relative;
+  width: 11px;
+  height: 11px;
+  background: var(--phone-attention);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--phone-attention) 90%, transparent);
+}
+@keyframes phone-sonar {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--phone-working) 60%, transparent); }
+  100% { box-shadow: 0 0 0 9px transparent; }
+}
+.phone-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.phone-row-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.phone-row-name {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  /* Two lines, as in the app: the title matters more than the preview. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+.phone-row-app {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #93a0b4;
+  background: color-mix(in srgb, #93a0b4 16%, transparent);
+}
+.phone-row-app.app-claude { color: var(--phone-glow); background: color-mix(in srgb, var(--phone-glow) 16%, transparent); }
+.phone-row-app.app-vim, .phone-row-app.app-nvim { color: #2fbf9a; background: color-mix(in srgb, #2fbf9a 16%, transparent); }
+.phone-row-app.app-python, .phone-row-app.app-python3 { color: #5aa7e0; background: color-mix(in srgb, #5aa7e0 16%, transparent); }
+.phone-row-app.app-ssh { color: #e0a45a; background: color-mix(in srgb, #e0a45a 16%, transparent); }
+.phone-row-checkbacks, .phone-row-views {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.phone-row-views.fresh { color: var(--phone-glow); }
+.phone-row-glyph { flex-shrink: 0; font-size: 11px; color: var(--ink-muted); }
+.phone-row-glyph.permitted { color: var(--phone-glow); }
+.phone-row-time {
+  margin-left: auto;
+  padding-left: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--ink-muted) 70%, transparent);
+}
+.phone-row-why {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--phone-attention);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.phone-row-tagline {
+  font-size: 12px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.phone-row-tagline.dir { direction: rtl; text-align: left; }
+.phone-row-preview {
+  margin: 2px 0 0;
+  padding: 4px 5px;
+  border-radius: 6px;
+  background: var(--phone-surface);
+  color: color-mix(in srgb, var(--ink-muted) 85%, transparent);
+  font-family: var(--font-terminal);
+  font-size: 9.5px;
+  line-height: 13px;
+  overflow: hidden;
+}
+/* Five lines in all, wrapped lines included — the app's lineLimit(5). */
+.phone-row-preview { max-height: calc(13px * 5 + 8px); }
+.phone-row-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.phone-row-snippet {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  background: var(--bg-alt);
+  border-radius: 5px;
+  padding: 3px 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.phone-row-chevron { flex-shrink: 0; font-size: 22px; color: color-mix(in srgb, var(--ink-muted) 60%, transparent); }
+/* The global button lift/raise is desktop chrome; the app's controls don't move. */
+.switcher-phone .phone-bar button:hover,
+.switcher-phone .phone-search button:hover,
+.switcher-phone .phone-row button:hover { transform: none; box-shadow: none; }
+.phone-menu-item { border-radius: 0; font-weight: 400; }
+.phone-row-checkbacks, .phone-row-views { border-radius: 0; }
+
+/* ── Phone briefing: the app's front page ── */
+.pdigest-card {
+  margin-bottom: 14px;
+  padding: 12px 14px 10px;
+  border-radius: 14px;
+  background: var(--panel);
+}
+.pdigest-head { display: flex; align-items: center; gap: 6px; color: var(--phone-glow, var(--accent)); }
+.pdigest-badge { font-size: 12px; font-weight: 600; }
+.pdigest-spacer { flex: 1; }
+.pdigest-dismiss {
+  border: none; background: none; padding: 4px; border-radius: 0;
+  font-size: 12px; font-weight: 600; color: color-mix(in srgb, var(--ink-muted) 70%, transparent);
+}
+.pdigest-dismiss:hover { transform: none; box-shadow: none; }
+.pdigest-summary { margin: 7px 0 4px; font-size: 17px; line-height: 1.32; color: var(--ink); }
+.pdigest-slot-label {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--ink-muted);
+}
+.pdigest-slot.slot-decide .pdigest-slot-label { color: var(--phone-attention, #f0a53a); }
+.pdigest-slot.slot-watch .pdigest-slot-label { color: #ff9f0a; }
+.pdigest-slot.slot-done .pdigest-slot-label { color: var(--phone-live, #35d47a); }
+.pdigest-story { padding: 4px 0; }
+.pdigest-open, .pdigest-also, .pdigest-edition-head, .pdigest-earlier-toggle {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  align-items: flex-start;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 2px 0;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pdigest-card button:hover { transform: none; box-shadow: none; }
+.pdigest-glyph { flex-shrink: 0; margin-top: 2px; color: var(--ink-muted); }
+.pdigest-glyph.needs, .pdigest-name.needs { color: var(--phone-attention, #f0a53a); }
+.pdigest-glyph.blocked, .pdigest-name.blocked { color: #ff9f0a; }
+.pdigest-glyph.done, .pdigest-name.done { color: var(--phone-live, #35d47a); }
+.pdigest-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pdigest-dateline { display: flex; align-items: center; gap: 5px; }
+.pdigest-unread { width: 6px; height: 6px; border-radius: 50%; background: var(--phone-glow, var(--accent)); flex-shrink: 0; }
+.pdigest-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+.pdigest-headline { font-size: 13px; font-weight: 600; line-height: 1.3; }
+.pdigest-headline.read { color: var(--ink-muted); }
+.pdigest-why { font-size: 12px; line-height: 1.35; color: var(--ink-muted); }
+.pdigest-reco { font-size: 12px; font-style: italic; line-height: 1.35; }
+.pdigest-chev { flex-shrink: 0; margin-left: auto; font-size: 16px; line-height: 16px; color: color-mix(in srgb, var(--ink-muted) 60%, transparent); }
+.pdigest-replies { display: flex; flex-wrap: wrap; gap: 6px; padding: 5px 0 4px 21px; }
+.pdigest-reply {
+  border: none;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--phone-pill, var(--bg-alt));
+  color: var(--ink);
+}
+.pdigest-reply.sent { background: color-mix(in srgb, var(--phone-glow, var(--accent)) 25%, transparent); color: var(--phone-glow, var(--accent)); }
+.pdigest-reply:disabled:not(.sent) { opacity: 0.5; }
+.pdigest-also { align-items: baseline; padding: 4px 0; }
+.pdigest-also-name { flex-shrink: 0; font-family: var(--font-mono); font-size: 10px; font-weight: 700; color: var(--ink-muted); }
+.pdigest-also-head { flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pdigest-earlier { margin-top: 8px; }
+.pdigest-earlier-toggle { font-size: 12px; font-weight: 600; color: var(--ink-muted); padding: 4px 0; }
+.pdigest-edition-head { padding: 4px 0; }
+.pdigest-when { flex: 0 0 62px; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: color-mix(in srgb, var(--ink-muted) 70%, transparent); }
+.pdigest-edition-summary { flex: 1; min-width: 0; font-size: 12px; color: var(--ink-muted); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.pdigest-edition-summary.open { display: block; }
+.pdigest-edition-body { padding-left: 10px; }
+.switcher-phone .digest-recall { width: 100%; margin-bottom: 14px; }
+
+/* ── Phone terminal bar: the iOS app's pill over the terminal ── */
+.phone-term-bar { display: none; }
+@media (max-width: 768px) {
+  .phone-term-bar {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 8px;
+    margin: 0 4px;
+    padding: calc(env(safe-area-inset-top, 0px) + 6px) 6px 6px;
+    border-radius: 0 0 22px 22px;
+    background: #000;
+    color: #e6edf3;
+  }
+  :root[data-theme="light"] .phone-term-bar { background: #f2f3f5; color: #1f2328; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .phone-term-bar { background: #f2f3f5; color: #1f2328; }
+  }
+  .phone-term-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 40px;
+    padding: 0;
+    border: none;
+    border-radius: 20px;
+    background: transparent;
+    color: #a855f7;
+  }
+  .phone-term-btn:hover { transform: none; box-shadow: none; }
+  .phone-term-btn:active { background: rgba(127, 127, 127, 0.18); }
+  .phone-term-attention {
+    position: absolute;
+    top: 7px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #93a0b4;
+  }
+  .phone-term-attention.bell { background: #f0a53a; box-shadow: 0 0 6px rgba(240, 165, 58, 0.9); }
+  .phone-term-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; background: #93a0b4; margin-left: 6px; }
+  .phone-term-dot.connected { background: #35d47a; box-shadow: 0 0 5px rgba(53, 212, 122, 0.7); }
+  .phone-term-dot.connecting { background: #f0a53a; }
+  .phone-term-dot.ended, .phone-term-dot.disconnected { background: #d95a6b; }
+  .phone-term-name {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .phone-term-divider { width: 0.5px; height: 28px; background: rgba(127, 127, 127, 0.35); }
+  .session .phone-term-bar ~ .drawer-toggle { display: none !important; }
+  .session.has-keyboard:has(.phone-term-bar) { padding-top: 0; }
+}

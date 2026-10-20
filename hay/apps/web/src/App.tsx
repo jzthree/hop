@@ -25,6 +25,7 @@ import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
+import { CodexAppPanel } from "./components/CodexAppPanel";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -722,6 +723,7 @@ const App = () => {
   // Published views (`hop view`). `session` scopes the panel to one session;
   // an object with none open it fleet-wide. Null = closed.
   const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string } | null>(null);
+  const [codexAppOpen, setCodexAppOpen] = useState(false);
   // The ⏰ chip's window: what is waiting on a session.
   const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(null);
   const sessionsRef = useRef(sessions);
@@ -3306,11 +3308,13 @@ const App = () => {
           createdVia: typeof s.createdVia === "string" ? s.createdVia : null,
           agent: s.agent === "claude" || s.agent === "codex" ? s.agent : null,
           agentHome: s.agentHome && typeof s.agentHome.dir === "string" ? s.agentHome : null,
+          agentModel: typeof s.agentModel === "string" && s.agentModel ? s.agentModel : null,
           agentPhase: s.agentPhase === "working" || s.agentPhase === "done" ? s.agentPhase : null,
           turnSeen: s.turnSeen !== false,
           checkbacks: Number(s.checkbacks) > 0 ? Number(s.checkbacks) : undefined,
           checkbackNext: Number(s.checkbackNext) > 0 ? Number(s.checkbackNext) : undefined,
           codexAutomations: Number(s.codexAutomations) > 0 ? Number(s.codexAutomations) : undefined,
+          interactionScore: Number(s.interactionScore) > 0 ? Number(s.interactionScore) : 0,
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
           rows: Number.isInteger(s.rows) ? s.rows : undefined,
           // These three were silently dropped here, so the switcher never saw
@@ -4358,6 +4362,7 @@ const App = () => {
             onNotice={showToast}
             tileWsBase={resolveTunnelWsUrl()}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
+            onOpenCodexApp={() => setCodexAppOpen(true)}
             onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
@@ -4420,6 +4425,34 @@ const App = () => {
                 </button>
               )}
             </div>
+          )}
+          {/* Phone: the iOS app's terminal bar — back to the sessions, the
+              session's name with its live dot, ⋯ for the menu. Replaces the
+              floating draggable menu button (hidden by CSS when this is up). */}
+          {isMobile && (
+            <header className="phone-term-bar">
+              <button
+                type="button"
+                className="phone-term-btn"
+                aria-label="All sessions"
+                onClick={() => {
+                  setDrawerOpen(false);
+                  if (isEmbeddedInHop()) setSwitcherOpen(true);
+                  else window.location.href = "/";
+                }}
+              >
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+                {(otherAttention.bell || otherAttention.output) && (
+                  <span className={`phone-term-attention${otherAttention.bell ? " bell" : ""}`} aria-label="Another session wants you" />
+                )}
+              </button>
+              <span className={`phone-term-dot ${visibleStatus}`} aria-hidden="true" />
+              <span className="phone-term-name">{sessionLabel || session.room}</span>
+              <span className="phone-term-divider" aria-hidden="true" />
+              <button type="button" className="phone-term-btn" aria-label="Open menu" onClick={() => setDrawerOpen(true)}>
+                <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.8" fill="currentColor" /><circle cx="12" cy="12" r="1.8" fill="currentColor" /><circle cx="18.5" cy="12" r="1.8" fill="currentColor" /></svg>
+              </button>
+            </header>
           )}
           <button
             type="button"
@@ -5025,6 +5058,7 @@ const App = () => {
             onFocusSession={focusSessionInPlace}
             folders={folders}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
+            onOpenCodexApp={() => setCodexAppOpen(true)}
             onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
@@ -5176,6 +5210,12 @@ const App = () => {
           sessionName={sessions.find((s) => (s.internalName || s.name) === checkbacksOpen)?.displayName || checkbacksOpen}
           onClose={() => setCheckbacksOpen(null)}
           onChanged={() => { void fetchSessions({ showLoading: false }); }}
+        />
+      )}
+      {codexAppOpen && (
+        <CodexAppPanel
+          onClose={() => setCodexAppOpen(false)}
+          onOpen={(_internal, displayName) => { setCodexAppOpen(false); window.location.href = buildSessionPath(displayName); }}
         />
       )}
       {viewsOpen && (

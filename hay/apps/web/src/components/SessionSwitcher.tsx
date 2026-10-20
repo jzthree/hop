@@ -35,12 +35,14 @@ import {
   type SwitcherFolder,
   type SwitcherSession,
   type SwitcherSortMode,
-  insertAfter, describeAccount, type AgentHome, type AgentHomes } from "../utils/switcherModel";
+  insertAfter, describeAccount, type AgentHome, type AgentHomes, shortModelName,
+  meaningfulTailIndices, shortRelativeTime, phoneAttentionLabel, fleetSummaryCompact } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
 import { chipWhen } from "../utils/checkbackText";
 import { currentWsBase, noteSocketClosed } from "../utils/localLink";
 import { watchLiveness } from "../utils/socketLiveness";
+import { sendLineToSession } from "../utils/quickReply";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
 
@@ -125,6 +127,8 @@ type Props = {
   // Open the Views panel. No argument = the whole fleet (header button); an
   // internalName = just that session (a card's chip).
   onOpenViews?: (session?: string, item?: string) => void;
+  // The Codex desktop app's threads, continued in hop.
+  onOpenCodexApp?: () => void;
   /** The ⏰ chip: what hop will type into this session, and when. */
   onOpenCheckbacks?: (session: string) => void;
 };
@@ -321,24 +325,86 @@ const ScaledScreen = ({ frame }: { frame: PreviewFrame }) => {
   );
 };
 
+// The phone layout follows the viewport, live: rotating or resizing the
+// window must not leave a desktop wall squeezed onto a phone (or the reverse).
+const PHONE_QUERY = "(max-width: 600px)";
+const usePhoneLayout = () => {
+  const [phone, setPhone] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(PHONE_QUERY).matches);
+  useEffect(() => {
+    const mq = window.matchMedia?.(PHONE_QUERY);
+    if (!mq) return;
+    const on = () => setPhone(mq.matches);
+    on();
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, []);
+  return phone;
+};
+
+// Monochrome line icons for the phone menu — the app's SF Symbols, not
+// emoji (which arrive in colour and in the system's own style).
+const PHONE_ICONS: Record<string, string> = {
+  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+  flame: "M12 21c3.9 0 6.5-2.6 6.5-6.2 0-3.6-2.6-5.8-4-8.8-.8 2-1.8 3-3 3.6.2-2.4-.6-4.6-2.4-6.6.2 3.4-4.6 6-4.6 11.6C4.5 18.6 8 21 12 21z",
+  drive: "M3 13h18v6H3zM5 13l2.5-8h9L19 13M7 16h.01",
+  folder: "M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z",
+  grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  tray: "M3 13l3-8h12l3 8v6H3zM3 13h5l1.5 2.5h5L16 13h5",
+  window: "M3 5h18v14H3zM3 9h18M6 7h.01M8.5 7h.01",
+  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3",
+  keyboard: "M2 6h20v12H2zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10",
+  auto: "M12 3a9 9 0 1 0 0 18zM12 3a9 9 0 0 1 0 18",
+  sun: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+  moon: "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z",
+  gear: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"
+};
+const PhoneIcon = ({ name }: { name: string }) => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d={PHONE_ICONS[name] || ""} />
+  </svg>
+);
+
+// A screen row without its leading/trailing blanks, styling kept (iOS
+// TileInk.trimmed): a row's preview lines start at their first character.
+const trimRuns = (runs: PreviewRun[]): PreviewRun[] => {
+  const out = runs.slice();
+  while (out.length) {
+    const t = out[0].t.replace(/^ +/, "");
+    if (!t) { out.shift(); continue; }
+    out[0] = { ...out[0], t };
+    break;
+  }
+  while (out.length) {
+    const last = out[out.length - 1];
+    const t = last.t.replace(/ +$/, "");
+    if (!t) { out.pop(); continue; }
+    out[out.length - 1] = { ...last, t };
+    break;
+  }
+  return out;
+};
+
+const renderRuns = (runs: PreviewRun[]) =>
+  runs.map((r, i) => (
+    <span
+      key={i}
+      style={{
+        // Inverse swaps fg/bg the way the terminal does; unset sides fall
+        // back to the tile's own colors.
+        color: r.i ? r.b || "var(--terminal-bg)" : r.f,
+        background: r.i ? r.f || "var(--ink)" : r.b,
+        opacity: r.d ? 0.6 : undefined,
+        fontWeight: r.o ? 600 : undefined
+      }}
+    >
+      {r.t}
+    </span>
+  ));
+
 const renderPreviewRuns = (lines: PreviewRun[][]) =>
   lines.map((runs, y) => (
     <div key={y} className="switcher-preview-row">
-      {runs.map((r, i) => (
-        <span
-          key={i}
-          style={{
-            // Inverse swaps fg/bg the way the terminal does; unset sides fall
-            // back to the tile's own colors.
-            color: r.i ? r.b || "var(--terminal-bg)" : r.f,
-            background: r.i ? r.f || "var(--ink)" : r.b,
-            opacity: r.d ? 0.6 : undefined,
-            fontWeight: r.o ? 600 : undefined
-          }}
-        >
-          {r.t}
-        </span>
-      ))}
+      {renderRuns(runs)}
     </div>
   ));
 
@@ -1318,6 +1384,7 @@ export const SessionSwitcher = ({
   onToggleKeyboard,
   onFind,
   onOpenViews,
+  onOpenCodexApp,
   onOpenCheckbacks
 }: Props) => {
   // View state survives a REFRESH but not a new tab: sessionStorage, not
@@ -1429,7 +1496,7 @@ export const SessionSwitcher = ({
   // (a persisted drag order). Persisted so the choice sticks across sessions.
   const [sortMode, setSortMode] = useState<SwitcherSortMode>(() => {
     const saved = localStorage.getItem("hay_sort_mode");
-    return saved === "project" || saved === "manual" ? saved : "recent";
+    return saved === "project" || saved === "manual" || saved === "used" ? saved : "recent";
   });
   const changeSortMode = (mode: SwitcherSortMode) => {
     setSortMode(mode);
@@ -1533,6 +1600,7 @@ export const SessionSwitcher = ({
         { kind: "separator" as const },
         { label: "Sort by recent", onSelect: () => changeSortMode("recent"), disabled: sortMode === "recent" },
         { label: "Group by project", onSelect: () => changeSortMode("project"), disabled: sortMode === "project" },
+        { label: "Sort by activity", onSelect: () => changeSortMode("used"), disabled: sortMode === "used" },
         { label: "Manual order", onSelect: () => changeSortMode("manual"), disabled: sortMode === "manual" },
         { kind: "separator" as const },
         { label: "Zoom in", onSelect: () => changeZoom(effectiveZoom + 1), hint: "+", disabled: effectiveZoom >= maxZoom },
@@ -1943,6 +2011,21 @@ export const SessionSwitcher = ({
   const filterInputRef = useRef<HTMLInputElement>(null);
   const [kbdIndex, setKbdIndex] = useState(0);
   const finePointer = typeof window !== "undefined" && !!window.matchMedia?.("(pointer: fine)").matches;
+
+  // Phone width: the wall becomes the iOS app's screen — one toolbar row
+  // (scope · summary · ⋯ · ＋), a pinned search field, and a single column
+  // of rows (name, why it wants you, tagline, five lines of screen). The
+  // tile wall stays one menu toggle away, as it is in the app.
+  const phone = usePhoneLayout();
+  const [phoneTiles, setPhoneTiles] = useState(() => {
+    try { return localStorage.getItem("hay_phone_tiles") === "1"; } catch { return false; }
+  });
+  const togglePhoneTiles = () => setPhoneTiles((v) => {
+    try { localStorage.setItem("hay_phone_tiles", v ? "0" : "1"); } catch { /* per-device nicety */ }
+    return !v;
+  });
+  const [phoneMenuOpen, setPhoneMenuOpen] = useState(false);
+  const phoneRows = phone && !phoneTiles;
 
   // Content-aware matches: debounced grep over each session's recent screen
   // text (daemon-side, over already-retained output — no index, no polling).
@@ -2605,6 +2688,24 @@ export const SessionSwitcher = ({
     }
   };
 
+  const handOffToCodexApp = async (s: SwitcherSession) => {
+    setSheet(null);
+    const name = s.displayName || s.name;
+    if (!window.confirm(`Stop ${name} here and open it in the Codex app on the Mac?\n\nIt is parked, and opening it in hop again picks it back up.`)) return;
+    try {
+      const res = await fetch("/api/codex/open-in-app", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-hop-actor": "user" },
+        body: JSON.stringify({ internalName: sessionKey(s), handOff: true })
+      });
+      const data = await res.json().catch(() => ({} as { error?: string }));
+      onNotice(res.ok ? `${name} handed to the Codex app` : (data.error || "Could not open the Codex app"));
+      if (res.ok) onRefresh?.();
+    } catch {
+      onNotice("Could not open the Codex app");
+    }
+  };
+
   const forkSession = async (s: SwitcherSession, target?: "claude" | "codex") => {
     setSheet(null);
     onNotice(target ? `Condensing for ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
@@ -2974,6 +3075,7 @@ export const SessionSwitcher = ({
   // `snippet` (search content hits): the matching output line, shown under
   // the preview so the card says WHY it matched.
   const renderCard = (s: SwitcherSession, snippet?: string) => {
+    if (phoneRows) return renderPhoneRow(s, snippet);
     const key = sessionKey(s);
     const preview = previewCacheRef.current!.get(key);
     const current = isCurrentSession(s);
@@ -3121,15 +3223,22 @@ export const SessionSwitcher = ({
               </button>
             );
           })()}
-          {s.agentHome && homesFor(s.agent).length > 1 && (() => {
+          {(s.agentModel || (s.agentHome && homesFor(s.agent).length > 1)) && (() => {
+            // The MODEL is what tells sessions apart ("opus", "astra",
+            // "sol"); the login it runs as is added only when it isn't the
+            // default one, and stays in the hover text.
             const known = homesFor(s.agent).find((h) => h.dir === s.agentHome?.dir);
             const out = known?.login && !known.login.loggedIn;
+            const model = shortModelName(s.agentModel);
+            const account = s.agentHome && !s.agentHome.isDefault && homesFor(s.agent).length > 1 ? s.agentHome.label : null;
+            const text = [model, account].filter(Boolean).join(" · ") || s.agentHome?.label || "";
+            const runsAs = s.agentHome ? `Runs as ${known ? describeAccount(known) : s.agentHome.label} — ${s.agentHome.dir}` : "";
             return (
               <span
-                className={"switcher-chip account" + (s.agentHome.isDefault ? " default" : "") + (out ? " logged-out" : "")}
-                title={`Runs as ${known ? describeAccount(known) : s.agentHome.label} — ${s.agentHome.dir}${out ? ". Logged out: run /login in the session, or switch it to another account." : ""}`}
+                className={"switcher-chip account" + (account ? "" : " default") + (out ? " logged-out" : "")}
+                title={[s.agentModel ? `Model: ${s.agentModel}` : "", runsAs, out ? "Logged out: run /login in the session, or switch it to another account." : ""].filter(Boolean).join("\n")}
               >
-                {out ? "⚠ " : ""}{s.agentHome.label}
+                {out ? "⚠ " : ""}{text}
               </span>
             );
           })()}
@@ -3203,6 +3312,211 @@ export const SessionSwitcher = ({
       </div>
     );
   };
+
+  // ── Phone layout (iOS parity) ──
+  // A row is the app's SessionRow: the dot owns attention (amber with a
+  // halo), then name · app · check-backs · time, WHY it wants you, the
+  // tagline (or the folder), and the screen's last five meaningful lines.
+  const renderPhoneRow = (s: SwitcherSession, snippet?: string) => {
+    const key = sessionKey(s);
+    const preview = previewCacheRef.current!.get(key);
+    const wants = !!s.bellUnseen && !s.parked;
+    const phase = cardPhase(s);
+    const app = appLabel(s);
+    const scheduled = (s.checkbacks || 0) + (s.codexAutomations || 0);
+    const dot = wants ? "wants" : phase === "working" ? "working" : phase === "done-unread" ? "done" : s.active ? "live" : "off";
+    const lines = preview?.text ? meaningfulTailIndices(preview.text, 5) : [];
+    const plain = preview?.text ? preview.text.split("\n") : [];
+    return (
+      <div
+        key={key}
+        role="button"
+        tabIndex={0}
+        data-nav-index={navIndexByKey.get(key)}
+        data-session-key={key}
+        className={`phone-row${wants ? " wants" : ""}${isCurrentSession(s) ? " current" : ""}${finePointer && navIndexByKey.get(key) === kbdIndex ? " kbd-selected" : ""}`}
+        onClick={(e) => {
+          if ((e.target as HTMLElement | null)?.closest?.("button, a, input")) return;
+          handleTap(s);
+        }}
+        onKeyDown={(e) => { if (e.key === "Enter") handleTap(s); }}
+        {...pressHandlers(s)}
+      >
+        <span className={`phone-row-dot ${dot}`} aria-hidden="true"><span /></span>
+        <div className="phone-row-body">
+          <div className="phone-row-head">
+            <span className="phone-row-name">{s.displayName}</span>
+            {app && <span className={`phone-row-app app-${app.replace(/[^a-z0-9]/gi, "")}`}>{app}</span>}
+            {scheduled > 0 && (
+              <button type="button" className="phone-row-checkbacks"
+                      aria-label={`${scheduled} scheduled on ${s.displayName}`}
+                      onClick={(e) => { e.stopPropagation(); onOpenCheckbacks?.(key); }}
+                      onPointerDown={(e) => e.stopPropagation()}>
+                ⏰ {scheduled}
+              </button>
+            )}
+            {s.createdBy === "agent" ? <span className="phone-row-glyph" title="Started by an agent">⚙</span>
+              : s.agentPermitted ? <span className="phone-row-glyph permitted" title="Agents may drive this session">⚙</span> : null}
+            {onOpenViews && s.views && s.views.count > 0 && (
+              <button type="button"
+                      className={"phone-row-views" + (hasUnseenViews(key, s.views.latestAt, viewsSeen) ? " fresh" : "")}
+                      aria-label={`${s.views.count} published view${s.views.count === 1 ? "" : "s"} in ${s.displayName}`}
+                      onClick={(e) => { e.stopPropagation(); onOpenViews(key); }}
+                      onPointerDown={(e) => e.stopPropagation()}>
+                ◧ {s.views.count}
+              </button>
+            )}
+            <span className="phone-row-time">{shortRelativeTime(s.lastActivityAt || 0, now)}</span>
+          </div>
+          {wants && <div className="phone-row-why">{phoneAttentionLabel(s)}</div>}
+          {s.tagline ? <div className="phone-row-tagline">{s.tagline}</div>
+            : dirPath(s) ? <div className="phone-row-tagline dir">{`\u200E${dirPath(s)}\u200E`}</div> : null}
+          {lines.length > 0 && (
+            <pre className="phone-row-preview" aria-hidden="true">
+              {lines.map((i) => {
+                const runs = preview?.color?.[i];
+                return (
+                  <div key={i} className="phone-row-line">
+                    {runs?.length ? renderRuns(trimRuns(runs)) : (plain[i] || "").trim()}
+                  </div>
+                );
+              })}
+            </pre>
+          )}
+          {snippet && <div className="phone-row-snippet">{highlightSnippet(snippet, filter.trim())}</div>}
+        </div>
+        <span className="phone-row-chevron" aria-hidden="true">›</span>
+      </div>
+    );
+  };
+
+  // The app's toolbar summary: counts across the WHOLE fleet, so narrowing
+  // the scope never reports "quiet" while another scope is waiting on you.
+  const fleet = sessions.filter((s) => s.type !== "port" && !s.parked);
+  const fleetWanting = fleet.filter((s) => s.bellUnseen);
+  const shownWall = wallSessions.filter((s) => s.type !== "port");
+  const phoneSummary = fleetSummaryCompact(
+    shownWall.length, fleet.length, fleetWanting.length,
+    fleetWanting.length - shownWall.filter((s) => s.bellUnseen).length,
+    sessions.filter((s) => s.type !== "port" && s.parked).length
+  );
+  const scopeLabel = { user: "You", agent: "Agents", all: "All" } as const;
+  const changeScope = (scope: SessionOriginScope) => {
+    setOriginScope(scope);
+    setCreating(false);
+    frozenOrderRef.current = null;
+  };
+  const menuItem = (label: string, onClick: () => void, opts: { checked?: boolean; icon?: string; note?: string } = {}) => (
+    <button type="button" role="menuitem" className="phone-menu-item"
+            onClick={() => { setPhoneMenuOpen(false); onClick(); }}>
+      <span className="phone-menu-check" aria-hidden="true">{opts.checked ? "✓" : ""}</span>
+      <span className="phone-menu-label">{label}</span>
+      {opts.note && <span className="phone-menu-note">{opts.note}</span>}
+      {opts.icon && <span className="phone-menu-icon"><PhoneIcon name={opts.icon} /></span>}
+    </button>
+  );
+  const renderPhoneTop = () => (
+    <>
+      <header className="phone-bar">
+        <div className="phone-pill">
+          <svg className="phone-logo" width="30" height="22" viewBox="0 0 30 22" aria-hidden="true">
+            {/* The app's hare.fill, drawn: crouched body, head, two ears back. */}
+            <ellipse cx="12" cy="14.5" rx="9" ry="6" fill="currentColor" />
+            <circle cx="21.5" cy="10.5" r="4.6" fill="currentColor" />
+            <path d="M19.5 7.5C17 3.5 14 1.2 12.2 1.6c-1 .9 2.6 4.6 5.6 7.3z" fill="currentColor" />
+            <path d="M21.8 6.6C21 2.6 22.4.4 24 .6c1.2.8.2 4.4-.9 6.6z" fill="currentColor" />
+            <circle cx="3.6" cy="12.6" r="2.4" fill="currentColor" />
+            <path d="M6 19.6h6.5M17 19.4l4.5.6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+            <circle cx="23" cy="9.6" r="0.9" fill="var(--phone-pill)" />
+          </svg>
+          <label className="phone-scope">
+            <span>{scopeLabel[originScope]}</span>
+            <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            <select aria-label={`Scope: ${scopeLabel[originScope]}`} value={originScope}
+                    onChange={(e) => changeScope(e.target.value as SessionOriginScope)}>
+              <option value="user">You</option>
+              <option value="agent">Agents</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+        </div>
+        {fleetWanting.length > 0 ? (
+          <button type="button" className="phone-summary wants" title="Open the session that wants you"
+                  onClick={() => handleTap(fleetWanting[0])}>{phoneSummary}</button>
+        ) : (
+          <span className="phone-summary">{phoneSummary}</span>
+        )}
+        <div className="phone-pill">
+          <button type="button" className="phone-pill-btn" aria-label="Settings" aria-haspopup="menu"
+                  aria-expanded={phoneMenuOpen} onClick={() => setPhoneMenuOpen((v) => !v)}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <circle cx="12" cy="12" r="9.5" /><circle cx="7.6" cy="12" r="1.1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" /><circle cx="16.4" cy="12" r="1.1" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+          {originScope !== "agent" && (
+            <button type="button" className="phone-pill-btn" aria-label="New session" onClick={() => setCreating(true)}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><path d="M12 4v16M4 12h16" /></svg>
+            </button>
+          )}
+          {dismissable && (
+            <button type="button" className="phone-pill-btn" aria-label="Close switcher" onClick={onClose}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          )}
+        </div>
+        {phoneMenuOpen && (
+          <>
+            <div className="phone-menu-backdrop" onClick={() => setPhoneMenuOpen(false)} />
+            <div className="phone-menu" role="menu" aria-label="Settings">
+              <div className="phone-menu-section">
+                {([
+                  ["recent", "Recent", "clock"],
+                  ["used", "Active", "flame"],
+                  ["project", "By project", "drive"],
+                  ["manual", "By folder", "folder"]
+                ] as const).map(([mode, label, icon]) => menuItem(label, () => changeSortMode(mode), { checked: sortMode === mode, icon }))}
+              </div>
+              <div className="phone-menu-section">
+                {menuItem("Tile view", togglePhoneTiles, { checked: phoneTiles, icon: "grid" })}
+              </div>
+              <div className="phone-menu-section">
+                {onOpenViews && menuItem("Views", () => onOpenViews(), { icon: "tray", note: unseenViewSessions > 0 ? `${unseenViewSessions} new` : undefined })}
+                {onOpenCodexApp && menuItem("Codex app threads", onOpenCodexApp, { icon: "window" })}
+                {onFind && menuItem("Find in terminal", onFind, { icon: "search" })}
+                {onToggleKeyboard && menuItem("Keyboard", onToggleKeyboard, { icon: "keyboard" })}
+              </div>
+              {(onThemeChange && themeMode) || onOpenSettings ? (
+                <div className="phone-menu-section">
+                  {onThemeChange && themeMode && (["system", "light", "dark"] as const).map((m) =>
+                    menuItem(m === "system" ? "Auto theme" : m === "light" ? "Light" : "Dark", () => onThemeChange(m),
+                             { checked: themeMode === m, icon: m === "light" ? "sun" : m === "dark" ? "moon" : "auto" }))}
+                  {onOpenSettings && menuItem("Settings", onOpenSettings, { icon: "gear" })}
+                </div>
+              ) : null}
+            </div>
+          </>
+        )}
+      </header>
+      <div className="phone-search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
+        <input
+          ref={filterInputRef}
+          type="search"
+          enterKeyHint="search"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          placeholder="Search sessions by name"
+          value={filter}
+          onChange={(e) => { setFocusedKey(null); setFilter(e.target.value); }}
+          aria-label="Filter sessions"
+        />
+        {filter && (
+          <button type="button" className="phone-search-clear" aria-label="Clear search" onClick={() => setFilter("")}>✕</button>
+        )}
+      </div>
+    </>
+  );
 
   // Inline quick actions (desktop hover): rename + kill without the sheet.
   const inlineActions = (s: SwitcherSession) => (
@@ -3292,7 +3606,7 @@ export const SessionSwitcher = ({
       // tile-dense: too narrow for inline actions. tile-micro: too short for
       // a second text line at all — the tagline shows from the DEFAULT zoom
       // up (hiding it there meant nobody ever saw one).
-      className={`switcher-overlay${zoomLevel.min < 300 ? " tile-dense" : ""}${zoomLevel.min < 150 ? " tile-micro" : ""}${dismissable ? "" : " switcher-hub"}${dismissable ? " switcher-fullscreen" : ""}`}
+      className={`switcher-overlay${phone ? " switcher-phone" : ""}${phoneRows ? " phone-list" : ""}${zoomLevel.min < 300 ? " tile-dense" : ""}${zoomLevel.min < 150 ? " tile-micro" : ""}${dismissable ? "" : " switcher-hub"}${dismissable ? " switcher-fullscreen" : ""}`}
       style={{ "--tile-min": `${zoomLevel.min}px`, "--tile-h": zoomLevel.h, "--tile-fs": zoomLevel.fs } as CSSProperties}
       role="dialog"
       aria-label="Sessions"
@@ -3300,6 +3614,7 @@ export const SessionSwitcher = ({
       // dismiss the wall and flash the terminal behind it. Escape/✕ close.
     >
       <div className="switcher-top">
+        {phone ? renderPhoneTop() : (<>
         <header className="switcher-header">
           <h2>Sessions</h2>
           <span className="switcher-count">{visibleSessions.length}</span>
@@ -3372,6 +3687,13 @@ export const SessionSwitcher = ({
                 : (() => { const n = visibleSessions.reduce((k, s) => k + (s.views?.count || 0), 0); return n > 0 ? <span className="views-entry-count">{n}</span> : null; })()}
             </button>
           )}
+          {onOpenCodexApp && (
+            <button type="button" className="switcher-action views-entry" aria-label="Codex app threads"
+                    title="Continue a Codex desktop app thread in hop" onClick={onOpenCodexApp}>
+              <span aria-hidden="true">⧉</span>
+              Codex app
+            </button>
+          )}
           {onThemeChange && themeMode && (() => {
             const next = themeMode === "system" ? "light" : themeMode === "light" ? "dark" : "system";
             const label = (m: string) => (m === "system" ? "Auto" : m === "light" ? "Light" : "Dark");
@@ -3423,6 +3745,7 @@ export const SessionSwitcher = ({
           <div className="switcher-origin switcher-sort" role="group" aria-label="Organize sessions by">
             {([
               ["recent", "Recent", "Most recently active first"],
+              ["used", "Active", "The sessions you interact with most first"],
               ["project", "Project", "Grouped by working directory"],
               ["manual", "Manual", "Your own drag order"]
             ] as const).map(([mode, label, title]) => (
@@ -3469,6 +3792,7 @@ export const SessionSwitcher = ({
             aria-label="Filter sessions"
           />
         </div>
+        </>)}
         {/* Create form lives in the top bar so the header ＋ works from EVERY
             mode — the dashed grid card only exists in recent mode. */}
         {creating && !createInFolder && (
@@ -3497,7 +3821,16 @@ export const SessionSwitcher = ({
             briefing sitting on top of every search result in the folder
             layout. */}
         {!searching && (
-          <DigestCard sessions={sessions} onOpen={handleTap} />
+          <DigestCard
+            sessions={sessions}
+            onOpen={handleTap}
+            phone={phone}
+            onReply={tileWsBase ? async (t, text) => {
+              const ok = await sendLineToSession(tileWsBase, sessionKey(t), text, { userName, cols: t.cols, rows: t.rows });
+              if (!ok) onNotice(`Couldn't send to ${t.displayName}`);
+              return ok;
+            } : undefined}
+          />
         )}
         {model.mode === "filter" ? (
           // Matches keep their terminal previews: search results are preview
@@ -3814,6 +4147,14 @@ export const SessionSwitcher = ({
                     {target === "codex" ? "Codex" : "Claude"}…
                   </button>
                 ))}
+                {/* Back to the Codex app on the Mac. Codex lets one process
+                    write a thread, so the app can continue it only once this
+                    session's codex stops: Stop & park (resumable), then open. */}
+                {appLabel(sheetSession) === "codex" && (
+                  <button type="button" onClick={() => { void handOffToCodexApp(sheetSession); }}>
+                    Hand off to Codex app…
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {

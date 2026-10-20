@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSwitcherModel,
+  shortModelName,
   filterScore,
   filterSessionsByOrigin,
   projectKey,
@@ -534,5 +535,51 @@ describe("insertAfter — a fork takes the slot after its source", () => {
     const order = ["a", "b"];
     expect(insertAfter(order, "zzz", "x")).toBe(order);
     expect(insertAfter(order, "a", "a")).toBe(order);
+  });
+});
+
+describe("Most used layout", () => {
+  it("orders by the daemon's interaction score, rare ones last, ties by recency", () => {
+    const mk = (name: string, interactionScore: number, lastActivityAt: number) =>
+      ({ name, internalName: name, type: "terminal", active: true, interactionScore, lastActivityAt }) as any;
+    const m = buildSwitcherModel(
+      [mk("a", 0.2, 30), mk("b", 5, 10), mk("c", 2, 20), mk("d", 2, 25), mk("e", 0, 99)],
+      null, "", "used");
+    expect(m.mode).toBe("project");
+    if (m.mode !== "project") return;
+    expect(m.groups.map((g) => g.label)).toEqual(["Active", "Less active"]);
+    expect(m.groups[0].rows.map((s) => s.name)).toEqual(["b", "d", "c"]);
+    expect(m.groups[1].rows.map((s) => s.name)).toEqual(["e", "a"]);
+  });
+});
+
+describe("shortModelName", () => {
+  it("names models the way people say them", () => {
+    expect(shortModelName("claude-opus-5-5")).toBe("opus");
+    expect(shortModelName("claude-fable-5-1")).toBe("fable");
+    expect(shortModelName("claude-opus-5")).toBe("opus");
+    expect(shortModelName("claude-haiku-4-5-20251001")).toBe("haiku");
+    expect(shortModelName("claude-3-5-sonnet-20241022")).toBe("sonnet");
+    expect(shortModelName("gpt-6-astra")).toBe("astra");
+    expect(shortModelName("gpt-5.6-sol")).toBe("sol");
+    expect(shortModelName("gpt-6.1-sol")).toBe("sol");
+    expect(shortModelName("gpt-5.5")).toBe("gpt-5.5");
+    expect(shortModelName(null)).toBe(null);
+  });
+});
+
+describe("phone row helpers (iOS parity)", () => {
+  it("keeps the last meaningful lines, skipping chrome", async () => {
+    const { meaningfulTailIndices } = await import("../src/utils/switcherModel");
+    const screen = ["first", "", "╭──────────╮", "second line", "❯", "  ? for shortcuts  ", "third one"].join("\n");
+    expect(meaningfulTailIndices(screen, 5)).toEqual([0, 3, 6]);
+    expect(meaningfulTailIndices(screen, 2)).toEqual([3, 6]);
+  });
+  it("summarises like the app's toolbar", async () => {
+    const { fleetSummaryCompact, shortRelativeTime } = await import("../src/utils/switcherModel");
+    expect(fleetSummaryCompact(34, 36, 30, 0, 0)).toBe("34/36 · 30 want you");
+    expect(fleetSummaryCompact(5, 5, 1, 1, 2)).toBe("5 · 1 wants you (+1) · 2 parked");
+    expect(fleetSummaryCompact(5, 5, 0, 0, 0)).toBe("5 · quiet");
+    expect(shortRelativeTime(1000, 1000 + 125000)).toBe("2m");
   });
 });

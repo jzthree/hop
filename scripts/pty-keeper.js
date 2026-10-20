@@ -134,7 +134,13 @@ function handle(msg, sock) {
             return;
         }
         case 'kill':
-            if (t && !t.exited) { try { t.pty.kill(msg.signal || undefined); } catch (e) { /* already gone */ } }
+            if (t && !t.exited) {
+                // A signal other than hangup is a forwarded keystroke-like
+                // ask (SIGINT…): just that. Ending the terminal ends
+                // EVERYTHING on it — see endTerminal.
+                if (msg.signal && msg.signal !== 'SIGHUP') { try { t.pty.kill(msg.signal); } catch (e) { /* already gone */ } }
+                else endTerminal(t);
+            }
             return;
         case 'list':
             return reply(sock, {
@@ -158,13 +164,54 @@ function handle(msg, sock) {
             return;
         case 'shutdown':
             log(`shutdown requested — ending ${terms.size} terminal(s)`);
-            for (const x of terms.values()) { if (!x.exited) { try { x.pty.kill(); } catch (e) { /* gone */ } } }
+            for (const x of terms.values()) { if (!x.exited) endTerminal(x); }
             try { sock.end(); } catch (e) { /* ignore */ }
-            setTimeout(() => process.exit(0), 300);
+            // Long enough for endTerminal's TERM/KILL follow-up to run.
+            setTimeout(() => process.exit(0), terms.size ? 3500 : 300);
             return;
         default:
             return;
     }
+}
+
+// Ending a terminal: hang up the shell, then make sure nothing that ran on
+// it outlives it. node-pty's kill() is one SIGHUP to the shell's pid, and a
+// process that ignores hangup — a TUI agent, a `trap '' HUP` job, anything
+// backgrounded — kept running after `hopa term close --killSession`
+// (observed: a Codex left alive). The process list is snapshotted BEFORE the
+// hangup, because the survivors are reparented to launchd the moment the
+// shell dies: every process whose controlling terminal is this pty, plus the
+// shell's descendants. Whatever is still alive 1.5s later gets SIGTERM, then
+// SIGKILL.
+function terminalProcesses(t) {
+    const tty = String(t.pty._pty || t.pty.ptsName || '').replace(/^\/dev\//, '');
+    let rows = [];
+    try {
+        rows = require('child_process').execFileSync('/bin/ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', timeout: 3000 })
+            .split('\n').map((l) => l.trim().split(/\s+/)).filter((r) => r.length >= 3)
+            .map(([pid, ppid, tt]) => ({ pid: Number(pid), ppid: Number(ppid), tty: tt }));
+    } catch (e) { return []; }
+    const keep = new Set([t.pid]);
+    if (tty) for (const r of rows) if (r.tty === tty || `tty${r.tty}` === tty || r.tty === tty.replace(/^tty/, '')) keep.add(r.pid);
+    for (let grew = true; grew;) {
+        grew = false;
+        for (const r of rows) if (!keep.has(r.pid) && keep.has(r.ppid)) { keep.add(r.pid); grew = true; }
+    }
+    keep.delete(process.pid);
+    return [...keep].filter((pid) => pid > 1);
+}
+function endTerminal(t) {
+    const pids = terminalProcesses(t);
+    try { t.pty.kill(); } catch (e) { /* already gone */ }
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return false; } };
+    const sweep = (sig) => { for (const pid of pids) if (alive(pid)) { try { process.kill(pid, sig); } catch (e) { /* raced */ } } };
+    setTimeout(() => {
+        const left = pids.filter(alive);
+        if (!left.length) return;
+        log(`ending terminal pid=${t.pid}: ${left.length} process(es) ignored hangup — SIGTERM`);
+        sweep('SIGTERM');
+        setTimeout(() => sweep('SIGKILL'), 1500);
+    }, 1500);
 }
 
 function main() {

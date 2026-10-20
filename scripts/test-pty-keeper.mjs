@@ -112,6 +112,24 @@ try {
     if (!c.text().includes('after-42')) console.log('TAIL:', JSON.stringify(c.text().slice(-400)));
     c.ws.close();
 
+    // ── ending a terminal ends what ignores hangup too ───────────────────
+    // (hopa term close --killSession left a Codex alive: node-pty's kill is
+    // one SIGHUP to the shell.)
+    const marker = 40000 + Math.floor(Math.random() * 9999);
+    await http('POST', '/rooms', { id: 'k3', cols: 100, rows: 30, cwd: home });
+    await sleep(800);
+    const d = await attach('k3');
+    d.ws.send(JSON.stringify({ type: 'input', data: `sh -c 'trap "" HUP; exec sleep ${marker}' &\r` }));
+    const pgrep = () => { try { return require('node:child_process').execFileSync('/usr/bin/pgrep', ['-f', `sleep ${marker}`], { encoding: 'utf8' }).trim(); } catch (e) { return ''; } };
+    for (let i = 0; i < 20 && !pgrep(); i++) await sleep(150);
+    check(!!pgrep(), 'a hangup-ignoring job is running on k3');
+    d.ws.close();
+    await keeperOp({ op: 'kill', id: 'k3' });
+    await sleep(3500);
+    const leftover = pgrep();
+    check(!leftover, `killing k3 ended the job that ignored hangup${leftover ? ` (still alive: ${leftover})` : ''}`);
+    if (leftover) { try { process.kill(Number(leftover.split('\n')[0]), 'SIGKILL'); } catch (e) { /* gone */ } }
+
     // ── stop --all semantics: the keeper ends everything ────────────────
     await keeperOp({ op: 'shutdown' });
     await sleep(800);

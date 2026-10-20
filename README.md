@@ -4,6 +4,8 @@
 
 Hop gives you secure browser access to local terminals and a built-in MCP server for creating, driving, and auditing agent sessions over the same runtime.
 
+📱 **On iPhone:** [hop-ios](https://github.com/jzthree/hop-ios) is the native app for the same sessions — open source, in its own repo.
+
 > **macOS/Linux** — Requires cloudflared for tunneling
 
 ```
@@ -202,14 +204,16 @@ The attached-terminal UI adapts light/dark themes to your terminal and puts the 
 **Native iOS app**: [hop-ios](https://github.com/jzthree/hop-ios) — a SwiftUI
 client for iPhone with a real terminal (SwiftTerm), optimistic-echo typing,
 bell notifications with lock-screen reply, Siri/Shortcuts/Spotlight/Handoff
-integration, and a fixed-height terminal keyboard. It consumes hop's public
-HTTP + WebSocket API and needs no changes to hop.
+integration, and a fixed-height terminal keyboard. It lives in its own
+repository and consumes hop's public HTTP + WebSocket API — it needs no
+changes to hop, and builds from source with Xcode (`make install` in that repo).
 
-Hop’s mobile **web** UI includes:
+Hop’s mobile **web** UI follows the app's layout on a phone-width screen:
 
-- a terminal-oriented accessory row with `Esc`, `Tab`, `Ctrl`, `Alt`, and arrows
-- a native keyboard button for dictation, spellcheck, and autocomplete
-- a floating menu for keyboard toggle and session switching; the switcher starts with user sessions and can toggle to agent sessions or all sessions
+- the app's sessions screen — scope picker, a "N want you" summary, search, and one row per session with why it wants you and the last lines of its screen (tile view is one menu toggle away)
+- the briefing as a front page, where a decision's reply chips type the answer into that session
+- a top bar over the terminal (back to sessions, the session's name and live dot, ⋯ menu)
+- a terminal-oriented accessory row with `Esc`, `Tab`, `Ctrl`, `Alt`, and arrows, plus a native keyboard button for dictation, spellcheck, and autocomplete
 - draggable controls designed for one-handed use
 
 ### Restore Sessions (incl. Claude Code)

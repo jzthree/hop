@@ -14,7 +14,7 @@ type Status =
   | { kind: "connecting" }
   | { kind: "login"; types: string[]; failed?: string }
   | { kind: "live"; name: string }
-  | { kind: "closed"; why: string };
+  | { kind: "closed"; why: string; auth?: boolean };
 
 type Rfb = EventTarget & {
   scaleViewport: boolean;
@@ -33,6 +33,15 @@ const USER_KEY = "hop.desktop.user";
 const readUser = () => { try { return localStorage.getItem(USER_KEY) || ""; } catch { return ""; } };
 const saveUser = (u: string) => { try { localStorage.setItem(USER_KEY, u); } catch { /* private window */ } };
 
+// macOS offers two sign-ins: its own (the Mac account, which noVNC picks
+// first) and, when "VNC viewers may control screen with password" is set,
+// a plain VNC password. Which one this viewer uses is the viewer's choice.
+type Method = "account" | "vnc";
+const METHOD_KEY = "hop.desktop.method";
+const readMethod = (): Method => { try { return localStorage.getItem(METHOD_KEY) === "vnc" ? "vnc" : "account"; } catch { return "account"; } };
+const saveMethod = (m: Method) => { try { localStorage.setItem(METHOD_KEY, m); } catch { /* private window */ } };
+const ARD_AUTH = 30; // Apple Remote Desktop: the Mac account
+
 type Props = { wsBase: string; onClose: () => void };
 
 export const DesktopView = ({ wsBase, onClose }: Props) => {
@@ -43,6 +52,13 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
   const [fit, setFit] = useState(true);
   const [viewOnly, setViewOnly] = useState(false);
   const [user, setUser] = useState(readUser);
+  const [method, setMethod] = useState<Method>(readMethod);
+  const switchMethod = () => {
+    const next: Method = method === "vnc" ? "account" : "vnc";
+    saveMethod(next);
+    setPassword("");
+    setMethod(next); // reconnects: the method is chosen at the handshake
+  };
   const [password, setPassword] = useState("");
   const [hint, setHint] = useState<string | null>(null);
 
@@ -86,6 +102,13 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
         // Through a tunnel, fewer bytes beat sharper pixels.
         rfb.qualityLevel = 5;
         rfb.compressionLevel = 6;
+        // noVNC takes the server's first supported sign-in (Apple's, on a
+        // Mac); passing over it leaves the VNC password.
+        if (method === "vnc") {
+          const r = rfb as unknown as { _isSupportedSecurityType: (t: number) => boolean };
+          const supported = r._isSupportedSecurityType.bind(rfb);
+          r._isSupportedSecurityType = (t: number) => t !== ARD_AUTH && supported(t);
+        }
         rfb.addEventListener("connect", () => {
           opened = true;
           if (!disposed) setStatus({ kind: "live", name });
@@ -103,7 +126,7 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
         rfb.addEventListener("securityfailure", (e) => {
           opened = true;
           const reason = String((e as CustomEvent).detail?.reason || "");
-          if (!disposed) setStatus({ kind: "closed", why: reason || "The desktop refused that login." });
+          if (!disposed) setStatus({ kind: "closed", auth: true, why: reason || "The desktop refused that login." });
         });
         rfb.addEventListener("disconnect", () => {
           if (rfbRef.current === rfb) rfbRef.current = null;
@@ -123,7 +146,7 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
     };
     // fit and viewOnly are applied live below, not by reconnecting.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsBase, attempt]);
+  }, [wsBase, attempt, method]);
 
   useEffect(() => {
     const rfb = rfbRef.current;
@@ -177,8 +200,8 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
           <div className="desktop-card-title">Sign in to the desktop</div>
           <p className="desktop-card-note">
             {status.types.includes("username")
-              ? "Use this machine's account. It goes straight to the machine and hop does not keep it."
-              : "The VNC password set on this machine."}
+              ? "This Mac's account: its short user name and login password. It goes straight to the machine and hop does not keep it."
+              : "The VNC password set in Screen Sharing (\u201cVNC viewers may control screen with password\u201d)."}
           </p>
           {status.types.includes("username") && (
             <input className="desktop-input" autoComplete="username" placeholder="Username" value={user}
@@ -186,6 +209,9 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
           )}
           <input className="desktop-input" type="password" autoComplete="current-password" placeholder="Password"
                  value={password} onChange={(e) => setPassword(e.target.value)} autoFocus={!!user || !status.types.includes("username")} />
+          <button type="button" className="desktop-switch" onClick={switchMethod}>
+            {method === "vnc" ? "Sign in with the Mac account instead" : "Use the Screen Sharing VNC password instead"}
+          </button>
           <div className="desktop-card-actions">
             <button type="button" className="desktop-tool" onClick={onClose}>Cancel</button>
             <button type="submit" className="desktop-tool primary" disabled={!password}>Connect</button>
@@ -196,6 +222,18 @@ export const DesktopView = ({ wsBase, onClose }: Props) => {
         <div className="desktop-card">
           <div className="desktop-card-title">{status.why}</div>
           {hint && <p className="desktop-card-note">{hint}</p>}
+          {status.auth && (
+            <>
+              <p className="desktop-card-note">
+                {method === "vnc"
+                  ? "That was the Screen Sharing VNC password."
+                  : "That was the Mac account sign-in: the short user name (as in /Users/<name>) and its login password. The user must be allowed in Screen Sharing\u2019s \u201cAllow access for\u201d."}
+              </p>
+              <button type="button" className="desktop-switch" onClick={switchMethod}>
+                {method === "vnc" ? "Sign in with the Mac account instead" : "Use the Screen Sharing VNC password instead"}
+              </button>
+            </>
+          )}
           <div className="desktop-card-actions">
             <button type="button" className="desktop-tool" onClick={onClose}>Close</button>
             <button type="button" className="desktop-tool primary" onClick={() => setAttempt((n) => n + 1)}>Reconnect</button>

@@ -139,7 +139,10 @@ function bumpTurn(payload) {
     sessionId: rootId,
     count: count + 1,
     at: new Date().toISOString(),
-    agent: "codex"
+    agent: "codex",
+    // Codex hands its final message to notify: the notification's text.
+    ...(typeof payload?.["last-assistant-message"] === "string" && payload["last-assistant-message"].trim()
+      ? { lastMessage: payload["last-assistant-message"].replace(/\s+/g, " ").trim().slice(0, 600) } : {})
   });
   try {
     const tmp = `${file}.tmp-${process.pid}`;

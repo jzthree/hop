@@ -176,6 +176,39 @@ function recordSession(dir, hopSession, payload, launchCmd) {
   } catch { /* ignore */ }
 }
 
+// The agent's final words for this turn: the Stop payload's
+// last_assistant_message when Claude Code provides it, else the last
+// assistant text block in the transcript tail. Bounded and best-effort —
+// a hook must never slow claude down or fail it.
+function lastAssistantMessage(payload) {
+  const clip = (t) => String(t).replace(/\s+/g, " ").trim().slice(0, 600);
+  if (typeof payload.last_assistant_message === "string" && payload.last_assistant_message.trim()) {
+    return clip(payload.last_assistant_message);
+  }
+  const tp = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
+  if (!tp) return "";
+  try {
+    const fd = fs.openSync(tp, "r");
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, 256 * 1024);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    const lines = buf.toString("utf8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let rec;
+      try { rec = JSON.parse(lines[i]); } catch { continue; }
+      if (!rec || rec.type !== "assistant" || !rec.message) continue;
+      const content = rec.message.content;
+      const text = Array.isArray(content)
+        ? content.filter((c) => c && c.type === "text" && typeof c.text === "string").map((c) => c.text).join(" ")
+        : (typeof content === "string" ? content : "");
+      if (text.trim()) return clip(text);
+    }
+  } catch { /* no transcript */ }
+  return "";
+}
+
 function bumpTurn(dir, hopSession, payload) {
   const file = path.join(dir, `${hopSession}.turn`);
   let count = 0;
@@ -183,10 +216,14 @@ function bumpTurn(dir, hopSession, payload) {
     const prev = JSON.parse(fs.readFileSync(file, "utf8"));
     if (prev && Number.isInteger(prev.count) && prev.count >= 0) count = prev.count;
   } catch { /* missing/corrupt -> start at 0 */ }
+  const lastMessage = lastAssistantMessage(payload);
   const record = JSON.stringify({
     sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
     count: count + 1,
-    at: new Date().toISOString()
+    at: new Date().toISOString(),
+    // What the agent said at the end of the turn — the line a notification
+    // should carry ("finished: <this>"), not just "Finished a turn".
+    ...(lastMessage ? { lastMessage } : {})
   });
   try {
     writeDurable(file, record);

@@ -120,6 +120,11 @@ export type RoomCreateOptions = {
   // Launch the room ON this command (passed to the shell as argv) instead of
   // typing it in afterwards — see PtyFactoryOptions.command.
   command?: string;
+  // ADOPTION (pty-keeper): the terminal already exists and kept running
+  // while the host restarted; this is everything it printed so far. Fed
+  // through the same buffer + mode tracking as live output (minus the
+  // broadcast), so modes, the screen grid and snapshots come back exact.
+  adoptReplay?: string;
 };
 
 export type RoomSummary = {
@@ -197,9 +202,15 @@ const SERIALIZED_MAX_REQUEST = 524_288;
 // snapshot never trips).
 const SERIALIZED_CAPPED_HINT_BYTES = 262_144;
 
-// Size ownership: the last USER ACTION owns the PTY size — opening the
-// session (a claim:"attach" or user:true resize) or a real keystroke,
-// whichever happened last. No idle windows, no election. The owner's
+// Size ownership: the size belongs to whoever is ACTIVELY TYPING (Jian,
+// 2026-10-01: "use the terminal with the active user input's size"). A real
+// keystroke takes it at once. Opening / re-attaching / clicking
+// (claim:"attach", user:true or not) takes it only when the owner is gone
+// or hasn't typed for OWNER_ACTIVE_MS — otherwise a phone waking or a
+// desktop tab refocusing yanked the grid out from under the person typing,
+// and two open screens traded it back and forth (the flicker: 58x38 <->
+// 115x30 four times in 200ms on one wake). An explicit take:true ("take
+// mine", Fit) still wins outright. The owner's
 // resizes apply unconditionally (their viewport IS the session's size);
 // everyone else's are recorded as that client's declared fit and answered
 // with a corrective active_size so followers can adopt the owner's grid.
@@ -210,7 +221,32 @@ const SERIALIZED_CAPPED_HINT_BYTES = 262_144;
 // transfer nothing. SGR mouse reports only — every hop client sends wheel
 // as CSI < b;x;y M/m. Anchored and exclusive: a payload containing
 // anything besides mouse reports still counts as typing.
-const PURE_MOUSE_REPORT = /^(?:\x1b\[<\d+;\d+;\d+[Mm])+$/;
+const OWNER_ACTIVE_MS = 60_000;
+// Not typing either: the TERMINAL's automatic answers to an app's queries.
+// Codex (and other TUIs) ask for the cursor position / device attributes /
+// colours on every redraw — every attached client's emulator answers, and
+// each answer used to count as a keystroke and TAKE THE SIZE. So a resize →
+// Codex redraws and queries → phone and desk both answer → each answer
+// transfers ownership → another resize: an endless loop (diagnostic
+// 2026-10-05: 56x32 <-> 114x33 every 20–40ms, "severe flickering").
+// Mouse reports, CPR, DA1/2/3, focus in/out, DECRPM, kitty keyboard flags,
+// DSR status, window reports, OSC replies (colours, clipboard) and DCS
+// replies (XTVERSION, DECRQSS) — anchored, exclusive, so a payload with
+// anything else still counts as typing.
+const PURE_MOUSE_REPORT = new RegExp(
+  "^(?:" + [
+    "\\x1b\\[<\\d+;\\d+;\\d+[Mm]",          // SGR mouse
+    "\\x1b\\[\\d+;\\d+R",                     // CPR
+    "\\x1b\\[[?>=][\\d;]*c",                    // DA1/DA2/DA3 replies
+    "\\x1b\\[[IO]",                               // focus in/out
+    "\\x1b\\[\\??[\\d;]+\\$y",               // DECRPM
+    "\\x1b\\[\\?\\d+u",                        // kitty keyboard flags
+    "\\x1b\\[\\d+n",                             // DSR status
+    "\\x1b\\[\\d+(?:;\\d+)*t",                 // window size reports
+    "\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)",  // OSC replies
+    "\\x1bP[^\\x1b]*\\x1b\\\\"               // DCS replies
+  ].join("|") + ")+$"
+);
 const CONTROL_SEQUENCE_TAIL = 32;
 const DEBUG_STATE = process.env.HAY_DEBUG === "1";
 
@@ -305,6 +341,8 @@ export class Room extends EventEmitter {
   // The client whose last user action (open or keystroke) owns the PTY size.
   // null = up for grabs (fresh room, or the owner detached).
   private sizeOwnerId: string | null = null;
+  /** When the size owner last TYPED (0 = took it without typing). */
+  private sizeOwnerTypedAt = 0;
   private activeCols: number;
   private activeRows: number;
   // Retained raw output as a chunk ring: append is O(1) and trimming drops
@@ -365,6 +403,7 @@ export class Room extends EventEmitter {
     this.initialCwd = options.cwd;
     this.liveCwd = options.cwd;
     this.pty = ptyFactory({
+      id,
       cols: initialSize.cols,
       rows: initialSize.rows,
       cwd: options.cwd,
@@ -384,6 +423,11 @@ export class Room extends EventEmitter {
     // stage it into the buffer — we don't re-broadcast or re-parse it.
     if (options.seedOutput) {
       this.appendOutput(options.seedOutput);
+    }
+    if (options.adoptReplay) {
+      this.appendOutput(options.adoptReplay);
+      this.updateTerminalState(options.adoptReplay);
+      this.lastActivityAt = now();
     }
 
     this.pty.onData((data: string) => {
@@ -459,9 +503,18 @@ export class Room extends EventEmitter {
     // that dropped off the network never sends a close, so its old
     // connection would otherwise sit in presence as a second "iPhone"
     // until TCP gives up on the corpse.
+    // The successor INHERITS the size: a phone waking from sleep is the same
+    // person at the same viewport. Without this the owner slot went empty
+    // (or stayed on the corpse), the new socket saw its own old grid as a
+    // foreign one, adopted it at a shrunken font, then reclaimed — a 3-step
+    // size bounce on every wake (diagnostic 2026-10-03: 55 -> 32 -> 34 rows
+    // in 70ms).
+    let inheritsSize = false;
+    const ownerTypedAt = this.sizeOwnerTypedAt;
     if (info.deviceKey) {
       for (const [id, peer] of [...this.clients]) {
         if (peer.deviceKey === info.deviceKey && peer.source !== "monitor") {
+          if (this.sizeOwnerId === id) inheritsSize = true;
           try { peer.socket.close(); } catch { /* already dead */ }
           this.removeClient(id);
         }
@@ -470,6 +523,10 @@ export class Room extends EventEmitter {
 
     const client = new ClientState(info, socket);
     this.clients.set(client.id, client);
+    if (inheritsSize && this.sizeOwnerId === null) {
+      this.sizeOwnerId = client.id;
+      this.sizeOwnerTypedAt = ownerTypedAt;
+    }
     const created = !this.hasHadClient;
     this.hasHadClient = true;
 
@@ -649,7 +706,7 @@ export class Room extends EventEmitter {
         this.handleInput(client, message.data);
         break;
       case "resize":
-        this.handleResize(client, message.cols, message.rows, message.claim, message.user === true);
+        this.handleResize(client, message.cols, message.rows, message.claim, message.user === true, message.take === true);
         break;
       case "typing":
         client.typing = message.active;
@@ -915,8 +972,10 @@ export class Room extends EventEmitter {
    */
   startCwdPolling(intervalMs = 15000) {
     this.stopCwdPolling();
-    const pid = (this.pty as unknown as { pid?: number }).pid;
-    if (!pid) return;
+    // The pid is read on every tick, not once: a keeper-spawned terminal has
+    // none until the keeper answers, and bailing out here left every session
+    // created after the keeper with no cwd or foreground tracking at all.
+    const currentPid = () => (this.pty as unknown as { pid?: number }).pid || 0;
 
     const updateCwd = (cwdPath: string) => {
       if (cwdPath && cwdPath !== this.liveCwd) {
@@ -931,6 +990,8 @@ export class Room extends EventEmitter {
 
     const poll = () => {
       if (this.ended) return;
+      const pid = currentPid();
+      if (!pid) return;
       // node-pty exposes the foreground process name (already short, e.g. "vim",
       // "node", "claude"); cheap getter, sampled on the same cadence as cwd.
       const fg = (this.pty as unknown as { process?: string }).process;
@@ -1003,6 +1064,10 @@ export class Room extends EventEmitter {
       return;
     }
     client.lastActive = now();
+    // Typing keeps the size (and, below, takes it).
+    if (this.sizeOwnerId === client.id && client.source !== "monitor" && !PURE_MOUSE_REPORT.test(data)) {
+      this.sizeOwnerTypedAt = now();
+    }
     // A real keystroke takes the size: transfer ownership and bring the PTY
     // to the new owner's declared fit immediately, so typing from a phone
     // reshapes the session even before its next resize message arrives.
@@ -1014,6 +1079,7 @@ export class Room extends EventEmitter {
       !PURE_MOUSE_REPORT.test(data)
     ) {
       this.sizeOwnerId = client.id;
+      this.sizeOwnerTypedAt = now();
       if (client.cols !== this.activeCols || client.rows !== this.activeRows) {
         this.applySize(client, client.cols, client.rows);
       }
@@ -1022,7 +1088,14 @@ export class Room extends EventEmitter {
     this.emit("pty_input", { roomId: this.id, clientId: client.id, data, timestamp: now() });
   }
 
-  private handleResize(client: ClientState, cols: number, rows: number, claim?: "attach", userClaim = false) {
+  /** The owner is someone else who is still here and typed recently. */
+  private ownerIsActiveTypist(client: ClientState): boolean {
+    if (this.sizeOwnerId === null || this.sizeOwnerId === client.id) return false;
+    if (!this.clients.has(this.sizeOwnerId)) return false;
+    return now() - this.sizeOwnerTypedAt < OWNER_ACTIVE_MS;
+  }
+
+  private handleResize(client: ClientState, cols: number, rows: number, claim?: "attach", userClaim = false, take = false) {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
     if (cols < 1 || cols > 500 || rows < 1 || rows > 200) return;
 
@@ -1050,9 +1123,18 @@ export class Room extends EventEmitter {
     // (user:true) is a user action: strict recency, it takes ownership
     // outright. Whoever was typing elsewhere takes it back with their next
     // keystroke, so misfires self-heal.
-    if (claim === "attach" || userClaim) {
+    if (take || ((claim === "attach" || userClaim) && !this.ownerIsActiveTypist(client))) {
+      if (this.sizeOwnerId !== client.id) this.sizeOwnerTypedAt = 0;
       this.sizeOwnerId = client.id;
       this.applySize(client, cols, rows);
+      return;
+    }
+    if (claim === "attach" || userClaim) {
+      // Someone is typing elsewhere: opening here doesn't take their grid.
+      // The declaration is kept; this client's first keystroke applies it.
+      if (cols !== this.activeCols || rows !== this.activeRows) {
+        this.sendActiveSize(client, this.sizeOwnerId!);
+      }
       return;
     }
 
@@ -1303,6 +1385,11 @@ export class Room extends EventEmitter {
       else rest += `\x1b[?${mode}h`;
     }
     return alt + rest;
+  }
+
+  /** After an adoption replay: bring the screen grid up from the ring. */
+  resumeAfterAdopt() {
+    this.startTuiGrid();
   }
 
   private startTuiGrid() {
@@ -1594,6 +1681,28 @@ export class RoomManager {
 
   hasRoom(roomId: string) {
     return this.rooms.has(roomId);
+  }
+
+  /**
+   * Re-create a room around a terminal that is ALREADY running (pty-keeper):
+   * no spawn, the given terminal and its output so far. Used when a host
+   * restarts — the agents never noticed.
+   */
+  adoptRoom(roomId: string, size: { cols: number; rows: number }, cwd: string, pty: unknown, replay: string, modePrefix = "") {
+    const existing = this.rooms.get(roomId);
+    if (existing && !existing.hasEnded()) return existing;
+    // modePrefix: the modes the app had set when the last host saw it (see
+    // Room.modePrefix). Applied BEFORE the replay, so anything the app
+    // changed since still wins.
+    const room = new Room(roomId, (() => pty) as unknown as PtyFactory, size, { cwd, adoptReplay: modePrefix + replay });
+    room.on("empty", () => {
+      if (this.rooms.get(roomId) === room) {
+        this.rooms.delete(roomId);
+      }
+    });
+    this.rooms.set(roomId, room);
+    room.resumeAfterAdopt();
+    return room;
   }
 
   closeRoom(roomId: string) {

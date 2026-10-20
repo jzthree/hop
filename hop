@@ -4616,6 +4616,143 @@ function stampSessionSeen(sessionName) {
     if (typeof sessionSeenSaveTimer.unref === 'function') sessionSeenSaveTimer.unref();
 }
 
+// ── How much the HUMAN uses each session ────────────────────────────────────
+// A rolling log of interactions — opening it on a phone or in a browser,
+// submitting a Claude prompt, a Codex turn — decayed into one score both
+// clients sort by ("Most used" layout; Jian: "order by frequency of user
+// interaction with a session, both in the app and in hop web"). Bursts
+// collapse: events closer than INTERACTION_DEDUPE_MS count once.
+const INTERACTIONS_FILE = path.join(HOME_DIR, '.interactions.json');
+const INTERACTION_DEDUPE_MS = 2 * 60 * 1000;
+const INTERACTION_KEEP_MS = 21 * 86_400_000;
+const INTERACTION_HALF_LIFE_MS = 3 * 86_400_000;   // last week counts; last month barely
+let interactions = null;
+let interactionsSaveTimer = null;
+function loadInteractions() {
+    if (interactions) return interactions;
+    try {
+        const parsed = JSON.parse(fs.readFileSync(INTERACTIONS_FILE, 'utf8'));
+        interactions = parsed && typeof parsed === 'object' && parsed.sessions ? parsed : { sessions: {} };
+    } catch (e) { interactions = { sessions: {} }; }
+    return interactions;
+}
+function saveInteractionsSoon() {
+    if (interactionsSaveTimer) return;
+    interactionsSaveTimer = setTimeout(() => {
+        interactionsSaveTimer = null;
+        try { writePrivateFile(INTERACTIONS_FILE, JSON.stringify(loadInteractions()), 0o600); } catch (e) { /* next */ }
+    }, 2000);
+    if (typeof interactionsSaveTimer.unref === 'function') interactionsSaveTimer.unref();
+}
+function recordInteraction(sessionName, at = Date.now()) {
+    if (!sessionName) return;
+    const store = loadInteractions();
+    const rec = store.sessions[sessionName] || (store.sessions[sessionName] = { events: [] });
+    const last = rec.events.length ? rec.events[rec.events.length - 1] : 0;
+    if (at - last < INTERACTION_DEDUPE_MS) return;
+    rec.events.push(at);
+    const cutoff = Date.now() - INTERACTION_KEEP_MS;
+    while (rec.events.length && rec.events[0] < cutoff) rec.events.shift();
+    if (rec.events.length > 600) rec.events.splice(0, rec.events.length - 600);
+    saveInteractionsSoon();
+}
+/**
+ * Fold in prompts and agent turns that happened since we last looked — but
+ * only ones the HUMAN drove: a prompt/turn while they had the session open
+ * (or within USER_DRIVEN_MS of leaving it). Check-backs typed by hop, agent
+ * fleets prompting each other and long autonomous runs all fire the same
+ * hooks; counting them ranked a background Codex worker above everything
+ * the user actually touches.
+ */
+const USER_DRIVEN_MS = 15 * 60 * 1000;
+function userDrove(sessionName, at) {
+    if ((userViewingCounts.get(sessionName) || 0) > 0) return true;
+    const seen = loadSessionSeenStamps()[sessionName] || 0;
+    return seen > 0 && Math.abs(at - seen) <= USER_DRIVEN_MS;
+}
+function ingestAgentInteractions(sessionName) {
+    const store = loadInteractions();
+    const rec = store.sessions[sessionName] || (store.sessions[sessionName] = { events: [] });
+    const promptAt = readPromptAt(sessionName);           // claude: the user's own prompt
+    if (promptAt && promptAt > (rec.lastPromptAt || 0)) {
+        rec.lastPromptAt = promptAt;
+        if (userDrove(sessionName, promptAt)) recordInteraction(sessionName, promptAt);
+        else saveInteractionsSoon();
+    }
+    const count = readTurnCount(sessionName);              // codex has no prompt hook: its turns
+    if (rec.lastTurnCount === undefined) { rec.lastTurnCount = count; saveInteractionsSoon(); }
+    else if (count > rec.lastTurnCount) {
+        const turnAt = readTurnAt(sessionName) || Date.now();
+        rec.lastTurnCount = count;
+        if ((!promptAt || Math.abs(turnAt - promptAt) > 60 * 60 * 1000) && userDrove(sessionName, turnAt)) {
+            recordInteraction(sessionName, turnAt);
+        }
+        saveInteractionsSoon();
+    }
+}
+function interactionScore(sessionName, now = Date.now()) {
+    const rec = loadInteractions().sessions[sessionName];
+    if (!rec || !rec.events.length) return 0;
+    let score = 0;
+    for (const t of rec.events) score += Math.pow(0.5, (now - t) / INTERACTION_HALF_LIFE_MS);
+    return Math.round(score * 100) / 100;
+}
+
+/**
+ * Watch a proxied client socket for the human TYPING (hay `input` frames),
+ * without touching the stream. Attaches alone over-count: a browser tab left
+ * open on a session reconnects all night and every reconnect looked like an
+ * open. Typing is the honest signal. Terminal auto-replies (cursor reports,
+ * focus, mouse) are escape sequences, stripped before deciding.
+ */
+const TERMINAL_SEQ = /\x1b(?:\[[\d;?<>=]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\|[^\[\]P])/g;
+function isHumanKeystrokes(data) {
+    const rest = String(data || '').replace(TERMINAL_SEQ, '');
+    return /[\x20-\x7e\r\x7f\u00a0-\uffff]/.test(rest);
+}
+function watchClientTyping(socket, sessionName) {
+    let buf = Buffer.alloc(0);
+    let skip = 0;  // bytes of a frame we decided not to read
+    socket.on('data', (chunk) => {
+        try {
+            if (skip) {
+                const n = Math.min(skip, chunk.length);
+                skip -= n;
+                chunk = chunk.subarray(n);
+                if (!chunk.length) return;
+            }
+            buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+            for (;;) {
+                if (buf.length < 2) return;
+                const b0 = buf[0], b1 = buf[1];
+                let len = b1 & 0x7f, off = 2;
+                if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4; }
+                else if (len === 127) { if (buf.length < 10) return; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+                const masked = (b1 & 0x80) !== 0;
+                const head = off + (masked ? 4 : 0);
+                const opcode = b0 & 0x0f;
+                const compressed = (b0 & 0x40) !== 0;
+                if (opcode !== 1 || compressed || len > 64 * 1024) {
+                    // Not a plain text frame we care about: step over it.
+                    if (buf.length >= head + len) { buf = buf.subarray(head + len); continue; }
+                    skip = head + len - buf.length;
+                    buf = Buffer.alloc(0);
+                    return;
+                }
+                if (buf.length < head + len) return;
+                const payload = Buffer.from(buf.subarray(head, head + len));
+                if (masked) { const m = buf.subarray(off, off + 4); for (let i = 0; i < payload.length; i++) payload[i] ^= m[i & 3]; }
+                buf = buf.subarray(head + len);
+                const text = payload.toString('utf8');
+                if (text.includes('"input"')) {
+                    const msg = JSON.parse(text);
+                    if (msg && msg.type === 'input' && isHumanKeystrokes(msg.data)) recordInteraction(sessionName);
+                }
+            }
+        } catch (e) { buf = Buffer.alloc(0); skip = 0; }  // observe only — never break the stream
+    });
+}
+
 function getSessionSeenInfo(sessionName) {
     const attachedNow = (userViewingCounts.get(sessionName) || 0) > 0;
     // Attached right now means seen-through-now; otherwise the last detach.
@@ -4625,8 +4762,12 @@ function getSessionSeenInfo(sessionName) {
     };
 }
 
-function noteClientConnected(sessionName, source, claimId = null) {
+function noteClientConnected(sessionName, source, claimId = null, meta = null) {
     if (!sessionName) return;
+    if (process.env.HOP_ATTACH_TRACE) {
+        try { fs.appendFileSync(path.join(HOME_DIR, 'logs', 'attach-trace.log'),
+            `${new Date().toISOString()} ${sessionName} source=${source || '-'} ${meta ? JSON.stringify(meta) : ''}\n`); } catch (e) { /* trace only */ }
+    }
     if (source === 'local-cli') {
         consumePendingLocalCliClaim(sessionName, claimId);
     }
@@ -5493,6 +5634,24 @@ function askOf(internalName) {
 // Stop hook, Codex's notify chain). Used to attribute a bell: Codex rings
 // the terminal bell at the end of EVERY turn, and a bell that lands within
 // seconds of the turn record is "finished", not "needs you".
+// The agent's final message for its latest turn (both hooks record it), so a
+// "finished" notification can say WHAT it finished, not just that it did.
+function readTurnMessage(internalName) {
+    try {
+        const rec = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.turn`), 'utf8'));
+        if (typeof rec.lastMessage !== 'string') return '';
+        // Plain text for a notification: drop code blocks and Markdown marks.
+        return rec.lastMessage
+            .replace(/```[\s\S]*?(```|$)/g, ' ')
+            .replace(/`([^`]*)`/g, '$1')
+            .replace(/\*\*|__|~~/g, '')
+            .replace(/(^|\s)[#>*-]+\s/g, '$1')
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 400);
+    } catch (e) { return ''; }
+}
 function readTurnAt(internalName) {
     try {
         const at = Date.parse(JSON.parse(fs.readFileSync(
@@ -5589,7 +5748,7 @@ function attentionReason(internalName, lastBellAt, lastActivityAt) {
     const bell = Number(lastBellAt) || 0;
     if (bell > 0) {
         const turnAt = readTurnAt(internalName);
-        if (turnAt && Math.abs(bell - turnAt) <= 4000) return { reason: 'finished', note: '' };
+        if (turnAt && Math.abs(bell - turnAt) <= 4000) return { reason: 'finished', note: readTurnMessage(internalName) };
         const view = latestViewAtMs(internalName);
         if (view.at && Math.abs(bell - view.at) <= 4000) return { reason: 'view', note: view.title };
         // Still producing output: an agent that needs you is QUIET. Codex
@@ -5793,10 +5952,92 @@ function sessionAgentHome(internalName, agent, config) {
     }
     return null;
 }
-/** The list's agent fields for one session: the tool, and the account it runs as. */
+/**
+ * The model a session's agent is actually running (Jian: the account badge
+ * "default" said little — show "opus", "astra", "sol"). Read from the END of
+ * its transcript (Claude: each reply's message.model; Codex: the rollout's
+ * turn_context model), so a mid-session /model switch shows. Paths are cached
+ * per session id, the answer per file size — the list is polled.
+ */
+const agentModelPathCache = new Map(); // sessionId -> transcript path | null
+const agentModelCache = new Map();     // path -> { size, model }
+function lastModelIn(fd, from, to) {
+    const len = to - from;
+    if (len <= 0) return null;
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, from);
+    const re = /"model"\s*:\s*"([^"]+)"/g;
+    let m, last = null;
+    const text = buf.toString('utf8');
+    while ((m = re.exec(text))) {
+        if (m[1] !== '<synthetic>' && !/auto-review/.test(m[1])) last = m[1];
+    }
+    return last;
+}
+function tailModel(file) {
+    let st;
+    try { st = fs.statSync(file); } catch (e) { return null; }
+    const hit = agentModelCache.get(file);
+    if (hit && hit.size === st.size) return hit.model;
+    let model = hit ? hit.model : null;
+    let fd = null;
+    try {
+        fd = fs.openSync(file, 'r');
+        const CHUNK = 1024 * 1024;
+        if (hit && hit.model && st.size > hit.size) {
+            // Grew since last look: only the new bytes can change the answer.
+            for (let at = hit.size; at < st.size; at += 4 * CHUNK) {
+                const found = lastModelIn(fd, Math.max(0, at - 512), Math.min(st.size, at + 4 * CHUNK));
+                if (found) model = found;
+            }
+        } else {
+            // First look: walk back from the end. Codex rollouts run to
+            // hundreds of MB with the model once per turn, so a fixed tail
+            // missed it; give up after 32 MB and read the head instead.
+            model = null;
+            for (let end = st.size; end > 0 && st.size - end < 32 * CHUNK && !model; end -= CHUNK) {
+                model = lastModelIn(fd, Math.max(0, end - CHUNK - 512), end);
+            }
+            if (!model) model = lastModelIn(fd, 0, Math.min(st.size, CHUNK));
+        }
+    } catch (e) { /* keep what we had */ }
+    finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) { } }
+    agentModelCache.set(file, { size: st.size, model });
+    return model;
+}
+function sessionAgentModel(internalName, agent) {
+    try {
+        if (agent === 'claude') {
+            const rec = readClaudeSessionRecord(internalName);
+            if (!rec || !rec.sessionId) return null;
+            let file = agentModelPathCache.get(rec.sessionId);
+            if (file === undefined || (file && !fs.existsSync(file))) {
+                file = resolveClaudeTranscriptPath(rec) || null;
+                agentModelPathCache.set(rec.sessionId, file);
+            }
+            return file ? tailModel(file) : null;
+        }
+        if (agent === 'codex') {
+            const turn = readTurnInfo(internalName);
+            if (!turn || !turn.sessionId) return null;
+            let file = agentModelPathCache.get(turn.sessionId);
+            if (file === undefined || (file && !fs.existsSync(file))) {
+                file = findCodexRolloutById(turn.sessionId) || null;
+                agentModelPathCache.set(turn.sessionId, file);
+            }
+            return file ? tailModel(file) : null;
+        }
+    } catch (e) { /* unknown */ }
+    return null;
+}
+/** The list's agent fields for one session: the tool, the account it runs as, the model. */
 function sessionAgentFields(internalName, config) {
     const agent = sessionAgentKind(internalName);
-    return { agent, agentHome: agent ? sessionAgentHome(internalName, agent, config) : null };
+    return {
+        agent,
+        agentHome: agent ? sessionAgentHome(internalName, agent, config) : null,
+        agentModel: agent ? sessionAgentModel(internalName, agent) : null
+    };
 }
 
 function sessionAgentKind(internalName) {
@@ -5871,6 +6112,126 @@ function codexRootThreadId(sessionId) {
         id = parent;
     }
     return id;
+}
+
+/**
+ * Stop & park (resumable): park the session, pre-write its resume command,
+ * and stop the process — records, metas and buffers all stay.
+ */
+async function stopAndParkSession(resolved) {
+    const config = getEffectiveSessionConfig(resolved);
+    if (!config || config.type === 'port') return { ok: false, error: 'Session not a terminal' };
+    const plan = restorePlanForSession({
+        internalName: resolved,
+        cwd: config.cwd,
+        startup: config.startup,
+        autoStart: config.autoStart
+    });
+    const next = {
+        ...config,
+        parked: true,
+        archived: true,
+        startup: plan?.command || config.startup,
+        cwd: plan?.cwd || config.cwd,
+        updatedAt: new Date().toISOString()
+    };
+    // Always SAVED: a stopped session has no room, and a
+    // runtime-only definition went with it — a stopped plain
+    // terminal vanished from the list instead of parking.
+    setSessionConfig(resolved, next);
+    const durable = readClaudeSessionMeta(resolved) || {};
+    writeClaudeSessionMeta(resolved, { ...durable, internalName: resolved, parked: true, archived: true, cwd: next.cwd });
+    // Stop the process — records, metas, and buffers all stay.
+    if (isExternalTerminalBackend()) {
+        await terminateExternalHaySession(resolved);
+    } else if (hayRooms.hasRoom(resolved)) {
+        hayRooms.closeRoom(resolved);
+    }
+    if (activeSessions[resolved]) delete activeSessions[resolved];
+    sessionClientSummary.delete(resolved);
+    return { ok: true, resumable: !!plan?.command };
+}
+
+/**
+ * The Codex desktop app's threads, as the app itself lists them: its state
+ * database, read-only (the app keeps writing it), newest first. Who holds
+ * each thread comes from its writer lock — Codex lets ONE process write a
+ * thread, so a thread the app has open can be forked here but not resumed,
+ * and one a hop session runs can be viewed in the app but not continued
+ * there until that session stops.
+ */
+const CODEX_STATE_DB = path.join(os.homedir(), '.codex', 'state_5.sqlite');
+const CODEX_LOCK_DIR = path.join(os.homedir(), '.codex', 'thread-writer-locks');
+const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function execFileText(cmd, args, timeoutMs = 4000) {
+    return new Promise((resolve) => {
+        execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err && !stdout ? null : String(stdout || '')));
+    });
+}
+
+async function listCodexDesktopThreads(limit = 40, { id = null } = {}) {
+    if (!fs.existsSync(CODEX_STATE_DB)) return [];
+    const n = Math.max(1, Math.min(200, Number(limit) || 40));
+    const where = id && CODEX_THREAD_ID_RE.test(id)
+        ? `id = '${id}'`
+        : `archived = 0 and originator in ('Codex Desktop', 'codex_work_desktop') and coalesce(thread_source, 'user') = 'user' and source not like '{%'`;
+    const sql = `select id, coalesce(nullif(name,''), nullif(title,''), substr(first_user_message,1,80)), cwd, max(coalesce(updated_at_ms,0), coalesce(recency_at_ms,0)), is_pinned
+        from threads where ${where}
+        order by 4 desc limit ${n}`;
+    const out = await execFileText('/usr/bin/sqlite3', ['-readonly', '-json', CODEX_STATE_DB, sql]);
+    let rows = [];
+    try { rows = JSON.parse(out || '[]'); } catch (e) { return []; }
+    return rows.map((r) => {
+        const v = Object.values(r);
+        return { id: v[0], title: String(v[1] || '').trim() || 'Untitled', cwd: v[2] || null, updatedAt: Number(v[3]) || 0, pinned: v[4] === 1 };
+    }).filter((t) => CODEX_THREAD_ID_RE.test(t.id));
+}
+
+/** Thread id → 'app' | 'daemon' | 'terminal', for the threads someone holds. */
+async function codexThreadHolders(ids) {
+    const files = ids.map((id) => path.join(CODEX_LOCK_DIR, `${id}.lock`)).filter((f) => fs.existsSync(f));
+    const holders = new Map();
+    if (!files.length) return holders;
+    const out = await execFileText('/usr/sbin/lsof', ['-F', 'pn', '--', ...files]);
+    if (!out) return holders;
+    const pids = new Map();
+    let pid = null;
+    for (const line of out.split('\n')) {
+        if (line[0] === 'p') pid = line.slice(1);
+        else if (line[0] === 'n' && pid) {
+            const m = /([0-9a-f-]{36})\.lock$/.exec(line);
+            if (m) pids.set(m[1], pid);
+        }
+    }
+    if (!pids.size) return holders;
+    const ps = await execFileText('/bin/ps', ['-o', 'pid=,command=', '-p', [...new Set(pids.values())].join(',')]);
+    const cmdOf = new Map();
+    for (const line of String(ps || '').split('\n')) {
+        const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+        if (m) cmdOf.set(m[1], m[2]);
+    }
+    for (const [id, p] of pids) {
+        const cmd = cmdOf.get(p) || '';
+        holders.set(id, /ChatGPT\.app|Codex\.app/.test(cmd) ? 'app' : /app-server-daemon|app-server\s+--listen/.test(cmd) ? 'daemon' : 'terminal');
+    }
+    return holders;
+}
+
+/** Codex thread id → the hop session whose conversation it is. */
+function hopSessionsByCodexThread() {
+    const map = new Map();
+    let names = [];
+    try { names = fs.readdirSync(CLAUDE_SESSIONS_DIR).filter((f) => f.endsWith('.turn')).map((f) => f.slice(0, -5)); } catch (e) { return map; }
+    for (const name of names) {
+        const turn = readTurnInfo(name);
+        if (!turn || turn.agent !== 'codex' || !CODEX_THREAD_ID_RE.test(turn.sessionId)) continue;
+        if (!(hopSessionExists(name) || getEffectiveSessionConfig(name))) continue;
+        map.set(turn.sessionId, name);
+        const root = codexRootThreadId(turn.sessionId);
+        if (root && root !== turn.sessionId) map.set(root, name);
+    }
+    return map;
 }
 
 // Find a transcript for a bare session id across every claude config root,
@@ -8570,6 +8931,19 @@ function callerSessionOrExplain(what) {
     return null;
 }
 
+/** Ask the pty-keeper to end every terminal and exit (`hop stop --all`). */
+function stopPtyKeeper(timeoutMs = 3000) {
+    const sock = process.env.HOP_PTY_KEEPER_SOCK || path.join(HOME_DIR, 'pty-keeper.sock');
+    if (!fs.existsSync(sock)) return Promise.resolve(false);
+    return new Promise((resolve) => {
+        const c = require('net').connect(sock);
+        const done = (v) => { try { c.destroy(); } catch (e) { /* ignore */ } resolve(v); };
+        c.on('connect', () => { c.write(JSON.stringify({ op: 'shutdown' }) + '\n'); setTimeout(() => done(true), 800); });
+        c.on('error', () => done(false));
+        setTimeout(() => done(false), timeoutMs);
+    });
+}
+
 function readHayHostStateFile() {
     if (!fs.existsSync(HAY_HOST_STATE_FILE)) return null;
     try {
@@ -9563,6 +9937,49 @@ function previewFrameIsSparse(text) {
     return len < 60;                      // 3-4 fragments → sparse unless substantial
 }
 
+// The search corpus, RENDERED. A byte tail is not text: TUIs repaint with
+// absolute column moves, so the stream says "I'll" CHA(8) "check" and the
+// spaces between words exist only as cursor motion. stripAnsiForSearch()
+// substitutes one space per sequence, which is right when the gap is one
+// column and wrong otherwise — measured on live rooms it produced "hi tory",
+// "b tes", "r aches", "beaitiful" (Jian: "search results seem to randomly
+// miss character and replace with space"). Worse than ugly: those words
+// then cannot be MATCHED either, so the search silently fails to find text
+// that is plainly on screen.
+//
+// Running the same bytes through a real terminal costs ~20ms for a 512KB
+// tail and gives exactly what the screen shows. Scrollback keeps whatever
+// genuinely scrolled; a repainting TUI has none by nature, and for those the
+// transcript corpus (searched alongside) is the deep history.
+async function renderSessionSearchText(source) {
+    if (!source || typeof source.output !== 'string' || !source.output) return null;
+    const Term = loadHeadlessTerminal();
+    if (!Term) return null;
+    const cols = Math.max(2, Math.min(1000, Math.floor(Number(source.cols) || 80)));
+    const rows = Math.max(2, Math.min(200, Math.floor(Number(source.rows) || 24)));
+    let term;
+    try { term = new Term({ cols, rows, scrollback: 2000, allowProposedApi: true }); }
+    catch (e) { return null; }
+    try {
+        await new Promise((resolve) => {
+            try { term.write(source.output, () => resolve()); }
+            catch (e) { resolve(); }
+        });
+        const buffer = term.buffer.active;
+        const lines = [];
+        for (let i = 0; i < buffer.length; i++) {
+            const line = buffer.getLine(i);
+            const text = line ? line.translateToString(true) : '';
+            if (text.trim()) lines.push(text);
+        }
+        return lines.join('\n');
+    } catch (e) {
+        return null;
+    } finally {
+        try { term.dispose(); } catch (e) { /* already gone */ }
+    }
+}
+
 async function renderSessionPreviewText(source, { noTrim = false } = {}) {
     if (!source || typeof source.output !== 'string') return null;
     const Term = loadHeadlessTerminal();
@@ -10140,8 +10557,11 @@ async function ensureExternalHayHostReadyOnce() {
     if (existing) {
         const why = watchdogKilledLiveHost
             ? 'The watchdog killed a host with live sessions'
-            : `Host ${existing.pid} is gone (not stopped by hop) and has been replaced`;
-        log(`[Hay] ${why} — auto-restoring saved sessions in 5s. Agent-created sessions are excluded; \`hop restore --agents\` brings those back.`, YELLOW);
+            : `Host ${existing.pid} was replaced`;
+        // With the pty-keeper, the new host has already re-adopted every
+        // terminal that is still running; this restore only brings back the
+        // sessions that genuinely ended (restore skips live ones).
+        log(`[Hay] ${why} — restoring, in 5s, only sessions that are no longer running (a keeper-backed host re-adopts the rest). Agent-created sessions are excluded; \`hop restore --agents\` brings those back.`, YELLOW);
         setTimeout(() => {
             restoreSavedSessions({}).catch((e) => {
                 log(`[Hay] Auto-restore after the host replacement failed: ${e?.message || e}. Run \`hop restore\` by hand.`, RED);
@@ -12382,9 +12802,12 @@ happens until someone clicks it.
                         // Deeper-than-screen tail (?bytes honored by newer
                         // hosts). Only live sessions have a screen at all.
                         let raw = '';
+                        let prevCols = 0, prevRows = 0;
                         if (s.live) {
                             const prev = await callExternalHayHostApi(`/rooms/${encodeURIComponent(id)}/preview?bytes=524288`);
                             raw = typeof prev?.data?.output === 'string' ? prev.data.output : '';
+                            prevCols = Number(prev?.data?.cols) || 0;
+                            prevRows = Number(prev?.data?.rows) || 0;
                         }
                         // The CONVERSATION transcript reaches back much further
                         // than any screen tail — grep its recent text too, so
@@ -12423,7 +12846,18 @@ happens until someone clicks it.
                                 transcriptSig = '';
                             }
                         } catch (e) { /* no transcript — screen only */ }
-                        const screenText = stripAnsiForSearch(raw);
+                        // Rendered when we can, stripped when we can't (no
+                        // headless terminal available): exact text beats a
+                        // deeper corpus that neither reads nor matches right.
+                        let screenText = null;
+                        if (raw) {
+                            try {
+                                screenText = await renderSessionSearchText({
+                                    output: raw, cols: prevCols, rows: prevRows
+                                });
+                            } catch (e) { screenText = null; }
+                        }
+                        if (screenText === null) screenText = stripAnsiForSearch(raw);
                         entry = {
                             at: now,
                             text: screenText,
@@ -12508,6 +12942,7 @@ happens until someone clicks it.
                 // Which account (config root) the agent runs as — the wall labels
                 // it when more than one is set up.
                 agentHome: s.agentHome || null,
+                agentModel: s.agentModel || null,
                 // working / done + whether the human has opened it since the
                 // turn ended (server-side seen witness, so every device agrees).
                 ...(phaseBySession.get(s.internalName) || { agentPhase: null, turnSeen: true, turnAt: null }),
@@ -12515,6 +12950,8 @@ happens until someone clicks it.
                 checkbacks: pendingCheckbacksFor(s.internalName) || undefined,
                 checkbackNext: nextCheckbackAt(s.internalName) || undefined,
                 codexAutomations: codexAutomationsForSession(s.internalName).filter((a) => a.status === 'ACTIVE' && !codexAutomationPastDue(a)).length || undefined,
+                // How much the human uses it (decayed; the "Most used" layout).
+                interactionScore: (ingestAgentInteractions(s.internalName), interactionScore(s.internalName)),
                 lastActivityAt: s.lastActivityAt,
                 // For sessions armed with notify-on-finish, each completed turn
                 // adds to bellSeq so the phone treats a finished response like a
@@ -12774,6 +13211,134 @@ happens until someone clicks it.
             return;
         }
 
+        // API: Codex desktop app ⇄ hop. The app's threads, who holds each
+        // one, and the hop session (if any) that already runs it.
+        if (parsedUrl.pathname === '/api/codex/desktop' && req.method === 'GET') {
+            try {
+                const threads = await listCodexDesktopThreads(parsedUrl.query?.limit || 40);
+                const holders = await codexThreadHolders(threads.map((t) => t.id));
+                const inHop = hopSessionsByCodexThread();
+                const out = threads.map((t) => {
+                    const hop = inHop.get(t.id) || null;
+                    const cfg = hop ? (getEffectiveSessionConfig(hop) || {}) : null;
+                    return {
+                        ...t,
+                        holder: holders.get(t.id) || null,
+                        hopSession: hop ? { internalName: hop, displayName: getSessionDisplayName(hop), parked: cfg.parked === true } : null
+                    };
+                });
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, available: fs.existsSync(CODEX_STATE_DB), threads: out }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: e?.message || 'Could not read Codex threads' }));
+            }
+            return;
+        }
+
+        // API: Continue a Codex desktop thread in hop. Resumed when nobody
+        // holds it; forked (a copy, the app's thread untouched) when the
+        // app has it open — Codex refuses a second writer. A thread a hop
+        // session already runs just names that session.
+        if (parsedUrl.pathname === '/api/codex/continue' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', async () => {
+                try {
+                    const { id } = JSON.parse(body || '{}');
+                    if (!CODEX_THREAD_ID_RE.test(String(id || ''))) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Not a Codex thread id' }));
+                        return;
+                    }
+                    // A stopped session whose thread someone else now holds
+                    // (handed to the app) could not resume it; fork instead.
+                    const existing = hopSessionsByCodexThread().get(id);
+                    const existingStopped = existing && (getEffectiveSessionConfig(existing) || {}).archived === true;
+                    if (existing && !(existingStopped && (await codexThreadHolders([id])).get(id))) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: true, internalName: existing, name: getSessionDisplayName(existing), kind: 'existing' }));
+                        return;
+                    }
+                    const [thread] = await listCodexDesktopThreads(1, { id });
+                    if (!thread || !findCodexRolloutById(id)) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'That Codex thread is not on this Mac' }));
+                        return;
+                    }
+                    const holder = (await codexThreadHolders([id])).get(id) || null;
+                    const kind = holder ? 'fork' : 'resume';
+                    const cwd = thread.cwd && fs.existsSync(thread.cwd) ? thread.cwd : os.homedir();
+                    // A session name, not the title verbatim: spaces in it
+                    // broke rename and Continue-in for the session.
+                    const base = sessionNameFromText(thread.title, 'codex');
+                    let name = base;
+                    for (let n = 2; isDisplayNameInUse(name); n++) name = `${base}-${n}`;
+                    const internal = mintSessionInternalName();
+                    const command = `codex ${kind} '${id}'`;
+                    // A resume names its thread before its first turn here, so
+                    // a restart in between brings the same conversation back.
+                    if (kind === 'resume') {
+                        writePrivateFile(path.join(CLAUDE_SESSIONS_DIR, `${internal}.turn`), JSON.stringify({ sessionId: id, agent: 'codex', count: 0, at: new Date().toISOString() }));
+                    }
+                    log(`[codex] continue ${id.slice(0, 8)}… (${holder || 'free'}) → ${name}: ${command}`, DIM);
+                    await ensureExternalRuntimeSession(internal, cwd, name, { createdBy: 'user', saveDefinition: false, command });
+                    rememberRuntimeSessionMetadata(internal, { type: 'terminal', displayName: name, cwd, createdBy: 'user' });
+                    writeClaudeSessionMeta(internal, { internalName: internal, displayName: name, cwd, createdBy: 'user', fromCodexApp: id });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, internalName: internal, name, kind, holder }));
+                } catch (e) {
+                    log(`[codex] continue failed: ${e?.message || e}`, RED);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: e?.message || 'Could not continue the thread' }));
+                }
+            });
+            return;
+        }
+
+        // API: Open a thread in the Codex desktop app, by thread id or by the
+        // hop session running it. `handOff` first stops that session (Stop &
+        // park, resumable) so the app can write the thread, not just show it.
+        if (parsedUrl.pathname === '/api/codex/open-in-app' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', async () => {
+                try {
+                    const { id: rawId, internalName, handOff } = JSON.parse(body || '{}');
+                    let id = CODEX_THREAD_ID_RE.test(String(rawId || '')) ? rawId : null;
+                    const session = internalName ? resolveSessionInternalName(null, internalName) : null;
+                    if (!id && session) {
+                        const turn = readTurnInfo(session);
+                        if (turn?.agent === 'codex') id = codexRootThreadId(turn.sessionId);
+                    }
+                    if (!id || !CODEX_THREAD_ID_RE.test(id)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'No Codex conversation to open' }));
+                        return;
+                    }
+                    if (process.platform !== 'darwin' || !fs.existsSync('/Applications/ChatGPT.app')) {
+                        res.writeHead(409, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'The Codex app is not installed on this host' }));
+                        return;
+                    }
+                    let stopped = false;
+                    if (handOff && session) {
+                        stopped = (await stopAndParkSession(session)).ok;
+                        // The writer lock goes with the process; give it a beat.
+                        for (let i = 0; i < 20 && (await codexThreadHolders([id])).get(id) === 'terminal'; i++) await new Promise((r2) => setTimeout(r2, 150));
+                    }
+                    await execFileText('/usr/bin/open', [`codex://threads/${id}`]);
+                    const holder = (await codexThreadHolders([id])).get(id) || null;
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, id, stopped, holder, writable: holder !== 'terminal' && holder !== 'daemon' }));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: e?.message || 'Could not open the Codex app' }));
+                }
+            });
+            return;
+        }
+
         // API: Park / unpark. Parked sessions leave the wall but keep
         // running; unparking also clears the archived flag (the session is
         // being brought back deliberately).
@@ -12873,43 +13438,14 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
-                    const savedConfig = getSessionConfig(resolved);
-                    const config = getEffectiveSessionConfig(resolved);
-                    if (!config || config.type === 'port') {
+                    const r = await stopAndParkSession(resolved);
+                    if (!r.ok) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: 'Session not a terminal' }));
+                        res.end(JSON.stringify({ error: r.error }));
                         return;
                     }
-                    const plan = restorePlanForSession({
-                        internalName: resolved,
-                        cwd: config.cwd,
-                        startup: config.startup,
-                        autoStart: config.autoStart
-                    });
-                    const next = {
-                        ...config,
-                        parked: true,
-                        archived: true,
-                        startup: plan?.command || config.startup,
-                        cwd: plan?.cwd || config.cwd,
-                        updatedAt: new Date().toISOString()
-                    };
-                    // Always SAVED: a stopped session has no room, and a
-                    // runtime-only definition went with it — a stopped plain
-                    // terminal vanished from the list instead of parking.
-                    setSessionConfig(resolved, next);
-                    const durable = readClaudeSessionMeta(resolved) || {};
-                    writeClaudeSessionMeta(resolved, { ...durable, internalName: resolved, parked: true, archived: true, cwd: next.cwd });
-                    // Stop the process — records, metas, and buffers all stay.
-                    if (isExternalTerminalBackend()) {
-                        await terminateExternalHaySession(resolved);
-                    } else if (hayRooms.hasRoom(resolved)) {
-                        hayRooms.closeRoom(resolved);
-                    }
-                    if (activeSessions[resolved]) delete activeSessions[resolved];
-                    sessionClientSummary.delete(resolved);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, resumable: !!plan?.command }));
+                    res.end(JSON.stringify({ ok: true, resumable: r.resumable }));
                 } catch (e) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Archive failed' }));
@@ -14869,7 +15405,7 @@ happens until someone clicks it.
 
                 const source = typeof parsedUrl.query.source === 'string' ? parsedUrl.query.source : '';
                 const claimId = typeof parsedUrl.query.claim === 'string' ? parsedUrl.query.claim : null;
-                noteClientConnected(sessionName, source, claimId);
+                noteClientConnected(sessionName, source, claimId, { path: 'proxy', ua: String(req.headers['user-agent'] || '').slice(0, 60), dev: parsedUrl.query.device || '' });
                 let disconnected = false;
                 const handleDisconnect = () => {
                     if (disconnected) return;
@@ -14888,6 +15424,7 @@ happens until someone clicks it.
                     });
                     const originalUrl = req.url;
                     req.url = buildExternalHayWsPath(parsedUrl, sessionName);
+                    if (isUserViewingSource(source)) watchClientTyping(socket, sessionName);
                     proxy.ws(req, socket, head);
                     req.url = originalUrl;
                 } catch (e) {
@@ -14950,7 +15487,7 @@ happens until someone clicks it.
             const colorIndex = Math.floor(Math.random() * 1000);
             const actorLabel = source ? `web:${source}` : 'web';
 
-            noteClientConnected(sessionName, source, claimId);
+            noteClientConnected(sessionName, source, claimId, { path: 'ws', ua: String(req.headers['user-agent'] || '').slice(0, 60), dev: deviceKey });
             registerSessionClientActor(sessionName, clientId, actorLabel);
             let disconnected = false;
             const handleDisconnect = () => {
@@ -16992,6 +17529,7 @@ const HELP_SECTIONS = [
         `hop restore <name>...     Redo just those sessions — even live ones, if they hold only an idle shell or a startup dialog`,
         `hop restore --health      Show sessions the reconciler could not bring back on its own, and why`,
         `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
+        `hop host restart          Restart only the hay-host — sessions keep running (terminals live in the pty-keeper)`,
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
         `hop claude-hook status|remove   Check or remove the hook`,
         `hop checkback ...          Type a message into a session later: --in 30m, --at 15:00, --every 2h, --when-idle, --when-file, --when-cmd`,
@@ -17391,10 +17929,13 @@ async function main() {
                     process.exit(1);
                 }
                 clearHayHostStateFile();
-                log(`Hay-host stopped. All terminal sessions ended.`, GREEN);
+                log(`Hay-host stopped.`, GREEN);
             } else if (hayHost) {
                 clearHayHostStateFile();
             }
+            // The terminals live in the pty-keeper: `stop --all` means end
+            // them too (a host stop alone no longer does).
+            if (await stopPtyKeeper()) log(`Terminal keeper stopped. All terminal sessions ended.`, GREEN);
             process.exit(0);
         }
 
@@ -17698,6 +18239,16 @@ async function main() {
     // step. --host additionally chains the detached graceful salvage-restart
     // so host-side changes activate too (that one DOES cycle sessions
     // through restore). --check reports without touching anything.
+    // `hop host restart` — restart only the hay-host. With the pty-keeper
+    // (terminals live outside the host) no session notices; see
+    // scripts/restart-host.js.
+    if (process.argv[2] === 'host' && process.argv[3] === 'restart') {
+        const script = path.join(__dirname, 'scripts', 'restart-host.js');
+        const child = spawn(process.execPath, [script, ...process.argv.slice(4)], { stdio: 'inherit' });
+        child.on('exit', (code) => process.exit(code ?? 0));
+        return;
+    }
+
     if (process.argv[2] === 'update') {
         const checkOnly = process.argv.includes('--check');
         // Cycling the host is the default now — it's what actually finishes
@@ -17771,6 +18322,23 @@ async function main() {
                 }
             }
         }
+        // Hay (server, web client, CLI) runs from its build output, which git
+        // does not carry: without a rebuild here, a pull updated the source
+        // and the host and browser went on running the old code (the codex
+        // shell integration and the Codex app panel reached nobody).
+        if (local !== runGit('git rev-parse HEAD')) {
+            let changed = '';
+            try { changed = runGit(`git diff --name-only ${local} HEAD -- hay/packages hay/apps`); } catch (e) { changed = 'unknown'; }
+            if (changed) {
+                log('Hay changed — rebuilding…', CYAN);
+                try {
+                    execFileSync('npm', ['run', 'build'], { cwd: path.join(__dirname, 'hay'), stdio: 'inherit', timeout: 900000 });
+                } catch (e) {
+                    log(`Hay build failed: ${e.message}`, RED);
+                    process.exit(1);
+                }
+            }
+        }
         // Restart the daemon onto the new code. The host keeps every session
         // alive through this.
         const state = isServerRunning();
@@ -17785,11 +18353,14 @@ async function main() {
         }
         log(`✓ Updated to ${runGit('git rev-parse --short HEAD')} — daemon restarted; sessions untouched.`, GREEN);
         if (withHost) {
-            const script = path.join(__dirname, 'scripts', 'salvage-and-restart-host.js');
+            // restart-host.js: a keeper-backed host restarts with every
+            // session left RUNNING; a pre-keeper host falls back to the old
+            // salvage → restart → restore (the last one that cycles sessions).
+            const script = path.join(__dirname, 'scripts', 'restart-host.js');
             const child = spawn(process.execPath, [script], { detached: true, stdio: 'ignore' });
             child.unref();
-            log('Host salvage-restart launched (detached) — progress: ~/.hop2/transcript-salvage/restart.log', YELLOW);
-            log('It waits for the fleet to go idle, then cycles the host through salvage → restore.', YELLOW);
+            log('Host restart launched (detached) — progress: ~/.hop2/logs/host-restart.log', YELLOW);
+            log('Sessions keep running when the host is keeper-backed; an older host is cycled through salvage → restore once.', YELLOW);
         } else {
             log(`Host still runs the previous code (skipped via ${CYAN}--no-host${RESET}); ${CYAN}hop update --host${RESET}${DIM} (redundant now, but accepted)${RESET} or the salvage script cycles it when convenient.`, RESET);
         }

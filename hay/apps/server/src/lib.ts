@@ -2,7 +2,8 @@
 // Export everything needed for embedding into other apps
 
 export { Room, RoomManager, setDefaultViewerColors, getDefaultViewerColors, type SocketAdapter, type ClientInfo, type RoomSummary } from "./rooms";
-export { createPty, type PtyFactory } from "./pty";
+export { createPty, resolveSpawn, type PtyFactory } from "./pty";
+export { KeeperClient, KeeperPty, type KeeperItem } from "./keeper";
 export { sanitizeName, sanitizeRoom } from "./utils";
 
 // Re-export shared types
@@ -122,6 +123,7 @@ export function attachTermshare(options: TermshareServerOptions) {
     const source = url.searchParams.get("source") || "";
     const cols = Number(url.searchParams.get("cols") ?? 80);
     const rows = Number(url.searchParams.get("rows") ?? 24);
+    const sizeClaim = url.searchParams.get("sizeClaim") === "attach" ? "attach" as const : undefined;
 
     const clientId = randomUUID();
     const colorIndex = Math.floor(Math.random() * 1000);
@@ -139,7 +141,8 @@ export function attachTermshare(options: TermshareServerOptions) {
         source,
         colorIndex,
         cols,
-        rows
+        rows,
+        sizeClaim
       },
       toSocketAdapter(ws)
     );

@@ -15,7 +15,13 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     // wall tile, switching to the session) — it wins the election outright.
     // A subsequent typist elsewhere reclaims instantly, so misfires self-heal.
     // Old servers strip the field and fall back to attach-claim semantics.
-    user: z.boolean().optional()
+    user: z.boolean().optional(),
+    // take:true is an EXPLICIT "use my size" (the phone's "take mine", the
+    // web's Fit button): it wins outright, even over someone typing now.
+    // Opening/attaching/clicking (claim:"attach", with or without user)
+    // only takes the size from an owner who is gone or hasn't typed in a
+    // while — the size belongs to whoever is actively typing.
+    take: z.boolean().optional()
   }),
   z.object({ type: z.literal("typing"), active: z.boolean() }),
   z.object({ type: z.literal("toggle_collab"), enabled: z.boolean() }),

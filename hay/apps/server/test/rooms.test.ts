@@ -299,7 +299,105 @@ describe("Room", () => {
     expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 80, rows: 40 });
   });
 
-  it("the last user action — open or keystroke — owns the size", () => {
+  it("opening a session does not take the size from an active typist", () => {
+    vi.useFakeTimers();
+    try {
+      let pty: FakePty | null = null;
+      const manager = new RoomManager(() => (pty = new FakePty() as unknown as FakePty) as any);
+      const room = manager.getRoom("active-typist", { cols: 115, rows: 30 }, "/tmp");
+      const desk = new FakeSocket();
+      room.attachClient({ id: "desk", name: "Desk", colorIndex: 0, cols: 115, rows: 30, sizeClaim: "attach" }, desk);
+      desk.emitMessage({ type: "input", data: "ls" });
+      // A phone opens (and re-attaches on wake) while the desk is typing:
+      // neither takes the grid — no reflow, the phone is told the desk's size.
+      const phone = new FakeSocket();
+      const before = pty!.resizes.length;
+      room.attachClient({ id: "ph", name: "iPhone", colorIndex: 1, cols: 51, rows: 50, sizeClaim: "attach" }, phone);
+      phone.emitMessage({ type: "resize", cols: 51, rows: 50, claim: "attach", user: true });
+      expect(pty!.resizes.length).toBe(before);
+      expect(findMessages(phone, "active_size").at(-1)).toMatchObject({ cols: 115, rows: 30, clientId: "desk" });
+      // The phone's first keystroke makes its declared size the PTY's.
+      phone.emitMessage({ type: "input", data: "x" });
+      expect(pty!.resizes.at(-1)).toEqual({ cols: 51, rows: 50 });
+      // Now the PHONE is the active typist: the desk refocusing/clicking
+      // (attach + user) doesn't take it back...
+      const n = pty!.resizes.length;
+      desk.emitMessage({ type: "resize", cols: 115, rows: 30, claim: "attach", user: true });
+      expect(pty!.resizes.length).toBe(n);
+      // ...its keystroke does.
+      desk.emitMessage({ type: "input", data: "y" });
+      expect(pty!.resizes.at(-1)).toEqual({ cols: 115, rows: 30 });
+      // After a minute without typing, opening on the phone takes it.
+      vi.advanceTimersByTime(61_000);
+      phone.emitMessage({ type: "resize", cols: 51, rows: 50, claim: "attach" });
+      expect(pty!.resizes.at(-1)).toEqual({ cols: 51, rows: 50 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a same-device reconnect inherits the size it owned", () => {
+    let pty: FakePty | null = null;
+    const manager = new RoomManager(() => (pty = new FakePty() as unknown as FakePty) as any);
+    const room = manager.getRoom("inherit", { cols: 80, rows: 24 }, "/tmp");
+    const desk = new FakeSocket();
+    room.attachClient({ id: "desk", name: "Desk", colorIndex: 0, cols: 115, rows: 30 }, desk);
+    const phone1 = new FakeSocket();
+    room.attachClient({ id: "ph1", name: "iPhone", colorIndex: 1, cols: 58, rows: 34, deviceKey: "ios-A" }, phone1);
+    phone1.emitMessage({ type: "input", data: "x" });          // the phone types: it owns 58x34
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 58, rows: 34 });
+    // Wake: a new socket from the same device. It must be told the size is
+    // ITS OWN (no foreign adopt), and the PTY must not move.
+    const n = pty!.resizes.length;
+    const phone2 = new FakeSocket();
+    room.attachClient({ id: "ph2", name: "iPhone", colorIndex: 1, cols: 58, rows: 34, deviceKey: "ios-A", nudge: false }, phone2);
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 58, rows: 34 });
+    expect(findMessages(phone2, "active_size").every((m) => m.clientId === "ph2")).toBe(true);
+    expect(findMessages(phone2, "active_size").at(-1)).toMatchObject({ cols: 58, rows: 34, clientId: "ph2" });
+    // ...and the desk opening/clicking still can't take it from an active typist.
+    desk.emitMessage({ type: "resize", cols: 115, rows: 30, claim: "attach", user: true });
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 58, rows: 34 });
+    void n;
+  });
+
+  it("terminal auto-replies (CPR, DA, focus, OSC) never take the size", () => {
+    let pty: FakePty | null = null;
+    const manager = new RoomManager(() => (pty = new FakePty() as unknown as FakePty) as any);
+    const room = manager.getRoom("replies", { cols: 80, rows: 24 }, "/tmp");
+    const desk = new FakeSocket();
+    room.attachClient({ id: "desk", name: "Desk", colorIndex: 0, cols: 114, rows: 33 }, desk);
+    const phone = new FakeSocket();
+    room.attachClient({ id: "ph", name: "iPhone", colorIndex: 1, cols: 56, rows: 32 }, phone);
+    phone.emitMessage({ type: "input", data: "x" });           // the phone types: owns 56x32
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 56, rows: 32 });
+    const n = pty!.resizes.length;
+    // Codex redraws and queries; the DESK's emulator answers. That is not
+    // the human at the desk typing — the size must not move (it used to,
+    // and the phone's answer moved it back: the 20–40ms flicker loop).
+    for (const reply of ["\x1b[12;40R", "\x1b[?62;22c", "\x1b[I", "\x1b]11;rgb:0d0d/1111/1717\x07", "\x1b[?1u"]) {
+      desk.emitMessage({ type: "input", data: reply });
+    }
+    expect(pty!.resizes.length).toBe(n);
+    // A real keystroke from the desk still takes it.
+    desk.emitMessage({ type: "input", data: "y" });
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 114, rows: 33 });
+  });
+
+  it("an explicit take wins even over an active typist", () => {
+    let pty: FakePty | null = null;
+    const manager = new RoomManager(() => (pty = new FakePty() as unknown as FakePty) as any);
+    const room = manager.getRoom("take", { cols: 115, rows: 30 }, "/tmp");
+    const desk = new FakeSocket();
+    room.attachClient({ id: "desk", name: "Desk", colorIndex: 0, cols: 115, rows: 30 }, desk);
+    desk.emitMessage({ type: "input", data: "ls" });
+    const phone = new FakeSocket();
+    room.attachClient({ id: "ph", name: "iPhone", colorIndex: 1, cols: 51, rows: 50 }, phone);
+    phone.emitMessage({ type: "resize", cols: 51, rows: 50, user: true, take: true });
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 51, rows: 50 });
+    expect(findMessages(phone, "active_size").at(-1)).toMatchObject({ cols: 51, rows: 50, clientId: "ph" });
+  });
+
+  it("an explicit take or a keystroke moves the size", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {
       ptyInstance = new FakePty() as unknown as FakePty;
@@ -313,12 +411,12 @@ describe("Room", () => {
     // The desktop CLI is actively typing right now.
     cli.emitMessage({ type: "input", data: "ls" });
 
-    // A phone opens the session and attach-claims its fitted size: opening
-    // is the latest user action, so the claim wins outright — even over
-    // someone who typed a moment ago. Strict recency, no idle windows.
+    // A phone opens the session and asks for its fitted size explicitly
+    // (take:true — "take mine"): that wins outright even over someone who
+    // typed a moment ago. (A plain open would not; see the test above.)
     const phone = new FakeSocket();
     room.attachClient({ id: "ph", name: "Phone", colorIndex: 1, cols: 46, rows: 28 }, phone);
-    phone.emitMessage({ type: "resize", cols: 46, rows: 28, claim: "attach" });
+    phone.emitMessage({ type: "resize", cols: 46, rows: 28, claim: "attach", take: true });
     expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 46, rows: 28 });
 
     // The CLI's next keystroke is now the latest user action: ownership
@@ -679,6 +777,28 @@ describe("Room", () => {
       ptyInstance!.emit("\x1b]11;?\x07");
       expect(ptyInstance!.writes.join("")).toBe("");
     });
+
+    it("a NEW headless room answers with the colors the last viewer (of any room) had — a light theme stays light", () => {
+      const ptys: FakePty[] = [];
+      const factory: PtyFactory = () => { const p = new FakePty(); ptys.push(p); return p as any; };
+      const manager = new RoomManager(factory);
+      const first = manager.getRoom("seen", { cols: 80, rows: 24 }, "/tmp");
+      // The browser attached on a white theme (its bg/fg ride on the attach URL).
+      first.setClientColors("ffffff", "1f2328");
+      expect(getDefaultViewerColors()).toEqual({ bg: "ffffff", fg: "1f2328" });
+
+      // The next room is created by the daemon and probed by Codex before any
+      // browser attaches: it is told white, not the dark default.
+      manager.getRoom("fresh", { cols: 80, rows: 24 }, "/tmp");
+      ptys[1].emit("\x1b]10;?\x07\x1b]11;?\x1b\\");
+      const answered = ptys[1].writes.join("");
+      expect(answered).toContain("]11;rgb:ffff/ffff/ffff");
+      expect(answered).toContain("]10;rgb:1f1f/2323/2828");
+
+      // Garbage never replaces a good answer; the dark default is restorable.
+      expect(setDefaultViewerColors("#fff", "nope")).toBe(false);
+      expect(setDefaultViewerColors("0d1117", "e6edf3")).toBe(true);
+    });
   });
 
   describe("getOutputSince (incremental preview feed)", () => {
@@ -777,28 +897,6 @@ describe("Room", () => {
       const factory: PtyFactory = () => {
         ptyInstance = new FakePty() as unknown as FakePty;
         return ptyInstance as any;
-
-    it("a NEW headless room answers with the colors the last viewer (of any room) had — a light theme stays light", () => {
-      const ptys: FakePty[] = [];
-      const factory: PtyFactory = () => { const p = new FakePty(); ptys.push(p); return p as any; };
-      const manager = new RoomManager(factory);
-      const first = manager.getRoom("seen", { cols: 80, rows: 24 }, "/tmp");
-      // The browser attached on a white theme (its bg/fg ride on the attach URL).
-      first.setClientColors("ffffff", "1f2328");
-      expect(getDefaultViewerColors()).toEqual({ bg: "ffffff", fg: "1f2328" });
-
-      // The next room is created by the daemon and probed by Codex before any
-      // browser attaches: it is told white, not the dark default.
-      manager.getRoom("fresh", { cols: 80, rows: 24 }, "/tmp");
-      ptys[1].emit("\x1b]10;?\x07\x1b]11;?\x1b\\");
-      const answered = ptys[1].writes.join("");
-      expect(answered).toContain("]11;rgb:ffff/ffff/ffff");
-      expect(answered).toContain("]10;rgb:1f1f/2323/2828");
-
-      // Garbage never replaces a good answer; the dark default is restorable.
-      expect(setDefaultViewerColors("#fff", "nope")).toBe(false);
-      expect(setDefaultViewerColors("0d1117", "e6edf3")).toBe(true);
-    });
       };
       const manager = new RoomManager(factory);
       const room = manager.getRoom(roomId, initialSize, "/tmp");

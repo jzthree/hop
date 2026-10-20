@@ -262,11 +262,84 @@ function normalizeEnv(rawEnv) {
     return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+// ── pty-keeper ──────────────────────────────────────────────────────────────
+// The terminals live in scripts/pty-keeper.js, NOT in this process, so a host
+// restart (a deploy, a crash) leaves every agent running and this host
+// re-adopts them on startup. On by default for a real home; a temp-dir test
+// home opts in with HOP_PTY_KEEPER=1 (and must shut its keeper down). Any
+// failure to reach a keeper falls back to owning the terminals directly —
+// exactly the old behaviour, so the keeper can never make hop unusable.
+const KEEPER_SOCK = process.env.HOP_PTY_KEEPER_SOCK || path.join(HOP_HOME, 'pty-keeper.sock');
+const keeperWanted = () => {
+    if (process.env.HOP_PTY_KEEPER === '0') return false;
+    if (process.env.HOP_PTY_KEEPER === '1') return true;
+    return !HOP_HOME.startsWith(os.tmpdir());
+};
+async function connectKeeper(hay) {
+    if (!keeperWanted() || typeof hay.KeeperClient !== 'function') return null;
+    try { return await hay.KeeperClient.connect(KEEPER_SOCK); } catch (e) { /* not running yet */ }
+    try {
+        const logDir = path.join(HOP_HOME, 'logs');
+        fs.mkdirSync(logDir, { recursive: true });
+        const fd = fs.openSync(path.join(logDir, 'pty-keeper.log'), 'a');
+        const { spawn } = require('child_process');
+        const child = spawn(process.execPath, [path.join(__dirname, 'pty-keeper.js')], {
+            detached: true,            // own session: survives this host, its group, its terminal
+            stdio: ['ignore', fd, fd],
+            env: { ...process.env, HOP_HOME, HOP_PTY_KEEPER_SOCK: KEEPER_SOCK }
+        });
+        child.unref();
+        console.log(`[hay-host] started pty-keeper (pid ${child.pid})`);
+    } catch (e) {
+        console.error(`[hay-host] could not start pty-keeper: ${e.message} — owning terminals directly`);
+        return null;
+    }
+    for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        try { return await hay.KeeperClient.connect(KEEPER_SOCK); } catch (e) { /* retry */ }
+    }
+    console.error('[hay-host] pty-keeper did not come up — owning terminals directly');
+    return null;
+}
+
 async function main() {
     const libPath = path.join(__dirname, '..', 'hay', 'apps', 'server', 'dist', 'lib.js');
     const hay = await import(pathToFileURL(libPath));
     loadViewerColors(hay);
-    const rooms = new hay.RoomManager(hay.createPty);
+    const keeper = await connectKeeper(hay);
+    const rooms = new hay.RoomManager(keeper ? keeper.factory() : hay.createPty);
+    if (keeper) {
+        // Re-adopt everything the keeper kept running across our restart.
+        let adopted = 0, gone = 0;
+        try {
+            // A replay that times out (the loop stalls hydrating the rooms
+            // before it) is retried after the rest: surf's single failure
+            // on 2026-10-12 left its agent running in the keeper with no
+            // room, unreachable until it was killed and resumed.
+            let pending = (await keeper.list()).filter((item) => {
+                if (item.exited) { keeper.forget(item.id); gone++; return false; }
+                return true;
+            });
+            for (let attempt = 1; attempt <= 3 && pending.length; attempt++) {
+                const failed = [];
+                for (const item of pending) {
+                    try {
+                        const { pty, replay } = await keeper.adopt(item);
+                        watchRoomEnd(rooms.adoptRoom(item.id, { cols: item.cols, rows: item.rows },
+                            existingCwdOr(item.cwd, FALLBACK_CWD), pty, replay, loadRoomModes(item.id)));
+                        adopted++;
+                    } catch (e) {
+                        console.error(`[hay-host] adopt ${item.id} failed (attempt ${attempt}): ${e.message}`);
+                        failed.push(item);
+                    }
+                }
+                pending = failed;
+            }
+        } catch (e) {
+            console.error(`[hay-host] keeper list failed: ${e.message}`);
+        }
+        console.log(`[hay-host] pty-keeper v${keeper.version} pid ${keeper.keeperPid}: adopted ${adopted} running terminal(s)${gone ? `, ${gone} had exited` : ''}`);
+    }
     const server = http.createServer(async (req, res) => {
         const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
         if (reqUrl.pathname === '/health') {
@@ -275,7 +348,11 @@ async function main() {
                 ok: true,
                 capabilities: {
                     localCliCount: true,
-                    outputSince: true
+                    outputSince: true,
+                    // Terminals live in pty-keeper: restarting THIS process
+                    // leaves every session running (scripts/restart-host.js).
+                    keeper: !!(keeper && keeper.connected),
+                    keeperPid: keeper ? keeper.keeperPid : null
                 }
             }));
             return;
@@ -542,7 +619,11 @@ async function main() {
                 // to undefined made claim sockets pull the full default tail.
                 replayBytes: Number.isFinite(replayRaw) && replayRaw >= 0 ? replayRaw : undefined,
                 // nudge=0: viewer already shows the current grid (wall tile)
-                nudge: wsUrl.searchParams.get('nudge') === '0' ? false : undefined
+                nudge: wsUrl.searchParams.get('nudge') === '0' ? false : undefined,
+                // sizeClaim=attach: run the attach-size election BEFORE the
+                // snapshot, so the client's first frame is already its size
+                // (iOS; see hay ClientInfo.sizeClaim).
+                sizeClaim: wsUrl.searchParams.get('sizeClaim') === 'attach' ? 'attach' : undefined
             },
             hay.createSocketAdapter(ws)
         );
@@ -566,9 +647,16 @@ async function main() {
         try {
             persistRoomBuffers(rooms);
         } catch (e) { }
-        try {
-            rooms.closeAll();
-        } catch (e) { }
+        // With a keeper, the terminals are NOT ours to end: this exit is a
+        // host restart, and the next host re-adopts them. Ending them is the
+        // keeper's {op:"shutdown"} (`hop stop --all`), never a host signal.
+        if (keeper && keeper.connected && process.env.HOP_HOST_KILL_TERMINALS !== '1') {
+            console.log('[hay-host] shutting down — terminals stay running in pty-keeper');
+        } else {
+            try {
+                rooms.closeAll();
+            } catch (e) { }
+        }
         try {
             wss.close();
             if (wssDeflate !== wss) wssDeflate.close();

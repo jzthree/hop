@@ -1,6 +1,7 @@
 import os from "node:os";
 import { EventEmitter } from "node:events";
 import pty, { IPty } from "node-pty-prebuilt-multiarch";
+import { applyShellIntegration } from "./shellIntegration";
 
 export type PtyFactoryOptions = {
   cols: number;
@@ -16,6 +17,8 @@ export type PtyFactoryOptions = {
   // the scrollback. The shell is re-exec'd afterwards so the session behaves
   // exactly as before once the command exits.
   command?: string;
+  /** The room this terminal belongs to — the keeper's key for it. */
+  id?: string;
 };
 
 export type PtyFactory = (options: PtyFactoryOptions) => IPty;
@@ -33,60 +36,53 @@ const resolveShell = (shellOverride?: string) => {
   return "/bin/bash";
 };
 
-export const createPty: PtyFactory = ({ cols, rows, cwd, env: envOverrides, shell, command }) => {
+/**
+ * Everything a terminal spawn needs, fully resolved on THIS side (env
+ * scrubbing, shell choice, the `-lc command; exec shell` wrapper) so a
+ * process that merely owns terminals (scripts/pty-keeper.js) can spawn it
+ * verbatim and never needs to change when this policy does.
+ */
+export type ResolvedSpawn = { file: string; args: string[]; cwd: string; env: Record<string, string>; cols: number; rows: number };
+
+export const resolveSpawn = ({ cols, rows, cwd, env: envOverrides, shell, command }: PtyFactoryOptions): ResolvedSpawn => {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") {
+      env[key] = value;
+    }
+  }
+  env.PROMPT_EOL_MARK = "";
+  if (envOverrides && typeof envOverrides === "object") {
+    for (const [key, value] of Object.entries(envOverrides)) {
+      if (!key || typeof value !== "string") continue;
+      env[key] = value;
+    }
+  }
+  env.TERM = "xterm-256color";
+  if (!env.COLORTERM) {
+    env.COLORTERM = "truecolor";
+  }
+  if (!envOverrides || !("NO_COLOR" in envOverrides)) delete env.NO_COLOR;
+  if (env.FORCE_COLOR === "0" && (!envOverrides || !("FORCE_COLOR" in envOverrides))) {
+    delete env.FORCE_COLOR;
+  }
+  const shellPath = resolveShell(shell);
+  // A `codex` typed at a hop prompt runs standalone (shellIntegration.ts).
+  applyShellIntegration(shellPath, env);
+  const args = command
+    ? ["-lc", `${command}; exec ${shellPath} -l`]
+    : [];
+  return { file: shellPath, args, cwd, env, cols, rows };
+};
+
+export const createPty: PtyFactory = (options) => {
   const mode = process.env.PTY_MODE ?? "native";
   if (mode === "mock") {
     return createMockPty();
   }
   try {
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (typeof value === "string") {
-        env[key] = value;
-      }
-    }
-    // Shared PTYs get resized whenever a differently-sized device attaches
-    // (autofit claims), and every resize makes zsh re-emit its end-of-line
-    // mark ("%" + a line of spaces + CR) into history at the OLD width —
-    // rendering as stray reverse-video % at line ends for every later viewer.
-    // Suppress the mark for hop-spawned shells; user env overrides still win.
-    env.PROMPT_EOL_MARK = "";
-    if (envOverrides && typeof envOverrides === "object") {
-      for (const [key, value] of Object.entries(envOverrides)) {
-        if (!key || typeof value !== "string") continue;
-        env[key] = value;
-      }
-    }
-    env.TERM = "xterm-256color";
-    if (!env.COLORTERM) {
-      env.COLORTERM = "truecolor";
-    }
-    // A hop session is an INTERACTIVE terminal, so it must never inherit a
-    // "this output isn't for a human" color suppressor from whatever
-    // launched the daemon. Claude Code sets NO_COLOR=1 for the shells it
-    // runs commands in — so a daemon (re)started from inside an agent
-    // session propagated NO_COLOR into every PTY it spawned afterwards, and
-    // every app in every session silently went monochrome: measured, claude
-    // emits ZERO colored SGR with NO_COLOR=1 and full 24-bit truecolor
-    // without it. That is the whole "claude has no color in hop but does in
-    // iTerm" report. Explicit per-session env overrides above still win.
-    if (!envOverrides || !("NO_COLOR" in envOverrides)) delete env.NO_COLOR;
-    if (env.FORCE_COLOR === "0" && (!envOverrides || !("FORCE_COLOR" in envOverrides))) {
-      delete env.FORCE_COLOR;
-    }
-    const shellPath = resolveShell(shell);
-    // `-lc` runs the command in a login shell (rc files, aliases, PATH all
-    // as the user has them), then `exec <shell> -l` replaces it with the
-    // normal interactive shell, so exiting the app leaves a usable session.
-    const args = command
-      ? ["-lc", `${command}; exec ${shellPath} -l`]
-      : [];
-    return pty.spawn(shellPath, args, {
-      cols,
-      rows,
-      cwd,
-      env
-    });
+    const r = resolveSpawn(options);
+    return pty.spawn(r.file, r.args, { cols: r.cols, rows: r.rows, cwd: r.cwd, env: r.env });
   } catch (error) {
     if (mode === "auto") {
       return createMockPty();

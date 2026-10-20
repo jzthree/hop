@@ -2688,21 +2688,25 @@ export const SessionSwitcher = ({
     }
   };
 
-  const handOffToCodexApp = async (s: SwitcherSession) => {
+  // Back to the agent's desktop app on the Mac: Codex lets one process
+  // write a thread, and the Claude app adopts the CLI transcript in place —
+  // either way this session's agent stops first (Stop & park, resumable).
+  const handOffToApp = async (s: SwitcherSession, app: "codex" | "claude") => {
     setSheet(null);
     const name = s.displayName || s.name;
-    if (!window.confirm(`Stop ${name} here and open it in the Codex app on the Mac?\n\nIt is parked, and opening it in hop again picks it back up.`)) return;
+    const label = app === "codex" ? "Codex app" : "Claude app";
+    if (!window.confirm(`Stop ${name} here and open it in the ${label} on the Mac?\n\nIt is parked, and opening it in hop again picks it back up.`)) return;
     try {
-      const res = await fetch("/api/codex/open-in-app", {
+      const res = await fetch(`/api/${app}/open-in-app`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-hop-actor": "user" },
         body: JSON.stringify({ internalName: sessionKey(s), handOff: true })
       });
       const data = await res.json().catch(() => ({} as { error?: string }));
-      onNotice(res.ok ? `${name} handed to the Codex app` : (data.error || "Could not open the Codex app"));
+      onNotice(res.ok ? `${name} handed to the ${label}` : (data.error || `Could not open the ${label}`));
       if (res.ok) onRefresh?.();
     } catch {
-      onNotice("Could not open the Codex app");
+      onNotice(`Could not open the ${label}`);
     }
   };
 
@@ -4147,12 +4151,9 @@ export const SessionSwitcher = ({
                     {target === "codex" ? "Codex" : "Claude"}…
                   </button>
                 ))}
-                {/* Back to the Codex app on the Mac. Codex lets one process
-                    write a thread, so the app can continue it only once this
-                    session's codex stops: Stop & park (resumable), then open. */}
-                {appLabel(sheetSession) === "codex" && (
-                  <button type="button" onClick={() => { void handOffToCodexApp(sheetSession); }}>
-                    Hand off to Codex app…
+                {(appLabel(sheetSession) === "codex" || appLabel(sheetSession) === "claude") && (
+                  <button type="button" onClick={() => { void handOffToApp(sheetSession, appLabel(sheetSession) as "codex" | "claude"); }}>
+                    Hand off to {appLabel(sheetSession) === "codex" ? "Codex" : "Claude"} app…
                   </button>
                 )}
                 <button

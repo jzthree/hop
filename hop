@@ -6118,6 +6118,106 @@ function codexRootThreadId(sessionId) {
  * Stop & park (resumable): park the session, pre-write its resume command,
  * and stop the process — records, metas and buffers all stay.
  */
+const CLAUDE_APP_PATH = '/Applications/Claude.app';
+const CLAUDE_APP_LOG = path.join(os.homedir(), 'Library', 'Logs', 'Claude', 'main.log');
+const CLAUDE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function claudeAppPid() {
+    try {
+        const out = require('child_process').execFileSync('/usr/bin/pgrep', ['-f', `${CLAUDE_APP_PATH}/Contents/MacOS/Claude$`], { encoding: 'utf8' });
+        const pid = Number(out.trim().split('\n')[0]);
+        return pid > 0 ? pid : null;
+    } catch (e) { return null; }
+}
+// The store the RUNNING app reads: its own CLAUDE_CONFIG_DIR if it was
+// launched with one (from a shell that had it), else ~/.claude — which is
+// also what a launch from hop gets, since openClaudeAppResume launches it
+// with the variable removed.
+function claudeAppConfigDir() {
+    const home = path.join(os.homedir(), '.claude');
+    const pid = claudeAppPid();
+    if (!pid) return home;
+    try {
+        const env = require('child_process').execFileSync('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+        const m = env.match(/(?:^|\s)CLAUDE_CONFIG_DIR=(\S+)/);
+        return m ? m[1] : home;
+    } catch (e) { return home; }
+}
+// Put the transcript where the app looks: same project slug, under the
+// app's config dir. Same dir → nothing to do. A copy is a regular file (the
+// app refuses links). Never clobber what the app wrote: an existing copy is
+// replaced only when it is a strict prefix of hop's (hop continued after an
+// earlier hand-off and the app has not written since).
+function stageClaudeTranscriptForApp(file, appDir, id) {
+    const root = path.resolve(path.dirname(path.dirname(path.dirname(file))));
+    if (root === path.resolve(appDir)) return { ok: true, copied: false };
+    const slug = path.basename(path.dirname(file));
+    const dest = path.join(appDir, 'projects', slug, `${id}.jsonl`);
+    const src = fs.readFileSync(file);
+    let cur = null;
+    try { cur = fs.readFileSync(dest); } catch (e) { /* not there yet */ }
+    if (cur && cur.equals(src)) return { ok: true, copied: false };
+    if (cur && !(cur.length < src.length && src.subarray(0, cur.length).equals(cur))) {
+        return { ok: false, error: 'The Claude app already continued this conversation — open it there, or fork it in hop' };
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const tmp = `${dest}.hop-${process.pid}.tmp`;
+    fs.writeFileSync(tmp, src, { mode: 0o600 });
+    fs.renameSync(tmp, dest);
+    return { ok: true, copied: true };
+}
+const claudeLogSize = () => { try { return fs.statSync(CLAUDE_APP_LOG).size; } catch (e) { return 0; } };
+const claudeLogSince = (from) => {
+    try {
+        const fd = fs.openSync(CLAUDE_APP_LOG, 'r');
+        const len = Math.max(0, fs.fstatSync(fd).size - from);
+        const buf = Buffer.alloc(Math.min(len, 4 * 1024 * 1024));
+        fs.readSync(fd, buf, 0, buf.length, from);
+        fs.closeSync(fd);
+        return buf.toString('utf8');
+    } catch (e) { return ''; }
+};
+async function waitForClaudeLog(from, test, ms) {
+    for (const end = Date.now() + ms; Date.now() < end;) {
+        const hit = test(claudeLogSince(from));
+        if (hit) return hit;
+        await new Promise((r) => setTimeout(r, 300));
+    }
+    return null;
+}
+// Open claude://resume and read the app's verdict from its log. A cold
+// launch races the app's sign-in (the link fails "auth_expired" until the
+// account loads), so the app is started first and the link retried.
+async function openClaudeAppResume(id) {
+    const env = { ...process.env };
+    delete env.CLAUDE_CONFIG_DIR;
+    const open = (args) => new Promise((resolve) => {
+        execFile('/usr/bin/open', args, { timeout: 8000, env }, () => resolve());
+    });
+    if (!claudeAppPid()) {
+        const from = claudeLogSize();
+        await open(['-a', CLAUDE_APP_PATH]);
+        await waitForClaudeLog(from, (t) => /sdk loaded|getDefaultWorkspaceFolders/.test(t), 30000);
+    }
+    let last = 'The Claude app did not answer';
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const from = claudeLogSize();
+        await open([`claude://resume?session=${id}`]);
+        const verdict = await waitForClaudeLog(from, (t) => {
+            const failed = t.match(new RegExp(`Failed to import CLI session[^\\n]*${id}[^\\n]*category: '([a-z_]+)'`));
+            if (failed) return { ok: false, category: failed[1] };
+            if (t.includes(`local_${id}`) || t.includes(`CLI session ${id} already`)) return { ok: true };
+            return null;
+        }, 15000);
+        if (verdict?.ok) return { ok: true };
+        if (!verdict) { last = 'The Claude app did not confirm the hand-off'; break; }
+        last = verdict.category === 'transcript_missing' ? 'The Claude app could not find the transcript'
+            : verdict.category === 'auth_expired' ? 'The Claude app is not signed in'
+                : `The Claude app refused the session (${verdict.category})`;
+        if (verdict.category !== 'auth_expired') break;
+        await new Promise((r) => setTimeout(r, 3000));
+    }
+    return { ok: false, error: last };
+}
 async function stopAndParkSession(resolved) {
     const config = getEffectiveSessionConfig(resolved);
     if (!config || config.type === 'port') return { ok: false, error: 'Session not a terminal' };
@@ -13334,6 +13434,51 @@ happens until someone clicks it.
                 } catch (e) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: e?.message || 'Could not open the Codex app' }));
+                }
+            });
+            return;
+        }
+
+        // API: hand a Claude session to the Claude desktop app — the
+        // Claude twin of /api/codex/open-in-app. The app adopts a CLI
+        // conversation IN PLACE from claude://resume?session=<id>: it reads
+        // <its config dir>/projects/*/<id>.jsonl (a regular file — it
+        // refuses links), registers it as local_<id> and continues writing
+        // the same file. So: stop hop's claude (one writer), put the
+        // transcript where the app looks, open the link, and read the app's
+        // own log for the verdict — the link is fire-and-forget otherwise.
+        if (parsedUrl.pathname === '/api/claude/open-in-app' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', async () => {
+                const fail = (code, error) => {
+                    res.writeHead(code, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error }));
+                };
+                try {
+                    const { internalName } = JSON.parse(body || '{}');
+                    const session = internalName ? resolveSessionInternalName(null, internalName) : null;
+                    if (!session) return fail(404, 'Session not found');
+                    const rec = readClaudeSessionRecord(session);
+                    const id = rec?.sessionId || readTurnSessionId(session);
+                    if (!id || !CLAUDE_SESSION_ID_RE.test(id)) return fail(400, 'No Claude conversation to open');
+                    if (process.platform !== 'darwin' || !fs.existsSync(CLAUDE_APP_PATH)) {
+                        return fail(409, 'The Claude app is not installed on this host');
+                    }
+                    const found = findClaudeTranscriptById(id);
+                    if (!found) return fail(404, 'This conversation has no transcript on this host');
+                    // Always stopped: the app continues the SAME file, and two
+                    // writers would interleave turns into one transcript.
+                    const stopped = (await stopAndParkSession(session)).ok;
+                    const appDir = claudeAppConfigDir();
+                    const staged = stageClaudeTranscriptForApp(found.file, appDir, id);
+                    if (!staged.ok) return fail(409, staged.error);
+                    const verdict = await openClaudeAppResume(id);
+                    if (!verdict.ok) return fail(502, verdict.error);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, id, stopped, copied: staged.copied, appSessionId: `local_${id}` }));
+                } catch (e) {
+                    fail(500, e?.message || 'Could not open the Claude app');
                 }
             });
             return;

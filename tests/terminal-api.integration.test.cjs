@@ -1473,3 +1473,56 @@ test('restore still refuses a record whose transcript lives in another directory
   await fs.rm(path.join(dir, `${internal}.json`), { force: true });
   await fs.rm(path.join(dir, `${internal}.meta`), { force: true });
 });
+
+test('the desktop pipe is off by default and, once on, carries bytes both ways', async () => {
+  const WebSocket = require('ws');
+  const net = require('node:net');
+  // A stand-in VNC server: greets like one, then echoes upper-cased.
+  const vnc = net.createServer((c) => {
+    c.write('RFB 003.008\n');
+    c.on('data', (d) => c.write(d.toString().toUpperCase()));
+  });
+  await new Promise((r) => vnc.listen(0, '127.0.0.1', r));
+  const vncPort = vnc.address().port;
+  const configPath = path.join(hopHome, '.config.json');
+  const original = await fs.readFile(configPath, 'utf8').catch(() => null);
+  const attach = (headers = {}) => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${state.port}/desktop/ws?token=${state.sessionSecret}`, { headers });
+    const got = [];
+    ws.on('unexpected-response', (_req, res) => resolve({ status: res.statusCode }));
+    ws.on('error', () => resolve({ status: 'error' }));
+    ws.on('message', (d) => {
+      got.push(d.toString());
+      if (got.length === 1) ws.send('hello');
+      else { ws.close(); resolve({ status: 101, got }); }
+    });
+  });
+  try {
+    const off = await requestJson(state.port, state.sessionSecret, 'GET', '/api/desktop');
+    assert.equal(off.data.enabled, false);
+    assert.equal((await attach()).status, 404, 'no desktop until it is turned on');
+
+    const base = original ? JSON.parse(original) : {};
+    await fs.writeFile(configPath, JSON.stringify({ ...base, desktop: { enabled: true, port: vncPort } }));
+    const on = await requestJson(state.port, state.sessionSecret, 'GET', '/api/desktop');
+    assert.equal(on.data.enabled, true);
+    assert.equal(on.data.reachable, true);
+    assert.equal(on.data.version, '003.008');
+
+    const piped = await attach();
+    assert.equal(piped.status, 101);
+    assert.deepEqual(piped.got, ['RFB 003.008\n', 'HELLO']);
+
+    const anon = await new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${state.port}/desktop/ws`);
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode));
+      ws.on('open', () => { ws.close(); resolve(101); });
+      ws.on('error', () => resolve('error'));
+    });
+    assert.equal(anon, 401, 'the desktop needs a hop login');
+  } finally {
+    if (original === null) await fs.rm(configPath, { force: true });
+    else await fs.writeFile(configPath, original);
+    vnc.close();
+  }
+});

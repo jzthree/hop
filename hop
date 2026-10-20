@@ -2746,6 +2746,110 @@ function saveHopConfig(config) {
     writePrivateFile(HOP_CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
+// --- Remote desktop ---
+// hop carries a VNC server that is already on the machine (macOS Screen
+// Sharing, or x11vnc/wayvnc on Linux) through its own authenticated link:
+// /desktop/ws pipes bytes to the loopback VNC port and the web client draws
+// it with noVNC. hop never opens that port to the network, and the VNC
+// server's own login (the Mac account) still applies on top of hop's.
+// Off until `hop desktop on`; read per request, so no restart.
+const DESKTOP_DEFAULT_PORT = 5900;
+function getDesktopConfig() {
+    const d = getHopConfig().desktop || {};
+    const port = Number.isInteger(d.port) && d.port > 0 && d.port < 65536 ? d.port : DESKTOP_DEFAULT_PORT;
+    return { enabled: d.enabled === true, port };
+}
+
+// Is a VNC server answering on the port? It speaks first: "RFB 003.008\n".
+function probeDesktopServer(port, timeoutMs = 1500) {
+    return new Promise((resolve) => {
+        let done = false;
+        let got = '';
+        const finish = (result) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            try { sock.destroy(); } catch (e) { /* closed */ }
+            resolve(result);
+        };
+        const sock = net.connect({ host: '127.0.0.1', port });
+        const timer = setTimeout(() => finish({ reachable: false, error: 'timeout' }), timeoutMs);
+        sock.on('data', (d) => {
+            got += d.toString('latin1');
+            if (got.length < 12) return;
+            const m = /^RFB (\d{3}\.\d{3})\n/.exec(got);
+            finish(m ? { reachable: true, version: m[1] } : { reachable: false, error: 'not a VNC server' });
+        });
+        sock.on('error', (e) => finish({ reachable: false, error: e.code === 'ECONNREFUSED' ? 'nothing listening' : String(e.code || e.message) }));
+        sock.on('close', () => finish({ reachable: false, error: 'closed' }));
+    });
+}
+
+// A browser only sends the login cookie from hop's own pages, but a desktop
+// is worth the belt and braces: a cookie-authenticated upgrade must come
+// from a page on the host it is addressed to.
+function desktopOriginOk(req, wsAuth, parsedUrl) {
+    if (wsAuth.via !== 'cookie' || typeof parsedUrl.query.token === 'string') return true;
+    const origin = req.headers.origin;
+    if (!origin) return true; // not a browser
+    try { return new URL(origin).host === String(req.headers.host || ''); } catch (e) { return false; }
+}
+
+function handleDesktopUpgrade(req, socket, head, wsAuth, parsedUrl) {
+    const config = getDesktopConfig();
+    if (!config.enabled) {
+        socket.write('HTTP/1.1 404 Desktop Off\r\n\r\n');
+        socket.destroy();
+        return;
+    }
+    if (!desktopOriginOk(req, wsAuth, parsedUrl)) {
+        log(`[desktop] refused an upgrade from origin ${req.headers.origin}`, YELLOW);
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+    }
+    const wss = new WebSocket.Server({ noServer: true, perMessageDeflate: false });
+    wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.close();
+        const who = wsAuth.session?.label || wsAuth.session?.deviceName || wsAuth.via;
+        const started = Date.now();
+        log(`[desktop] ${who} connected`, CYAN);
+        const vnc = net.connect({ host: '127.0.0.1', port: config.port });
+        vnc.setNoDelay(true);
+        let closed = false;
+        const closeBoth = (why) => {
+            if (closed) return;
+            closed = true;
+            clearInterval(heartbeat);
+            try { vnc.destroy(); } catch (e) { /* gone */ }
+            try { ws.close(1000); } catch (e) { /* gone */ }
+            log(`[desktop] ${who} disconnected after ${Math.round((Date.now() - started) / 1000)}s${why ? ` (${why})` : ''}`, DIM);
+        };
+        // Screen updates can outrun a slow link: stop reading the VNC server
+        // while the browser is behind, rather than buffer frames in memory.
+        let paused = false;
+        vnc.on('data', (d) => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            ws.send(d, { binary: true }, () => {
+                if (paused && ws.bufferedAmount < 1 << 20) { paused = false; vnc.resume(); }
+            });
+            if (!paused && ws.bufferedAmount > 4 << 20) { paused = true; vnc.pause(); }
+        });
+        vnc.on('error', (e) => closeBoth(e.code === 'ECONNREFUSED' ? `no VNC server on port ${config.port}` : String(e.code || e.message)));
+        vnc.on('close', () => closeBoth());
+        ws.on('message', (d) => { if (!closed) vnc.write(Buffer.isBuffer(d) ? d : Buffer.from(d)); });
+        ws.on('close', () => closeBoth());
+        ws.on('error', () => closeBoth());
+        let alive = true;
+        ws.on('pong', () => { alive = true; });
+        const heartbeat = setInterval(() => {
+            if (!alive) { closeBoth('no pong'); try { ws.terminate(); } catch (e) { /* gone */ } return; }
+            alive = false;
+            try { ws.ping(); } catch (e) { /* closing */ }
+        }, 30000);
+    });
+}
+
 // Claude asks how to resume a large conversation ("1. Resume from summary
 // (recommended) / 2. Resume full session as-is / 3. Don't ask me again"), so a
 // restored session comes back alive but frozen on a question. There is no CLI
@@ -14472,6 +14576,15 @@ happens until someone clicks it.
             return;
         }
 
+        // API: remote desktop — is it on, and is a VNC server answering?
+        if (parsedUrl.pathname === '/api/desktop' && req.method === 'GET') {
+            const config = getDesktopConfig();
+            const probe = config.enabled ? await probeDesktopServer(config.port) : { reachable: false };
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ enabled: config.enabled, port: config.port, platform: process.platform, ...probe }));
+            return;
+        }
+
         // API: check-backs — list / schedule / cancel (lib/checkbacks.js)
         if (parsedUrl.pathname === '/api/checkbacks' && req.method === 'GET') {
             const now = Date.now();
@@ -15440,6 +15553,11 @@ happens until someone clicks it.
         if (!isAuthenticated) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
             socket.destroy();
+            return;
+        }
+
+        if (parsedUrl.pathname === '/desktop/ws') {
+            handleDesktopUpgrade(req, socket, head, wsAuth, parsedUrl);
             return;
         }
 
@@ -17550,7 +17668,7 @@ const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
     'password', 'auth', 'user', 'workspace', 'session', 'wipe', 'restore', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
-    'mail', 'registration', 'canonical'
+    'mail', 'registration', 'canonical', 'desktop'
 ];
 
 // Suggest the closest known command for typos (small edit distances only).
@@ -17691,6 +17809,11 @@ const HELP_SECTIONS = [
     ] },
     { title: 'Client mode (for users)', lines: [
         `hop client <credentials>  Run tunnel with exported credentials`,
+    ] },
+    { title: 'Remote desktop', lines: [
+        `hop desktop               Show whether the desktop is shared through hop`,
+        `hop desktop on [--port N] Share this machine's VNC server (macOS Screen Sharing) in hop`,
+        `hop desktop off           Stop sharing it`,
     ] },
     { title: 'Math', lines: [
         `hop math '<latex>'        Render a LaTeX formula (inline image where supported, else Unicode)`,
@@ -19682,6 +19805,46 @@ async function main() {
     // it does not move anything by itself; it tells clients where to go and
     // enables the one-time session handoff, so devices can follow a move
     // without being re-authenticated by hand.
+    if (process.argv[2] === 'desktop') {
+        const sub = String(process.argv[3] || 'status').toLowerCase();
+        const config = getDesktopConfig();
+        const enableHint = process.platform === 'darwin'
+            ? `Turn on macOS Screen Sharing: System Settings → General → Sharing → Screen Sharing.`
+            : `Run a VNC server on 127.0.0.1:${config.port} (x11vnc on X11, wayvnc on Wayland).`;
+        if (sub === 'on' || sub === 'enable') {
+            const portIdx = process.argv.indexOf('--port');
+            const port = portIdx > 0 ? parseInt(process.argv[portIdx + 1], 10) : config.port;
+            if (!Number.isInteger(port) || port <= 0 || port >= 65536) {
+                log(`Usage: hop desktop on [--port <vnc port>]`, RED);
+                process.exit(1);
+            }
+            saveHopConfig({ ...getHopConfig(), desktop: { enabled: true, port } });
+            const probe = await probeDesktopServer(port);
+            log(`\n${GREEN}✓ Desktop sharing is on.${RESET} Open the wall and choose ${CYAN}Desktop${RESET}.`, GREEN);
+            log(`  hop login (password + code) gets you to it; the VNC server then asks for its own login.`, DIM);
+            if (!probe.reachable) {
+                log(`\n${YELLOW}No VNC server is answering on port ${port} yet (${probe.error}).${RESET}`, YELLOW);
+                log(`  ${enableHint}`, RESET);
+            }
+            process.exit(0);
+        }
+        if (sub === 'off' || sub === 'disable') {
+            saveHopConfig({ ...getHopConfig(), desktop: { enabled: false, port: config.port } });
+            log(`\n${GREEN}✓ Desktop sharing is off.${RESET} Open desktop views close at their next connect.`, GREEN);
+            process.exit(0);
+        }
+        if (sub !== 'status') {
+            log(`Usage: hop desktop [on [--port N] | off]`, RED);
+            process.exit(1);
+        }
+        const probe = await probeDesktopServer(config.port);
+        log(`\nDesktop sharing: ${config.enabled ? `${GREEN}on${RESET}` : `${DIM}off${RESET}`}  (VNC port ${config.port})`, RESET);
+        log(`VNC server: ${probe.reachable ? `${GREEN}answering${RESET} (RFB ${probe.version})` : `${YELLOW}not answering${RESET} (${probe.error})`}`, RESET);
+        if (!probe.reachable) log(`  ${enableHint}`, DIM);
+        if (!config.enabled) log(`\nTurn on: ${CYAN}hop desktop on${RESET}`, RESET);
+        process.exit(0);
+    }
+
     if (process.argv[2] === 'canonical') {
         const value = process.argv[3];
         const current = getCanonicalHost();

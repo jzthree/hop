@@ -129,6 +129,8 @@ type Props = {
   onOpenViews?: (session?: string, item?: string) => void;
   // The Codex desktop app's threads, continued in hop.
   onOpenCodexApp?: () => void;
+  // This machine's own desktop (hop desktop on); absent while it is off.
+  onOpenDesktop?: () => void;
   /** The ⏰ chip: what hop will type into this session, and when. */
   onOpenCheckbacks?: (session: string) => void;
 };
@@ -351,6 +353,7 @@ const PHONE_ICONS: Record<string, string> = {
   grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
   tray: "M3 13l3-8h12l3 8v6H3zM3 13h5l1.5 2.5h5L16 13h5",
   window: "M3 5h18v14H3zM3 9h18M6 7h.01M8.5 7h.01",
+  display: "M3 4h18v12H3zM8 20h8M12 16v4",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3",
   keyboard: "M2 6h20v12H2zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10",
   auto: "M12 3a9 9 0 1 0 0 18zM12 3a9 9 0 0 1 0 18",
@@ -1385,6 +1388,7 @@ export const SessionSwitcher = ({
   onFind,
   onOpenViews,
   onOpenCodexApp,
+  onOpenDesktop,
   onOpenCheckbacks
 }: Props) => {
   // View state survives a REFRESH but not a new tab: sessionStorage, not
@@ -3489,6 +3493,7 @@ export const SessionSwitcher = ({
                 {onOpenViews && menuItem("Views", () => onOpenViews(), { icon: "tray", note: unseenViewSessions > 0 ? `${unseenViewSessions} new` : undefined })}
                 {onOpenCheckbacks && menuItem("Scheduled", () => onOpenCheckbacks("*"), { icon: "clock", note: scheduledTotal > 0 ? String(scheduledTotal) : undefined })}
                 {onOpenCodexApp && menuItem("Codex app threads", onOpenCodexApp, { icon: "window" })}
+                {onOpenDesktop && menuItem("Desktop", onOpenDesktop, { icon: "display" })}
                 {onFind && menuItem("Find in terminal", onFind, { icon: "search" })}
                 {onToggleKeyboard && menuItem("Keyboard", onToggleKeyboard, { icon: "keyboard" })}
               </div>
@@ -3692,6 +3697,13 @@ export const SessionSwitcher = ({
               {unseenViewSessions > 0
                 ? <span className="views-entry-count fresh">{unseenViewSessions} new</span>
                 : (() => { const n = visibleSessions.reduce((k, s) => k + (s.views?.count || 0), 0); return n > 0 ? <span className="views-entry-count">{n}</span> : null; })()}
+            </button>
+          )}
+          {onOpenDesktop && (
+            <button type="button" className="switcher-action views-entry" aria-label="Remote desktop"
+                    title="This machine's screen, through hop" onClick={() => onOpenDesktop()}>
+              <span aria-hidden="true">🖥</span>
+              Desktop
             </button>
           )}
           {onOpenCheckbacks && scheduledTotal > 0 && (

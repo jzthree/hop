@@ -27,6 +27,7 @@ import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
 import { SessionRail } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
+import { DesktopView } from "./components/DesktopView";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { SecondaryPane } from "./components/SecondaryPane";
@@ -727,6 +728,18 @@ const App = () => {
   // an object with none open it fleet-wide. Null = closed.
   const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string } | null>(null);
   const [codexAppOpen, setCodexAppOpen] = useState(false);
+  // The machine's desktop through hop: offered on the wall once `hop desktop
+  // on` has been run there; checked on load and each time the wall opens.
+  const [desktopOpen, setDesktopOpen] = useState(false);
+  const [desktopEnabled, setDesktopEnabled] = useState(false);
+  useEffect(() => {
+    let live = true;
+    fetch("/api/desktop", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (live) setDesktopEnabled(!!d?.enabled); })
+      .catch(() => { /* an older daemon: no desktop */ });
+    return () => { live = false; };
+  }, [switcherOpen]);
   // The ⏰ chip's window: what is waiting on a session.
   const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(null);
   const sessionsRef = useRef(sessions);
@@ -4375,6 +4388,7 @@ const App = () => {
             tileWsBase={resolveTunnelWsUrl()}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             onOpenCodexApp={() => setCodexAppOpen(true)}
+            onOpenDesktop={desktopEnabled ? () => setDesktopOpen(true) : undefined}
             onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
@@ -5077,6 +5091,7 @@ const App = () => {
             folders={folders}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             onOpenCodexApp={() => setCodexAppOpen(true)}
+            onOpenDesktop={desktopEnabled ? () => setDesktopOpen(true) : undefined}
             onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
@@ -5251,6 +5266,7 @@ const App = () => {
           onOpen={(_internal, displayName) => { setCodexAppOpen(false); window.location.href = buildSessionPath(displayName); }}
         />
       )}
+      {desktopOpen && <DesktopView wsBase={resolveTunnelWsUrl()} onClose={() => setDesktopOpen(false)} />}
       {viewsOpen && (
         <ViewsPanel session={viewsOpen.session} item={viewsOpen.item} sessions={sessions} dock={viewsOpen.dock}
                     onClose={() => setViewsOpen(null)} />

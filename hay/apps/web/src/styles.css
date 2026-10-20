@@ -5750,3 +5750,67 @@ body.pane-dragging { user-select: none; }
 }
 .phone-term-caret { font-size: 11px; opacity: 0.55; flex: none; }
 .phone-term-title .phone-term-name { flex: 0 1 auto; }
+
+/* Remote desktop (DesktopView): the machine's screen through hop, full
+   window, with a slim bar. noVNC draws into .desktop-screen. */
+.desktop-view {
+  position: fixed;
+  inset: 0;
+  z-index: 760;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+.desktop-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  padding-top: max(6px, env(safe-area-inset-top));
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+}
+.desktop-status { font-size: 12.5px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-status.live { color: var(--ink); }
+.desktop-tool {
+  border: 1px solid var(--line);
+  background: var(--bg-alt);
+  color: var(--ink);
+  border-radius: 7px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.desktop-tool.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.desktop-tool:disabled { opacity: 0.5; cursor: default; }
+.desktop-screen { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+.desktop-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(340px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+}
+.desktop-card-title { font-weight: 600; font-size: 14px; }
+.desktop-card-note { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-muted); }
+.desktop-input {
+  font: inherit;
+  font-size: 14px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+}
+.desktop-card-actions { display: flex; justify-content: flex-end; gap: 8px; }

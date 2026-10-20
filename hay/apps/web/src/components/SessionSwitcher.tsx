@@ -362,8 +362,8 @@ const PHONE_ICONS: Record<string, string> = {
   moon: "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z",
   gear: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"
 };
-const PhoneIcon = ({ name }: { name: string }) => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+const PhoneIcon = ({ name, size = 20 }: { name: string; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d={PHONE_ICONS[name] || ""} />
   </svg>
 );
@@ -3703,14 +3703,14 @@ export const SessionSwitcher = ({
           {onOpenDesktop && (
             <button type="button" className="switcher-action views-entry" aria-label="Remote desktop"
                     title="This machine's screen, through hop" onClick={() => onOpenDesktop()}>
-              <span aria-hidden="true">🖥</span>
+              <span className="switcher-action-icon"><PhoneIcon name="display" size={15} /></span>
               Desktop
             </button>
           )}
           {onOpenCheckbacks && scheduledTotal > 0 && (
             <button type="button" className="switcher-action views-entry" aria-label="Scheduled on every session"
                     title="Every check-back hop will type, across your sessions" onClick={() => onOpenCheckbacks("*")}>
-              <span aria-hidden="true">⏰</span>
+              <span className="switcher-action-icon"><PhoneIcon name="clock" size={15} /></span>
               Scheduled
               <span className="views-entry-count">{scheduledTotal}</span>
             </button>

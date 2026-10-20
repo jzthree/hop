@@ -5824,3 +5824,5 @@ body.pane-dragging { user-select: none; }
   color: var(--accent);
   cursor: pointer;
 }
+/* Line icons in the wall's header buttons sit on the text like its glyphs. */
+.switcher-action-icon { display: inline-flex; align-items: center; opacity: 0.85; }

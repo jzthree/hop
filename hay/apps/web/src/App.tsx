@@ -25,6 +25,7 @@ import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
+import { SessionRail } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { MobileKeyboard } from "./components/MobileKeyboard";
 import { SessionSwitcher } from "./components/SessionSwitcher";
@@ -455,6 +456,8 @@ const App = () => {
   const [terminalReady, setTerminalReady] = useState(false);
   const [reconnectToken, setReconnectToken] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // The Slack-style session rail (components/SessionRail.tsx).
+  const [railOpen, setRailOpen] = useState(false);
   const [searchActive, setSearchActive] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchInfo, setSearchInfo] = useState({ index: 0, total: 0 });
@@ -4293,6 +4296,15 @@ const App = () => {
           <div className="topbar-actions">
             <button
               type="button"
+              className="topbar-sessions-btn topbar-rail-btn"
+              title="Sessions by folder"
+              aria-label="Sessions by folder"
+              onClick={() => setRailOpen(true)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
+            </button>
+            <button
+              type="button"
               className="topbar-sessions-btn"
               title={`Sessions (${isMacPlatform ? "⌘K" : "Ctrl+Shift+K"})`}
               onClick={() => setSwitcherOpen(true)}
@@ -4446,8 +4458,14 @@ const App = () => {
                   <span className={`phone-term-attention${otherAttention.bell ? " bell" : ""}`} aria-label="Another session wants you" />
                 )}
               </button>
-              <span className={`phone-term-dot ${visibleStatus}`} aria-hidden="true" />
-              <span className="phone-term-name">{sessionLabel || session.room}</span>
+              {/* The name opens the session rail — every session by folder,
+                  a tap away, as the app's left-edge drawer does. */}
+              <button type="button" className="phone-term-title" aria-label="Sessions by folder"
+                      onClick={() => { if (isEmbeddedInHop()) setRailOpen(true); }}>
+                <span className={`phone-term-dot ${visibleStatus}`} aria-hidden="true" />
+                <span className="phone-term-name">{sessionLabel || session.room}</span>
+                {isEmbeddedInHop() && <span className="phone-term-caret" aria-hidden="true">▾</span>}
+              </button>
               <span className="phone-term-divider" aria-hidden="true" />
               <button type="button" className="phone-term-btn" aria-label="Open menu" onClick={() => setDrawerOpen(true)}>
                 <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.8" fill="currentColor" /><circle cx="12" cy="12" r="1.8" fill="currentColor" /><circle cx="18.5" cy="12" r="1.8" fill="currentColor" /></svg>
@@ -5204,6 +5222,16 @@ const App = () => {
       )}
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}
+      {railOpen && session && (
+        <SessionRail
+          sessions={sessions}
+          folders={folders}
+          currentRoom={status === "ended" ? null : session.room}
+          onPick={(next) => { setRailOpen(false); switchSession(next as SessionInfo); }}
+          onAllSessions={() => { setRailOpen(false); setSwitcherOpen(true); }}
+          onClose={() => setRailOpen(false)}
+        />
+      )}
       {checkbacksOpen && (
         <CheckbacksPanel
           session={checkbacksOpen}

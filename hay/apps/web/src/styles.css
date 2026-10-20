@@ -5678,3 +5678,75 @@ body.pane-dragging { user-select: none; }
   color: var(--accent, #7c3aed); text-transform: none;
 }
 .sched-session:hover { text-decoration: underline; transform: none; }
+
+/* ── Session rail: the Slack-style side panel (SessionRail.tsx) ───────── */
+.rail-backdrop { position: fixed; inset: 0; z-index: 400; background: rgba(0, 0, 0, 0.35); }
+.session-rail {
+  /* Over the web's own keyboard (150): the list needs the whole height. */
+  position: fixed; top: 0; bottom: 0; left: 0; z-index: 401;
+  width: min(320px, 86vw); display: flex; flex-direction: column;
+  background: var(--panel); color: var(--ink);
+  border-right: 1px solid var(--line); box-shadow: 4px 0 24px rgba(0, 0, 0, 0.3);
+  padding-top: env(safe-area-inset-top);
+  animation: rail-in 0.16s ease-out;
+}
+@keyframes rail-in { from { transform: translateX(-24px); opacity: 0.4; } to { transform: none; opacity: 1; } }
+@media (max-width: 600px) and (orientation: portrait) { .session-rail { width: 100vw; border-right: 0; } }
+.rail-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; }
+.rail-title { font-weight: 700; font-size: 15px; }
+.rail-scope { display: flex; margin-left: auto; background: var(--chip-bg); border-radius: 8px; padding: 2px; }
+.rail-scope button {
+  border: 0; background: none; color: var(--ink-muted); font: 600 12px/1 inherit;
+  padding: 5px 9px; border-radius: 6px; cursor: pointer;
+}
+.rail-scope button.on { background: var(--bg); color: var(--ink); }
+.rail-close {
+  border: 0; background: none; color: var(--ink-muted); font-size: 20px; line-height: 1;
+  width: 28px; height: 28px; cursor: pointer; border-radius: 6px;
+}
+.rail-filter {
+  margin: 0 14px 8px; padding: 8px 10px; border-radius: 9px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); font-size: 14px;
+}
+.rail-list { flex: 1; overflow-y: auto; padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+.rail-row, .rail-folder {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: 0; background: none; color: inherit; text-align: left; cursor: pointer;
+  border-radius: 0; transform: none;
+}
+.rail-row { padding: 6px 14px 6px 18px; font-size: 14px; }
+.rail-row:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); transform: none; }
+.rail-row.current { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.rail-row.all { padding-left: 14px; font-weight: 600; }
+.rail-grid { width: 10px; text-align: center; color: var(--ink-muted); }
+.rail-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.rail-name.strong { font-weight: 700; }
+.rail-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #93a0b4; }
+.rail-dot.live { background: #35d47a; }
+.rail-dot.working { background: #5aa7e0; }
+.rail-dot.done { background: #35d47a; box-shadow: 0 0 0 2px color-mix(in srgb, #35d47a 30%, transparent); }
+.rail-dot.wants { background: #f0a53a; box-shadow: 0 0 6px rgba(240, 165, 58, 0.7); }
+.rail-dot.off { background: transparent; border: 1.5px solid #93a0b4; }
+.rail-badge {
+  flex: none; min-width: 18px; height: 18px; border-radius: 9px; padding: 0 5px;
+  background: #f0a53a; color: #000; font: 700 11px/18px inherit; text-align: center;
+}
+.rail-folder {
+  padding: 14px 14px 4px; color: var(--ink-muted);
+  font: 700 11px/1.2 inherit; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.rail-folder:hover { color: var(--ink); transform: none; background: none; }
+.rail-chev { width: 10px; }
+.rail-folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-count { font-weight: 500; opacity: 0.6; letter-spacing: 0; }
+.rail-count.wants { opacity: 1; background: #f0a53a; color: #000; border-radius: 8px; padding: 1px 6px; font-weight: 700; }
+.rail-empty { padding: 14px; color: var(--ink-muted); font-size: 13px; }
+.topbar-rail-btn { display: inline-flex; align-items: center; justify-content: center; padding-left: 8px; padding-right: 8px; }
+/* The phone bar's name is the rail's door. */
+.phone-term-title {
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  border: 0; background: none; color: inherit; padding: 0; cursor: pointer; text-align: left;
+  transform: none; border-radius: 0;
+}
+.phone-term-caret { font-size: 11px; opacity: 0.55; flex: none; }
+.phone-term-title .phone-term-name { flex: 0 1 auto; }

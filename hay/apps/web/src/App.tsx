@@ -1774,7 +1774,7 @@ const App = () => {
     const hex = (c?: string) => (c || "").replace("#", "").slice(0, 6);
     const url = `${wsUrl}${wsUrl.includes("?") ? "&" : "?"}room=${encodeURIComponent(nextSession.room)}&name=${encodeURIComponent(
       nextSession.name
-    )}&cols=${cols}&rows=${rows}&replay=${replay}&bg=${hex(surface.background)}&fg=${hex(surface.foreground)}&device=${encodeURIComponent(resolveDeviceKey())}`;
+    )}&cols=${cols}&rows=${rows}&replay=${replay}&bg=${hex(surface.background)}&fg=${hex(surface.foreground)}&device=${encodeURIComponent(resolveDeviceKey())}&visible=${document.visibilityState === "visible" ? 1 : 0}`;
 
     wsRef.current?.close();
     setStatus("connecting");

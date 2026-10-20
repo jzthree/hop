@@ -4777,13 +4777,20 @@ function noteClientConnected(sessionName, source, claimId = null, meta = null) {
         entry.localCliCount += 1;
     }
     sessionClientSummary.set(sessionName, entry);
-    if (isUserViewingSource(source)) {
+    // Whether this socket is someone LOOKING. A client says so on connect
+    // (visible=0 is a hidden tab's or a backgrounded app's auto-reconnect);
+    // one that predates the flag counts, as before. Hidden reconnects all
+    // night stamped every session "seen", so the briefing called stories
+    // read that nobody had read.
+    const viewing = isUserViewingSource(source) && !(meta && meta.visible === '0');
+    if (viewing) {
         userViewingCounts.set(sessionName, (userViewingCounts.get(sessionName) || 0) + 1);
         stampSessionSeen(sessionName);
     }
+    return viewing;
 }
 
-function noteClientDisconnected(sessionName, source) {
+function noteClientDisconnected(sessionName, source, viewing = isUserViewingSource(source)) {
     if (!sessionName) return;
     const entry = sessionClientSummary.get(sessionName);
     if (!entry) return;
@@ -4796,7 +4803,7 @@ function noteClientDisconnected(sessionName, source) {
     } else {
         sessionClientSummary.set(sessionName, entry);
     }
-    if (isUserViewingSource(source)) {
+    if (viewing) {
         const next = Math.max(0, (userViewingCounts.get(sessionName) || 0) - 1);
         if (next === 0) userViewingCounts.delete(sessionName);
         else userViewingCounts.set(sessionName, next);
@@ -15550,12 +15557,12 @@ happens until someone clicks it.
 
                 const source = typeof parsedUrl.query.source === 'string' ? parsedUrl.query.source : '';
                 const claimId = typeof parsedUrl.query.claim === 'string' ? parsedUrl.query.claim : null;
-                noteClientConnected(sessionName, source, claimId, { path: 'proxy', ua: String(req.headers['user-agent'] || '').slice(0, 60), dev: parsedUrl.query.device || '' });
+                const viewing = noteClientConnected(sessionName, source, claimId, { path: 'proxy', ua: String(req.headers['user-agent'] || '').slice(0, 60), dev: parsedUrl.query.device || '', visible: typeof parsedUrl.query.visible === 'string' ? parsedUrl.query.visible : undefined });
                 let disconnected = false;
                 const handleDisconnect = () => {
                     if (disconnected) return;
                     disconnected = true;
-                    noteClientDisconnected(sessionName, source);
+                    noteClientDisconnected(sessionName, source, viewing);
                 };
                 socket.once('close', handleDisconnect);
                 socket.once('error', handleDisconnect);
@@ -15632,13 +15639,13 @@ happens until someone clicks it.
             const colorIndex = Math.floor(Math.random() * 1000);
             const actorLabel = source ? `web:${source}` : 'web';
 
-            noteClientConnected(sessionName, source, claimId, { path: 'ws', ua: String(req.headers['user-agent'] || '').slice(0, 60), dev: deviceKey });
+            const viewing = noteClientConnected(sessionName, source, claimId, { path: 'ws', ua: String(req.headers['user-agent'] || '').slice(0, 60), dev: deviceKey, visible: wsUrl.searchParams.get('visible') ?? undefined });
             registerSessionClientActor(sessionName, clientId, actorLabel);
             let disconnected = false;
             const handleDisconnect = () => {
                 if (disconnected) return;
                 disconnected = true;
-                noteClientDisconnected(sessionName, source);
+                noteClientDisconnected(sessionName, source, viewing);
                 unregisterSessionClientActor(sessionName, clientId);
             };
             ws.on('close', handleDisconnect);

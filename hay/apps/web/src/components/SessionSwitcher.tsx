@@ -3399,6 +3399,8 @@ export const SessionSwitcher = ({
   const fleet = sessions.filter((s) => s.type !== "port" && !s.parked);
   const fleetWanting = fleet.filter((s) => s.bellUnseen);
   const shownWall = wallSessions.filter((s) => s.type !== "port");
+  // Every check-back pending on the sessions in this scope (the ⏰ entry).
+  const scheduledTotal = visibleSessions.reduce((k, s) => k + (s.checkbacks || 0), 0);
   const phoneSummary = fleetSummaryCompact(
     shownWall.length, fleet.length, fleetWanting.length,
     fleetWanting.length - shownWall.filter((s) => s.bellUnseen).length,
@@ -3485,6 +3487,7 @@ export const SessionSwitcher = ({
               </div>
               <div className="phone-menu-section">
                 {onOpenViews && menuItem("Views", () => onOpenViews(), { icon: "tray", note: unseenViewSessions > 0 ? `${unseenViewSessions} new` : undefined })}
+                {onOpenCheckbacks && menuItem("Scheduled", () => onOpenCheckbacks("*"), { icon: "clock", note: scheduledTotal > 0 ? String(scheduledTotal) : undefined })}
                 {onOpenCodexApp && menuItem("Codex app threads", onOpenCodexApp, { icon: "window" })}
                 {onFind && menuItem("Find in terminal", onFind, { icon: "search" })}
                 {onToggleKeyboard && menuItem("Keyboard", onToggleKeyboard, { icon: "keyboard" })}
@@ -3689,6 +3692,14 @@ export const SessionSwitcher = ({
               {unseenViewSessions > 0
                 ? <span className="views-entry-count fresh">{unseenViewSessions} new</span>
                 : (() => { const n = visibleSessions.reduce((k, s) => k + (s.views?.count || 0), 0); return n > 0 ? <span className="views-entry-count">{n}</span> : null; })()}
+            </button>
+          )}
+          {onOpenCheckbacks && scheduledTotal > 0 && (
+            <button type="button" className="switcher-action views-entry" aria-label="Scheduled on every session"
+                    title="Every check-back hop will type, across your sessions" onClick={() => onOpenCheckbacks("*")}>
+              <span aria-hidden="true">⏰</span>
+              Scheduled
+              <span className="views-entry-count">{scheduledTotal}</span>
             </button>
           )}
           {onOpenCodexApp && (

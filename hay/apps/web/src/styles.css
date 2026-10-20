@@ -5670,3 +5670,11 @@ body.pane-dragging { user-select: none; }
   .session .phone-term-bar ~ .drawer-toggle { display: none !important; }
   .session.has-keyboard:has(.phone-term-bar) { padding-top: 0; }
 }
+/* All-sessions check-backs: whose a row is, and the way there. */
+.sched-session {
+  display: inline-block; margin: 0 0 2px; padding: 0;
+  border: 0; background: none; cursor: pointer;
+  font: 600 11.5px/1.3 var(--font-terminal);
+  color: var(--accent, #7c3aed); text-transform: none;
+}
+.sched-session:hover { text-decoration: underline; transform: none; }

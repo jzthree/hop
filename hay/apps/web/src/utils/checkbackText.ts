@@ -64,8 +64,10 @@ export const describeState = (cb: Checkback, now: number): string => {
 };
 
 /** Pending first (soonest first), then the recent rest, newest first. */
-export const orderForSession = (items: Checkback[], session: string): Checkback[] => {
-  const mine = items.filter((c) => c.session === session);
+export const orderForSession = (items: Checkback[], session: string): Checkback[] =>
+  orderForAll(items.filter((c) => c.session === session));
+
+export const orderForAll = (mine: Checkback[]): Checkback[] => {
   const nextOf = (c: Checkback) => (c.trigger.kind === "at" ? c.trigger.at : c.trigger.kind === "every" ? c.trigger.next : Number.MAX_SAFE_INTEGER);
   const pending = mine.filter((c) => c.status === "pending").sort((a, b) => nextOf(a) - nextOf(b));
   const done = mine.filter((c) => c.status !== "pending").sort((a, b) => ((b.deliveredAt || b.cancelledAt || b.createdAt || 0) - (a.deliveredAt || a.cancelledAt || a.createdAt || 0)));

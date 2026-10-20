@@ -5210,6 +5210,11 @@ const App = () => {
           sessionName={sessions.find((s) => (s.internalName || s.name) === checkbacksOpen)?.displayName || checkbacksOpen}
           onClose={() => setCheckbacksOpen(null)}
           onChanged={() => { void fetchSessions({ showLoading: false }); }}
+          onOpenSession={(internal) => {
+            setCheckbacksOpen(null);
+            const target = sessions.find((s) => (s.internalName || s.name) === internal);
+            window.location.href = buildSessionPath(target?.displayName || internal);
+          }}
         />
       )}
       {codexAppOpen && (

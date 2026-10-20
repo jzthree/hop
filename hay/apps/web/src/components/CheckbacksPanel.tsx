@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   chipWhen, conditionLabel, dayHeading, describeRrule, describeState, describeTrigger, isTimed,
-  nextOfTrigger, orderForSession, relative, timeOfDay, type Checkback, type CodexAutomation
+  nextOfTrigger, orderForAll, orderForSession, relative, timeOfDay, type Checkback, type CodexAutomation
 } from "../utils/checkbackText";
 
 // What is scheduled on a session, read like a reminders list: the timed ones
@@ -11,6 +11,10 @@ import {
 // hop's own can be cancelled here; scheduling stays with `hop checkback` and
 // the agent's MCP tool, and Codex's automations with Codex.
 
+// session "*" is every session at once: the same list, each row naming
+// whose it is, the session's name opening it.
+export const ALL_CHECKBACKS = "*";
+
 type Props = {
   session: string;
   sessionName: string;
@@ -18,13 +22,15 @@ type Props = {
   // The wall's chip count comes from the session list; a cancel here should
   // show there without waiting for the next poll.
   onChanged?: () => void;
+  onOpenSession?: (internalName: string) => void;
 };
 
 type Timed =
   | { source: "hop"; at: number; cb: Checkback }
   | { source: "codex"; at: number; auto: CodexAutomation; rule: string };
 
-export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Props) => {
+export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession }: Props) => {
+  const all = session === ALL_CHECKBACKS;
   const [items, setItems] = useState<Checkback[] | null>(null);
   const [automations, setAutomations] = useState<CodexAutomation[]>([]);
   const [failed, setFailed] = useState(false);
@@ -33,7 +39,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
   const now = Date.now();
 
   const load = () => {
-    fetch(`/api/checkbacks?session=${encodeURIComponent(session)}`, { cache: "no-store" })
+    fetch(all ? "/api/checkbacks" : `/api/checkbacks?session=${encodeURIComponent(session)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((d) => {
         setItems(Array.isArray(d?.items) ? d.items : []);
@@ -60,7 +66,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
     }
   };
 
-  const rows = items ? orderForSession(items, session) : [];
+  const rows = items ? (all ? orderForAll(items) : orderForSession(items, session)) : [];
   const pending = rows.filter((c) => c.status === "pending");
   const past = rows.filter((c) => c.status !== "pending").slice(0, 12);
   // A one-shot Codex automation whose time has passed is not upcoming:
@@ -92,6 +98,10 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
          title={open === key ? "" : "Click to read it all"}>{text}</div>
   );
   const who = (c: Checkback) => (c.createdBy === "agent" ? "the agent" : "you");
+  // In the all-sessions list, whose it is — and the way there.
+  const whose = (c: Checkback) => all ? (
+    <button type="button" className="sched-session" onClick={() => onOpenSession?.(c.session)}>{c.sessionName || c.session}</button>
+  ) : null;
 
   return (
     <>
@@ -99,7 +109,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
       <div className="views-panel checkbacks-panel" role="dialog" aria-label={`Scheduled for ${sessionName}`}>
         <div className="views-head">
           <span className="views-badge">Scheduled</span>
-          <span className="checkbacks-session">{sessionName}</span>
+          <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>
           <span className="views-head-spacer" />
           <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
@@ -109,7 +119,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
           <p className="checkbacks-empty">Could not load what is scheduled.</p>
         ) : (
           <div className="checkbacks-list">
-            {nothing && <p className="checkbacks-empty">Nothing scheduled on this session.</p>}
+            {nothing && <p className="checkbacks-empty">{all ? "Nothing scheduled." : "Nothing scheduled on this session."}</p>}
 
             {days.map(([head, list]) => (
               <section key={head} className="sched-day">
@@ -118,6 +128,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
                   <div key={t.cb.id} className={"sched-row" + (t.cb.firedAt ? " fired" : "")}>
                     <div className="sched-time">{t.at === Number.MAX_SAFE_INTEGER ? "—" : timeOfDay(t.at)}</div>
                     <div className="sched-body">
+                      {whose(t.cb)}
                       {message(t.cb.id, t.cb.message)}
                       <div className="sched-meta">
                         {t.cb.trigger.kind === "every" ? describeTrigger(t.cb.trigger, now) : chipWhen(t.at, now)}
@@ -150,6 +161,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
                     <div key={c.id} className={"sched-row" + (c.firedAt ? " fired" : "")}>
                       <div className="sched-time tag">{cond.tag}</div>
                       <div className="sched-body">
+                        {whose(c)}
                         {message(c.id, c.message)}
                         <div className="sched-meta">
                           <code className="sched-cond" title={cond.detail}>{cond.detail}</code>
@@ -204,6 +216,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged }: Pr
                   <div key={c.id} className={"sched-row past " + c.status}>
                     <div className="sched-time tag">{c.status === "delivered" ? "sent" : "cancelled"}</div>
                     <div className="sched-body">
+                      {whose(c)}
                       {message(c.id, c.message)}
                       <div className="sched-meta">{describeState(c, now)}</div>
                     </div>

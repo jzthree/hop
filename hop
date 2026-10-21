@@ -7785,6 +7785,11 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     if (refiled.length) log(`${dryRun ? 'Would re-file' : 'Re-filed'} ${refiled.length} session(s) into their folders from the identity snapshot.`, DIM);
     const snapshot = await listAllSessionEntriesRuntimeFirst();
     const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
+    // The host cuts room ids to 32 characters, so a record filed under a
+    // longer name (forks named after their source did this) belongs to the
+    // room with the cut name; while that runs, the record is not a dead
+    // session to bring back.
+    const isLive = (name) => live.has(name) || (name.length > 32 && live.has(name.slice(0, 32)));
     // Targeted redo (`hop restore <name>...`): the named sessions are planned
     // even when live - a failed restore leaves a LIVE room (bare shell,
     // parked dialog), which is exactly what a fleet restore skips, so the
@@ -7841,14 +7846,14 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
         // angler-codex-claude-codex, 2026-10-12). Let the old ones go first.
         if (closedAny) await new Promise((r) => setTimeout(r, 2000));
     }
-    const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !live.has(e.internalName));
+    const candidates = snapshot.entries.filter((e) => e && e.type === 'terminal' && !isLive(e.internalName));
     // Primary source: the SessionStart-hook records. Add any recorded session that
     // isn't already live or covered by the store, so restore works even though the
     // workspace store is empty. restorePlanForSession() reads each record and turns
     // it into `claude --resume <sessionId>`.
     const known = new Set(candidates.map((e) => e.internalName));
     for (const rec of listClaudeSessionRecords()) {
-        if (live.has(rec.internalName) || known.has(rec.internalName)) continue;
+        if (isLive(rec.internalName) || known.has(rec.internalName)) continue;
         known.add(rec.internalName);
         candidates.push({
             internalName: rec.internalName,
@@ -7866,7 +7871,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     // record, so after a HARD crash (no graceful-shutdown buffers) the meta's cwd
     // is its only trace — reopen a fresh shell there.
     for (const meta of listClaudeSessionMetas()) {
-        if (live.has(meta.internalName) || known.has(meta.internalName)) continue;
+        if (isLive(meta.internalName) || known.has(meta.internalName)) continue;
         if (!meta.cwd || typeof meta.cwd !== 'string') continue;
         known.add(meta.internalName);
         candidates.push({
@@ -13388,7 +13393,12 @@ happens until someone clicks it.
                         forkName = forkBase + suffix + n;
                         n += 1;
                     }
-                    const forkInternal = toInternalSessionName(forkName);
+                    // An opaque id like any new session's, not the name: the
+                    // host cuts room ids to 32 characters, so a long name ran
+                    // as a shorter room than its records were filed under,
+                    // and a later `hop restore` took the record for a dead
+                    // session and listed it as restored.
+                    const forkInternal = mintSessionInternalName();
 
                     let command;
                     let kind = 'shell';

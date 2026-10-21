@@ -1055,7 +1055,7 @@ test('a session whose display name has spaces can be renamed and forked', async 
     internalName: internal
   });
   assert.equal(fork.status, 200, JSON.stringify(fork.data));
-  assert.match(fork.data.internalName, /^[A-Za-z0-9_-]+$/);
+  assert.match(fork.data.internalName, /^s_[0-9a-f]{10}$/, 'a fork gets an opaque id, not its (possibly long) name');
 
   const rename = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/rename', {
     oldName: 'Find grant opportunities', newName: 'grant-search', internalName: internal
@@ -1066,6 +1066,37 @@ test('a session whose display name has spaces can be renamed and forked', async 
     await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
       { name, internalName: name });
   }
+});
+
+
+// The host cuts room ids to 32 characters. A record filed under a longer
+// name belongs to the room with the cut name, and while that room runs,
+// restore must not plan the record as a dead session.
+test('restore does not take a long-named record for dead while its cut room runs', async () => {
+  const dir = path.join(hopHome, 'claude-sessions');
+  await fs.mkdir(dir, { recursive: true });
+  const cut = 'longnamerecordcheck-abcdefghijkl'; // 32 characters
+  const long = cut + '-continued';
+  assert.equal(cut.length, 32);
+  await fs.writeFile(path.join(dir, `${cut}.meta`), JSON.stringify({ internalName: cut, cwd: tempDir }), { mode: 0o600 });
+  const up = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { only: [cut] });
+  assert.equal(up.status, 200, JSON.stringify(up.data));
+  let running = false;
+  for (let i = 0; i < 40 && !running; i++) {
+    const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+    running = !!list.data.sessions.find((x) => x.internalName === cut && x.live !== false);
+    if (!running) await delay(150);
+  }
+  assert.ok(running, 'the 32-character room is up');
+
+  await fs.writeFile(path.join(dir, `${long}.meta`), JSON.stringify({ internalName: long, displayName: long, cwd: tempDir }), { mode: 0o600 });
+  const plan = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true });
+  assert.equal(plan.status, 200, JSON.stringify(plan.data));
+  const names = (plan.data.restored || []).map((x) => x.name);
+  assert.ok(!names.includes(long), `planned the live session again: ${names.join(', ')}`);
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: cut, internalName: cut });
+  await fs.rm(path.join(dir, `${long}.meta`), { force: true });
 });
 
 

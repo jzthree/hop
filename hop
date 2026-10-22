@@ -6426,7 +6426,7 @@ async function stopAndParkSession(resolved) {
  * there until that session stops.
  */
 const CODEX_STATE_DB = path.join(os.homedir(), '.codex', 'state_5.sqlite');
-const CODEX_LOCK_DIR = path.join(os.homedir(), '.codex', 'thread-writer-locks');
+const CODEX_LOCK_DIR = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'thread-writer-locks');
 const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function execFileText(cmd, args, timeoutMs = 4000) {
@@ -6481,6 +6481,25 @@ async function codexThreadHolders(ids) {
         holders.set(id, /ChatGPT\.app|Codex\.app/.test(cmd) ? 'app' : /app-server-daemon|app-server\s+--listen/.test(cmd) ? 'daemon' : 'terminal');
     }
     return holders;
+}
+
+/** The Codex app's active automations that run in this thread. */
+function codexAppAutomationsOn(threadId) {
+    return readCodexAutomations().filter((a) => a.thread === threadId && a.status === 'ACTIVE');
+}
+
+function pauseCodexAppAutomation({ id }) {
+    const file = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'automations', id, 'automation.toml');
+    try {
+        const text = fs.readFileSync(file, 'utf8');
+        const next = text.replace(/^status\s*=\s*"ACTIVE"/m, 'status = "PAUSED"');
+        if (next === text) return false;
+        const tmp = `${file}.hop-tmp`;
+        fs.writeFileSync(tmp, next);
+        fs.renameSync(tmp, file);
+        codexAutomationCache = { at: 0, items: [] };
+        return true;
+    } catch (e) { return false; }
 }
 
 /** Codex thread id → the hop session whose conversation it is. */
@@ -18532,7 +18551,7 @@ async function main() {
         }
         const plan = restorePlanForSession({ internalName: target, cwd, startup: cfg?.startup, autoStart: cfg?.autoStart });
         let command = plan?.command || null;
-        let kind = command ? 'claude' : null;
+        let kind = command ? (plan.agent || 'claude') : null;
         if (!command) {
             // No claude record: a codex conversation by its hook's id, else
             // by the newest rollout in this directory.
@@ -18547,6 +18566,45 @@ async function main() {
         if (!command) {
             log(`${display}: nothing to recover — no claude or codex conversation is recorded for this session${plan?.warning ? ` (${plan.warning})` : ''}.`, YELLOW);
             process.exit(1);
+        }
+        // Codex lets one process write a conversation. When another holds
+        // it, `codex resume` only forks a stray copy or exits, so say who
+        // has it instead; the desktop app, which keeps a conversation for
+        // hours after you leave it (and for good while one of its
+        // automations runs there), can be quit with --take.
+        const threadId = kind === 'codex' ? (/codex resume '([0-9a-f-]{36})'/.exec(command) || [])[1] : null;
+        if (threadId) {
+            const take = args.includes('--take');
+            const holder = (await codexThreadHolders([threadId])).get(threadId) || null;
+            const automations = codexAppAutomationsOn(threadId);
+            if (holder === 'app' && !take) {
+                log(`${display}: its Codex conversation is open in the Codex desktop app, which holds it, so it cannot continue here.`, YELLOW);
+                for (const a of automations) log(`  ${DIM}The app's automation ${RESET}"${a.name}"${DIM} runs in this conversation, so the app keeps it.${RESET}`, RESET);
+                log(`  Quit the Codex app and run ${CYAN}hop recover${RESET} again, or ${CYAN}hop recover --take${RESET} to quit it${automations.length ? ', pause that automation' : ''} and continue here.`, RESET);
+                process.exit(1);
+            }
+            if (holder && holder !== 'app') {
+                log(`${display}: its Codex conversation is already running ${holder === 'daemon' ? "in Codex's background server (run codex agents to see or stop it)" : 'in another terminal'}.`, YELLOW);
+                process.exit(1);
+            }
+            if (holder === 'app' && !dryRun) {
+                // The app re-opens the conversation on the automation's next
+                // run, so pause it first; the app reads it again on launch.
+                for (const a of automations) {
+                    if (pauseCodexAppAutomation(a)) log(`  Paused the app's automation "${a.name}" (resume it in the Codex app).`, DIM);
+                }
+                log(`  Quitting the Codex app so it lets go of the conversation…`, DIM);
+                try { execFileSync('/usr/bin/osascript', ['-e', 'tell application id "com.openai.codex" to quit'], { timeout: 20000, stdio: 'ignore' }); } catch (e) { /* checked below */ }
+                let free = false;
+                for (let i = 0; i < 60 && !free; i++) {
+                    free = !(await codexThreadHolders([threadId])).has(threadId);
+                    if (!free) await new Promise((r) => setTimeout(r, 500));
+                }
+                if (!free) {
+                    log(`${display}: the Codex app still holds the conversation. Quit it by hand (⌘Q) and run ${CYAN}hop recover${RESET} again.`, RED);
+                    process.exit(1);
+                }
+            }
         }
         log(`${dryRun ? 'Would recover' : 'Recovering'} ${BOLD}${display}${RESET} (${kind}) in this terminal:`, RESET);
         log(`  ${DIM}${command}${RESET}`, RESET);

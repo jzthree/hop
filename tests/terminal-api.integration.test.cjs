@@ -437,6 +437,25 @@ test('agent session origin survives a daemon restart', async () => {
   assert.equal(cleanup.status, 200);
 });
 
+test('a permission you set on a session survives a daemon restart', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'permit-restart', cwd: tempDir
+  }, userHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const permit = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/agent-permission', { internalName: internal, allowed: true });
+  assert.equal(permit.status, 200);
+  const meta = JSON.parse(await fs.readFile(path.join(hopHome, 'claude-sessions', `${internal}.meta`), 'utf8'));
+  assert.equal(meta.agentPermitted, true, 'the answer is kept in the session record');
+
+  const previousState = state;
+  await stopDaemon(true);
+  await launchDaemon(previousState);
+  const sessions = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  assert.equal(sessions.data.sessions.find((x) => x.internalName === internal)?.agentPermitted, true);
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+});
+
 test('incremental output endpoint + grid-backed preview', async () => {
   const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
     name: 'prevgrid',

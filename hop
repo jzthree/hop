@@ -1322,7 +1322,8 @@ function getEffectiveSessionConfig(name) {
             // A stopped session has nothing but this record; dropping its
             // flags listed it as a live, unparked card that would not open.
             ...(durable.parked !== undefined ? { parked: durable.parked } : {}),
-            ...(durable.archived !== undefined ? { archived: durable.archived } : {})
+            ...(durable.archived !== undefined ? { archived: durable.archived } : {}),
+            ...(typeof durable.agentPermitted === 'boolean' ? { agentPermitted: durable.agentPermitted } : {})
         };
     }
     const merged = { ...base };
@@ -1332,6 +1333,7 @@ function getEffectiveSessionConfig(name) {
     if (durable.tagline) merged.tagline = durable.tagline;
     if (durable.parked !== undefined) merged.parked = durable.parked;
     if (durable.archived !== undefined) merged.archived = durable.archived;
+    if (typeof durable.agentPermitted === 'boolean') merged.agentPermitted = durable.agentPermitted;
     return merged;
 }
 
@@ -5214,7 +5216,7 @@ function buildSessionEntries(haySessions, opts = {}) {
                 cwd: effective.cwd,
                 workspaceName: resolveSessionWorkspaceName(effective),
                 createdBy: effective.createdBy || 'user',
-                agentPermitted: effective.agentPermitted === true,
+                agentPermitted: typeof effective.agentPermitted === 'boolean' ? effective.agentPermitted : defaultAgentPermitted(effective.createdBy),
                 ...sessionAgentFields(name, effective),
                 localCliCount: clientSummary.localCliCount,
                 hasLocalCli: clientSummary.hasLocalCli,
@@ -14606,6 +14608,11 @@ happens until someone clicks it.
                     } else {
                         rememberRuntimeSessionMetadata(resolved, next);
                     }
+                    // The configs above are caches a restart may drop (a
+                    // stopped session has only its record); your answer
+                    // belongs in the record, beside its name and folder.
+                    const durable = readClaudeSessionMeta(resolved);
+                    if (durable) writeClaudeSessionMeta(resolved, { ...durable, agentPermitted: next.agentPermitted });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, agentPermitted: next.agentPermitted }));
                 } catch (e) {
@@ -21186,6 +21193,8 @@ async function main() {
             } else {
                 rememberRuntimeSessionMetadata(internalName, config);
             }
+            const durable = readClaudeSessionMeta(internalName);
+            if (durable) writeClaudeSessionMeta(internalName, { ...durable, agentPermitted: allowed });
             log(`${allowed ? 'Allowed' : 'Blocked'} agent access for "${displayName}".`, GREEN);
             process.exit(0);
         }

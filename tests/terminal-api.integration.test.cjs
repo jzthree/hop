@@ -343,6 +343,37 @@ test('agent attach denied until permitted', async () => {
   assert.equal(delRes.status, 200);
 });
 
+test('with agent access permitted by default, your new sessions admit agents until blocked', async () => {
+  const cfgPath = path.join(hopHome, '.config.json');
+  const before = await fs.readFile(cfgPath, 'utf8').catch(() => null);
+  await fs.writeFile(cfgPath, JSON.stringify({ ...(before ? JSON.parse(before) : {}), agent_access_default: 'permit' }), { mode: 0o600 });
+  await delay(3200); // the daemon re-reads the default every few seconds
+  try {
+    const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+      name: 'opendefault', cwd: tempDir
+    }, userHeaders);
+    assert.equal(create.status, 200);
+    const internal = create.data.sessionName;
+    const sessions = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+    const entry = sessions.data.sessions.find((x) => x.internalName === internal);
+    assert.equal(entry?.createdBy, 'user');
+    assert.equal(entry?.agentPermitted, true);
+    const attach = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals/attach', { name: 'opendefault' }, agentHeaders);
+    assert.equal(attach.status, 200, JSON.stringify(attach.data));
+    await requestJson(state.port, state.sessionSecret, 'DELETE', `/api/terminals/${attach.data.id}`);
+
+    const block = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/agent-permission', { internalName: internal, allowed: false });
+    assert.equal(block.status, 200);
+    const denied = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals/attach', { name: 'opendefault' }, agentHeaders);
+    assert.equal(denied.status, 403, 'a session you block stays blocked');
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+  } finally {
+    if (before === null) await fs.rm(cfgPath, { force: true });
+    else await fs.writeFile(cfgPath, before, { mode: 0o600 });
+    await delay(3200);
+  }
+});
+
 test('agent cannot list or stream user terminal when not permitted', async () => {
   const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
     name: 'user-private-observe-denied',

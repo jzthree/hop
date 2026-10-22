@@ -1093,7 +1093,7 @@ function normalizeStoredSessionConfig(name, config, folders, workspaceName, fall
         startup: typeof config.startup === 'string' && config.startup ? config.startup : undefined,
         autoStart: typeof config.autoStart === 'boolean' ? config.autoStart : undefined,
         createdBy,
-        agentPermitted: typeof config.agentPermitted === 'boolean' ? config.agentPermitted : createdBy === 'agent',
+        agentPermitted: typeof config.agentPermitted === 'boolean' ? config.agentPermitted : defaultAgentPermitted(createdBy),
         displayName: typeof config.displayName === 'string' && config.displayName ? config.displayName : toDisplaySessionName(name),
         folderId,
         workspaceName,
@@ -1776,7 +1776,7 @@ function moveSessionToFolder(name, folderId, index) {
         createdBy: config.createdBy || 'user',
         agentPermitted: typeof config.agentPermitted === 'boolean'
             ? config.agentPermitted
-            : (config.createdBy === 'agent'),
+            : defaultAgentPermitted(config.createdBy),
         folderId: targetFolder,
         updatedAt: new Date().toISOString()
     };
@@ -1877,7 +1877,7 @@ function normalizeSnapshotSessionConfig(name, config, workspaceName) {
         startup: config?.startup,
         autoStart: config?.autoStart,
         createdBy: config?.createdBy || 'user',
-        agentPermitted: typeof config?.agentPermitted === 'boolean' ? config.agentPermitted : false,
+        agentPermitted: typeof config?.agentPermitted === 'boolean' ? config.agentPermitted : defaultAgentPermitted(config?.createdBy),
         displayName: config?.displayName || toDisplaySessionName(name),
         createdAt: config?.createdAt || fallback.createdAt,
         updatedAt: fallback.updatedAt
@@ -2744,6 +2744,22 @@ function getHopConfig() {
 
 function saveHopConfig(config) {
     writePrivateFile(HOP_CONFIG_FILE, JSON.stringify(config, null, 2));
+    agentAccessDefaultMemo = null;
+}
+
+// Whether agents may use a session nobody has permitted or blocked: agent-
+// made ones always; yours when `hop config agent-access permit` is set.
+// Read on every session listing, so the config file is read at most every
+// few seconds.
+let agentAccessDefaultMemo = null;
+function agentAccessDefault() {
+    if (!agentAccessDefaultMemo || Date.now() - agentAccessDefaultMemo.at > 3000) {
+        agentAccessDefaultMemo = { at: Date.now(), permit: getHopConfig().agent_access_default === 'permit' };
+    }
+    return agentAccessDefaultMemo.permit;
+}
+function defaultAgentPermitted(createdBy) {
+    return createdBy === 'agent' || agentAccessDefault();
 }
 
 // --- View thumbnails ---
@@ -5320,7 +5336,7 @@ function getOrCreateSession(sessionName, cwd, displayName) {
         createdBy: existingConfig?.createdBy || 'user',
         agentPermitted: typeof existingConfig?.agentPermitted === 'boolean'
             ? existingConfig.agentPermitted
-            : (existingConfig?.createdBy === 'agent'),
+            : defaultAgentPermitted(existingConfig?.createdBy),
         folderId: existingConfig?.folderId || null,
         workspaceName: resolveSessionWorkspaceName(existingConfig)
     });
@@ -7882,7 +7898,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
             cols: 140,
             rows: 40,
             createdBy: readClaudeSessionMeta(rec.internalName)?.createdBy === 'agent' ? 'agent' : 'user',
-            agentPermitted: false,
+            agentPermitted: defaultAgentPermitted(readClaudeSessionMeta(rec.internalName)?.createdBy),
             folderId: null
         });
     }
@@ -7901,7 +7917,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
             cols: 140,
             rows: 40,
             createdBy: meta.createdBy === 'agent' ? 'agent' : 'user',
-            agentPermitted: false,
+            agentPermitted: defaultAgentPermitted(meta.createdBy),
             folderId: null
         });
     }
@@ -10947,7 +10963,7 @@ async function ensureExternalRuntimeSession(sessionName, cwd, displayName, opts 
         ? opts.agentPermitted
         : (typeof existingConfig?.agentPermitted === 'boolean'
             ? existingConfig.agentPermitted
-            : createdBy === 'agent');
+            : defaultAgentPermitted(createdBy));
     const effectiveConfig = {
         type: 'terminal',
         cwd: cwd || existingConfig?.cwd || process.cwd(),
@@ -11154,7 +11170,7 @@ async function reconcileExternalRuntimeSessionsUncached() {
                 ? savedConfig.agentPermitted
                 : (typeof runtimeConfig?.agentPermitted === 'boolean'
                     ? runtimeConfig.agentPermitted
-                    : createdBy === 'agent'),
+                    : defaultAgentPermitted(createdBy)),
             workspaceName: resolveSessionWorkspaceName(savedConfig || runtimeConfig, {
                 workspaceName: savedConfig?.workspaceName || runtimeConfig?.workspaceName
             })
@@ -14198,7 +14214,7 @@ happens until someone clicks it.
                                 updatedAt: new Date().toISOString(),
                                 createdBy: actorCreatedBy,
                                 createdVia,
-                                agentPermitted: actorCreatedBy === 'agent',
+                                agentPermitted: defaultAgentPermitted(actorCreatedBy),
                                 workspaceName: targetWorkspaceName
                             });
                             if (!saved) {
@@ -14228,7 +14244,7 @@ happens until someone clicks it.
                                     updatedAt: new Date().toISOString(),
                                     createdBy: actorCreatedBy,
                                 createdVia,
-                                    agentPermitted: actorCreatedBy === 'agent',
+                                    agentPermitted: defaultAgentPermitted(actorCreatedBy),
                                     workspaceName: targetWorkspaceName
                                 });
                                 if (!saved) {
@@ -14904,7 +14920,7 @@ happens until someone clicks it.
                             startup,
                             autoStart,
                             createdBy: actor,
-                            agentPermitted: actor === 'agent',
+                            agentPermitted: defaultAgentPermitted(actor),
                             displayName,
                             folderId,
                             workspaceName: targetWorkspaceName,
@@ -14928,7 +14944,7 @@ happens until someone clicks it.
                         startup,
                         autoStart,
                         createdBy: actor,
-                        agentPermitted: actor === 'agent',
+                        agentPermitted: defaultAgentPermitted(actor),
                         folderId,
                         workspaceName: targetWorkspaceName || null
                     });
@@ -14961,7 +14977,7 @@ happens until someone clicks it.
                         // ended at createdVia null because nothing here ever
                         // recorded the channel.
                         createdVia: resolveVia(req),
-                        agentPermitted: actor === 'agent',
+                        agentPermitted: defaultAgentPermitted(actor),
                         folderId,
                         workspaceName: targetWorkspaceName || null,
                         saveDefinition
@@ -17390,7 +17406,7 @@ async function claimUnnamedLocalCliSession(opts = {}) {
             cwd: cwdPath,
             displayName: target.displayName,
             createdBy: claimCreatedBy,
-            agentPermitted: claimCreatedBy === 'agent',
+            agentPermitted: defaultAgentPermitted(claimCreatedBy),
             workspaceName: null
         });
     }
@@ -17478,7 +17494,7 @@ async function runHayCliAttach(target, shareUrl = '') {
         createdBy: target.createdBy || savedConfig?.createdBy || 'user',
         agentPermitted: typeof target.agentPermitted === 'boolean'
             ? target.agentPermitted
-            : (typeof savedConfig?.agentPermitted === 'boolean' ? savedConfig.agentPermitted : false),
+            : (typeof savedConfig?.agentPermitted === 'boolean' ? savedConfig.agentPermitted : defaultAgentPermitted(target.createdBy || savedConfig?.createdBy)),
         workspaceName: target.workspaceName || savedConfig?.workspaceName || null
     });
     await ensureExternalHayHostReady();
@@ -17579,10 +17595,10 @@ function resolveOrCreateLocalTerminalSession(nameArg, opts = {}) {
             cwd: process.cwd(),
             displayName,
             createdBy: 'user',
-            agentPermitted: false,
+            agentPermitted: defaultAgentPermitted('user'),
             workspaceName: null
         });
-        return { internalName, displayName, cwd: process.cwd(), createdBy: 'user', agentPermitted: false, workspaceName: null };
+        return { internalName, displayName, cwd: process.cwd(), createdBy: 'user', agentPermitted: defaultAgentPermitted('user'), workspaceName: null };
     }
 
     const cwdName = getCwdSessionBaseName();
@@ -17594,10 +17610,10 @@ function resolveOrCreateLocalTerminalSession(nameArg, opts = {}) {
         cwd: cwdPath,
         displayName,
         createdBy: 'user',
-        agentPermitted: false,
+        agentPermitted: defaultAgentPermitted('user'),
         workspaceName: null
     });
-    return { internalName, displayName, cwd: cwdPath, createdBy: 'user', agentPermitted: false, workspaceName: null };
+    return { internalName, displayName, cwd: cwdPath, createdBy: 'user', agentPermitted: defaultAgentPermitted('user'), workspaceName: null };
 }
 
 async function runLocalOnlyTerminal(nameArg) {
@@ -17634,7 +17650,7 @@ async function runLocalOnlyTerminal(nameArg) {
                 cwd: cwdPath,
                 displayName: target.displayName,
                 createdBy: 'user',
-                agentPermitted: false,
+                agentPermitted: defaultAgentPermitted('user'),
                 workspaceName: null
             });
         } else {
@@ -17845,6 +17861,7 @@ const HELP_SECTIONS = [
         `hop auth revoke <id>|--all  Log one device out, or everyone`,
         `hop auth token [--label L]  Mint a device token for an app or script`,
         `hop config totp-only on|off  Allow the tunnel with authenticator-only login (not recommended)`,
+        `hop config agent-access permit|block  Whether agents may use your sessions by default`,
         `hop config agent-ceiling <mode>  Cap the permission mode spawned agents may run with`,
     ] },
     { title: 'Multi-user (admin)', lines: [
@@ -19723,6 +19740,28 @@ async function main() {
             }
             process.exit(0);
         }
+        // Whether agents may use your sessions by default. A session you
+        // permit or block yourself keeps that; this decides the rest, and
+        // every session you make from now on.
+        if (subCmd === 'agent-access') {
+            const value = process.argv[4];
+            const cfg = getHopConfig();
+            if (value === 'permit' || value === 'block') {
+                if (value === 'permit') cfg.agent_access_default = 'permit';
+                else delete cfg.agent_access_default;
+                saveHopConfig(cfg);
+                log(value === 'permit'
+                    ? `Agents may use your sessions by default. Block one with ${CYAN}hop session block <name>${RESET}.`
+                    : `Agents need your permission for each of your sessions (${CYAN}hop session permit <name>${RESET}).`, GREEN);
+            } else if (value) {
+                log(`Use ${CYAN}hop config agent-access permit${RESET} or ${CYAN}block${RESET}.`, RED);
+                process.exit(1);
+            } else {
+                log(`Agent access to your sessions by default: ${BOLD}${cfg.agent_access_default === 'permit' ? 'permitted' : 'blocked'}${RESET}`, RESET);
+                log(`Change with: ${CYAN}hop config agent-access permit|block${RESET}`, DIM);
+            }
+            process.exit(0);
+        }
         // Ceiling on the permission mode hopx_spawn_agent may give a worker.
         if (subCmd === 'agent-ceiling') {
             const modes = ['plan', 'manual', 'acceptEdits', 'dontAsk', 'auto', 'bypassPermissions'];
@@ -21062,7 +21101,7 @@ async function main() {
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 createdBy: 'user',
-                agentPermitted: false,
+                agentPermitted: defaultAgentPermitted('user'),
                 workspaceName: explicitWorkspaceName
             });
             if (!saved) {

@@ -456,6 +456,41 @@ test('a permission you set on a session survives a daemon restart', async () => 
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
 });
 
+test('search finds a conversation line behind megabytes of tool output, and a new turn at once', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'deepsearch', cwd: tempDir }, userHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const sessionId = '33333333-4444-5555-6666-777777777777';
+  const configDir = path.join(tempDir, 'claude-cfg');
+  const pdir = path.join(configDir, 'projects', tempDir.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(pdir, { recursive: true });
+  const tfile = path.join(pdir, `${sessionId}.jsonl`);
+  const line = (text) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }) + '\n';
+  await fs.writeFile(tfile, line('we settled on the quartzlantern plan') + JSON.stringify({ type: 'user', toolUseResult: 'x'.repeat(3 * 1024 * 1024) }) + '\n' + line('later chatter'));
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.json`), JSON.stringify({
+    sessionId, cwd: tempDir, configDir, launchCmd: 'claude', updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const find = async (q) => {
+    for (let i = 0; i < 30; i++) {
+      const r = await requestJson(state.port, state.sessionSecret, 'GET', `/api/sessions/search?q=${encodeURIComponent(q)}`);
+      const hit = (r.data.matches || []).find((m) => m.internalName === internal);
+      if (hit) return hit;
+      await delay(200); // the older text is loaded in the background
+    }
+    return null;
+  };
+  const old = await find('quartzlantern');
+  assert.ok(old, 'a line 3 MB back is in the window');
+  assert.match(old.snippet, /quartzlantern plan/);
+
+  await fs.appendFile(tfile, line('fresh emberwick turn'));
+  const r = await requestJson(state.port, state.sessionSecret, 'GET', `/api/sessions/search?q=emberwick`);
+  assert.ok((r.data.matches || []).some((m) => m.internalName === internal), 'an appended turn is found on the next search');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+});
+
 test('incremental output endpoint + grid-backed preview', async () => {
   const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
     name: 'prevgrid',

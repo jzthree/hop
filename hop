@@ -826,6 +826,25 @@ const hayHostEnsureFlight = createSingleFlight();
 // Session content search: per-room ANSI-stripped tail, cached briefly so a
 // typing burst in the switcher re-greps without re-fetching from the host.
 const sessionSearchTextCache = new Map();
+// Each session's conversation text for that search, measured in characters
+// of conversation rather than transcript bytes (see lib/transcript-corpus).
+const { TranscriptCorpus } = require('./lib/transcript-corpus');
+const sessionSearchCorpus = new TranscriptCorpus({
+    budgetChars: parsePositiveIntEnv('HOP_SEARCH_TEXT_CHARS', 256 * 1024)
+});
+// Deepen the corpora a step at a time between requests, never in one.
+let sessionSearchBackfillRunning = false;
+function scheduleSessionSearchBackfill() {
+    if (sessionSearchBackfillRunning) return;
+    sessionSearchBackfillRunning = true;
+    const step = () => {
+        const next = sessionSearchCorpus.pending()[0];
+        if (!next) { sessionSearchBackfillRunning = false; return; }
+        try { sessionSearchCorpus.backfill(next); } catch (e) { sessionSearchCorpus.entries.delete(next); }
+        setTimeout(step, 5);
+    };
+    setTimeout(step, 0);
+}
 // Strip control/escape sequences well enough for text grep. Not a renderer —
 // overwritten rows may linger — but "was this string on/near the screen
 // recently" is exactly the question the filter is asking.
@@ -7157,9 +7176,31 @@ function resolveRgRunner() {
 
 // A session's transcript for SEARCH: the claude record when there is one,
 // else — for sessions identifiably running codex — its newest rollout by cwd.
+// Thread id → rollout path. A rollout never moves, and finding one walks
+// the dated directories, so each is looked up once.
+const codexRolloutPathCache = new Map();
+function cachedCodexRolloutById(id) {
+    const hit = codexRolloutPathCache.get(id);
+    if (hit && hit.path && fs.existsSync(hit.path)) return hit.path;
+    // A miss is remembered for a minute, so search does not re-walk for it
+    // on every keystroke.
+    if (hit && !hit.path && Date.now() - hit.at < 60_000) return null;
+    const found = findCodexRolloutById(id);
+    codexRolloutPathCache.set(id, { path: found, at: Date.now() });
+    return found;
+}
+
 function resolveSessionTranscriptPathForSearch(internalName, sessionEntry) {
     const claudePath = resolveClaudeTranscriptPath(readClaudeSessionRecord(internalName));
     if (claudePath) return claudePath;
+    // A Codex session's own conversation, by the id its turns are filed
+    // under; the newest rollout in its directory could be another
+    // session's that shares the folder.
+    const turn = readTurnInfo(internalName);
+    if (turn?.agent === 'codex' && turn.sessionId) {
+        const byId = cachedCodexRolloutById(turn.sessionId);
+        if (byId) return byId;
+    }
     if (/codex/i.test(String(sessionEntry?.foregroundProcess || ''))) {
         return resolveCodexTranscriptByCwd(sessionEntry?.cwd || null);
     }
@@ -13119,6 +13160,7 @@ happens until someone clicks it.
                 const CAP = 120;
                 truncated = allEntries.length > CAP;
                 const now = Date.now();
+                const corpusPaths = new Set();
                 const lookups = allEntries.slice(0, CAP).map(async (s) => {
                     const id = s.internalName;
                     let entry = sessionSearchTextCache.get(id);
@@ -13133,43 +13175,9 @@ happens until someone clicks it.
                             prevCols = Number(prev?.data?.cols) || 0;
                             prevRows = Number(prev?.data?.rows) || 0;
                         }
-                        // The CONVERSATION transcript reaches back much further
-                        // than any screen tail — grep its recent text too, so
-                        // "the session where we discussed X" is findable even
-                        // when X scrolled away an hour ago. The 1MB read+parse
-                        // is skipped when the file hasn't changed since the
-                        // last search (stat signature match) — steady-state
-                        // searches re-read nothing.
-                        let transcriptText = entry ? entry.transcript : '';
-                        let transcriptLower = entry ? entry.transcriptLower : '';
-                        let transcriptSig = entry ? entry.transcriptSig : '';
-                        try {
-                            const tPath = resolveSessionTranscriptPathForSearch(id, s);
-                            if (tPath) {
-                                const stat = fs.statSync(tPath);
-                                const sig = `${tPath}:${stat.size}:${stat.mtimeMs}`;
-                                if (sig !== transcriptSig) {
-                                    const fd = fs.openSync(tPath, 'r');
-                                    const readLen = Math.min(stat.size, 1048576);
-                                    const buf = Buffer.alloc(readLen);
-                                    fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
-                                    fs.closeSync(fd);
-                                    // Upper bound is recall, not safety: a
-                                    // message longer than the bound vanishes
-                                    // from the corpus entirely (2000 silently
-                                    // dropped most agent messages).
-                                    transcriptText = (buf.toString('utf8').match(/"text":"((?:[^"\\]|\\.){4,20000})"/g) || [])
-                                        .map((m) => m.slice(8, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'))
-                                        .join('\n');
-                                    transcriptLower = transcriptText.toLowerCase();
-                                    transcriptSig = sig;
-                                }
-                            } else {
-                                transcriptText = '';
-                                transcriptLower = '';
-                                transcriptSig = '';
-                            }
-                        } catch (e) { /* no transcript — screen only */ }
+                        // The conversation itself reaches back much further
+                        // than any screen tail; it is read separately below,
+                        // incrementally, on every search.
                         // Rendered when we can, stripped when we can't (no
                         // headless terminal available): exact text beats a
                         // deeper corpus that neither reads nor matches right.
@@ -13185,10 +13193,7 @@ happens until someone clicks it.
                         entry = {
                             at: now,
                             text: screenText,
-                            textLower: screenText.toLowerCase(),
-                            transcript: transcriptText || '',
-                            transcriptLower: transcriptLower || '',
-                            transcriptSig: transcriptSig || ''
+                            textLower: screenText.toLowerCase()
                         };
                         sessionSearchTextCache.set(id, entry);
                         if (sessionSearchTextCache.size > 150) {
@@ -13196,6 +13201,16 @@ happens until someone clicks it.
                             for (const key of [...sessionSearchTextCache.keys()].slice(0, 50)) sessionSearchTextCache.delete(key);
                         }
                     }
+                    // Only appended bytes are read here (a stat when nothing
+                    // changed), so a turn is searchable the moment it lands.
+                    let convo = { text: '', lower: '' };
+                    try {
+                        const tPath = resolveSessionTranscriptPathForSearch(id, s);
+                        if (tPath && sessionSearchCorpus.refresh(tPath)) {
+                            corpusPaths.add(tPath);
+                            convo = sessionSearchCorpus.text(tPath);
+                        }
+                    } catch (e) { /* no transcript — screen only */ }
                     const onScreen = matchAll(entry.textLower);
                     if (onScreen) {
                         return {
@@ -13205,13 +13220,13 @@ happens until someone clicks it.
                             snippet: snippetAround(entry.text, onScreen.idx, onScreen.len)
                         };
                     }
-                    const inTranscript = entry.transcriptLower ? matchAll(entry.transcriptLower) : null;
+                    const inTranscript = convo.lower ? matchAll(convo.lower) : null;
                     if (inTranscript) {
                         return {
                             internalName: id,
                             name: s.displayName || id,
                             lastActivityAt: s.lastActivityAt || 0,
-                            snippet: `≡ ${snippetAround(entry.transcript, inTranscript.idx, inTranscript.len)}`
+                            snippet: `≡ ${snippetAround(convo.text, inTranscript.idx, inTranscript.len)}`
                         };
                     }
                     return null;
@@ -13221,6 +13236,9 @@ happens until someone clicks it.
                 matches = (await Promise.all(lookups)).filter(Boolean)
                     .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))
                     .map(({ lastActivityAt, ...m }) => m);
+                // Transcripts no session points at any more are let go.
+                sessionSearchCorpus.forget(corpusPaths);
+                scheduleSessionSearchBackfill();
             } catch (e) { /* host unreachable — return what we have */ }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ matches, truncated }));

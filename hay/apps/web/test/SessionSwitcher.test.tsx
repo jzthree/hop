@@ -276,6 +276,38 @@ describe("focus rules", () => {
   });
 });
 
+describe("keys typed right after engaging a session", () => {
+  it("go to that session, not the search box, while its terminal is still connecting", () => {
+    const sockets: Array<{ url: string; sent: string[]; readyState: number; open: () => void }> = [];
+    class FakeSocket extends EventTarget {
+      static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
+      url: string; readyState = 0; sent: string[] = [];
+      onopen: ((e: Event) => void) | null = null; onmessage: ((e: MessageEvent) => void) | null = null;
+      onclose: ((e: CloseEvent) => void) | null = null; onerror: ((e: Event) => void) | null = null;
+      constructor(url: string) { super(); this.url = url; sockets.push(this as never); }
+      send(d: string) { this.sent.push(d); }
+      close() { this.readyState = 3; }
+      open() { this.readyState = 1; const e = new Event("open"); this.onopen?.(e); this.dispatchEvent(e); }
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    localStorage.setItem("hay_tile_zoom", "5");
+    render(<SessionSwitcher {...props} open tileWsBase="ws://x/ws" />);
+    const card = screen.getByText("research").closest(".switcher-card") as HTMLElement;
+    fireEvent.click(card);
+    // Typed before the tile's terminal has the keyboard.
+    for (const key of ["l", "s", "Enter"]) fireEvent.keyDown(window, { key });
+    const filter = document.querySelector("input") as HTMLInputElement;
+    expect(filter.value).toBe("");
+    expect(card.querySelector(".switcher-live-tile.is-live")).toBeTruthy();
+    const tileSocket = sockets.find((x) => /research/.test(x.url) && !/probe=1/.test(x.url));
+    expect(tileSocket).toBeTruthy();
+    tileSocket!.open();
+    const typed = tileSocket!.sent.map((d) => { try { return JSON.parse(d); } catch { return null; } })
+      .filter((m) => m?.type === "input").map((m) => m.data).join("");
+    expect(typed).toBe("ls\r");
+  });
+});
+
 describe("context menus", () => {
   afterEach(() => { document.body.innerHTML = ""; });
 

@@ -259,6 +259,76 @@ const SESSION_LIST_STALE_MS = 5000;
 const PENDING_INPUT_MAX_AGE_MS = 15000;
 const PENDING_INPUT_MAX_ENTRIES = 200;
 
+// Opening a session from the landing wall loads its page. Until the new
+// page's terminal is connected, the old wall is still there, and its
+// type-to-filter took every key typed in the gap — the text landed in the
+// search box (late, on a busy page) and never reached the session. From the
+// click on, keys are held instead and carried across the load (this tab's
+// sessionStorage), then sent once the session's terminal connects.
+const TYPEAHEAD_KEY = "hop.typeahead";
+const carryTypeaheadTo = (path: string) => {
+  let data = "";
+  const save = () => {
+    try { sessionStorage.setItem(TYPEAHEAD_KEY, JSON.stringify({ path, data, at: Date.now() })); } catch { /* private window */ }
+  };
+  save();
+  (document.activeElement as HTMLElement | null)?.blur?.();
+  window.addEventListener("keydown", (e) => {
+    const d = typeaheadKey(e);
+    if (!d) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    data += d;
+    save();
+  }, true);
+};
+// The same gap on the session page itself: it loads fast, but its terminal
+// takes the keyboard only once it has connected, and keys typed before that
+// reached nothing. From load until the first connect they are held here.
+const typeaheadKey = (e: KeyboardEvent) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return "";
+  const k = e.key;
+  return k === "Enter" ? "\r" : k === "Backspace" ? "\x7f" : k === "Tab" ? "\t" : k.length === 1 ? k : "";
+};
+const earlyTypeahead = (() => {
+  if (typeof window === "undefined" || !/^\/s\/[^/]+\/?$/.test(window.location.pathname)) return null;
+  // The page's inline script started holding them before this one loaded.
+  const inline = (window as unknown as { __hopEarlyKeys?: { data: string; on: boolean } }).__hopEarlyKeys;
+  if (inline) return { take: () => { if (!inline.on) return ""; inline.on = false; return inline.data; } };
+  let data = "";
+  let done = false;
+  const onKey = (e: KeyboardEvent) => {
+    // Only keys nothing else is taking: another field (a login box, the
+    // wall's filter) keeps its own.
+    const ae = document.activeElement as HTMLElement | null;
+    if (ae && ae !== document.body && !ae.classList.contains("xterm-helper-textarea")) return;
+    const d = typeaheadKey(e);
+    if (!d) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    data += d;
+  };
+  window.addEventListener("keydown", onKey, true);
+  const take = () => {
+    if (done) return "";
+    done = true;
+    window.removeEventListener("keydown", onKey, true);
+    return data;
+  };
+  window.setTimeout(() => { take(); }, PENDING_INPUT_MAX_AGE_MS);
+  return { take };
+})();
+const takeTypeahead = (): string => {
+  try {
+    const raw = sessionStorage.getItem(TYPEAHEAD_KEY);
+    if (!raw) return "";
+    sessionStorage.removeItem(TYPEAHEAD_KEY);
+    const t = JSON.parse(raw) as { path?: string; data?: string; at?: number };
+    if (t.path !== window.location.pathname || !t.data || Date.now() - (t.at || 0) > PENDING_INPUT_MAX_AGE_MS) return "";
+    return t.data;
+  } catch { return ""; }
+};
+
 type SessionInfo = {
   name: string;
   displayName: string;
@@ -704,6 +774,11 @@ const App = () => {
   // keystrokes into a shell long after they were typed is worse than losing
   // them (the user has usually retyped by then).
   const pendingInputRef = useRef<Array<{ room: string; data: string; at: number }>>([]);
+  // Set from an in-place switch until the new session's socket opens: keys
+  // typed in between belong to the NEW session. Without it they were tagged
+  // with the old one (and discarded) or, while the old socket was still
+  // open, sent to the session just left.
+  const switchingToRef = useRef<string | null>(null);
   // Presence re-render throttle (see the "presence" message handler).
   const presenceThrottleRef = useRef<number | null>(null);
   // Per-peer "last observed typing" — refreshed on every presence frame that
@@ -1337,8 +1412,8 @@ const App = () => {
     }
     // Buffer input while disconnected instead of dropping it; the reconnect
     // handler replays it in order (same room, age-capped).
-    if (wsRef.current?.readyState !== WebSocket.OPEN) {
-      const room = activeSessionRoomRef.current;
+    if (switchingToRef.current || wsRef.current?.readyState !== WebSocket.OPEN) {
+      const room = switchingToRef.current || activeSessionRoomRef.current;
       if (room) {
         pendingInputRef.current.push({ room, data: sanitized, at: Date.now() });
         if (pendingInputRef.current.length > PENDING_INPUT_MAX_ENTRIES) {
@@ -1815,12 +1890,16 @@ const App = () => {
         return;
       }
       setStatus("connected");
+      if (switchingToRef.current === targetRoom) switchingToRef.current = null;
       reconnectAttemptRef.current = 0; // Reset backoff on successful connection
       lastSentSizeRef.current = null; // fresh connection must learn the size once
       // No resize here: the connect URL already declared our size, and the
       // real fit (with the attach claim) goes out after the snapshot. The
       // old immediate send carried the PREVIOUS session's grid and could
       // reshape the PTY twice per switch.
+      // Keys typed while this page was being opened from the wall.
+      const carried = takeTypeahead() + (earlyTypeahead?.take() || "");
+      if (carried) ws.send(JSON.stringify({ type: "input", data: carried } satisfies ClientMessage));
       // Replay keystrokes buffered during the outage: this room only, in
       // order, and only within the age window — stale input is discarded.
       const queued = pendingInputRef.current;
@@ -3625,6 +3704,8 @@ const App = () => {
 
     optimisticEchoRef.current.reset();
     pendingInputRef.current = [];
+    switchingToRef.current = targetRoom;
+    activeSessionRoomRef.current = targetRoom;
     setPresence([]);
     setControllerId(null);
     setClientId(null);
@@ -4381,7 +4462,9 @@ const App = () => {
             folders={folders}
             onClose={() => {}}
             onSwitch={(next) => {
-              window.location.href = buildSessionPath(next.displayName || next.name);
+              const path = buildSessionPath(next.displayName || next.name);
+              carryTypeaheadTo(path);
+              window.location.href = path;
             }}
             onRefresh={() => fetchSessions({ showLoading: false })}
             onNotice={showToast}
@@ -5242,7 +5325,13 @@ const App = () => {
           sessions={sessions}
           folders={folders}
           currentRoom={status === "ended" ? null : session.room}
-          onPick={(next) => { setRailOpen(false); switchSession(next as SessionInfo); }}
+          onPick={(next) => {
+            setRailOpen(false);
+            switchSession(next as SessionInfo);
+            // The picked row goes away with the rail; keys typed next are
+            // the session's, not nobody's.
+            termRef.current?.focus();
+          }}
           onAllSessions={() => { setRailOpen(false); setSwitcherOpen(true); }}
           onClose={() => setRailOpen(false)}
         />

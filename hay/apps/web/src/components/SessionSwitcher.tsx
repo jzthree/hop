@@ -1777,6 +1777,28 @@ export const SessionSwitcher = ({
   // the wall pre-focusing the current session as it opens. The live tile
   // takes the session's size only for the former.
   const deliberateFocusRef = useRef<string | null>(null);
+  // A session engaged in place owns the keyboard from the click, but its
+  // terminal takes focus only once the tile has connected — on a busy wall
+  // that can be a second or more. Keys typed in that gap were taken for
+  // type-to-filter: they dropped the session and landed in the search box.
+  // Until the tile's terminal has focus, they go to the session instead
+  // (held here until its connection can take them).
+  const engagingRef = useRef<{ key: string; at: number } | null>(null);
+  const earlyKeysRef = useRef<{ key: string; data: string[] } | null>(null);
+  const ENGAGE_GRACE_MS = 8000;
+  useEffect(() => {
+    if (engagingRef.current && engagingRef.current.key !== focusedKey) { engagingRef.current = null; earlyKeysRef.current = null; }
+  }, [focusedKey]);
+  useEffect(() => {
+    // Ends when the keyboard lands somewhere on purpose: the tile's own
+    // terminal (its guard takes over) or the search box.
+    const onFocusIn = (e: FocusEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.(".switcher-live-tile, .switcher-focus-tile") || t === filterInputRef.current) engagingRef.current = null;
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, []);
   useEffect(() => { if (!open) { setFocusedKey(null); deliberateFocusRef.current = null; } }, [open]);
   useEffect(() => { if (!interactiveTiles) setFocusedKey(null); }, [interactiveTiles]);
   const [renameDraft, setRenameDraft] = useState("");
@@ -2448,6 +2470,8 @@ export const SessionSwitcher = ({
     const key = sessionKey(session);
     filterInputRef.current?.blur();
     deliberateFocusRef.current = key;
+    engagingRef.current = { key, at: Date.now() };
+    earlyKeysRef.current = null;
     setFocusedKey(key);
     onFocusSession?.(session);
     const idx = flatNav.findIndex((x) => sessionKey(x) === key);
@@ -2560,6 +2584,22 @@ export const SessionSwitcher = ({
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // The engaged session's keys, before its terminal has focus.
+      const engaging = engagingRef.current;
+      if (engaging && Date.now() - engaging.at < ENGAGE_GRACE_MS
+          && document.activeElement !== filterInputRef.current
+          && (event.key.length === 1 || event.key === "Backspace" || event.key === "Enter" || event.key === "Tab")) {
+        const data = event.key === "Backspace" ? "\x7f" : event.key === "Enter" ? "\r" : event.key === "Tab" ? "\t" : event.key;
+        event.preventDefault();
+        const send = tileSendersRef.current.get(engaging.key);
+        if (send) send(data);
+        else {
+          const held = earlyKeysRef.current?.key === engaging.key ? earlyKeysRef.current : { key: engaging.key, data: [] };
+          held.data.push(data);
+          earlyKeysRef.current = held;
+        }
+        return;
+      }
       // +/− step the tile zoom — but never while editing the filter text
       // ("-" is a legal character in session names).
       if (document.activeElement !== filterInputRef.current) {
@@ -3300,7 +3340,12 @@ export const SessionSwitcher = ({
               onFullscreen={() => onSwitch(s)}
               onUnfocus={() => setFocusedKey(null)}
               onNotice={onNotice}
-              onSender={(fn) => { if (fn) tileSendersRef.current.set(key, fn); else tileSendersRef.current.delete(key); }}
+              onSender={(fn) => {
+                if (!fn) { tileSendersRef.current.delete(key); return; }
+                tileSendersRef.current.set(key, fn);
+                const held = earlyKeysRef.current;
+                if (held && held.key === key && held.data.length) { earlyKeysRef.current = null; fn(held.data.join("")); }
+              }}
               onOpenView={(scope, item) => onOpenViews?.(scope, item)}
             />
           </div>

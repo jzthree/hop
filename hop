@@ -829,6 +829,13 @@ const sessionSearchTextCache = new Map();
 // Each session's conversation text for that search, measured in characters
 // of conversation rather than transcript bytes (see lib/transcript-corpus).
 const { TranscriptCorpus } = require('./lib/transcript-corpus');
+const { createUpdateChecker } = require('./lib/update-check');
+// Notify-only: is a newer hop on npm? (lib/update-check.js)
+const updateChecker = createUpdateChecker({
+    root: __dirname,
+    current: (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version; } catch (e) { return '0.0.0'; } })(),
+    log: (msg) => log(`[Update] ${msg}`, YELLOW),
+});
 const sessionSearchCorpus = new TranscriptCorpus({
     budgetChars: parsePositiveIntEnv('HOP_SEARCH_TEXT_CHARS', 256 * 1024)
 });
@@ -14717,6 +14724,13 @@ happens until someone clicks it.
             return;
         }
 
+        // API: is a newer hop published? (lib/update-check.js) — for the web notice.
+        if (parsedUrl.pathname === '/api/update' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify(updateChecker.info()));
+            return;
+        }
+
         // API: remote desktop — is it on, and is a VNC server answering?
         if (parsedUrl.pathname === '/api/desktop' && req.method === 'GET') {
             const config = getDesktopConfig();
@@ -18713,85 +18727,114 @@ async function main() {
         const withHost = !process.argv.includes('--no-host');
         const runGit = (cmd, timeout = 60000) =>
             execSync(cmd, { cwd: __dirname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim();
-        try { runGit('git rev-parse --git-dir'); } catch (e) {
-            log('Not a git checkout — cannot self-update.', RED);
-            process.exit(1);
-        }
-        log('Checking for updates…', CYAN);
-        try { runGit('git fetch --quiet origin', 120000); } catch (e) {
-            log(`Fetch failed: ${e.message}`, RED);
-            process.exit(1);
-        }
-        const local = runGit('git rev-parse HEAD');
-        let upstream;
-        try { upstream = runGit('git rev-parse @{u}'); } catch (e) {
-            try { upstream = runGit('git rev-parse origin/main'); } catch (e2) {
-                log('No upstream to compare against.', RED);
-                process.exit(1);
+        let isGit = true;
+        try { runGit('git rev-parse --git-dir'); } catch (e) { isGit = false; }
+        if (!isGit) {
+            // An npm install: the new code comes from npm, then the same
+            // restart a git update ends with. The install replaces this
+            // script in place, so the restart is run by the NEW script.
+            const { isNewerVersion } = require('./lib/update-check');
+            const current = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version;
+            if (!process.argv.includes('--restart')) {
+                let latest = '';
+                try { latest = execFileSync('npm', ['view', 'hop2@latest', 'version'], { encoding: 'utf8', timeout: 60000 }).trim(); } catch (e) {
+                    log(`Could not ask npm for the latest hop: ${e.message}`, RED);
+                    process.exit(1);
+                }
+                if (!isNewerVersion(latest, current)) {
+                    log(`Already up to date (${current}).`, GREEN);
+                    process.exit(0);
+                }
+                log(`Update available: ${current} → ${latest}`, YELLOW);
+                if (checkOnly) process.exit(0);
+                try {
+                    execFileSync('npm', ['install', '-g', 'hop2@latest'], { stdio: 'inherit', timeout: 600000 });
+                } catch (e) {
+                    log(`npm install failed — run it yourself: npm install -g hop2@latest && hop update --restart`, RED);
+                    process.exit(1);
+                }
+                const child = spawn(process.execPath, [process.argv[1], 'update', '--restart', ...(withHost ? [] : ['--no-host'])], { stdio: 'inherit' });
+                child.on('exit', (code) => process.exit(code ?? 0));
+                return;
             }
         }
-        // --restart: cycle onto the CURRENT checkout even when git has
-        // nothing to pull. The running processes can predate the checkout —
-        // commit locally, push, `hop update`, and "Already up to date" used
-        // to leave every process on pre-commit code with no hint.
-        const restartOnly = process.argv.includes('--restart');
-        if (local === upstream && (checkOnly || !restartOnly)) {
-            log(`Already up to date (${local.slice(0, 7)}).`, GREEN);
-            if (!checkOnly) log(`Processes were not cycled — if they predate this checkout, ${CYAN}hop update --restart${RESET} restarts them onto it.`, RESET);
-            process.exit(0);
-        }
-        if (local === upstream) {
-            log(`Checkout already current (${local.slice(0, 7)}) — restarting processes onto it.`, CYAN);
-        } else {
-            const behind = runGit(`git rev-list --count HEAD..${upstream}`);
-            const ahead = runGit(`git rev-list --count ${upstream}..HEAD`);
-            log(`Update available: ${behind} new commit(s)${ahead !== '0' ? ` — but local is ${ahead} ahead; resolve manually` : ''}`, YELLOW);
-            try { log(runGit(`git log --oneline --no-decorate HEAD..${upstream} -15`), RESET); } catch (e) { }
-            if (checkOnly) process.exit(0);
-            if (ahead !== '0') process.exit(1);
-            let dirty = '';
-            try { dirty = runGit('git status --porcelain'); } catch (e) { }
-            if (dirty) {
-                log('Working tree has local changes — commit or stash them first.', RED);
+        if (isGit) {
+            log('Checking for updates…', CYAN);
+            try { runGit('git fetch --quiet origin', 120000); } catch (e) {
+                log(`Fetch failed: ${e.message}`, RED);
                 process.exit(1);
             }
-            // Dependency fingerprint across the pull: reinstall only when a
-            // lockfile actually changed.
-            const lockRev = (ref, file) => { try { return runGit(`git rev-parse ${ref}:${file}`); } catch (e) { return ''; } };
-            const locks = ['package-lock.json', 'hay/package-lock.json'];
-            const before = locks.map((f) => lockRev('HEAD', f));
-            try { runGit(`git merge --ff-only ${upstream}`); } catch (e) {
-                log(`Fast-forward failed: ${e.message}`, RED);
-                process.exit(1);
+            const local = runGit('git rev-parse HEAD');
+            let upstream;
+            try { upstream = runGit('git rev-parse @{u}'); } catch (e) {
+                try { upstream = runGit('git rev-parse origin/main'); } catch (e2) {
+                    log('No upstream to compare against.', RED);
+                    process.exit(1);
+                }
             }
-            const after = locks.map((f) => lockRev('HEAD', f));
-            for (let i = 0; i < locks.length; i++) {
-                if (before[i] !== after[i]) {
-                    const dir = locks[i].startsWith('hay/') ? path.join(__dirname, 'hay') : __dirname;
-                    log(`Dependencies changed (${locks[i]}) — installing…`, CYAN);
-                    try {
-                        execSync('npm install --no-audit --no-fund', { cwd: dir, stdio: 'inherit', timeout: 600000 });
-                    } catch (e) {
-                        log(`npm install failed in ${dir}: ${e.message}`, RED);
-                        process.exit(1);
+            // --restart: cycle onto the CURRENT checkout even when git has
+            // nothing to pull. The running processes can predate the checkout —
+            // commit locally, push, `hop update`, and "Already up to date" used
+            // to leave every process on pre-commit code with no hint.
+            const restartOnly = process.argv.includes('--restart');
+            if (local === upstream && (checkOnly || !restartOnly)) {
+                log(`Already up to date (${local.slice(0, 7)}).`, GREEN);
+                if (!checkOnly) log(`Processes were not cycled — if they predate this checkout, ${CYAN}hop update --restart${RESET} restarts them onto it.`, RESET);
+                process.exit(0);
+            }
+            if (local === upstream) {
+                log(`Checkout already current (${local.slice(0, 7)}) — restarting processes onto it.`, CYAN);
+            } else {
+                const behind = runGit(`git rev-list --count HEAD..${upstream}`);
+                const ahead = runGit(`git rev-list --count ${upstream}..HEAD`);
+                log(`Update available: ${behind} new commit(s)${ahead !== '0' ? ` — but local is ${ahead} ahead; resolve manually` : ''}`, YELLOW);
+                try { log(runGit(`git log --oneline --no-decorate HEAD..${upstream} -15`), RESET); } catch (e) { }
+                if (checkOnly) process.exit(0);
+                if (ahead !== '0') process.exit(1);
+                let dirty = '';
+                try { dirty = runGit('git status --porcelain'); } catch (e) { }
+                if (dirty) {
+                    log('Working tree has local changes — commit or stash them first.', RED);
+                    process.exit(1);
+                }
+                // Dependency fingerprint across the pull: reinstall only when a
+                // lockfile actually changed.
+                const lockRev = (ref, file) => { try { return runGit(`git rev-parse ${ref}:${file}`); } catch (e) { return ''; } };
+                const locks = ['package-lock.json', 'hay/package-lock.json'];
+                const before = locks.map((f) => lockRev('HEAD', f));
+                try { runGit(`git merge --ff-only ${upstream}`); } catch (e) {
+                    log(`Fast-forward failed: ${e.message}`, RED);
+                    process.exit(1);
+                }
+                const after = locks.map((f) => lockRev('HEAD', f));
+                for (let i = 0; i < locks.length; i++) {
+                    if (before[i] !== after[i]) {
+                        const dir = locks[i].startsWith('hay/') ? path.join(__dirname, 'hay') : __dirname;
+                        log(`Dependencies changed (${locks[i]}) — installing…`, CYAN);
+                        try {
+                            execSync('npm install --no-audit --no-fund', { cwd: dir, stdio: 'inherit', timeout: 600000 });
+                        } catch (e) {
+                            log(`npm install failed in ${dir}: ${e.message}`, RED);
+                            process.exit(1);
+                        }
                     }
                 }
             }
-        }
-        // Hay (server, web client, CLI) runs from its build output, which git
-        // does not carry: without a rebuild here, a pull updated the source
-        // and the host and browser went on running the old code (the codex
-        // shell integration and the Codex app panel reached nobody).
-        if (local !== runGit('git rev-parse HEAD')) {
-            let changed = '';
-            try { changed = runGit(`git diff --name-only ${local} HEAD -- hay/packages hay/apps`); } catch (e) { changed = 'unknown'; }
-            if (changed) {
-                log('Hay changed — rebuilding…', CYAN);
-                try {
-                    execFileSync('npm', ['run', 'build'], { cwd: path.join(__dirname, 'hay'), stdio: 'inherit', timeout: 900000 });
-                } catch (e) {
-                    log(`Hay build failed: ${e.message}`, RED);
-                    process.exit(1);
+            // Hay (server, web client, CLI) runs from its build output, which git
+            // does not carry: without a rebuild here, a pull updated the source
+            // and the host and browser went on running the old code (the codex
+            // shell integration and the Codex app panel reached nobody).
+            if (local !== runGit('git rev-parse HEAD')) {
+                let changed = '';
+                try { changed = runGit(`git diff --name-only ${local} HEAD -- hay/packages hay/apps`); } catch (e) { changed = 'unknown'; }
+                if (changed) {
+                    log('Hay changed — rebuilding…', CYAN);
+                    try {
+                        execFileSync('npm', ['run', 'build'], { cwd: path.join(__dirname, 'hay'), stdio: 'inherit', timeout: 900000 });
+                    } catch (e) {
+                        log(`Hay build failed: ${e.message}`, RED);
+                        process.exit(1);
+                    }
                 }
             }
         }
@@ -18807,7 +18850,7 @@ async function main() {
             startDaemon();
             await waitForDaemonReady();
         }
-        log(`✓ Updated to ${runGit('git rev-parse --short HEAD')} — daemon restarted; sessions untouched.`, GREEN);
+        log(`✓ Updated to ${isGit ? runGit('git rev-parse --short HEAD') : JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version} — daemon restarted; sessions untouched.`, GREEN);
         if (withHost) {
             // restart-host.js: a keeper-backed host restarts with every
             // session left RUNNING; a pre-keeper host falls back to the old
@@ -21666,6 +21709,9 @@ async function main() {
         log(`[Audit] rotation at ${Math.round(SESSION_AUDIT_MAX_BYTES / 1048576)} MB ×${SESSION_AUDIT_KEEP_ROTATIONS}, retention ${SESSION_AUDIT_RETENTION_DAYS > 0 ? `${SESSION_AUDIT_RETENTION_DAYS}d` : 'off'}`, CYAN);
         setTimeout(runAuditSweep, 120000).unref?.();
         setInterval(runAuditSweep, 86400000).unref?.();
+
+        // Is a newer hop published? At boot, then daily; HOP_NO_UPDATE_CHECK=1 opts out.
+        updateChecker.start();
 
         // Stuck resume prompts are urgent in a way a stale tagline isn't — a
         // session sitting on one is frozen, not just unlabeled — so this runs

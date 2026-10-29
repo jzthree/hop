@@ -23,6 +23,7 @@ import { urlAtCell, cellAtPoint, oscUrlAtCell } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
 import { ContextMenu, type MenuRequest } from "./ContextMenu";
 import { CwdField } from "./CwdField";
+import { UpdateNotice } from "./UpdateNotice";
 import { pasteableUploadPaths } from "../utils/fileDrop";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
 import { createVoiceHold, isClaudeSurface } from "../utils/voiceHold";
@@ -3866,6 +3867,7 @@ export const SessionSwitcher = ({
           />
         </div>
         </>)}
+        <UpdateNotice />
         {/* Create form lives in the top bar so the header ＋ works from EVERY
             mode — the dashed grid card only exists in recent mode. */}
         {creating && !createInFolder && (

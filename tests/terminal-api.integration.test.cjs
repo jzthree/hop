@@ -207,6 +207,7 @@ async function startDaemon() {
     ...process.env,
     HOP_HOME: hopHome,
     HOP_NO_TUNNEL: '1',
+    HOP_NO_UPDATE_CHECK: '1',
     // Never the real ~/.codex: tests plant their own rollouts here.
     CODEX_HOME: path.join(tempDir, 'codex_home'),
     PATH: `${binDir}:${process.env.PATH || ''}`,

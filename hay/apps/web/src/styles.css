@@ -5826,3 +5826,45 @@ body.pane-dragging { user-select: none; }
 }
 /* Line icons in the wall's header buttons sit on the text like its glyphs. */
 .switcher-action-icon { display: inline-flex; align-items: center; opacity: 0.85; }
+
+/* Notify-only update notice on the Sessions wall (components/UpdateNotice.tsx). */
+.update-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 10px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.update-notice-icon { color: var(--accent); flex-shrink: 0; }
+.update-notice-text { flex: 1; min-width: 0; }
+.update-notice-cmd {
+  display: inline;
+  padding: 1px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: copy;
+  word-break: break-all;
+}
+.update-notice-link {
+  flex-shrink: 0;
+  color: var(--accent-2);
+  text-decoration: underline dotted;
+}
+.update-notice-close {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}

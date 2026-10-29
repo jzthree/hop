@@ -13,7 +13,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const HOP = path.join(__dirname, '..', 'hop');
 const THREAD = '01a00000-1111-7222-8333-444455556666';
 
-test('recover names the desktop app and its automation when the app holds the conversation', async (t) => {
+test('recover names the desktop app and its automation when the app holds the conversation', { timeout: 300000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hop-recover-holder-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   const hopHome = path.join(tmp, 'hop_home');
@@ -45,7 +45,7 @@ test('recover names the desktop app and its automation when the app holds the co
   const r = spawnSync(process.execPath, [HOP, 'recover', '--dry-run'], {
     encoding: 'utf8',
     env: { ...process.env, HOP_HOME: hopHome, CODEX_HOME: codexHome, HOP_SESSION: session, NO_COLOR: '1' },
-    timeout: 30000
+    timeout: 120000
   });
   const out = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, '');
   assert.equal(r.status, 1, out);

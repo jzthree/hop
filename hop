@@ -6497,12 +6497,20 @@ async function listCodexDesktopThreads(limit = 40, { id = null } = {}) {
     }).filter((t) => CODEX_THREAD_ID_RE.test(t.id));
 }
 
-/** Thread id → 'app' | 'daemon' | 'terminal', for the threads someone holds. */
-async function codexThreadHolders(ids) {
+/** Thread id → 'app' | 'daemon' | 'terminal', for the threads someone holds.
+ *  `holders.unknown` is set when lsof did not answer in time: lsof stats every
+ *  process's files, and one hung network mount stalls it for many seconds,
+ *  which must not read as "nobody holds it". */
+async function codexThreadHolders(ids, { timeoutMs = 4000 } = {}) {
     const files = ids.map((id) => path.join(CODEX_LOCK_DIR, `${id}.lock`)).filter((f) => fs.existsSync(f));
     const holders = new Map();
     if (!files.length) return holders;
-    const out = await execFileText('/usr/sbin/lsof', ['-F', 'pn', '--', ...files]);
+    const out = await new Promise((resolve) => {
+        execFile('/usr/sbin/lsof', ['-F', 'pn', '--', ...files], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+            if (err && err.killed) holders.unknown = true;
+            resolve(String(stdout || ''));
+        });
+    });
     if (!out) return holders;
     const pids = new Map();
     let pid = null;
@@ -18631,7 +18639,16 @@ async function main() {
         const threadId = kind === 'codex' ? (/codex resume '([0-9a-f-]{36})'/.exec(command) || [])[1] : null;
         if (threadId) {
             const take = args.includes('--take');
-            const holder = (await codexThreadHolders([threadId])).get(threadId) || null;
+            // A CLI the person waits on anyway: give a slow lsof time.
+            const found = await codexThreadHolders([threadId], { timeoutMs: 60000 });
+            if (found.unknown) {
+                log(`${display}: could not tell whether another process holds its Codex conversation (lsof did not answer within a minute — a hung network mount stalls it).`, YELLOW);
+                if (!args.includes('--force')) {
+                    log(`  Run ${CYAN}hop recover --force${RESET} to resume it anyway.`, RESET);
+                    process.exit(1);
+                }
+            }
+            const holder = found.get(threadId) || null;
             const automations = codexAppAutomationsOn(threadId);
             if (holder === 'app' && !take) {
                 log(`${display}: its Codex conversation is open in the Codex desktop app, which holds it, so it cannot continue here.`, YELLOW);
@@ -18653,7 +18670,8 @@ async function main() {
                 try { execFileSync('/usr/bin/osascript', ['-e', 'tell application id "com.openai.codex" to quit'], { timeout: 20000, stdio: 'ignore' }); } catch (e) { /* checked below */ }
                 let free = false;
                 for (let i = 0; i < 60 && !free; i++) {
-                    free = !(await codexThreadHolders([threadId])).has(threadId);
+                    const now = await codexThreadHolders([threadId], { timeoutMs: 60000 });
+                    free = !now.unknown && !now.has(threadId);
                     if (!free) await new Promise((r) => setTimeout(r, 500));
                 }
                 if (!free) {

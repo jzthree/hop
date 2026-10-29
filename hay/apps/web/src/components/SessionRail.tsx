@@ -105,6 +105,8 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
     return (
       <button key={keyOf(s)} type="button" className={"rail-row" + (current ? " current" : "")}
               aria-current={current ? "true" : undefined} onClick={() => onPick(s)}
+              // Out of the filter at the press (Safari never focuses a clicked button).
+              onPointerDown={() => { if (document.activeElement === inputRef.current) inputRef.current?.blur(); }}
               title={s.tagline || s.displayName || s.name}>
         <span className={`rail-dot ${dotClass(s)}`} aria-hidden="true" />
         <span className={"rail-name" + (wantsYou(s) || s.unread ? " strong" : "")}>{s.displayName || s.name}</span>

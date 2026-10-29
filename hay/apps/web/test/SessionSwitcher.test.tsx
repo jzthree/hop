@@ -308,6 +308,18 @@ describe("keys typed right after engaging a session", () => {
   });
 });
 
+describe("pressing a tile", () => {
+  it("takes focus out of the search box at the press, before any click", () => {
+    render(<SessionSwitcher {...props} open />);
+    const filter = document.querySelector("input") as HTMLInputElement;
+    filter.focus();
+    expect(document.activeElement).toBe(filter);
+    const card = screen.getByText("research").closest(".switcher-card") as HTMLElement;
+    fireEvent.pointerDown(card);
+    expect(document.activeElement).not.toBe(filter);
+  });
+});
+
 describe("context menus", () => {
   afterEach(() => { document.body.innerHTML = ""; });
 

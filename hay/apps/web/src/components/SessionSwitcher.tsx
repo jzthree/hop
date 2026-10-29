@@ -3885,7 +3885,18 @@ export const SessionSwitcher = ({
           </form>
         )}
       </div>
-      <div className="switcher-scroll" ref={scrollRef} onContextMenu={openWallMenu}>
+      <div
+        className="switcher-scroll"
+        ref={scrollRef}
+        onContextMenu={openWallMenu}
+        // Pressing anything on the wall takes focus out of the search box AT
+        // THE PRESS — capture phase, so no tile's own handler (or a session
+        // still connecting) can delay it. Waiting for the click left the
+        // caret in the box, and keys typed meanwhile went into the search.
+        onPointerDownCapture={() => {
+          if (document.activeElement === filterInputRef.current) filterInputRef.current?.blur();
+        }}
+      >
         {/* The host agent's briefing — same digest.json the phone renders.
             Hidden while filtering: search is about one session, the briefing
             is about the fleet. Keyed on the QUERY, not on model.mode: manual

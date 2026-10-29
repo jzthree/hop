@@ -13,7 +13,10 @@ const { spawn, spawnSync } = require('node:child_process');
 const HOP = path.join(__dirname, '..', 'hop');
 const THREAD = '01a00000-1111-7222-8333-444455556666';
 
-test('recover names the desktop app and its automation when the app holds the conversation', { timeout: 300000 }, async (t) => {
+// The desktop app and /usr/sbin/lsof are macOS-only.
+const macOnly = process.platform !== 'darwin' || !fs.existsSync('/usr/sbin/lsof') ? 'needs macOS lsof' : false;
+
+test('recover names the desktop app and its automation when the app holds the conversation', { timeout: 300000, skip: macOnly }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hop-recover-holder-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   const hopHome = path.join(tmp, 'hop_home');

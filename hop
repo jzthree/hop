@@ -6554,6 +6554,27 @@ function pauseCodexAppAutomation({ id }) {
     } catch (e) { return false; }
 }
 
+/**
+ * Make the Codex desktop app let go of a thread so a CLI can resume it. The
+ * app's ipc has no release message, so this quits the app (it reopens with
+ * its threads), after pausing its automations in that thread — the app would
+ * take the thread again on the next run. Resolves once nobody holds the
+ * thread, or after ~30 s with ok: false.
+ */
+async function takeCodexThreadFromApp(threadId, { lsofTimeoutMs = 60000 } = {}) {
+    const paused = [];
+    for (const a of codexAppAutomationsOn(threadId)) {
+        if (pauseCodexAppAutomation(a)) paused.push(a.name);
+    }
+    await execFileText('/usr/bin/osascript', ['-e', 'tell application id "com.openai.codex" to quit'], 20000);
+    for (let i = 0; i < 60; i++) {
+        const now = await codexThreadHolders([threadId], { timeoutMs: lsofTimeoutMs });
+        if (!now.unknown && !now.has(threadId)) return { ok: true, paused };
+        await new Promise((r) => setTimeout(r, 500));
+    }
+    return { ok: false, paused };
+}
+
 /** Codex thread id → the hop session whose conversation it is. */
 function hopSessionsByCodexThread() {
     const map = new Map();
@@ -13701,6 +13722,66 @@ happens until someone clicks it.
             return;
         }
 
+        // API: take a session's Codex thread back from the desktop app — the
+        // reverse of open-in-app, and `hop recover --take` from the menu. The
+        // app keeps a thread for hours after its window closes, and while it
+        // does `codex resume` here only exits or forks. Quitting the app is
+        // the one way to make it let go; then the session relaunches on its
+        // conversation (targeted restore, which never replaces a busy agent).
+        if (parsedUrl.pathname === '/api/codex/take' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', async () => {
+                const reply = (code, data) => {
+                    res.writeHead(code, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(data));
+                };
+                try {
+                    const { name, internalName } = JSON.parse(body || '{}');
+                    const session = resolveSessionInternalName(name, internalName);
+                    if (!session) return reply(404, { error: 'Session not found' });
+                    const turn = readTurnInfo(session);
+                    const id = turn?.agent === 'codex' ? codexRootThreadId(turn.sessionId) : null;
+                    if (!id || !CODEX_THREAD_ID_RE.test(id)) return reply(409, { error: 'No Codex conversation is recorded for this session' });
+                    const found = await codexThreadHolders([id], { timeoutMs: 20000 });
+                    if (found.unknown) return reply(503, { error: 'Could not tell who holds the conversation (lsof is stalled, often by a hung network mount)' });
+                    const holder = found.get(id) || null;
+                    if (holder === 'terminal') return reply(409, { error: 'The conversation is already running in a terminal (this session or another), not in the Codex app' });
+                    if (holder === 'daemon') return reply(409, { error: "The conversation is running in Codex's background server (codex agents shows it)" });
+                    let paused = [];
+                    if (holder === 'app') {
+                        // Quitting mid-turn loses that turn: leave a thread
+                        // the app is writing right now alone.
+                        const rollout = findCodexRolloutById(id);
+                        let age = Infinity;
+                        try { age = Date.now() - fs.statSync(rollout).mtimeMs; } catch (e) { /* no rollout */ }
+                        if (age < 20000) return reply(409, { error: 'The Codex app is working in this conversation right now — try again when it finishes' });
+                        log(`[codex] taking ${id.slice(0, 8)}… from the Codex app for ${session}`, DIM);
+                        const taken = await takeCodexThreadFromApp(id, { lsofTimeoutMs: 20000 });
+                        paused = taken.paused;
+                        if (!taken.ok) return reply(409, { error: 'The Codex app still holds the conversation — quit it by hand (⌘Q) and try again', paused });
+                    }
+                    // A parked session is being brought back deliberately.
+                    const config = getEffectiveSessionConfig(session);
+                    if (config && (config.parked || config.archived)) {
+                        const next = { ...config, parked: undefined, archived: undefined, updatedAt: new Date().toISOString() };
+                        if (getSessionConfig(session)) setSessionConfig(session, next);
+                        else rememberRuntimeSessionMetadata(session, next);
+                        const durable = readClaudeSessionMeta(session) || {};
+                        writeClaudeSessionMeta(session, { ...durable, internalName: session, parked: undefined, archived: undefined });
+                    }
+                    const result = await restoreSavedSessions({ includeAgents: true, only: [session], replaceIdleAgent: true });
+                    const restarted = (result?.restored || []).length > 0;
+                    const skipped = (result?.skipped || [])[0]?.reason || null;
+                    reply(200, { ok: true, freed: holder === 'app', paused, restarted, skipped });
+                } catch (e) {
+                    log(`[codex] take failed: ${e?.message || e}`, RED);
+                    reply(500, { error: e?.message || 'Could not take the conversation back' });
+                }
+            });
+            return;
+        }
+
         // API: hand a Claude session to the Claude desktop app — the
         // Claude twin of /api/codex/open-in-app. The app adopts a CLI
         // conversation IN PLACE from claude://resume?session=<id>: it reads
@@ -18661,20 +18742,10 @@ async function main() {
                 process.exit(1);
             }
             if (holder === 'app' && !dryRun) {
-                // The app re-opens the conversation on the automation's next
-                // run, so pause it first; the app reads it again on launch.
-                for (const a of automations) {
-                    if (pauseCodexAppAutomation(a)) log(`  Paused the app's automation "${a.name}" (resume it in the Codex app).`, DIM);
-                }
                 log(`  Quitting the Codex app so it lets go of the conversation…`, DIM);
-                try { execFileSync('/usr/bin/osascript', ['-e', 'tell application id "com.openai.codex" to quit'], { timeout: 20000, stdio: 'ignore' }); } catch (e) { /* checked below */ }
-                let free = false;
-                for (let i = 0; i < 60 && !free; i++) {
-                    const now = await codexThreadHolders([threadId], { timeoutMs: 60000 });
-                    free = !now.unknown && !now.has(threadId);
-                    if (!free) await new Promise((r) => setTimeout(r, 500));
-                }
-                if (!free) {
+                const taken = await takeCodexThreadFromApp(threadId);
+                for (const name of taken.paused) log(`  Paused the app's automation "${name}" (resume it in the Codex app).`, DIM);
+                if (!taken.ok) {
                     log(`${display}: the Codex app still holds the conversation. Quit it by hand (⌘Q) and run ${CYAN}hop recover${RESET} again.`, RED);
                     process.exit(1);
                 }

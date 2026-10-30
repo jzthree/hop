@@ -760,6 +760,21 @@ test('session names resolve case-insensitively', async () => {
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'CaseOther', internalName: other.data.internalName });
 });
 
+// Taking a thread back from the Codex app quits the app, so the endpoint
+// must refuse anything that is not a session with a recorded Codex
+// conversation before it touches the app.
+test('take-from-Codex-app refuses a session with no Codex conversation', async () => {
+  const missing = await requestJson(state.port, state.sessionSecret, 'POST', '/api/codex/take', { internalName: 'no-such-session' });
+  assert.equal(missing.status, 404);
+  const plain = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions',
+    { name: 'TakePlain', type: 'terminal', cwd: tempDir, startRuntime: true });
+  await delay(400);
+  const refused = await requestJson(state.port, state.sessionSecret, 'POST', '/api/codex/take', { internalName: plain.data.internalName });
+  assert.equal(refused.status, 409, JSON.stringify(refused.data));
+  assert.match(refused.data.error, /No Codex conversation/);
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: 'TakePlain', internalName: plain.data.internalName });
+});
+
 // Regression: an undeclared Bearer-token creation is automation, not a human.
 // Agents' raw scripts rarely remember x-hop-actor, and every one that forgot
 // landed its sessions in the USER tab (SelectProbe). Cookie-auth (the web UI)

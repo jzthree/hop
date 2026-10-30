@@ -2756,6 +2756,32 @@ export const SessionSwitcher = ({
     }
   };
 
+  // The reverse: the Codex app keeps a thread for hours after its window
+  // closes, and while it does the CLI here cannot resume it. The only way to
+  // make it let go is to quit the app; then this session relaunches on it.
+  const takeFromCodexApp = async (s: SwitcherSession) => {
+    setSheet(null);
+    const name = s.displayName || s.name;
+    if (!window.confirm(`Take ${name}'s conversation back from the Codex app?\n\nThis quits the Codex app (all its windows; it reopens normally) and pauses any app automation in this conversation, then resumes it here.`)) return;
+    onNotice(`Taking ${name} back from the Codex app…`);
+    try {
+      const res = await fetch("/api/codex/take", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-hop-actor": "user" },
+        body: JSON.stringify({ internalName: sessionKey(s) })
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string; freed?: boolean; paused?: string[]; restarted?: boolean; skipped?: string | null };
+      if (!res.ok) { onNotice(data.error || "Could not take the conversation back"); return; }
+      const paused = data.paused?.length ? ` (paused app automation ${data.paused.map((a) => `“${a}”`).join(", ")})` : "";
+      onNotice(data.restarted
+        ? `${name} resumed here${data.freed ? " — the Codex app let go" : ""}${paused}`
+        : `${data.freed ? "The Codex app let go, but " : ""}${name} was not relaunched${data.skipped ? `: ${data.skipped}` : ""}`);
+      onRefresh?.();
+    } catch {
+      onNotice("Could not take the conversation back");
+    }
+  };
+
   const forkSession = async (s: SwitcherSession, target?: "claude" | "codex") => {
     setSheet(null);
     onNotice(target ? `Condensing for ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
@@ -4236,6 +4262,12 @@ export const SessionSwitcher = ({
                 {(appLabel(sheetSession) === "codex" || appLabel(sheetSession) === "claude") && (
                   <button type="button" onClick={() => { void handOffToApp(sheetSession, appLabel(sheetSession) as "codex" | "claude"); }}>
                     Hand off to {appLabel(sheetSession) === "codex" ? "Codex" : "Claude"} app…
+                  </button>
+                )}
+                {appLabel(sheetSession) === "codex" && (
+                  <button type="button" title="Quits the Codex desktop app so this session can resume its conversation"
+                          onClick={() => { void takeFromCodexApp(sheetSession); }}>
+                    Take back from Codex app…
                   </button>
                 )}
                 <button

@@ -4633,6 +4633,10 @@ body.pane-dragging { user-select: none; }
 .digest-session-head .digest-headline {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
   font-weight: 550;
+  /* The page-width cap (76ch, below) is for reading prose; here it made each
+     count badge land at name width + 76ch, a ragged column. Filling the row
+     puts every badge in one column at the right, by the caret. */
+  max-width: none;
 }
 .digest-session.unseen .digest-session-head .digest-headline { font-weight: 650; }
 /* Expanded session thread: the whole run of briefings for one session. */

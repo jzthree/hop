@@ -708,7 +708,7 @@ export class Room extends EventEmitter {
         this.handleInput(client, message.data);
         break;
       case "resize":
-        this.handleResize(client, message.cols, message.rows, message.claim, message.user === true, message.take === true);
+        this.handleResize(client, message.cols, message.rows, message.claim, message.user === true, message.take === true, message.passive === true);
         break;
       case "typing":
         client.typing = message.active;
@@ -1107,7 +1107,7 @@ export class Room extends EventEmitter {
     return now() - this.sizeOwnerTypedAt < OWNER_ACTIVE_MS;
   }
 
-  private handleResize(client: ClientState, cols: number, rows: number, claim?: "attach", userClaim = false, take = false) {
+  private handleResize(client: ClientState, cols: number, rows: number, claim?: "attach", userClaim = false, take = false, passive = false) {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
     if (cols < 1 || cols > 500 || rows < 1 || rows > 200) return;
 
@@ -1127,6 +1127,23 @@ export class Room extends EventEmitter {
         this.applySize(client, cols, rows, "monitor");
       } else if (cols !== this.activeCols || rows !== this.activeRows) {
         this.sendActiveSize(client, this.sizeOwnerId ?? client.id);
+      }
+      return;
+    }
+
+    // A window the person is not in (it reports passive: it lost focus)
+    // never sizes the session over someone else here: two windows on one
+    // session each re-fitting it — a reconnect, a display change — flipped
+    // it between their sizes. It still sizes a session it owns, and one
+    // nobody else is attached to.
+    if (passive && !take && this.sizeOwnerId !== client.id) {
+      const hasInteractivePeer = [...this.clients.values()].some(
+        (peer) => peer.id !== client.id && peer.source !== "monitor"
+      );
+      if (!hasInteractivePeer) {
+        this.applySize(client, cols, rows, "owner");
+      } else if (cols !== this.activeCols || rows !== this.activeRows) {
+        this.sendActiveSize(client, this.sizeOwnerId ?? "");
       }
       return;
     }

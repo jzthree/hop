@@ -616,6 +616,39 @@ describe("Room", () => {
     expect((ptyInstance as unknown as FakePty).resizes.at(-1)).toEqual({ cols: 60, rows: 20 });
   });
 
+  it("a window the person is not in never sizes the session over the one they are in", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("two-windows", { cols: 120, rows: 30 }, "/tmp");
+    const here = new FakeSocket();
+    const there = new FakeSocket();
+    room.attachClient({ id: "here", name: "Alex", colorIndex: 0, cols: 120, rows: 30 }, here);
+    room.attachClient({ id: "there", name: "Alex", colorIndex: 0, cols: 90, rows: 25 }, there);
+    const pty = () => (ptyInstance as unknown as FakePty).resizes.at(-1);
+
+    // Nobody owns the size yet, but a background window still cannot take it,
+    // not even with a claim (its page strips claims while unfocused).
+    there.emitMessage({ type: "resize", cols: 90, rows: 25, passive: true });
+    here.emitMessage({ type: "resize", cols: 120, rows: 30, claim: "attach", user: true });
+    there.emitMessage({ type: "resize", cols: 91, rows: 25, passive: true });
+    expect(pty()).toEqual({ cols: 120, rows: 30 });
+    // It is told the real size so it renders that, scaled.
+    expect(findMessages(there, "active_size").at(-1)).toMatchObject({ cols: 120, rows: 30, clientId: "here" });
+
+    // Switching to it (focus) is a claim like any other, and wins.
+    there.emitMessage({ type: "resize", cols: 90, rows: 25, claim: "attach", user: true });
+    expect(pty()).toEqual({ cols: 90, rows: 25 });
+
+    // Alone, a background window still sizes its session.
+    there.close();
+    here.emitMessage({ type: "resize", cols: 100, rows: 30, passive: true });
+    expect(pty()).toEqual({ cols: 100, rows: 30 });
+  });
+
   it("counts attention bells but not OSC-terminator BELs", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {

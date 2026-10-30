@@ -21,7 +21,11 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     // Opening/attaching/clicking (claim:"attach", with or without user)
     // only takes the size from an owner who is gone or hasn't typed in a
     // while — the size belongs to whoever is actively typing.
-    take: z.boolean().optional()
+    take: z.boolean().optional(),
+    // passive:true comes from a window the person is not in (it lost
+    // focus): a report of its fit, never a claim. It sizes the session only
+    // for its owner, or when no other interactive client is attached.
+    passive: z.boolean().optional()
   }),
   z.object({ type: z.literal("typing"), active: z.boolean() }),
   z.object({ type: z.literal("toggle_collab"), enabled: z.boolean() }),

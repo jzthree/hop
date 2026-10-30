@@ -1625,6 +1625,13 @@ const App = () => {
     // opening/clicking only takes the size from an idle or absent owner.
     const take = takeSizeRef.current;
     takeSizeRef.current = false;
+    // A window the person is not in only reports its fit: two windows on
+    // one session each sized it in turn, flipping it back and forth. The
+    // window they are in takes the size when it gets focus (below).
+    if (!document.hasFocus()) {
+      sendMessage({ type: "resize", cols, rows, passive: true });
+      return;
+    }
     sendMessage({
       type: "resize",
       cols,
@@ -3289,6 +3296,21 @@ const App = () => {
       } catch { /* disposed mid-tick */ }
     }, 1400);
     return () => window.clearInterval(id);
+  }, [session]);
+
+  // The window the person is in owns the size: switching to this window
+  // (or tab) brings the session to its fit. Quiet when it already fits, and
+  // someone typing elsewhere keeps it until they stop (server rule).
+  const claimSizeHereRef = useRef(claimSizeHere);
+  claimSizeHereRef.current = claimSizeHere;
+  useEffect(() => {
+    if (!session) return;
+    const onFocus = () => {
+      if (document.hidden || switcherOpenRef.current) return;
+      claimSizeHereRef.current();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [session]);
 
   // Tab or window coming back to the foreground: same stale-frame risk as

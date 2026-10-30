@@ -646,6 +646,25 @@ describe("Room", () => {
     expect(room.getSummary().bellSeq).toBe(3);
   });
 
+  it("classifies bells in a large replay in one pass", () => {
+    let ptyInstance: FakePty | null = null;
+    const factory: PtyFactory = () => {
+      ptyInstance = new FakePty() as unknown as FakePty;
+      return ptyInstance as any;
+    };
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("replay-bells", { cols: 80, rows: 24 }, "/tmp");
+    // An adoption replay of Codex output: thousands of ST-terminated OSC 8
+    // links, non-ASCII text (a two-byte string), one bell at the very end.
+    // Re-searching for the next BEL at every link took minutes per room.
+    const link = "\x1b]8;;https://example.com/a\x1b\\link\x1b]8;;\x1b\\ — text ";
+    const replay = link.repeat(Math.ceil(2_000_000 / link.length)) + "\x07";
+    const started = performance.now();
+    ptyInstance?.emit(replay);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(room.getSummary().bellSeq).toBe(1);
+  });
+
   it("tracks bells across chunk-split OSC sequences", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {

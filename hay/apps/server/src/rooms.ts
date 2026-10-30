@@ -870,10 +870,20 @@ export class Room extends EventEmitter {
     let bells = 0;
     let i = 0;
     const len = chunk.length;
+    // Each next-position is searched for again only once the scan has
+    // passed it. Searching afresh every step was quadratic: an adoption
+    // replay (2 MB) of Codex output holds thousands of ST-terminated OSC 8
+    // links and few BELs, so every link re-scanned megabytes for the next
+    // BEL, and a host restart sat at 100% CPU for half an hour.
+    let belAt = -2;
+    let stAt = -2;
+    let oscAt = -2;
+    const next = (at: number, needle: string): number =>
+      at === -1 || at >= i ? at : chunk.indexOf(needle, i);
     while (i < len) {
       if (this.inOscForBells) {
-        const bel = chunk.indexOf("\x07", i);
-        const st = chunk.indexOf("\x1b\\", i);
+        const bel = (belAt = next(belAt, "\x07"));
+        const st = (stAt = next(stAt, "\x1b\\"));
         if (bel === -1 && st === -1) {
           i = len;
           break;
@@ -886,8 +896,8 @@ export class Room extends EventEmitter {
           i = st + 2;
         }
       } else {
-        const bel = chunk.indexOf("\x07", i);
-        const osc = chunk.indexOf("\x1b]", i);
+        const bel = (belAt = next(belAt, "\x07"));
+        const osc = (oscAt = next(oscAt, "\x1b]"));
         if (bel === -1 && osc === -1) break;
         if (bel !== -1 && (osc === -1 || bel < osc)) {
           bells += 1;

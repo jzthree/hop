@@ -269,6 +269,28 @@ describe("Room", () => {
     expect(ptyInstance!.resizes.at(-1)).toEqual({ cols: 90, rows: 20 });
   });
 
+  it("logs a resize storm once, naming who resized and why", () => {
+    const factory: PtyFactory = () => new FakePty() as any;
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("storm", { cols: 80, rows: 24 }, "/tmp");
+    const socketA = new FakeSocket();
+    const socketB = new FakeSocket();
+    room.attachClient({ id: "a", name: "Alex", colorIndex: 0, cols: 80, rows: 24 }, socketA);
+    room.attachClient({ id: "b", name: "Blake", colorIndex: 1, cols: 80, rows: 24 }, socketB);
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      for (let i = 0; i < 4; i++) {
+        socketA.emitMessage({ type: "resize", cols: 100, rows: 30, claim: "attach", user: true });
+        socketB.emitMessage({ type: "resize", cols: 60, rows: 20, claim: "attach", user: true });
+      }
+    } finally { spy.mockRestore(); }
+    const storms = logs.filter((l) => l.includes("resize storm"));
+    expect(storms.length).toBe(1);
+    expect(storms[0]).toContain("100x30 by a/web/Alex (user-claim)");
+    expect(storms[0]).toContain("60x20 by b/web/Blake (user-claim)");
+  });
+
   it("lets a monitor size only an unattended session", () => {
     let ptyInstance: FakePty | null = null;
     const factory: PtyFactory = () => {

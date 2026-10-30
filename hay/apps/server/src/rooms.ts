@@ -222,6 +222,8 @@ const SERIALIZED_CAPPED_HINT_BYTES = 262_144;
 // as CSI < b;x;y M/m. Anchored and exclusive: a payload containing
 // anything besides mouse reports still counts as typing.
 const OWNER_ACTIVE_MS = 60_000;
+const RESIZE_STORM_MS = 5_000;
+const RESIZE_STORM_COUNT = 6;
 // Not typing either: the TERMINAL's automatic answers to an app's queries.
 // Codex (and other TUIs) ask for the cursor position / device attributes /
 // colours on every redraw — every attached client's emulator answers, and
@@ -1081,7 +1083,7 @@ export class Room extends EventEmitter {
       this.sizeOwnerId = client.id;
       this.sizeOwnerTypedAt = now();
       if (client.cols !== this.activeCols || client.rows !== this.activeRows) {
-        this.applySize(client, client.cols, client.rows);
+        this.applySize(client, client.cols, client.rows, "typed");
       }
     }
     this.pty.write(data);
@@ -1112,7 +1114,7 @@ export class Room extends EventEmitter {
         (peer) => peer.id !== client.id && peer.source !== "monitor"
       );
       if (!hasInteractivePeer) {
-        this.applySize(client, cols, rows);
+        this.applySize(client, cols, rows, "monitor");
       } else if (cols !== this.activeCols || rows !== this.activeRows) {
         this.sendActiveSize(client, this.sizeOwnerId ?? client.id);
       }
@@ -1126,7 +1128,7 @@ export class Room extends EventEmitter {
     if (take || ((claim === "attach" || userClaim) && !this.ownerIsActiveTypist(client))) {
       if (this.sizeOwnerId !== client.id) this.sizeOwnerTypedAt = 0;
       this.sizeOwnerId = client.id;
-      this.applySize(client, cols, rows);
+      this.applySize(client, cols, rows, take ? "take" : userClaim ? "user-claim" : "attach-claim");
       return;
     }
     if (claim === "attach" || userClaim) {
@@ -1143,7 +1145,7 @@ export class Room extends EventEmitter {
     // owns the size (fresh room, owner detached), any interactive client
     // may size it without claiming it.
     if (this.sizeOwnerId === client.id || this.sizeOwnerId === null) {
-      this.applySize(client, cols, rows);
+      this.applySize(client, cols, rows, "owner");
       return;
     }
 
@@ -1156,7 +1158,8 @@ export class Room extends EventEmitter {
     }
   }
 
-  private applySize(client: ClientState, cols: number, rows: number) {
+  private applySize(client: ClientState, cols: number, rows: number, why: string) {
+    if (cols !== this.activeCols || rows !== this.activeRows) this.noteResize(client, cols, rows, why);
     this.pty.resize(cols, rows);
     this.activeCols = cols;
     this.activeRows = rows;
@@ -1167,6 +1170,23 @@ export class Room extends EventEmitter {
     this.broadcastActiveSize(client);
     this.sendActiveSize(client, client.id);
     this.emit("pty_resize", { roomId: this.id, clientId: client.id, cols, rows, timestamp: now() });
+  }
+
+  // Resize storm diagnostics: two clients fighting over the size flash the
+  // terminal between two grids. When the size changes RESIZE_STORM_COUNT
+  // times within RESIZE_STORM_MS, log who and why (once per storm), so the
+  // next fight names its cause instead of having to be reproduced.
+  private recentResizes: Array<{ at: number; who: string; size: string; why: string }> = [];
+  private lastStormLogAt = 0;
+  private noteResize(client: ClientState, cols: number, rows: number, why: string) {
+    const t = now();
+    this.recentResizes.push({ at: t, who: `${client.id}/${client.source || "web"}/${client.name}`, size: `${cols}x${rows}`, why });
+    while (this.recentResizes.length && t - this.recentResizes[0].at > RESIZE_STORM_MS) this.recentResizes.shift();
+    if (this.recentResizes.length >= RESIZE_STORM_COUNT && t - this.lastStormLogAt > RESIZE_STORM_MS) {
+      this.lastStormLogAt = t;
+      const trail = this.recentResizes.slice(-8).map((r) => `${r.size} by ${r.who} (${r.why})`).join("; ");
+      console.log(`[hay] room=${this.id} resize storm: ${this.recentResizes.length} size changes in ${RESIZE_STORM_MS / 1000}s — ${trail}`);
+    }
   }
 
   private sendActiveSize(client: ClientState, ownerId: string) {

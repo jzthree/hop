@@ -23,7 +23,7 @@ const folders = [{ id: "f1", name: "Work" }];
 const names = () => [...document.querySelectorAll(".rail-row:not(.all) .rail-name")].map((n) => n.textContent);
 
 describe("SessionRail", () => {
-  it("docked, it has no backdrop, leaves Escape to the terminal, and offers unpinning", () => {
+  it("docked, it has no backdrop, leaves Escape to the terminal, and hides from its options menu", () => {
     const onClose = vi.fn();
     const onDockChange = vi.fn();
     render(<SessionRail sessions={sessions} folders={folders} currentRoom="alpha" docked canDock
@@ -32,7 +32,8 @@ describe("SessionRail", () => {
     expect(screen.queryByLabelText("Close sessions")).toBeNull();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText("Unpin the sidebar"));
+    fireEvent.click(screen.getByLabelText("Sidebar options"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Hide sidebar/ }));
     expect(onDockChange).toHaveBeenCalledWith(false);
   });
 
@@ -55,7 +56,7 @@ describe("SessionRail", () => {
     expect(onPark).toHaveBeenCalledWith(expect.objectContaining({ name: "gamma" }), true);
   });
 
-  it("on the wall: All sessions is where you are, the wall's search filters the list, nav rows open places", () => {
+  it("docked on the wall: Home is where you are, places sit in the strip, the wall's search filters the list", () => {
     const openViews = vi.fn();
     let slot: HTMLDivElement | null = null;
     render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} docked onWall
@@ -64,10 +65,12 @@ describe("SessionRail", () => {
                         onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
     expect(slot).not.toBeNull();
     expect(screen.queryByLabelText("Jump to a session")).toBeNull();
-    expect(names().filter((n) => n !== "Views")).toEqual(["gamma"]);
-    expect(screen.getByText("All sessions").closest("button")?.getAttribute("aria-current")).toBe("page");
-    fireEvent.click(screen.getByText("Views"));
+    expect(names()).toEqual(["gamma"]);
+    expect(screen.getByRole("button", { name: "Home" }).getAttribute("aria-current")).toBe("page");
+    fireEvent.click(screen.getByRole("button", { name: "Views" }));
     expect(openViews).toHaveBeenCalled();
+    // Scope lives in the options menu; a non-default one shows as a chip.
+    expect(screen.queryByRole("tab", { name: "Agents" })).toBeNull();
   });
 
   it("a page-owned scope: the sidebar shows it and reports changes instead of keeping its own", () => {
@@ -87,5 +90,18 @@ describe("SessionRail", () => {
                         onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
     fireEvent.doubleClick(screen.getByRole("separator", { name: "Resize the sidebar" }));
     expect(onResize).toHaveBeenCalledWith(null);
+  });
+
+  it("docked: the options menu sets the scope, and the chip it leaves resets it", () => {
+    const onScopeChange = vi.fn();
+    const { rerender } = render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} docked scope="user" onScopeChange={onScopeChange}
+                                             onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByLabelText("Sidebar options"));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /Agents' sessions/ }));
+    expect(onScopeChange).toHaveBeenLastCalledWith("agent");
+    rerender(<SessionRail sessions={sessions} folders={folders} currentRoom={null} docked scope="agent" onScopeChange={onScopeChange}
+                          onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /Agents/ }));
+    expect(onScopeChange).toHaveBeenLastCalledWith("user");
   });
 });

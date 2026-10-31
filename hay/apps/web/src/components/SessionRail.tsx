@@ -55,9 +55,31 @@ type Props = {
   onScopeChange?: (scope: Scope) => void;
   /** Docked: drag the right edge to resize (double-click resets). */
   onResize?: (width: number | null) => void;
+  /** Docked: the header's compose button — a new session. */
+  onNew?: () => void;
 };
 
-export type RailNavItem = { key: string; label: string; icon: ReactNode; count?: number; fresh?: boolean; onClick: () => void };
+/** A place in the docked rail's icon strip (Slack's Home / DMs / Activity
+ *  column); `bottom` items sit at its foot (Slack's + / theme / you). */
+export type RailNavItem = { key: string; label: string; icon: ReactNode; count?: number; fresh?: boolean; bottom?: boolean; onClick: () => void };
+
+/** Line icons for the strip (24-grid, stroke = currentColor). */
+const ICON_PATHS: Record<string, string> = {
+  home: "M3 10.5 12 3l9 7.5M5 9.5V21h5v-6h4v6h5V9.5",
+  views: "M12 3 3 8l9 5 9-5-9-5ZM3 13l9 5 9-5M3 17.5l9 5 9-5",
+  scheduled: "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
+  codex: "M4 4h16v16H4zM12 4v16M4 12h8",
+  desktop: "M3 4h18v12H3zM8 20h8M12 16v4",
+  light: "M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4 7 17M17 7l1.4-1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
+  dark: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z",
+  system: "M12 3a9 9 0 1 0 0 18V3ZM12 3a9 9 0 0 1 0 18",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"
+};
+export const RailIcon = ({ name }: { name: keyof typeof ICON_PATHS | string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d={ICON_PATHS[name] || ""} />
+  </svg>
+);
 
 export type Scope = "user" | "agent" | "all";
 type Order = "folder" | "recent";
@@ -77,13 +99,14 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize }: Props) => {
+export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew }: Props) => {
   const [ownFilter, setFilter] = useState("");
   const filter = searchSlot ? (externalFilter ?? "") : ownFilter;
   const [ownScope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
   const scope = scopeProp ?? ownScope;
   const [order, setOrder] = useState<Order>(() => (load(ORDER_KEY) === "recent" ? "recent" : "folder"));
   const [menu, setMenu] = useState<{ s: RailSession; x: number; y: number } | null>(null);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [folded, setFolded] = useState<Set<string>>(() => new Set((load(FOLD_KEY) || "").split(",").filter(Boolean)));
   const [parkedOpen, setParkedOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -99,6 +122,15 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose, docked]);
+
+  useEffect(() => {
+    if (!optionsOpen) return;
+    const close = () => setOptionsOpen(false);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey, true);
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", onKey, true); };
+  }, [optionsOpen]);
 
   useEffect(() => {
     if (!menu) return;
@@ -187,89 +219,157 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
     );
   };
 
+  const scopeLabel = (v: Scope) => (v === "user" ? "You" : v === "agent" ? "Agents" : "All");
+  const searchBox = searchSlot
+    ? <div className="rail-search-slot" ref={searchSlot} />
+    : <input ref={inputRef} className="rail-filter" type="search" placeholder={docked ? "Find a session…" : "Jump to…"} value={filter}
+             onChange={(e) => setFilter(e.target.value)}
+             onKeyDown={(e) => { if (e.key === "Enter" && visible[0]) onPick(visible[0]); }}
+             aria-label="Jump to a session" />;
+  const list = (
+    <div className="rail-list">
+      {!docked && (
+        <button type="button" className={"rail-row all" + (onWall ? " current" : "")} aria-current={onWall ? "page" : undefined}
+                onClick={onAllSessions}>
+          <span className="rail-grid" aria-hidden="true">▦</span>
+          <span className="rail-name">All sessions</span>
+        </button>
+      )}
+      {groups.map((g) => {
+        const isFolded = !searching && folded.has(g.id);
+        const wanting = g.rows.filter(wantsYou).length;
+        return (
+          <section key={g.id || "unfiled"}>
+            <button type="button" className="rail-folder" aria-expanded={!isFolded} onClick={() => toggle(g.id)}>
+              <span className="rail-chev" aria-hidden="true">{isFolded ? "▸" : "▾"}</span>
+              <span className="rail-folder-name">{g.title}</span>
+              {isFolded && wanting > 0
+                ? <span className="rail-count wants">{wanting}</span>
+                : <span className="rail-count">{g.rows.length}</span>}
+            </button>
+            {!isFolded && g.rows.map(row)}
+          </section>
+        );
+      })}
+      {parked.length > 0 && (
+        <section>
+          <button type="button" className="rail-folder" aria-expanded={parkedOpen} onClick={() => setParkedOpen((o) => !o)}>
+            <span className="rail-chev" aria-hidden="true">{parkedOpen ? "▾" : "▸"}</span>
+            <span className="rail-folder-name">Parked</span>
+            <span className="rail-count">{parked.length}</span>
+          </button>
+          {parkedOpen && parked.map(row)}
+        </section>
+      )}
+      {visible.length === 0 && (
+        <p className="rail-empty">{searching ? `No session matches “${filter.trim()}”.` : "No sessions in this scope."}</p>
+      )}
+    </div>
+  );
+  const stripButton = (n: { key: string; label: string; icon: ReactNode; count?: number; fresh?: boolean; active?: boolean; onClick: () => void }) => (
+    <button key={n.key} type="button" className={"rail-strip-btn" + (n.active ? " on" : "")} onClick={n.onClick}
+            aria-current={n.active ? "page" : undefined} aria-label={n.label} title={n.label}>
+      <span className="rail-strip-icon" aria-hidden="true">{n.icon}</span>
+      <span className="rail-strip-label">{n.label}</span>
+      {!!n.count && <span className={"rail-strip-count" + (n.fresh ? " fresh" : "")}>{n.count}</span>}
+    </button>
+  );
+
   return (
     <>
       {!docked && <div className="rail-backdrop" onClick={onClose} />}
       <aside className={"session-rail" + (docked ? " docked" : "")} role={docked ? "navigation" : "dialog"} aria-label="Sessions">
-        <div className="rail-head">
-          <span className="rail-title">{docked ? "hop" : "Sessions"}</span>
-          <button type="button" className="rail-order" aria-label={`Arrange: ${order === "folder" ? "by folder" : "most recent first"}`}
-                  title={order === "folder" ? "By folder — click for most recent first" : "Most recent first — click for by folder"}
-                  onClick={() => changeOrder(order === "folder" ? "recent" : "folder")}>
-            {order === "folder" ? "▤" : "◷"}
-          </button>
-          <div className="rail-scope" role="tablist" aria-label="Scope">
-            {(["user", "agent", "all"] as const).map((v) => (
-              <button key={v} type="button" role="tab" aria-selected={scope === v}
-                      className={scope === v ? "on" : ""} onClick={() => changeScope(v)}>
-                {v === "user" ? "You" : v === "agent" ? "Agents" : "All"}
-              </button>
-            ))}
-          </div>
-          {(canDock || docked) && (
-            <button type="button" className={"rail-pin" + (docked ? " on" : "")} aria-pressed={docked}
-                    aria-label={docked ? "Unpin the sidebar" : "Keep the sidebar open"}
-                    title={docked ? "Unpin — the sidebar closes after a pick" : "Keep open beside the terminal"}
-                    onClick={() => onDockChange?.(!docked)}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" />{docked && <path d="M5 8h2M5 12h2" />}</svg>
-            </button>
-          )}
-          {!docked && <button type="button" className="rail-close" aria-label="Close sessions" onClick={onClose}>×</button>}
-        </div>
-        {searchSlot
-          ? <div className="rail-search-slot" ref={searchSlot} />
-          : <input ref={inputRef} className="rail-filter" type="search" placeholder="Jump to…" value={filter}
-                   onChange={(e) => setFilter(e.target.value)}
-                   onKeyDown={(e) => { if (e.key === "Enter" && visible[0]) onPick(visible[0]); }}
-                   aria-label="Jump to a session" />}
-        <div className="rail-list">
-          <button type="button" className={"rail-row all" + (onWall ? " current" : "")} aria-current={onWall ? "page" : undefined}
-                  onClick={onAllSessions}>
-            <span className="rail-grid" aria-hidden="true">▦</span>
-            <span className="rail-name">All sessions</span>
-          </button>
-          {nav.map((n) => (
-            <button key={n.key} type="button" className="rail-row nav" onClick={n.onClick}>
-              <span className="rail-grid" aria-hidden="true">{n.icon}</span>
-              <span className="rail-name">{n.label}</span>
-              {!!n.count && <span className={"rail-count" + (n.fresh ? " wants" : "")}>{n.count}</span>}
-            </button>
-          ))}
-          {groups.map((g) => {
-            const isFolded = !searching && folded.has(g.id);
-            const wanting = g.rows.filter(wantsYou).length;
-            return (
-              <section key={g.id || "unfiled"}>
-                <button type="button" className="rail-folder" aria-expanded={!isFolded} onClick={() => toggle(g.id)}>
-                  <span className="rail-chev" aria-hidden="true">{isFolded ? "▸" : "▾"}</span>
-                  <span className="rail-folder-name">{g.title}</span>
-                  {isFolded && wanting > 0
-                    ? <span className="rail-count wants">{wanting}</span>
-                    : <span className="rail-count">{g.rows.length}</span>}
+        {docked ? (<>
+          {/* Slack's left column: places, not sessions. */}
+          <nav className="rail-strip" aria-label="Places">
+            {stripButton({ key: "home", label: "Home", icon: <RailIcon name="home" />, active: onWall, onClick: onAllSessions })}
+            {nav.filter((n) => !n.bottom).map(stripButton)}
+            <span className="rail-strip-spacer" />
+            {nav.filter((n) => n.bottom).map(stripButton)}
+          </nav>
+          {/* The sidebar proper: sessions, front and center. */}
+          <div className="rail-pane">
+            <div className="rail-head">
+              <span className="rail-title">hop</span>
+              {scope !== "user" && (
+                <button type="button" className="rail-scope-chip" title="Showing this scope — click to show yours"
+                        onClick={() => changeScope("user")}>
+                  {scopeLabel(scope)} <span aria-hidden="true">×</span>
                 </button>
-                {!isFolded && g.rows.map(row)}
-              </section>
-            );
-          })}
-          {parked.length > 0 && (
-            <section>
-              <button type="button" className="rail-folder" aria-expanded={parkedOpen} onClick={() => setParkedOpen((o) => !o)}>
-                <span className="rail-chev" aria-hidden="true">{parkedOpen ? "▾" : "▸"}</span>
-                <span className="rail-folder-name">Parked</span>
-                <span className="rail-count">{parked.length}</span>
+              )}
+              <span className="rail-head-spacer" />
+              <div className="rail-options-wrap" onPointerDown={(e) => e.stopPropagation()}>
+                <button type="button" className="rail-icon-btn" aria-label="Sidebar options" aria-expanded={optionsOpen}
+                        title="Show, arrange, hide" onClick={() => setOptionsOpen((o) => !o)}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" /></svg>
+                </button>
+                {optionsOpen && (
+                  <div className="rail-options" role="menu">
+                    <div className="rail-options-label">Show</div>
+                    {(["user", "agent", "all"] as const).map((v) => (
+                      <button key={v} type="button" role="menuitemradio" aria-checked={scope === v}
+                              onClick={() => { changeScope(v); setOptionsOpen(false); }}>
+                        <span className="rail-options-check">{scope === v ? "✓" : ""}</span>
+                        {v === "user" ? "Your sessions" : v === "agent" ? "Agents' sessions" : "All sessions"}
+                      </button>
+                    ))}
+                    <div className="rail-options-label">Arrange</div>
+                    {(["folder", "recent"] as const).map((v) => (
+                      <button key={v} type="button" role="menuitemradio" aria-checked={order === v}
+                              onClick={() => { changeOrder(v); setOptionsOpen(false); }}>
+                        <span className="rail-options-check">{order === v ? "✓" : ""}</span>
+                        {v === "folder" ? "By folder" : "Most recent first"}
+                      </button>
+                    ))}
+                    <div className="rail-options-sep" />
+                    <button type="button" role="menuitem" onClick={() => { setOptionsOpen(false); onDockChange?.(false); }}>
+                      <span className="rail-options-check" />Hide sidebar
+                    </button>
+                  </div>
+                )}
+              </div>
+              {onNew && (
+                <button type="button" className="rail-icon-btn" aria-label="New session" title="New session" onClick={onNew}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                </button>
+              )}
+            </div>
+            {searchBox}
+            {list}
+          </div>
+          {onResize && (
+            <div className="rail-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar"
+                 title="Drag to resize · double-click for the default width"
+                 onPointerDown={startResize} onDoubleClick={() => onResize(null)} />
+          )}
+        </>) : (<>
+          <div className="rail-head">
+            <span className="rail-title">Sessions</span>
+            <button type="button" className="rail-order" aria-label={`Arrange: ${order === "folder" ? "by folder" : "most recent first"}`}
+                    title={order === "folder" ? "By folder — click for most recent first" : "Most recent first — click for by folder"}
+                    onClick={() => changeOrder(order === "folder" ? "recent" : "folder")}>
+              {order === "folder" ? "▤" : "◷"}
+            </button>
+            <div className="rail-scope" role="tablist" aria-label="Scope">
+              {(["user", "agent", "all"] as const).map((v) => (
+                <button key={v} type="button" role="tab" aria-selected={scope === v}
+                        className={scope === v ? "on" : ""} onClick={() => changeScope(v)}>
+                  {scopeLabel(v)}
+                </button>
+              ))}
+            </div>
+            {canDock && (
+              <button type="button" className="rail-pin" aria-pressed={false}
+                      aria-label="Keep the sidebar open" title="Keep open beside the terminal"
+                      onClick={() => onDockChange?.(true)}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
               </button>
-              {parkedOpen && parked.map(row)}
-            </section>
-          )}
-          {visible.length === 0 && (
-            <p className="rail-empty">{searching ? `No session matches “${filter.trim()}”.` : "No sessions in this scope."}</p>
-          )}
-        </div>
-        {docked && onResize && (
-          <div className="rail-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar"
-               title="Drag to resize · double-click for the default width"
-               onPointerDown={startResize} onDoubleClick={() => onResize(null)} />
-        )}
+            )}
+            <button type="button" className="rail-close" aria-label="Close sessions" onClick={onClose}>×</button>
+          </div>
+          {searchBox}
+          {list}
+        </>)}
       </aside>
       {menu && onPark && (
         <div className="rail-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>

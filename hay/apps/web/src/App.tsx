@@ -25,7 +25,7 @@ import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
-import { SessionRail, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
+import { SessionRail, RailIcon, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { DesktopView } from "./components/DesktopView";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -547,16 +547,17 @@ const App = () => {
     try { localStorage.setItem("hop_rail_scope", next); } catch { /* per-browser only */ }
   };
   // Width, dragged at its edge (null = the default).
-  const RAIL_DEFAULT_W = 280;
+  const RAIL_DEFAULT_W = 320;
   const [railWidth, setRailWidth] = useState<number>(() => {
-    try { const v = Number(localStorage.getItem("hop_rail_width")); return v >= 200 && v <= 520 ? v : RAIL_DEFAULT_W; } catch { return RAIL_DEFAULT_W; }
+    try { const v = Number(localStorage.getItem("hop_rail_width")); return v >= 240 && v <= 560 ? v : RAIL_DEFAULT_W; } catch { return RAIL_DEFAULT_W; }
   });
   const resizeRail = (w: number | null) => {
-    const next = w === null ? RAIL_DEFAULT_W : Math.round(Math.max(200, Math.min(520, w)));
+    const next = w === null ? RAIL_DEFAULT_W : Math.round(Math.max(240, Math.min(560, w)));
     setRailWidth(next);
     try { localStorage.setItem("hop_rail_width", String(next)); } catch { /* per-browser only */ }
   };
   const [wallFilter, setWallFilter] = useState("");
+  const [createSignal, setCreateSignal] = useState(0);
   const dockQuery = "(min-width: 1100px) and (pointer: fine)";
   const [railCanDock, setRailCanDock] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(dockQuery).matches);
   useEffect(() => {
@@ -4390,19 +4391,21 @@ const App = () => {
   const railOnWall = !session || switcherOpen;
   const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
   const railNav: RailNavItem[] = !railDocked ? [] : [
-    { key: "views", label: "Views", icon: "◧", onClick: () => setViewsOpen({}) },
-    { key: "scheduled", label: "Scheduled", icon: "◷",
+    { key: "views", label: "Views", icon: <RailIcon name="views" />, onClick: () => setViewsOpen({}) },
+    { key: "scheduled", label: "Scheduled", icon: <RailIcon name="scheduled" />,
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
-    { key: "codex", label: "Codex app", icon: "⧉", onClick: () => setCodexAppOpen(true) },
-    ...(desktopEnabled ? [{ key: "desktop", label: "Desktop", icon: "▭", onClick: () => setDesktopOpen(true) }] : []),
+    { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
+    ...(desktopEnabled ? [{ key: "desktop", label: "Desktop", icon: <RailIcon name="desktop" />, onClick: () => setDesktopOpen(true) }] : []),
     (() => {
       const next = themeMode === "system" ? "light" : themeMode === "light" ? "dark" : "system";
       const label = (m: string) => (m === "system" ? "Auto" : m === "light" ? "Light" : "Dark");
-      return { key: "theme", label: `Theme: ${label(themeMode)}`, icon: themeMode === "light" ? "☀" : themeMode === "dark" ? "☾" : "◐",
-               onClick: () => setThemeMode(next) };
+      return { key: "theme", label: label(themeMode), icon: <RailIcon name={themeMode} />,
+               bottom: true, onClick: () => setThemeMode(next) };
     })(),
-    ...(session ? [{ key: "settings", label: "Settings", icon: "⚙", onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
+    ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
   ];
+  // The sidebar's compose button: the wall's new-session form.
+  const newFromRail = () => { if (session) setSwitcherOpen(true); setCreateSignal((n) => n + 1); };
 
   return (
     <div className={"app" + (railDocked ? " rail-docked" : "")}
@@ -4576,6 +4579,7 @@ const App = () => {
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
             scope={railDocked ? railScope : undefined}
+            createSignal={createSignal}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
           />
@@ -5286,6 +5290,7 @@ const App = () => {
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
             scope={railDocked ? railScope : undefined}
+            createSignal={createSignal}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
             onOpenSettings={() => {
@@ -5440,6 +5445,7 @@ const App = () => {
           scope={railScope}
           onScopeChange={changeRailScope}
           onResize={resizeRail}
+          onNew={newFromRail}
           docked={railDocked}
           canDock={railCanDock}
           onDockChange={setRailDocked}

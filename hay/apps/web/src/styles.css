@@ -6,6 +6,7 @@
 :root {
   color-scheme: light;
   --font-mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   /* Terminal-content font: the xterm terminal, its preview tiles, and the
      focus-tile veil must all render in ONE stack, or a preview looks like a
      different app than the session it previews. Kept separate from
@@ -5700,7 +5701,7 @@ body.pane-dragging { user-select: none; }
 .rail-title { font-weight: 700; font-size: 15px; }
 .rail-scope { display: flex; margin-left: auto; background: var(--chip-bg); border-radius: 8px; padding: 2px; }
 .rail-scope button {
-  border: 0; background: none; color: var(--ink-muted); font: 600 12px/1 inherit;
+  border: 0; background: none; color: var(--ink-muted); font: 600 12px/1 var(--font-sans);
   padding: 5px 9px; border-radius: 6px; cursor: pointer;
 }
 .rail-scope button.on { background: var(--bg); color: var(--ink); }
@@ -5733,11 +5734,11 @@ body.pane-dragging { user-select: none; }
 .rail-dot.off { background: transparent; border: 1.5px solid #93a0b4; }
 .rail-badge {
   flex: none; min-width: 18px; height: 18px; border-radius: 9px; padding: 0 5px;
-  background: #f0a53a; color: #000; font: 700 11px/18px inherit; text-align: center;
+  background: #f0a53a; color: #000; font: 700 11px/18px var(--font-sans); text-align: center;
 }
 .rail-folder {
   padding: 14px 14px 4px; color: var(--ink-muted);
-  font: 700 11px/1.2 inherit; letter-spacing: 0.06em; text-transform: uppercase;
+  font: 700 11px/1.2 var(--font-sans); letter-spacing: 0.06em; text-transform: uppercase;
 }
 .rail-folder:hover { color: var(--ink); transform: none; background: none; }
 .rail-chev { width: 10px; }
@@ -5753,57 +5754,116 @@ body.pane-dragging { user-select: none; }
 }
 .rail-order:hover, .rail-pin:hover { color: var(--ink); background: var(--chip-bg); transform: none; }
 .rail-pin.on { color: var(--accent, var(--ink)); }
-/* Docked: Slack's sidebar — a dark column beside the wall (the main view)
-   and beside a session, not an overlay. The page and the wall make room for
-   it; the terminal refits to what is left. Its own palette in both themes,
-   set as the tokens its parts already use. */
-/* --rail-w is set on .app from the dragged width (default 280px). */
-.app.rail-docked { padding-left: var(--rail-w, 280px); }
+/* Docked: Slack's layout — a narrow strip of places (Home, Views,
+   Scheduled…; theme and settings at its foot) and beside it the sidebar
+   proper, which is sessions: header, search, folders. Beside the wall (the
+   main view) and beside a session; the page and the wall make room, and the
+   terminal refits to what is left. Light or dark with the page, as Slack's
+   sidebar is; the strip a shade of the accent. */
+.app.rail-docked { padding-left: var(--rail-w, 320px); }
 .app.rail-docked .switcher-overlay,
-.app.rail-docked .connection-banner { left: var(--rail-w, 280px); }
-.rail-resize {
-  position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; z-index: 2;
-  cursor: col-resize; touch-action: none;
-}
-.rail-resize:hover, body.rail-resizing .rail-resize { background: color-mix(in srgb, var(--accent) 60%, transparent); }
-body.rail-resizing { cursor: col-resize; user-select: none; }
-body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
-/* Docked, the session's bar is its header — Slack's channel name. */
-.topbar.channel { padding: 10px 20px; gap: 16px; }
-.channel-name {
-  font: 700 15px/1.2 var(--font-mono); min-width: 0; flex: 0 1 auto;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+.app.rail-docked .connection-banner { left: var(--rail-w, 320px); }
 .session-rail.docked {
-  width: var(--rail-w, 280px); z-index: 30; box-shadow: none; animation: none; overflow: visible;
-  --panel: #3b1d48; --bg: rgba(255, 255, 255, 0.1); --chip-bg: rgba(255, 255, 255, 0.1);
-  --ink: rgba(255, 255, 255, 0.92); --ink-muted: rgba(255, 255, 255, 0.62);
-  --line: rgba(255, 255, 255, 0.12); --accent: #a78bfa;
-  border-right-color: rgba(0, 0, 0, 0.25);
+  width: var(--rail-w, 320px); z-index: 30; box-shadow: none; animation: none; overflow: visible;
+  flex-direction: row; padding-top: 0;
+  --rail-strip-bg: color-mix(in srgb, var(--accent) 16%, #f4f1fa);
+  --rail-pane-bg: #f8f7fa; --rail-ink: #1d1c1d; --rail-muted: #616061;
+  --rail-hover: rgba(0, 0, 0, 0.05); --rail-current: #6d4fc2; --rail-line: rgba(0, 0, 0, 0.08);
+  --rail-input: #fff;
+  background: var(--rail-pane-bg); color: var(--rail-ink); border-right: 1px solid var(--rail-line);
 }
-:root[data-theme="dark"] .session-rail.docked { --panel: #1f1a26; }
+:root[data-theme="dark"] .session-rail.docked {
+  --rail-strip-bg: #120f17; --rail-pane-bg: #1a1820; --rail-ink: #d8d6dc; --rail-muted: #9a97a1;
+  --rail-hover: rgba(255, 255, 255, 0.06); --rail-current: #6d4fc2; --rail-line: rgba(255, 255, 255, 0.08);
+  --rail-input: rgba(255, 255, 255, 0.07);
+}
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .session-rail.docked { --panel: #1f1a26; }
+  :root:not([data-theme="light"]) .session-rail.docked {
+    --rail-strip-bg: #120f17; --rail-pane-bg: #1a1820; --rail-ink: #d8d6dc; --rail-muted: #9a97a1;
+    --rail-hover: rgba(255, 255, 255, 0.06); --rail-current: #6d4fc2; --rail-line: rgba(255, 255, 255, 0.08);
+    --rail-input: rgba(255, 255, 255, 0.07);
+  }
 }
-.session-rail.docked .rail-head { padding-top: 14px; border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; }
-.session-rail.docked .rail-title { font-size: 17px; letter-spacing: -0.01em; }
-.session-rail.docked .rail-scope button { padding: 5px 7px; }
-.session-rail.docked .rail-scope button.on { background: rgba(255, 255, 255, 0.18); }
-.session-rail.docked .rail-row { border-radius: 6px; margin: 0 8px; width: calc(100% - 16px); padding-left: 12px; }
-.session-rail.docked .rail-row.all { padding-left: 10px; }
-.session-rail.docked .rail-row.current { background: #6d4fc2; color: #fff; }
-.session-rail.docked .rail-row.current .rail-grid,
-.session-rail.docked .rail-row.current .rail-mark { color: rgba(255, 255, 255, 0.85); }
-.session-rail.docked .rail-row.nav { font-family: inherit; }
-.session-rail.docked .rail-row.nav .rail-name { font-family: inherit; }
-.session-rail.docked .rail-row.nav:last-of-type { margin-bottom: 6px; }
-.rail-row .rail-count { margin-left: auto; font-size: 11px; }
-.rail-search-slot { display: contents; }
+.rail-strip {
+  flex: none; width: 64px; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 12px 0 14px; background: var(--rail-strip-bg);
+}
+.rail-strip-spacer { flex: 1; }
+.rail-strip-btn {
+  position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  width: 56px; padding: 6px 0 5px; border: 0; border-radius: 10px; background: none;
+  color: var(--rail-ink); cursor: pointer; transform: none;
+}
+.rail-strip-btn:hover { background: var(--rail-hover); transform: none; }
+.rail-strip-icon {
+  width: 34px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 9px; font-size: 17px; line-height: 1;
+}
+.rail-strip-btn.on .rail-strip-icon { background: var(--rail-current); color: #fff; }
+.rail-strip-label { font: 600 10.5px/1.1 var(--font-sans); color: var(--rail-muted); }
+.rail-strip-btn.on .rail-strip-label { color: var(--rail-ink); }
+.rail-strip-count {
+  position: absolute; top: 1px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--rail-muted); color: var(--rail-pane-bg);
+  font: 700 10px/16px var(--font-sans); text-align: center;
+}
+.rail-strip-count.fresh { background: #e01e5a; color: #fff; }
+.rail-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.session-rail.docked .rail-head { padding: 14px 10px 8px 16px; gap: 4px; }
+.session-rail.docked .rail-title { font: 800 18px/1.2 var(--font-sans); letter-spacing: -0.01em; }
+.rail-head-spacer { flex: 1; }
+.rail-scope-chip {
+  margin-left: 6px; border: 0; border-radius: 10px; padding: 2px 8px; cursor: pointer;
+  background: var(--rail-hover); color: var(--rail-muted); font: 600 11px/1.4 var(--font-sans);
+}
+.rail-icon-btn {
+  border: 0; background: none; color: var(--rail-muted); width: 30px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; cursor: pointer;
+}
+.rail-icon-btn:hover { background: var(--rail-hover); color: var(--rail-ink); transform: none; }
+.rail-options-wrap { position: relative; }
+.rail-options {
+  position: absolute; top: 34px; right: 0; z-index: 40; min-width: 200px; padding: 6px;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+.rail-options-label { padding: 6px 8px 2px; font: 700 11px/1.2 var(--font-sans); color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.rail-options button {
+  display: flex; align-items: center; width: 100%; text-align: left; border: 0; background: none;
+  color: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: 500 13px/1.2 var(--font-sans);
+}
+.rail-options button:hover { background: var(--chip-bg); transform: none; }
+.rail-options-check { width: 18px; flex: none; color: var(--accent); }
+.rail-options-sep { height: 1px; margin: 6px 4px; background: var(--line); }
+.session-rail.docked .rail-filter,
 .rail-search {
-  margin: 0 14px 10px; padding: 8px 10px; border-radius: 9px;
-  border: 1px solid var(--line); background: var(--bg); color: var(--ink); font-size: 14px;
+  margin: 0 12px 10px 12px; padding: 7px 10px; border-radius: 8px; font-size: 13.5px;
+  border: 1px solid var(--rail-line, var(--line)); background: var(--rail-input, var(--bg)); color: var(--rail-ink, var(--ink));
 }
-.rail-search::placeholder, .session-rail.docked .rail-filter::placeholder { color: var(--ink-muted); }
+.rail-search::placeholder, .session-rail.docked .rail-filter::placeholder { color: var(--rail-muted, var(--ink-muted)); }
+.rail-search-slot { display: contents; }
+/* Sessions: the content. Readable names (sans, like channel names), Slack's
+   rounded rows, the current one filled. */
+.session-rail.docked .rail-list { padding-top: 2px; }
+.session-rail.docked .rail-folder {
+  margin: 0 8px; width: calc(100% - 16px); padding: 10px 8px 4px; border-radius: 6px;
+  color: var(--rail-muted); font: 600 13px/1.2 var(--font-sans); letter-spacing: 0; text-transform: none;
+}
+.session-rail.docked .rail-folder:hover { color: var(--rail-ink); }
+.session-rail.docked .rail-row {
+  margin: 0 8px; width: calc(100% - 16px); padding: 5px 8px 5px 14px; border-radius: 6px;
+  font-size: 14.5px; color: var(--rail-ink);
+}
+.session-rail.docked .rail-row:hover { background: var(--rail-hover); }
+.session-rail.docked .rail-row.current { background: var(--rail-current); color: #fff; }
+.session-rail.docked .rail-row.current .rail-mark { color: rgba(255, 255, 255, 0.85); }
+.session-rail.docked .rail-name { font-family: var(--font-sans); font-weight: 400; }
+/* Bold is a signal, as in Slack: the sessions that want you or have news. */
+.session-rail.docked .rail-name.strong { font-weight: 700; }
+.rail-strip-icon svg { width: 19px; height: 19px; }
+.session-rail.docked .rail-mark { color: var(--rail-muted); }
+.session-rail.docked .rail-count { color: var(--rail-muted); }
+.rail-row .rail-count { margin-left: auto; font-size: 11px; }
 .rail-menu {
   position: fixed; z-index: 420; min-width: 120px; padding: 4px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
@@ -5811,7 +5871,7 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 }
 .rail-menu button {
   display: block; width: 100%; text-align: left; border: 0; background: none;
-  color: var(--ink); padding: 7px 10px; border-radius: 5px; cursor: pointer; font: 500 13px/1.2 inherit;
+  color: var(--ink); padding: 7px 10px; border-radius: 5px; cursor: pointer; font: 500 13px/1.2 var(--font-sans);
 }
 .rail-menu button:hover { background: var(--chip-bg); transform: none; }
 .topbar-rail-btn { display: inline-flex; align-items: center; justify-content: center; padding-left: 8px; padding-right: 8px; }

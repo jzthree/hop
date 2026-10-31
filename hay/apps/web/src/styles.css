@@ -6079,3 +6079,155 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
   color: var(--ink-muted);
   cursor: pointer;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+   hop's design layer for the wall — one hand with the sidebar.
+   Paper and hairlines; type that is quiet until it matters; colour kept
+   for meaning. News is a spark (violet into cyan), never a warning: a
+   finished turn you have not read, and a question for you, are the two
+   things worth being excited about. Working is calm indigo; read is quiet;
+   where you are is the cursor. Later rules win over the older ones above.
+   ════════════════════════════════════════════════════════════════════════ */
+:root {
+  --hop-spark: linear-gradient(120deg, #8b5cf6 0%, #6366f1 45%, #06b6d4 100%);
+  --wall-bg: #f5f4f0;
+  --card-bg: #ffffff;
+  --card-line: rgba(36, 33, 43, 0.1);
+  --card-shadow: 0 1px 2px rgba(24, 18, 48, 0.05), 0 6px 18px -10px rgba(24, 18, 48, 0.16);
+  --card-shadow-hover: 0 2px 4px rgba(24, 18, 48, 0.06), 0 14px 30px -14px rgba(24, 18, 48, 0.26);
+  --working: #4f63e8;
+  --settled: #0f9b8e;
+}
+:root[data-theme="dark"] {
+  --wall-bg: #111015; --card-bg: #1a1920; --card-line: rgba(255, 255, 255, 0.08);
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); --card-shadow-hover: 0 10px 28px -12px rgba(0, 0, 0, 0.6);
+  --working: #8b9cff; --settled: #3cc7b6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --wall-bg: #111015; --card-bg: #1a1920; --card-line: rgba(255, 255, 255, 0.08);
+    --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); --card-shadow-hover: 0 10px 28px -12px rgba(0, 0, 0, 0.6);
+    --working: #8b9cff; --settled: #3cc7b6;
+  }
+}
+
+/* The page. */
+.switcher-overlay { background: var(--wall-bg); }
+.switcher-top { background: var(--wall-bg); border-bottom: 1px solid var(--card-line); backdrop-filter: none; }
+.app.rail-docked .switcher-overlay.switcher-hub { padding: 0; }
+.app.rail-docked .switcher-overlay.switcher-hub > .switcher-top,
+.app.rail-docked .switcher-overlay.switcher-hub > .switcher-scroll { width: 100%; max-width: none; }
+
+/* Header: a title, a count, one primary act; arrangement as quiet tabs. */
+.switcher-header { padding-top: calc(env(safe-area-inset-top, 0px) + 16px); padding-bottom: 8px; gap: 10px; }
+.switcher-header h2,
+.switcher-overlay.switcher-hub .switcher-header h2 {
+  font: 700 21px/1.2 var(--font-sans); letter-spacing: -0.02em;
+}
+.switcher-count {
+  background: none; padding: 0; font: 500 13px/1 var(--font-mono); color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+.switcher-new-top {
+  margin-left: 6px; padding: 5px 12px; border: 0; border-radius: 8px;
+  background: var(--ink); color: var(--wall-bg); font: 600 12.5px/1.3 var(--font-sans);
+  transition: background 0.15s;
+}
+.switcher-new-top:hover { background: #7c3aed; color: #fff; border: 0; }
+.switcher-tilesize { border-color: var(--card-line); border-radius: 8px; margin-left: 4px; }
+.switcher-tilesize button { font: 500 12px/1.4 var(--font-sans); }
+.switcher-filter-row { gap: 18px; }
+.switcher-origin, .switcher-origin.switcher-sort {
+  border: 0; background: none; padding: 0; gap: 16px; border-radius: 0;
+}
+.switcher-origin button {
+  min-width: 0; padding: 6px 0; border-radius: 0; background: none; box-shadow: none;
+  font: 500 13px/1.2 var(--font-sans); color: var(--ink-muted);
+}
+.switcher-origin button:hover { color: var(--ink); transform: none; }
+.switcher-origin button.active {
+  background: none; color: var(--ink); font-weight: 650;
+  box-shadow: inset 0 -2px 0 var(--ink);
+}
+
+/* Cards: paper on the wall, a hairline, a soft lift on hover. */
+.switcher-card {
+  background: var(--card-bg); border: 1px solid var(--card-line); border-radius: 12px;
+  box-shadow: var(--card-shadow); padding: 11px 12px 9px; gap: 7px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.switcher-card:hover { transform: translateY(-1px); box-shadow: var(--card-shadow-hover); }
+.switcher-card-name { font: 650 13.5px/1.25 var(--font-sans); letter-spacing: -0.005em; }
+.switcher-card-tagline { font: 400 12px/1.3 var(--font-sans); color: var(--ink-muted); opacity: 1; }
+.switcher-preview { border: 0; border-radius: 8px; }
+.switcher-card-meta { font: 500 10.5px/1.4 var(--font-sans); gap: 6px; }
+.switcher-card-chips { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.switcher-card-when { flex: none; }
+.switcher-card-dir { font: 400 10.5px/1.4 var(--font-mono); opacity: 0.8; }
+.switcher-card-when { font-variant-numeric: tabular-nums; }
+/* Where you are: the cursor, a short bar at the top-left. */
+.switcher-card.current::before { left: 12px; right: auto; width: 26px; height: 3px; border-radius: 0 0 2px 2px; background: #7c3aed; }
+/* Recency, in the spark's hue rather than "alive" green. */
+.switcher-card-fresh { background: var(--hop-spark); width: 2px; }
+/* Activity right now is the fresh bar's pulse, not another ring. */
+.switcher-card.active-now { border-color: var(--card-line); box-shadow: var(--card-shadow); }
+
+/* Status. The old frame + wash + ring per state made the wall loud; now
+   working is a tint of the edge, news is the spark's edge, a question is
+   the spark's edge with a glow, and read is just paper. */
+.switcher-card.phase-working,
+.switcher-card.phase-done-unread,
+.switcher-card.needs-you { background: var(--card-bg); box-shadow: var(--card-shadow); }
+.switcher-card.phase-working { border-color: color-mix(in srgb, var(--working) 40%, var(--card-line)); }
+.switcher-card.phase-done-unread,
+.switcher-card.needs-you {
+  border: 1px solid transparent;
+  background: linear-gradient(var(--card-bg), var(--card-bg)) padding-box, var(--hop-spark) border-box;
+  box-shadow: 0 8px 22px -12px rgba(99, 102, 241, 0.45);
+}
+.switcher-card.needs-you { box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.12), 0 10px 26px -12px rgba(6, 182, 212, 0.55); }
+.switcher-card.phase-done-read { opacity: 1; }
+
+/* Chips: small, lowercase, tonal — facts, not alarms. */
+.switcher-chip {
+  font: 600 10px/1.5 var(--font-sans); letter-spacing: 0.01em; padding: 0 6px; border-radius: 5px;
+  background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink-muted);
+}
+.switcher-chip.account, .switcher-chip.account.default {
+  background: none; border: 1px solid var(--card-line); color: var(--ink-muted);
+  font: 500 10px/1.4 var(--font-mono); text-transform: lowercase;
+}
+.switcher-chip.phase.working { background: color-mix(in srgb, var(--working) 13%, transparent); color: var(--working); }
+.switcher-chip.phase.done-unread { background: var(--hop-spark); color: #fff; }
+.switcher-chip.phase.done-unread .phase-dot { display: none; }
+.switcher-chip.phase.done-unread::before { content: "✦"; margin-right: 1px; }
+.switcher-chip.phase.done-read { background: none; color: var(--ink-muted); }
+.switcher-chip.phase.done-read .phase-dot { background: var(--settled); }
+.switcher-chip.views { background: color-mix(in srgb, #7c3aed 11%, transparent); color: #6d28d9; }
+/* The gradient belongs to "new" alone; fresh results are a stronger tint. */
+.switcher-chip.views.fresh { background: color-mix(in srgb, #7c3aed 20%, transparent); color: #6d28d9; font-weight: 700; }
+.switcher-chip.checkback { background: none; border: 1px solid var(--card-line); color: var(--ink-muted); font-weight: 600; }
+.switcher-chip.waiting { background: var(--hop-spark); color: #fff; text-transform: lowercase; }
+.switcher-chip.waiting::before { content: "✦ "; }
+.switcher-chip.current { background: #7c3aed; color: #fff; }
+:root[data-theme="dark"] .switcher-chip.views, :root[data-theme="dark"] .switcher-chip.views.fresh { color: #c4b5fd; }
+
+/* The briefing, in the same hand: decisions are the accent (a choice
+   waiting for you), watching is indigo, done is teal — no alarm red. */
+.digest-card {
+  background: var(--card-bg); border: 1px solid var(--card-line); box-shadow: var(--card-shadow);
+  border-radius: 14px; padding: 14px 16px;
+}
+.digest-slot.slot-decide .digest-slot-head,
+.digest-item.needs .digest-dateline,
+.digest-thread-item.needs .digest-headline { color: #7c3aed; }
+.digest-slot.slot-watch .digest-slot-head,
+.digest-item.blocked .digest-dateline,
+.digest-thread-item.blocked .digest-headline { color: var(--working); }
+.digest-slot.slot-done .digest-slot-head,
+.digest-item.done .digest-dateline,
+.digest-thread-item.done .digest-headline { color: var(--settled); }
+.digest-slot.slot-decide .digest-item::before { background: var(--hop-spark); opacity: 1; }
+:root[data-theme="dark"] .digest-slot.slot-decide .digest-slot-head,
+:root[data-theme="dark"] .digest-item.needs .digest-dateline { color: #a78bfa; }
+

@@ -18,7 +18,7 @@ export const cardPhase = (s: { agentPhase?: "working" | "done" | null; turnSeen?
 };
 
 export const phaseLabel = (p: CardPhase): string =>
-  p === "working" ? "WORKING" : p === "done-unread" ? "DONE" : p === "done-read" ? "READ" : "";
+  p === "working" ? "working" : p === "done-unread" ? "new" : p === "done-read" ? "read" : "";
 
 export const phaseTitle = (p: CardPhase): string =>
   p === "working" ? "The agent is working on a turn"

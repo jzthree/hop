@@ -14,9 +14,9 @@ describe("cardPhase — the wall's three agent colours come from the daemon's ve
     expect(cardPhase({})).toBe(null);
   });
   it("labels", () => {
-    expect(phaseLabel("working")).toBe("WORKING");
-    expect(phaseLabel("done-unread")).toBe("DONE");
-    expect(phaseLabel("done-read")).toBe("READ");
+    expect(phaseLabel("working")).toBe("working");
+    expect(phaseLabel("done-unread")).toBe("new");
+    expect(phaseLabel("done-read")).toBe("read");
     expect(phaseLabel(null)).toBe("");
   });
 });

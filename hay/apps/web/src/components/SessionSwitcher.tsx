@@ -3163,8 +3163,10 @@ export const SessionSwitcher = ({
     const parts: string[] = [];
     const rel = relativeTime(s.lastActivityAt || 0, now);
     if (rel) parts.push(rel);
+    // The model chip already names the agent ("opus" is claude); the app
+    // name only adds something where no model is known.
     const app = appLabel(s);
-    if (app) parts.push(app);
+    if (app && !s.agentModel) parts.push(app);
     return parts.join(" · ");
   };
 
@@ -3311,69 +3313,6 @@ export const SessionSwitcher = ({
             </span>
           )}
           {!current && s.starting && !s.active && <span className="switcher-chip starting">STARTING</span>}
-          {(!!s.checkbacks || !!s.codexAutomations) && (() => {
-            // What is scheduled here, hop's and Codex's own: the chip says WHEN
-            // the next timed one is due ("in 12m", "4:30 PM"), or that it is
-            // waiting on something (a job, a file) when nothing has a time.
-            const total = (s.checkbacks || 0) + (s.codexAutomations || 0);
-            const when = s.checkbackNext ? chipWhen(s.checkbackNext, Date.now()) : "waiting";
-            return (
-              <button
-                type="button"
-                className="switcher-chip checkback"
-                title={`${total} scheduled${s.codexAutomations ? ` (${s.codexAutomations} Codex automation${s.codexAutomations === 1 ? "" : "s"})` : ""}${s.checkbackNext ? ` — next ${when}` : " — waiting on a condition"}. Click to see the list.`}
-                aria-label={`${total} scheduled on ${s.displayName}`}
-                onClick={(e) => { e.stopPropagation(); onOpenCheckbacks?.(key); }}
-                onPointerDown={(e) => e.stopPropagation()}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <rect x="3" y="5" width="18" height="16" rx="3" /><path d="M3 10h18M8 3v4M16 3v4" />
-                </svg>
-                <span>{when}</span>
-                {total > 1 && <span className="checkback-count">{total}</span>}
-              </button>
-            );
-          })()}
-          {(s.agentModel || (s.agentHome && homesFor(s.agent).length > 1)) && (() => {
-            // The MODEL is what tells sessions apart ("opus", "astra",
-            // "sol"); the login it runs as is added only when it isn't the
-            // default one, and stays in the hover text.
-            const known = homesFor(s.agent).find((h) => h.dir === s.agentHome?.dir);
-            const out = known?.login && !known.login.loggedIn;
-            const model = shortModelName(s.agentModel);
-            const account = s.agentHome && !s.agentHome.isDefault && homesFor(s.agent).length > 1 ? s.agentHome.label : null;
-            const text = [model, account].filter(Boolean).join(" · ") || s.agentHome?.label || "";
-            const runsAs = s.agentHome ? `Runs as ${known ? describeAccount(known) : s.agentHome.label} — ${s.agentHome.dir}` : "";
-            return (
-              <span
-                className={"switcher-chip account" + (account ? "" : " default") + (out ? " logged-out" : "")}
-                title={[s.agentModel ? `Model: ${s.agentModel}` : "", runsAs, out ? "Logged out: run /login in the session, or switch it to another account." : ""].filter(Boolean).join("\n")}
-              >
-                {out ? "⚠ " : ""}{text}
-              </span>
-            );
-          })()}
-          {phase && (
-            <span className={`switcher-chip phase ${phase}`} title={phaseTitle(phase)}>
-              <span className="phase-dot" aria-hidden="true" />{phaseLabel(phase)}
-            </span>
-          )}
-          {/* A result waiting on this session is worth as much as its status:
-              a published PDF or write-up was otherwise invisible from the wall.
-              stopPropagation on pointerdown keeps the long-press sheet out of
-              it, the same way the inline action buttons do. */}
-          {onOpenViews && s.views && s.views.count > 0 && (
-            <button
-              type="button"
-              className={"switcher-chip views" + (hasUnseenViews(key, s.views.latestAt, viewsSeen) ? " fresh" : "")}
-              title={s.views.latestTitle || s.views.latestName || "Published views"}
-              aria-label={`${s.views.count} published view${s.views.count === 1 ? "" : "s"} in ${s.displayName}`}
-              onClick={(e) => { e.stopPropagation(); onOpenViews(key); }}
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              ◧ <span className="views-word">Views · </span>{s.views.count}
-            </button>
-          )}
           {waitingOnUser(preview) && (
             <span className="switcher-chip waiting" title="Claude is asking how to resume this conversation — open it and choose">
               NEEDS YOU
@@ -3421,7 +3360,76 @@ export const SessionSwitcher = ({
           </pre>
         )}
         {snippet && <div className="switcher-card-snippet" title={snippet}>{highlightSnippet(snippet, filter.trim())}</div>}
+        {/* The card's facts sit in its footer — status, model, results,
+            what is scheduled — so the name above keeps the header's width
+            (with them up there it was cut to two letters). The folder path
+            gives way first; the time always shows. */}
         <div className="switcher-card-meta">
+          <span className="switcher-card-chips">
+              {(!!s.checkbacks || !!s.codexAutomations) && (() => {
+                // What is scheduled here, hop's and Codex's own: the chip says WHEN
+                // the next timed one is due ("in 12m", "4:30 PM"), or that it is
+                // waiting on something (a job, a file) when nothing has a time.
+                const total = (s.checkbacks || 0) + (s.codexAutomations || 0);
+                const when = s.checkbackNext ? chipWhen(s.checkbackNext, Date.now()) : "waiting";
+                return (
+                  <button
+                    type="button"
+                    className="switcher-chip checkback"
+                    title={`${total} scheduled${s.codexAutomations ? ` (${s.codexAutomations} Codex automation${s.codexAutomations === 1 ? "" : "s"})` : ""}${s.checkbackNext ? ` — next ${when}` : " — waiting on a condition"}. Click to see the list.`}
+                    aria-label={`${total} scheduled on ${s.displayName}`}
+                    onClick={(e) => { e.stopPropagation(); onOpenCheckbacks?.(key); }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <rect x="3" y="5" width="18" height="16" rx="3" /><path d="M3 10h18M8 3v4M16 3v4" />
+                    </svg>
+                    <span>{when}</span>
+                    {total > 1 && <span className="checkback-count">{total}</span>}
+                  </button>
+                );
+              })()}
+              {(s.agentModel || (s.agentHome && homesFor(s.agent).length > 1)) && (() => {
+                // The MODEL is what tells sessions apart ("opus", "astra",
+                // "sol"); the login it runs as is added only when it isn't the
+                // default one, and stays in the hover text.
+                const known = homesFor(s.agent).find((h) => h.dir === s.agentHome?.dir);
+                const out = known?.login && !known.login.loggedIn;
+                const model = shortModelName(s.agentModel);
+                const account = s.agentHome && !s.agentHome.isDefault && homesFor(s.agent).length > 1 ? s.agentHome.label : null;
+                const text = [model, account].filter(Boolean).join(" · ") || s.agentHome?.label || "";
+                const runsAs = s.agentHome ? `Runs as ${known ? describeAccount(known) : s.agentHome.label} — ${s.agentHome.dir}` : "";
+                return (
+                  <span
+                    className={"switcher-chip account" + (account ? "" : " default") + (out ? " logged-out" : "")}
+                    title={[s.agentModel ? `Model: ${s.agentModel}` : "", runsAs, out ? "Logged out: run /login in the session, or switch it to another account." : ""].filter(Boolean).join("\n")}
+                  >
+                    {out ? "⚠ " : ""}{text}
+                  </span>
+                );
+              })()}
+              {phase && (
+                <span className={`switcher-chip phase ${phase}`} title={phaseTitle(phase)}>
+                  <span className="phase-dot" aria-hidden="true" />{phaseLabel(phase)}
+                </span>
+              )}
+              {/* A result waiting on this session is worth as much as its status:
+                  a published PDF or write-up was otherwise invisible from the wall.
+                  stopPropagation on pointerdown keeps the long-press sheet out of
+                  it, the same way the inline action buttons do. */}
+              {onOpenViews && s.views && s.views.count > 0 && (
+                <button
+                  type="button"
+                  className={"switcher-chip views" + (hasUnseenViews(key, s.views.latestAt, viewsSeen) ? " fresh" : "")}
+                  title={s.views.latestTitle || s.views.latestName || "Published views"}
+                  aria-label={`${s.views.count} published view${s.views.count === 1 ? "" : "s"} in ${s.displayName}`}
+                  onClick={(e) => { e.stopPropagation(); onOpenViews(key); }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  ◧ <span className="views-word">Views · </span>{s.views.count}
+                </button>
+              )}
+          </span>
           <span className="switcher-card-dir" title={s.cwd || undefined}>{dirPath(s) ? `\u200E${dirPath(s)}\u200E` : "\u00a0"}</span>
           <span className="switcher-card-when">{meta(s)}</span>
         </div>

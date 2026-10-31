@@ -2762,7 +2762,7 @@ export const SessionSwitcher = ({
   const takeFromCodexApp = async (s: SwitcherSession) => {
     setSheet(null);
     const name = s.displayName || s.name;
-    if (!window.confirm(`Take ${name}'s conversation back from the Codex app?\n\nThis quits the Codex app (all its windows; it reopens normally) and pauses any app automation in this conversation, then resumes it here.`)) return;
+    if (!window.confirm(`Take ${name}'s conversation back from the Codex app?\n\nThis quits the Codex app (all its windows; it reopens normally) and pauses any app automation in this conversation, then resumes it here if its codex has exited (a running codex is left alone).`)) return;
     onNotice(`Taking ${name} back from the Codex app…`);
     try {
       const res = await fetch("/api/codex/take", {
@@ -2773,9 +2773,12 @@ export const SessionSwitcher = ({
       const data = await res.json().catch(() => ({})) as { error?: string; freed?: boolean; paused?: string[]; restarted?: boolean; skipped?: string | null };
       if (!res.ok) { onNotice(data.error || "Could not take the conversation back"); return; }
       const paused = data.paused?.length ? ` (paused app automation ${data.paused.map((a) => `“${a}”`).join(", ")})` : "";
+      // A codex still running in the session is left alone: retry there.
       onNotice(data.restarted
         ? `${name} resumed here${data.freed ? " — the Codex app let go" : ""}${paused}`
-        : `${data.freed ? "The Codex app let go, but " : ""}${name} was not relaunched${data.skipped ? `: ${data.skipped}` : ""}`);
+        : data.freed
+          ? `The Codex app let go of ${name}'s conversation${paused} — retry in the session`
+          : `The Codex app was not holding ${name}'s conversation — nothing changed`);
       onRefresh?.();
     } catch {
       onNotice("Could not take the conversation back");

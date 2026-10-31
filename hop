@@ -13726,8 +13726,9 @@ happens until someone clicks it.
         // reverse of open-in-app, and `hop recover --take` from the menu. The
         // app keeps a thread for hours after its window closes, and while it
         // does `codex resume` here only exits or forks. Quitting the app is
-        // the one way to make it let go; then the session relaunches on its
-        // conversation (targeted restore, which never replaces a busy agent).
+        // the one way to make it let go; then a session whose codex had
+        // exited relaunches on its conversation (targeted restore). A codex
+        // still running in the session is never touched.
         if (parsedUrl.pathname === '/api/codex/take' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
@@ -13770,7 +13771,11 @@ happens until someone clicks it.
                         const durable = readClaudeSessionMeta(session) || {};
                         writeClaudeSessionMeta(session, { ...durable, internalName: session, parked: undefined, archived: undefined });
                     }
-                    const result = await restoreSavedSessions({ includeAgents: true, only: [session], replaceIdleAgent: true });
+                    // Relaunch only a session its codex has left (a bare
+                    // shell after "open elsewhere", or a stopped one). A codex
+                    // still running there is left alone — the person retries
+                    // in it; replacing an idle agent here killed that CLI.
+                    const result = await restoreSavedSessions({ includeAgents: true, only: [session] });
                     const restarted = (result?.restored || []).length > 0;
                     const skipped = (result?.skipped || [])[0]?.reason || null;
                     reply(200, { ok: true, freed: holder === 'app', paused, restarted, skipped });

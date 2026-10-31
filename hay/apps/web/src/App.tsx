@@ -4513,8 +4513,13 @@ const App = () => {
     // in Slack; Esc or another place leaves.
     { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage || viewsSideNow,
       count: freshViewSessions || undefined, fresh: freshViewSessions > 0,
-      // Side by side it opens on this session's results; the page shows all.
-      onClick: () => setViewsOpen(viewsSide && session && !switcherOpen ? { session: session.room } : { page: true }) },
+      // With a session open, Views opens on that session's results ("all"
+      // is one click away in the panel); from the wall, or clicked again
+      // while already in Views, it shows everything.
+      onClick: () => {
+        const here = session && !switcherOpen && !viewsPage ? session.room : undefined;
+        setViewsOpen(viewsSide && here ? { session: here } : { session: here, page: true });
+      } },
     { key: "scheduled", label: "Scheduled", icon: <RailIcon name="scheduled" />,
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },

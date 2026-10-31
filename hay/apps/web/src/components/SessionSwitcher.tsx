@@ -1317,9 +1317,9 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       )}
       {live && (
         <div className="switcher-live-chrome" onClick={(e) => e.stopPropagation()}>
-          <span className={"switcher-focus-label" + (conn === "down" ? " down" : "")}>
-            {conn === "down" ? "reconnecting…" : "live"}
-          </span>
+          {/* At this zoom every tile is a terminal; "live" said nothing.
+              Only a dropped link is worth a word. */}
+          {conn === "down" && <span className="switcher-focus-label down">reconnecting…</span>}
           {driver && (
             <span className="switcher-live-driver" title={driver.name + " is typing in this session"}>
               <span className="driver-dot" style={{ background: driver.color }} />

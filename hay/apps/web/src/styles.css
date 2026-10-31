@@ -6233,3 +6233,22 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 :root[data-theme="dark"] .digest-slot.slot-decide .digest-slot-head,
 :root[data-theme="dark"] .digest-item.needs .digest-dateline { color: #a78bfa; }
 
+/* A live tile's controls (full screen, release, who else is here): a quiet
+   cluster floating in the terminal's corner — no panel behind them until
+   the pointer is on the tile, so the terminal reads like every preview. */
+.switcher-live-chrome {
+  top: 4px; right: 6px; gap: 2px; padding: 2px; border-radius: 8px;
+  background: transparent; font: 500 10.5px/1 var(--font-sans);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.switcher-card:hover .switcher-live-chrome {
+  background: color-mix(in srgb, var(--card-bg) 88%, transparent);
+  box-shadow: 0 0 0 1px var(--card-line), 0 4px 12px -6px rgba(24, 18, 48, 0.2);
+}
+.switcher-live-chrome button {
+  width: 22px; height: 22px; padding: 0; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.switcher-live-chrome button:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.switcher-live-chrome .switcher-focus-label.down { flex: none; padding: 0 4px; color: var(--working); }
+

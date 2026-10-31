@@ -28,9 +28,98 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
 describe("ViewsPanel", () => {
-  it("Download saves the stored file itself through a same-origin anchor, in the list and in the preview", async () => {
-    // The row is an <a>, so the button clicks a hidden anchor of its own;
-    // capture what that anchor asked the browser to do.
+  const title = (text: string) => screen.getAllByText(text).find((el) => el.closest(".vg-caption"))!;
+  const openCard = async (text: string) => {
+    await waitFor(() => expect(screen.getAllByText(text).length).toBeGreaterThan(0));
+    fireEvent.click(title(text).closest("a")!);
+  };
+
+  it("opens on the gallery: cards by day, figures as thumbnails, documents as typeset cards", async () => {
+    render(<ViewsPanel sessions={[{ name: "Orion", displayName: "orion-worker", internalName: "Orion" }]} onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(3));
+    expect(document.querySelector("iframe.views-frame")).toBeNull();
+    // Title first, the filename when there is none; the session by its
+    // renamed name.
+    expect(title("Views end-to-end")).toBeTruthy();
+    expect(title("views-test.html")).toBeTruthy();
+    expect(screen.getAllByText(/orion-worker/).length).toBeGreaterThan(0);
+    // An image is its own (lazy) thumbnail; a document gets its kind tag.
+    const thumb = document.querySelector(".vg-thumb.image img") as HTMLImageElement;
+    expect(thumb.getAttribute("src")).toBe("/view/Nebula/shot.png/thumb");
+    expect(thumb.getAttribute("loading")).toBe("lazy");
+    expect(screen.getByText("MD")).toBeTruthy();
+    // Grouped under a day heading.
+    expect(document.querySelectorAll(".vg-day-head").length).toBeGreaterThan(0);
+    // A card is a real link: ⌘-click and "copy link address" keep their meaning.
+    const link = title("Views end-to-end").closest("a") as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/view/Orion/agent-result.md/inline");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.className).toContain("fresh");
+    // Opening IS seeing: every session on screen gets its high-water mark.
+    await waitFor(() => expect(loadViewsSeen()).toEqual({ Orion: 1786303213, Nebula: 1786299000 }));
+    expect(hasUnseenViews("Orion", 1786303213, loadViewsSeen())).toBe(false);
+    expect(hasUnseenViews("Orion", 1786303300, loadViewsSeen())).toBe(true);
+  });
+
+  it("a card opens the reader in place; ‹ › and ← → step; Esc goes back, then closes", async () => {
+    const onClose = vi.fn();
+    render(<ViewsPanel onClose={onClose} />);
+    await openCard("Views end-to-end");
+    let frame = document.querySelector("iframe.views-frame") as HTMLIFrameElement;
+    // Rendered documents carry the wall's theme; our own files are never
+    // sandboxed (a sandboxed iframe disables the browser's PDF viewer).
+    expect(frame.getAttribute("src")).toBe("/view/Orion/agent-result.md/inline?theme=light");
+    expect(frame.hasAttribute("sandbox")).toBe(false);
+    expect(screen.getByText("1 / 3")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Next view" }));
+    frame = document.querySelector("iframe.views-frame") as HTMLIFrameElement;
+    expect(frame.getAttribute("src")).toBe("/view/Orion/views-test.html/inline");
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(screen.getByText("3 / 3")).toBeTruthy();
+    expect(document.querySelector(".views-media img")).toBeTruthy();
+    // The filmstrip marks where you are, and a click there turns the page.
+    fireEvent.click(document.querySelectorAll(".vg-strip-item")[0]);
+    expect(screen.getByText("1 / 3")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.querySelector(".vg-reader")).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("opened straight on one result (a link, an inline card): Esc closes, there was no gallery before", async () => {
+    const onClose = vi.fn();
+    render(<ViewsPanel session="Orion" item="views-test.html" onClose={onClose} />);
+    await waitFor(() => expect((document.querySelector("iframe.views-frame") as HTMLIFrameElement)?.getAttribute("src")).toBe("/view/Orion/views-test.html/inline"));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("filters by kind and searches by title, file or session", async () => {
+    render(<ViewsPanel onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(3));
+    fireEvent.click(screen.getByRole("tab", { name: /Figures/ }));
+    expect(document.querySelectorAll(".vg-card").length).toBe(1);
+    fireEvent.click(screen.getByRole("tab", { name: /Pages/ }));
+    expect(title("views-test.html")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /All/ }));
+    fireEvent.change(screen.getByLabelText("Search views"), { target: { value: "nebula" } });
+    expect(document.querySelectorAll(".vg-card").length).toBe(1);
+    fireEvent.change(screen.getByLabelText("Search views"), { target: { value: "nothing-like-it" } });
+    expect(screen.getByText(/Nothing here matches/)).toBeTruthy();
+  });
+
+  it("the keyboard walks the gallery: arrows move, ⏎ opens", async () => {
+    render(<ViewsPanel onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(3));
+    expect(document.querySelectorAll(".vg-card")[0].className).toContain("kbd");
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(document.querySelectorAll(".vg-card")[1].className).toContain("kbd");
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect((document.querySelector("iframe.views-frame") as HTMLIFrameElement).getAttribute("src")).toBe("/view/Orion/views-test.html/inline");
+  });
+
+  it("Download saves the stored file itself through a same-origin anchor", async () => {
     const clicked: Array<{ href: string; download: string }> = [];
     const origClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
@@ -38,89 +127,27 @@ describe("ViewsPanel", () => {
     };
     try {
       render(<ViewsPanel onClose={() => {}} />);
-      await waitFor(() => expect(document.querySelector("iframe.views-frame")).toBeTruthy());
-      // The newest is already the page, so the same download exists twice:
-      // on its row in the index, and on the reader's bar.
-      const both = screen.getAllByRole("button", { name: "Download agent-result.md" });
-      expect(both.length).toBe(2);
-      const inList = both.find((b) => b.closest(".views-list"))!;
-      const inReader = both.find((b) => b.closest(".views-nav"))!;
-      fireEvent.click(inList);
+      await openCard("Views end-to-end");
+      fireEvent.click(screen.getByRole("button", { name: "Download agent-result.md" }));
       expect(clicked).toEqual([{ href: "/view/Orion/agent-result.md/download", download: "agent-result.md" }]);
-      fireEvent.click(inReader);
-      expect(clicked.length).toBe(2);
-      expect(clicked[1].href).toBe("/view/Orion/agent-result.md/download");
     } finally {
       HTMLAnchorElement.prototype.click = origClick;
     }
   });
 
-  it("opens STRAIGHT INTO the newest result; a row click switches the page; the row stays a real link", async () => {
-    const onClose = vi.fn();
-    render(<ViewsPanel onClose={onClose} />);
-    await waitFor(() => expect(document.querySelector("iframe.views-frame")).toBeTruthy());
-    // jsdom's window is 1024 wide — the desk case, where the page exists.
-    // No click needed: the newest item is already the page.
-    let frame = document.querySelector("iframe.views-frame") as HTMLIFrameElement;
-    expect(frame).toBeTruthy();
-    // Rendered documents carry the wall's theme into the iframe — the OS
-    // doesn't know what the wall chose, so the URL has to say.
-    expect(frame.getAttribute("src")).toBe("/view/Orion/agent-result.md/inline?theme=light");
-    // Our own files must NOT be sandboxed — a sandboxed iframe disables the
-    // browser's PDF viewer, which is half of what the pane is for.
-    expect(frame.hasAttribute("sandbox")).toBe(false);
-    expect(screen.getByText("1 / 3")).toBeTruthy();
-    // The index is beside the page from the start — both in one window; a
-    // plain click on a row turns the page.
-    expect(document.querySelector(".views-panel.rail-side .views-list")).toBeTruthy();
-    const row = screen.getByText("views-test.html").closest("a") as HTMLAnchorElement;
-    expect(row.getAttribute("target")).toBe("_blank");
-    fireEvent.click(row);
-    frame = document.querySelector("iframe.views-frame") as HTMLIFrameElement;
-    expect(frame.getAttribute("src")).toBe("/view/Orion/views-test.html/inline");
-    expect(screen.getByText("2 / 3")).toBeTruthy();
-    // ‹ › step through the rest, and so do the arrow keys.
-    fireEvent.click(screen.getByRole("button", { name: "Next view" }));
-    expect(screen.getByText("3 / 3")).toBeTruthy();
-    fireEvent.keyDown(window, { key: "ArrowLeft" });
-    expect(screen.getByText("2 / 3")).toBeTruthy();
-    // Escape closes the panel: the reader IS the panel, there is no list
-    // mode underneath it to fall back to.
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(onClose).toHaveBeenCalled();
-  });
-
-  it("docked: the page is open at once with the index beside it, and keys are focus-scoped", async () => {
-    // The dock only exists on wide windows; jsdom defaults to 1024.
+  it("docked: no backdrop, and keys are focus-scoped", async () => {
     vi.stubGlobal("innerWidth", 1280);
     const onClose = vi.fn();
     render(<ViewsPanel session="Orion" dock onClose={onClose} />);
-    await waitFor(() => expect(document.querySelector("iframe.views-frame")).toBeTruthy());
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(2));
     const panel = document.querySelector(".views-panel") as HTMLDivElement;
     expect(panel.className).toContain("docked");
-    // No backdrop: the terminal beside the dock stays interactive.
     expect(document.querySelector(".views-backdrop")).toBeNull();
-    // Straight to the page: the scoped session's newest is showing.
-    expect((document.querySelector("iframe.views-frame") as HTMLIFrameElement).getAttribute("src"))
-      .toBe("/view/Orion/agent-result.md/inline?theme=light");
-    expect(screen.getByText("1 / 2")).toBeTruthy();
-
-    // A key from OUTSIDE the panel (the terminal) must be ignored — Esc is a
-    // real key in a shell, and answering it here would close a panel the
-    // user wasn't even touching. The dock takes focus when it opens (so Esc
-    // right away does close it); clicking into the terminal moves focus out.
+    // A key from OUTSIDE the panel (the terminal) is not the panel's: Esc
+    // is a real key in a shell.
     (document.activeElement as HTMLElement | null)?.blur();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
-
-    // The index sits beside the page in the dock too; ☰ hides it for a
-    // wider page and the choice is remembered.
-    expect(document.querySelector(".views-panel.rail-side .views-list")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Hide the index" }));
-    expect(document.querySelector(".views-list")).toBeNull();
-    expect(store.hop_views_rail).toBe("0");
-    expect(document.querySelector("iframe.views-frame")).toBeTruthy();
-    // Esc from the panel closes it.
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
   });
@@ -129,89 +156,50 @@ describe("ViewsPanel", () => {
     render(<ViewsPanel session="Nowhere" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText(/Nothing published yet by this session/)).toBeTruthy());
     expect(screen.getByRole("tab", { name: "all" }).getAttribute("aria-selected")).toBe("false");
-    expect(document.querySelector("iframe.views-frame")).toBeNull();
   });
 
   it("scoped open can widen to the fleet without reopening", async () => {
     render(<ViewsPanel session="Orion" onClose={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
-    // Scoped: the other session's rows are absent.
+    await waitFor(() => expect(title("Views end-to-end")).toBeTruthy());
     expect(screen.queryByText("shot.png")).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "all" }));
-    await waitFor(() => expect(screen.getByText("shot.png")).toBeTruthy());
+    await waitFor(() => expect(title("shot.png")).toBeTruthy());
   });
 
   it("clear is two-step, scope-bounded, and leaves live servers alone", async () => {
     render(<ViewsPanel session="Orion" onClose={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
-    const clear = screen.getByText("clear");
-    fireEvent.click(clear);
-    // Armed, not fired: freeing space is a decision, not a hover accident.
-    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
-      (c) => c[1]?.method === "DELETE").length).toBe(0);
+    await waitFor(() => expect(title("Views end-to-end")).toBeTruthy());
+    fireEvent.click(screen.getByText("clear"));
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[1]?.method === "DELETE").length).toBe(0);
     fireEvent.click(screen.getByText("release the copies?"));
     await waitFor(() => {
-      const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
-        (c) => c[1]?.method === "DELETE");
+      const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[1]?.method === "DELETE");
       expect(calls.length).toBe(1);
-      // Scoped open clears ONE session's copies, and says all — the daemon
-      // deletes copies only, so the agent's source files cannot be touched.
       expect(JSON.parse(calls[0][1].body)).toEqual({ session: "Orion", all: true });
     });
-    await waitFor(() => expect(screen.queryByText("Views end-to-end")).toBeNull());
+    await waitFor(() => expect(screen.queryAllByText("Views end-to-end").length).toBe(0));
   });
 
-  it("delete is two-step, and only the second click calls the API", async () => {
+  it("delete is two-step from the reader, and only the second click calls the API", async () => {
     render(<ViewsPanel onClose={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
-    const del = screen.getAllByLabelText("Delete")[0];
-    fireEvent.click(del);
-    // Armed, not deleted: nothing left the browser yet.
-    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
-      (c) => c[1]?.method === "DELETE").length).toBe(0);
-    fireEvent.click(screen.getAllByLabelText("Click again to delete")[0]);
+    await openCard("Views end-to-end");
+    fireEvent.click(screen.getByLabelText("Delete"));
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[1]?.method === "DELETE").length).toBe(0);
+    fireEvent.click(screen.getByLabelText("Click again to delete"));
     await waitFor(() => {
-      const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
-        (c) => c[1]?.method === "DELETE");
+      const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[1]?.method === "DELETE");
       expect(calls.length).toBe(1);
       expect(JSON.parse(calls[0][1].body)).toEqual({ session: "Orion", name: "agent-result.md" });
     });
-    // The row leaves the list only because the server said ok.
-    await waitFor(() => expect(screen.queryByText("Views end-to-end")).toBeNull());
-  });
-
-  it("groups by session, leads with the title, falls back to the filename", async () => {
-    render(<ViewsPanel sessions={[{ name: "Orion", displayName: "orion-worker", internalName: "Orion" }]} onClose={() => {}} />);
-    // The newest title appears twice on purpose — in the index and on the
-    // reader's bar — so the assertions below address the index's rows.
-    await waitFor(() => expect(screen.getAllByText("Views end-to-end").length).toBeGreaterThan(0));
-    const inList = (text: string) => screen.getAllByText(text).find((el) => el.closest(".views-list"))!;
-    // The manifest only knows internalNames; the dateline shows the rename.
-    expect(inList("orion-worker")).toBeTruthy();
-    expect(screen.getByText("Nebula")).toBeTruthy();
-    expect(screen.getByText("views-test.html")).toBeTruthy();
-    expect(screen.getByText("MD")).toBeTruthy();
-    // Images render as their own thumbnail, not a type tag — the file is the
-    // most honest icon it could have.
-    const thumb = document.querySelector("img.views-thumb") as HTMLImageElement;
-    expect(thumb).toBeTruthy();
-    expect(thumb.getAttribute("loading")).toBe("lazy");
-
-    const link = inList("Views end-to-end").closest("a") as HTMLAnchorElement;
-    expect(link.getAttribute("href")).toBe("/view/Orion/agent-result.md/inline");
-    expect(link.getAttribute("target")).toBe("_blank");
-    expect(link.className).toContain("fresh");
-
-    // Opening IS seeing: every session on screen gets its high-water mark.
-    await waitFor(() => expect(loadViewsSeen()).toEqual({ Orion: 1786303213, Nebula: 1786299000 }));
-    expect(hasUnseenViews("Orion", 1786303213, loadViewsSeen())).toBe(false);
-    expect(hasUnseenViews("Orion", 1786303300, loadViewsSeen())).toBe(true);
+    // Gone only because the server said ok — and the reader goes with it.
+    await waitFor(() => expect(screen.queryAllByText("Views end-to-end").length).toBe(0));
+    expect(document.querySelector(".vg-reader")).toBeNull();
   });
 
   it("scopes to one session without pruning the others' markers", async () => {
     store["hop_views_seen"] = JSON.stringify({ Nebula: 1 });
     render(<ViewsPanel session="orion" onClose={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    await waitFor(() => expect(title("Views end-to-end")).toBeTruthy());
     expect(screen.queryByText("shot.png")).toBeNull();
     await waitFor(() => expect(loadViewsSeen().Orion).toBe(1786303213));
     expect(loadViewsSeen().Nebula).toBe(1);
@@ -226,7 +214,7 @@ describe("ViewsPanel", () => {
   it("closes on Escape and on the backdrop", async () => {
     const onClose = vi.fn();
     const { container } = render(<ViewsPanel onClose={onClose} />);
-    await waitFor(() => expect(screen.getByText("Views end-to-end")).toBeTruthy());
+    await waitFor(() => expect(title("Views end-to-end")).toBeTruthy());
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
     fireEvent.click(container.querySelector(".views-backdrop")!);

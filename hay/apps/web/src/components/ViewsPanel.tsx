@@ -2,43 +2,34 @@ import { MouseEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useR
 import { relativeTime } from "../utils/switcherModel";
 
 // Views: the results an agent hands a human that a terminal cannot draw — a
-// PDF, a rendered write-up, a screenshot, a proxied dev server. The daemon has
-// published them since `hop view` shipped, but the only way to reach one from
-// this client was to catch the printed URL before it scrolled out of the
-// viewport.
+// plot, a PDF, a rendered write-up, a live dev server.
 //
-// ONE SHAPE: a reader with its index beside it. Opening Views lands you IN
-// the newest result (the scoped session's, or the fleet's), the list of
-// everything published on the left, ‹ › to step through it. Both in one
-// window, like a mail client — there is no separate "list mode" to click
-// through first.
+// A GALLERY, then a READER. Results are mostly visual, and a list of 500
+// filenames hid that: the gallery shows them as cards — figures as their own
+// thumbnails, documents as typographic cards — grouped by day, the way a lab
+// notebook reads. Filters by kind and a search narrow it; a session's own
+// Views open filtered to that session (with "all" one click away). Opening a
+// card fills the panel with the result: ‹ › and ← → step through what the
+// filters show, a filmstrip of the neighbours runs along the bottom, Esc
+// goes back to the gallery. Opened straight on one result (a link in a
+// terminal, an inline card) Esc closes instead: there was no gallery before.
 //
 // Three placements of that one shape:
 //
-// - PAGE (beside the docked sidebar): Views is a PLACE, like the wall —
-//   chosen from the sidebar's strip, it fills the main area, no backdrop.
-// - DOCK (the default on a desk-sized window): a right-side drawer with NO
-//   backdrop, so the wall or the terminal beside it stays visible, live and
-//   INTERACTIVE — you read the plot while the session that produced it keeps
-//   streaming, and you can still type. Per session: opened from the session's
-//   own Views button, a card's ◧ chip, or ⌘⇧V.
-// - MODAL (windows too narrow for a drawer): the same reader, centred, with
-//   the index beside the page.
+// - PAGE (beside the docked sidebar): Views is a place, like the wall.
+// - DOCK (beside a session): a right-side drawer with NO backdrop, so the
+//   terminal beside it stays live and interactive. It overlays rather than
+//   splitting the layout: a split would re-fit the shared PTY, and every
+//   client would reflow because someone glanced at a plot.
+// - MODAL where there is no sidebar.
 //
-// The dock deliberately OVERLAYS the terminal instead of splitting the
-// layout: a layout split would change the terminal's width, which re-fits and
-// resizes the shared PTY — one PTY means every client (the phone included)
-// reflows because someone on the desk glanced at a plot. Covering a strip of
-// the terminal costs nothing that isn't given back on close.
-//
-// The iframe is what makes in-place reading safe — navigating would tear
-// down the WebSocket attached to the live terminal. Every width reads in
-// place: a new tab is a choice (↗, ⌘-click, middle click), never the only
-// way to see a result.
+// Results read in place (an iframe, or native media): navigating would tear
+// down the terminal's WebSocket. A new tab is always a choice — ↗, ⌘-click,
+// middle click — never the only way to see a result.
 
 type ViewItem = {
-  // The session's internalName — the same key /api/sessions reports views
-  // under, so seen-markers written here line up with the switcher's counts.
+  // The session's internalName — the key /api/sessions reports views under,
+  // so seen-markers written here line up with the switcher's counts.
   session: string;
   name: string;
   title?: string;
@@ -47,33 +38,21 @@ type ViewItem = {
   // Epoch SECONDS (the manifest stores unix time, not ms).
   mtime?: number;
   // "server" is a LIVE proxied localhost server (`hop port`), not a stored
-  // file: it stops working when the server does, which a file never does.
-  // "link" points at another app entirely — a Nebula notebook on its own
-  // server — opened at `target`; `app` names what opens it.
+  // file; "link" points at another app (a Nebula notebook) at `target`.
   kind?: "file" | "server" | "link";
   app?: string;
-  // For a server, the proxy itself. The manifest scan can only see the
-  // redirect page `hop port` leaves behind; going straight to the proxy skips
-  // a visible flash and a round trip.
   target?: string;
 };
 
 type Props = {
   // Scope to one session — set when opened from that session's own affordance.
-  // Absent means the whole fleet, which is the default reading.
   session?: string;
-  // Only used to translate internalName into the name the user renamed it to;
-  // the manifest has no idea a session was ever renamed.
+  // Translates internalName into the name the user renamed it to.
   sessions?: { name: string; displayName?: string; internalName?: string }[];
-  // Right-side dock beside a live terminal. Off by default everywhere now:
-  // the reader opens as the CENTERED window, index beside page — a dock at
-  // the screen's edge was farther from where the eye already is. The dock
-  // stays available for a caller that wants it.
   dock?: boolean;
-  // Where the reader sits (see the header comment); overrides `dock`.
+  // Where the reader sits (see above); overrides `dock`.
   placement?: "modal" | "dock" | "page";
-  // Open straight on this item (its file name within `session`), e.g. from
-  // an inline hop view card in the terminal.
+  // Open straight on this result (its file name within `session`).
   item?: string;
   onClose: () => void;
 };
@@ -96,9 +75,8 @@ const saveViewsSeen = (seen: Record<string, number>) => {
 
 /**
  * Whether a session has published something since this browser last looked.
- * A session with no marker at all counts as unseen — a first-time reader HAS
- * results waiting, and silently baselining them would hide the whole feature
- * behind an affordance that never lights up.
+ * A session with no marker counts as unseen — a first-time reader HAS results
+ * waiting, and silently baselining them would hide the feature.
  */
 export const hasUnseenViews = (
   key: string,
@@ -106,27 +84,52 @@ export const hasUnseenViews = (
   seen: Record<string, number>
 ) => (latestAt || 0) > (seen[key] || 0);
 
-// A short type tag instead of an emoji: this sits at ~9px on a phone, and
-// emoji coverage for document glyphs differs enough between iOS and Android
-// that the column stops lining up. The tag also survives a monospace column.
-const kindOf = (name: string, kind?: string) => {
-  if (kind === "server") return "LIVE";
-  if (kind === "link") return "NB";
-  const ext = (name.split(".").pop() || "").toLowerCase();
+const extOf = (name: string) => (name.split(".").pop() || "").toLowerCase();
+const isImage = (name: string) => ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(extOf(name));
+const isVideo = (name: string) => ["mp4", "mov", "webm", "m4v", "ogv"].includes(extOf(name));
+const isAudio = (name: string) => ["mp3", "m4a", "wav", "flac", "aac", "ogg", "oga", "opus"].includes(extOf(name));
+// Kinds the daemon renders into a full HTML page — the only ones where a
+// theme exists to pass.
+const isRendered = (name: string) => ["md", "markdown", "csv", "tsv", "json"].includes(extOf(name));
+
+// A short type tag: emoji coverage for document glyphs differs too much
+// between platforms, and the tag survives a monospace column.
+const kindTag = (item: ViewItem) => {
+  if (item.kind === "server") return "LIVE";
+  if (item.kind === "link") return "NB";
+  const ext = extOf(item.name);
   if (["csv", "tsv"].includes(ext)) return "TBL";
-  if (["mp3", "m4a", "wav", "flac", "aac", "ogg", "opus"].includes(ext)) return "AUD";
+  if (isAudio(item.name)) return "AUD";
   if (ext === "pdf") return "PDF";
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "ico"].includes(ext)) return "IMG";
-  if (["mp4", "mov", "webm"].includes(ext)) return "VID";
+  if (isImage(item.name) || ext === "ico") return "IMG";
+  if (isVideo(item.name)) return "VID";
   if (["md", "markdown"].includes(ext)) return "MD";
   if (["html", "htm"].includes(ext)) return "WEB";
-  if (["txt", "log", "json", "csv"].includes(ext)) return "TXT";
+  if (["txt", "log", "json"].includes(ext)) return "TXT";
   return "FILE";
 };
 
-const isImage = (name: string) =>
-  ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(
-    (name.split(".").pop() || "").toLowerCase());
+export type ViewFilter = "all" | "figures" | "docs" | "pages" | "live";
+export const filterOf = (item: { name: string; kind?: string }): Exclude<ViewFilter, "all"> => {
+  if (item.kind === "server" || item.kind === "link") return "live";
+  const ext = extOf(item.name);
+  if (isImage(item.name) || isVideo(item.name) || isAudio(item.name)) return "figures";
+  if (ext === "html" || ext === "htm") return "pages";
+  return "docs";
+};
+const FILTERS: Array<[ViewFilter, string]> = [["all", "All"], ["figures", "Figures"], ["docs", "Docs"], ["pages", "Pages"], ["live", "Live"]];
+
+/** The day a result belongs to, as a notebook would head it. */
+export const dayLabel = (mtimeSec: number, now = Date.now()): string => {
+  const d = new Date(mtimeSec * 1000);
+  const start = (t: Date) => new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  const days = Math.round((start(new Date(now)) - start(d)) / 86_400_000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return d.toLocaleDateString(undefined, { weekday: "long" });
+  const sameYear = d.getFullYear() === new Date(now).getFullYear();
+  return d.toLocaleDateString(undefined, sameYear ? { month: "long", day: "numeric" } : { month: "long", day: "numeric", year: "numeric" });
+};
 
 const formatBytes = (n?: number) => {
   if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "";
@@ -138,14 +141,13 @@ const formatBytes = (n?: number) => {
 const hrefFor = (item: ViewItem) =>
   (item.kind === "server" || item.kind === "link") && item.target ? item.target : item.path;
 
-// The stored file itself, as an attachment: the daemon's /download mode
-// serves the markdown an agent wrote rather than the page it renders into.
-// Only files — a server is live, there is nothing to save.
+// The stored file itself, as an attachment (the markdown an agent wrote, not
+// the page it renders into). Only files — a server has nothing to save.
 const downloadHrefFor = (item: ViewItem) =>
   item.kind === "server" || item.kind === "link" ? null : item.path.replace(/\/inline$/, "") + "/download";
 
-// A hidden same-origin anchor with `download`: the row is already an <a>
-// (anchors cannot nest), and window.open would show the file, not save it.
+// A hidden same-origin anchor with `download`: window.open would show the
+// file, not save it, and cards are anchors already (anchors cannot nest).
 const triggerDownload = (item: ViewItem) => {
   const href = downloadHrefFor(item);
   if (!href) return;
@@ -159,16 +161,8 @@ const triggerDownload = (item: ViewItem) => {
   a.remove();
 };
 
-const extOf = (name: string) => (name.split(".").pop() || "").toLowerCase();
-const isVideo = (name: string) => ["mp4", "mov", "webm", "m4v", "ogv"].includes(extOf(name));
-const isAudio = (name: string) => ["mp3", "m4a", "wav", "flac", "aac", "ogg", "oga", "opus"].includes(extOf(name));
-// Kinds the daemon renders into a full HTML page — the only ones where a
-// theme exists to pass.
-const isRendered = (name: string) => ["md", "markdown", "csv", "tsv", "json"].includes(extOf(name));
-
-// The wall's theme is a USER CHOICE (data-theme on the root); only its
-// "system" setting defers to the OS. The rendered document inside the iframe
-// must follow the same chain, or a light wall frames a dark page.
+// The wall's theme is a USER CHOICE (data-theme on the root); only "system"
+// defers to the OS. The rendered document inside the iframe follows it.
 const pageTheme = (): "light" | "dark" => {
   const t = document.documentElement.getAttribute("data-theme");
   if (t === "light" || t === "dark") return t;
@@ -180,32 +174,34 @@ const previewSrc = (item: ViewItem) =>
     ? `${item.path}?theme=${pageTheme()}`
     : hrefFor(item);
 
-const RAIL_KEY = "hop_views_rail";
-// Wide enough for the index beside a readable page; on a 1440 display that
-// still leaves 680px of terminal. The drag handle remembers a choice.
+const thumbSrc = (item: ViewItem) => item.path.replace(/\/inline$/, "/thumb");
+
+// Wide enough for a readable page; on a 1440 display that still leaves
+// 680px of terminal. The drag handle remembers a choice.
 const DEFAULT_DOCK_W = 760;
 const clampDockW = (w: number) =>
-  Math.max(560, Math.min(Math.round(window.innerWidth * 0.75), w));
+  Math.max(520, Math.min(Math.round(window.innerWidth * 0.75), w));
 
 export const ViewsPanel = ({ session, item, sessions = [], dock = false, placement, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
-  const [preview, setPreview] = useState<ViewItem | null>(null);
-  // Scoped opens can widen to the fleet without closing and reopening; the
-  // toggle only exists when a scope was given, so the wall's fleet-wide open
-  // is not burdened with a control that does nothing.
+  // The result being read; null is the gallery.
+  const [open, setOpen] = useState<ViewItem | null>(null);
+  // Opened straight on a result: Esc closes rather than "going back".
+  const [direct, setDirect] = useState(!!item);
   const [showAll, setShowAll] = useState(false);
-  // Two-step delete, disarmed by leaving the row: a browser confirm() dialog
-  // over a floating panel reads as a different app interrupting.
+  const [filter, setFilter] = useState<ViewFilter>("all");
+  const [query, setQuery] = useState("");
+  // The keyboard's place in the gallery.
+  const [sel, setSel] = useState(0);
   const [armedDelete, setArmedDelete] = useState<string | null>(null);
   const [armedClear, setArmedClear] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-  // Frozen at open. The mark-seen effect below fires the moment the list
-  // lands, so reading live storage during render would clear every "new" dot
-  // in the same frame that exists to show them.
+  // Frozen at open: the mark-seen effect fires as soon as the list lands,
+  // and reading live storage during render would clear every "new" dot in
+  // the frame that exists to show them.
   const [seenAtOpen] = useState(loadViewsSeen);
-  // Decided once at mount: flipping dock/modal under a resize mid-read would
-  // teleport the panel. Reopening picks up the new geometry.
+  // Decided once at mount: flipping placement mid-read would teleport it.
   const [docked] = useState(() => (placement ? placement === "dock" : dock) && window.innerWidth >= 1100);
   const asPage = placement === "page";
   const [dockW, setDockW] = useState(() => {
@@ -213,20 +209,13 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     return clampDockW(Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_DOCK_W);
   });
   const panelRef = useRef<HTMLDivElement | null>(null);
-  // The index (the list of everything published) sits BESIDE the page, in
-  // the same window, like a mail client: the list on the left, the result on
-  // the right, both visible at once. ☰ hides it for a wider page, and that
-  // choice is remembered.
-  const [railOpen, setRailOpen] = useState<boolean>(() => {
-    try { return localStorage.getItem(RAIL_KEY) !== "0"; } catch { return true; }
-  });
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const gridRef = useRef<HTMLDivElement | null>(null);
   const now = Date.now();
 
-  // The scope arrives as whatever identifier the opener HAD — the URL's
-  // display name on a directly-loaded session page, the internalName from
-  // the switcher — while the manifest keys strictly by internalName. Resolve
-  // through the sessions list so /s/hop-ios/ scopes to "Orion" instead of
-  // matching nothing and reading as "this session never published".
+  // The scope arrives as whatever identifier the opener had (a display name
+  // from the URL, an internalName from the wall); the manifest keys by
+  // internalName, so resolve through the sessions list.
   const resolvedSession = useMemo(() => {
     if (!session) return undefined;
     const lc = session.toLowerCase();
@@ -236,13 +225,13 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
       || (s.displayName || "").toLowerCase() === lc);
     return hit?.internalName || session;
   }, [session, sessions]);
-
   const effectiveScope = showAll ? undefined : resolvedSession;
 
-  // The side-by-side preview pane only exists where it has room to be useful.
-  // Checked at interaction time, not render time, so a resized window behaves
-  // like what it currently is. The dock always previews (stacked).
-  const canPreview = () => true;
+  const label = (internalName: string) => {
+    const hit = sessions.find((s) => (s.internalName || s.name) === internalName)
+      || sessions.find((s) => (s.internalName || s.name).toLowerCase() === internalName.toLowerCase());
+    return hit ? (hit.displayName || hit.name) : internalName;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -255,141 +244,183 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     return () => { cancelled = true; };
   }, []);
 
-  // The dock has no backdrop and the terminal beside it stays interactive, so
-  // it must take focus once — otherwise its keyboard story (Esc, arrows)
-  // starts dead and the first Esc lands in the shell instead.
-  useEffect(() => {
-    if (docked) panelRef.current?.focus();
-  }, [docked]);
+  // Take focus once so the keyboard works at once (Esc, arrows) — the dock
+  // has no backdrop, and the page and modal sit over a terminal.
+  useEffect(() => { panelRef.current?.focus(); }, []);
 
-  const groups = useMemo(() => {
-    // The daemon folds case when a name addresses a session; match it here so
-    // a scoped open from a differently-cased key still finds its rows.
+  // In scope: newest first (the manifest's own order).
+  const scoped = useMemo(() => {
     const scope = effectiveScope?.toLowerCase();
-    const by = new Map<string, ViewItem[]>();
-    // /api/views is already newest-first, so plain insertion order gives both
-    // newest-first rows inside a session and newest-first sessions.
-    for (const item of items || []) {
-      if (!item?.path || !item?.name) continue;
-      const key = String(item.session || "");
-      if (scope && key.toLowerCase() !== scope) continue;
-      const rows = by.get(key);
-      if (rows) rows.push(item);
-      else by.set(key, [item]);
-    }
-    return [...by.entries()];
+    return (items || []).filter((i) => i?.path && i?.name
+      && (!scope || String(i.session || "").toLowerCase() === scope));
   }, [items, effectiveScope]);
 
-  const flatRows = useMemo(() => groups.flatMap(([, rows]) => rows), [groups]);
+  const counts = useMemo(() => {
+    const c: Record<ViewFilter, number> = { all: scoped.length, figures: 0, docs: 0, pages: 0, live: 0 };
+    for (const i of scoped) c[filterOf(i)] += 1;
+    return c;
+  }, [scoped]);
 
-  // Straight to the page: the newest result in scope is open the moment the
-  // index lands, and the reader never shows nothing while something exists
-  // (a deleted or out-of-scope selection moves to the newest that remains).
-  useEffect(() => {
-    if (!items || !canPreview()) return;
-    if (preview && flatRows.some((r) => r.path === preview.path)) return;
-    const asked = item ? flatRows.find((r) => r.name === item) : null;
-    setPreview(asked ?? flatRows[0] ?? null);
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return scoped.filter((i) => (filter === "all" || filterOf(i) === filter)
+      && (!q || (i.title || "").toLowerCase().includes(q) || i.name.toLowerCase().includes(q)
+        || label(i.session).toLowerCase().includes(q)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, flatRows]);
+  }, [scoped, filter, query, sessions]);
 
-  const at = preview ? flatRows.findIndex((r) => r.path === preview.path) : -1;
+  const days = useMemo(() => {
+    const out: Array<{ day: string; rows: ViewItem[] }> = [];
+    for (const i of shown) {
+      const day = dayLabel(i.mtime || 0, now);
+      const last = out[out.length - 1];
+      if (last && last.day === day) last.rows.push(i);
+      else out.push({ day, rows: [i] });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown]);
+
+  useEffect(() => { setSel(0); }, [filter, query, effectiveScope]);
+
+  // Opened on one result: read it as soon as the index lands.
+  useEffect(() => {
+    if (!items || !item || open) return;
+    const asked = scoped.find((r) => r.name === item);
+    if (asked) setOpen(asked);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
+  // A result that disappears (deleted, filtered away) closes the reader.
+  useEffect(() => {
+    if (open && items && !items.some((r) => r.path === open.path)) setOpen(null);
+  }, [items, open]);
+
+  const at = open ? shown.findIndex((r) => r.path === open.path) : -1;
   const step = (dir: 1 | -1) => {
-    if (!flatRows.length) return;
-    const next = at < 0 ? 0 : Math.min(flatRows.length - 1, Math.max(0, at + dir));
-    setPreview(flatRows[next]);
+    if (!shown.length) return;
+    const next = at < 0 ? 0 : Math.min(shown.length - 1, Math.max(0, at + dir));
+    setOpen(shown[next]);
+  };
+  const backToGallery = () => {
+    if (open) setSel(Math.max(0, shown.findIndex((r) => r.path === open.path)));
+    setOpen(null);
+    setDirect(false);
+    window.setTimeout(() => panelRef.current?.focus(), 0);
   };
 
-  // Escape backs OUT one layer — preview first, then the panel — and arrows
-  // read the list like a mail client. Capture phase + stopPropagation: the
-  // switcher listens for Escape on window too, and without this one press
-  // closed the panel AND dismissed the wall behind it.
-  //
-  // DOCKED, the rule inverts: the terminal beside the dock is live, and Esc
-  // is a real key there (vim!). So the dock only answers keys whose event
-  // originated inside it, or while something inside it holds focus — typing
-  // in the terminal never loses a panel you were reading.
+  // Grid columns, read from the layout: the cards sharing the first's top.
+  const columns = () => {
+    const cards = gridRef.current?.querySelectorAll<HTMLElement>(".vg-card");
+    if (!cards || !cards.length) return 1;
+    const top = cards[0].offsetTop;
+    let n = 0;
+    for (const c of Array.from(cards)) { if (c.offsetTop !== top) break; n++; }
+    return Math.max(1, n);
+  };
+
+  // Docked, the terminal beside the panel is live and Esc is a real key
+  // there (vim!): the panel only answers keys that start inside it.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const el = panelRef.current;
       if (docked) {
-        const el = panelRef.current;
-        // A keydown dispatched on `window` (tests do this; so does a page with
-        // nothing focused) has a target that is not a Node, and jsdom throws
-        // on contains() for it — which took the whole test run down as an
-        // unhandled error. Only a Node can be inside the panel.
+        // A keydown dispatched on `window` has a non-Node target; jsdom
+        // throws on contains() for it.
         const target = event.target instanceof Node ? event.target : null;
         const inside = !!el && ((target && el.contains(target))
           || (document.activeElement && el.contains(document.activeElement)));
         if (!inside) return;
       }
+      const inSearch = document.activeElement === searchRef.current;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        // The reader IS the panel: Escape closes it.
+        if (inSearch && query) { setQuery(""); return; }
+        if (open && !direct) { backToGallery(); return; }
         onClose();
         return;
       }
-      const dir = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1
-        : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 0;
-      if (dir && flatRows.length && canPreview()) {
+      if (open) {
+        const dir = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
+          : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+        if (dir) { event.preventDefault(); event.stopPropagation(); step(dir); }
+        return;
+      }
+      if (event.key === "/" && !inSearch) { event.preventDefault(); searchRef.current?.focus(); return; }
+      if (!shown.length) return;
+      const horiz = event.key === "ArrowLeft" || event.key === "ArrowRight";
+      if (inSearch && horiz && query) return; // ← → edit the query
+      const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1
+        : event.key === "ArrowDown" ? columns() : event.key === "ArrowUp" ? -columns() : 0;
+      if (delta) {
         event.preventDefault();
         event.stopPropagation();
-        step(dir);
+        if (inSearch) searchRef.current?.blur();
+        setSel((i) => Math.max(0, Math.min(shown.length - 1, i + delta)));
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        const pick = shown[Math.min(sel, shown.length - 1)];
+        if (pick) { setOpen(pick); setDirect(false); }
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onClose, preview, flatRows, docked]);
+  }, [onClose, open, shown, docked, direct, query, sel]);
+
+  // Keep the keyboard's card on screen.
+  useEffect(() => {
+    if (open) return;
+    const card = gridRef.current?.querySelectorAll<HTMLElement>(".vg-card")[sel];
+    card?.scrollIntoView?.({ block: "nearest" });
+  }, [sel, open]);
 
   // Opening the panel IS the act of seeing what it shows.
   useEffect(() => {
     if (!items) return;
     const seen = loadViewsSeen();
     let dirty = false;
-    for (const [key, rows] of groups) {
-      const newest = rows[0]?.mtime || 0;
-      if (newest > (seen[key] || 0)) { seen[key] = newest; dirty = true; }
+    const newest = new Map<string, number>();
+    for (const i of scoped) newest.set(i.session, Math.max(newest.get(i.session) || 0, i.mtime || 0));
+    for (const [key, m] of newest) {
+      if (m > (seen[key] || 0)) { seen[key] = m; dirty = true; }
     }
-    // Only a fleet-wide reading knows the full population. Pruning from a
-    // scoped open would delete every other session's marker, and their
-    // long-read views would announce themselves as new all over again.
+    // Only a fleet-wide reading knows the full population; pruning from a
+    // scoped open would make every other session's results "new" again.
     if (!effectiveScope) {
-      const live = new Set(groups.map(([key]) => key));
       for (const key of Object.keys(seen)) {
-        if (!live.has(key)) { delete seen[key]; dirty = true; }
+        if (!newest.has(key)) { delete seen[key]; dirty = true; }
       }
     }
     if (dirty) saveViewsSeen(seen);
-  }, [items, groups, effectiveScope]);
+  }, [items, scoped, effectiveScope]);
 
-  const label = (internalName: string) => {
-    const hit = sessions.find((s) => (s.internalName || s.name) === internalName)
-      || sessions.find((s) => (s.internalName || s.name).toLowerCase() === internalName.toLowerCase());
-    return hit ? (hit.displayName || hit.name) : internalName;
-  };
+  const isFresh = (i: ViewItem) => (i.mtime || 0) > (seenAtOpen[i.session] || 0);
 
-  // Rows stay real anchors so ⌘-click, middle-click and "copy link address"
-  // keep their browser meaning; a PLAIN left click reads it here.
-  const onRowClick = (event: MouseEvent, item: ViewItem) => {
+  // Cards are real anchors: ⌘-click, middle-click and "copy link address"
+  // keep their browser meaning; a plain click reads the result here.
+  const onCardClick = (event: MouseEvent, i: ViewItem) => {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    setPreview(item);
+    setOpen(i);
+    setDirect(false);
   };
 
-  const copyLink = (item: ViewItem) => {
-    const href = hrefFor(item);
+  const copyLink = (i: ViewItem) => {
+    const href = hrefFor(i);
     const url = /^https?:\/\//.test(href) ? href : location.origin + href;
     navigator.clipboard?.writeText(url).then(() => {
-      setCopied(item.path);
-      window.setTimeout(() => setCopied((c) => (c === item.path ? null : c)), 1400);
-    }).catch(() => { /* clipboard denied — the ↗ anchor still carries the URL */ });
+      setCopied(i.path);
+      window.setTimeout(() => setCopied((c) => (c === i.path ? null : c)), 1400);
+    }).catch(() => { /* clipboard denied — ↗ still carries the URL */ });
   };
 
-  // Clear the current scope's published COPIES. `hop view` copies files into
-  // the daemon's own store, so this releases exactly the space the feature
-  // consumes and cannot touch the agent's originals; live-server rows stay,
-  // because their resource is the running session, not a file.
+  // Clear the scope's published COPIES: `hop view` copies files into the
+  // daemon's store, so this frees exactly what the feature uses and cannot
+  // touch an agent's originals; live servers stay.
   const clearScope = () => {
     if (!armedClear) { setArmedClear(true); return; }
     setArmedClear(false);
@@ -403,28 +434,24 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
       if (!r.ok) return;
       setItems((cur) => (cur || []).filter((i) => i.kind === "server"
         || (scope ? i.session.toLowerCase() !== scope.toLowerCase() : false)));
-      setPreview((p) => (p && p.kind !== "server" ? null : p));
-    }).catch(() => { /* rows stay; nothing lied about being cleared */ });
+    }).catch(() => { /* nothing claimed to be cleared */ });
   };
 
-  const deleteItem = (item: ViewItem) => {
-    if (armedDelete !== item.path) { setArmedDelete(item.path); return; }
+  const deleteItem = (i: ViewItem) => {
+    if (armedDelete !== i.path) { setArmedDelete(i.path); return; }
     setArmedDelete(null);
     fetch("/api/views", {
       method: "DELETE",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: item.session, name: item.name })
+      body: JSON.stringify({ session: i.session, name: i.name })
     }).then((r) => {
       if (!r.ok) return;
-      setItems((cur) => (cur || []).filter((i) => i.path !== item.path));
-      setPreview((p) => (p?.path === item.path ? null : p));
-    }).catch(() => { /* row stays; nothing lied about being deleted */ });
+      setItems((cur) => (cur || []).filter((x) => x.path !== i.path));
+    }).catch(() => { /* nothing claimed to be deleted */ });
   };
 
-  // The dock's width is a reading choice worth remembering; drag its left
-  // edge. Pointer capture, so a fast drag that leaves the 7px handle keeps
-  // resizing instead of dropping the grab.
+  // The dock's width is a reading choice worth remembering: drag its edge.
   const onHandleDown = (down: ReactPointerEvent<HTMLDivElement>) => {
     down.preventDefault();
     const el = down.currentTarget;
@@ -443,266 +470,213 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     el.addEventListener("pointerup", onUp);
   };
 
-  const railVisible = railOpen && flatRows.length > 0;
-  const toggleRail = () => {
-    setRailOpen((v) => {
-      try { localStorage.setItem(RAIL_KEY, v ? "0" : "1"); } catch { /* private mode */ }
-      return !v;
-    });
-  };
-  const showPreview = preview !== null;
+  const metaOf = (i: ViewItem) => i.kind === "server"
+    ? "live server"
+    : [label(i.session), relativeTime((i.mtime || 0) * 1000, now)].filter(Boolean).join(" · ");
 
-  const rowsFor = (key: string, rows: ViewItem[]) => rows.map((item) => {
-    const fresh = (item.mtime || 0) > (seenAtOpen[key] || 0);
-    const isServer = item.kind === "server";
-    const isLink = item.kind === "link";
-    const selected = preview?.path === item.path;
-    // A server has no meaningful size and its filename is an implementation
-    // detail (the redirect page) — it is a door, not a document, so say what
-    // it is instead.
-    const linkHost = isLink ? (() => { try { return new URL(item.target || "").host; } catch { return ""; } })() : "";
-    const meta = isServer
-      ? "live server"
-      : isLink
-      ? [item.app === "nebula" ? "Nebula notebook" : "link", linkHost, relativeTime((item.mtime || 0) * 1000, now)].filter(Boolean).join(" · ")
-      : [
-          // The filename is only worth a line of its own when the title isn't
-          // already showing it.
-          item.title ? item.name : "",
-          relativeTime((item.mtime || 0) * 1000, now),
-          formatBytes(item.bytes)
-        ].filter(Boolean).join(" · ");
-    return (
-      <a
-        key={item.path}
-        className={"views-row" + (fresh ? " fresh" : "")
-          + (isServer || isLink ? " server" : "") + (selected ? " selected" : "")}
-        href={hrefFor(item)}
-        target="_blank"
-        rel="noopener"
-        onClick={(e) => onRowClick(e, item)}
-        onMouseLeave={() => setArmedDelete((a) => (a === item.path ? null : a))}
-      >
-        {isImage(item.name)
-          // A small server-made thumbnail (the daemon falls back to the file
-          // itself): a list of plots scannable at a glance, without pulling
-          // every full image through the tunnel to draw it.
-          ? <img className="views-thumb" src={item.path.replace(/\/inline$/, "/thumb")} loading="lazy" decoding="async" alt="" />
-          : <span className="views-kind" aria-hidden="true">{kindOf(item.name, item.kind)}</span>}
-        <span className="views-row-text">
-          <span className="views-title">{item.title || item.name}</span>
-          {meta && <span className="views-meta">{meta}</span>}
-        </span>
-        {fresh && <span className="views-dot" aria-label="New" />}
-        <span className="views-acts" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-          {/* A button, not an <a>: anchors cannot nest, and the row itself is
-              already the real link. */}
-          <button type="button" className="views-act"
-                  title="Open in a new tab" aria-label="Open in a new tab"
-                  onClick={() => window.open(hrefFor(item), "_blank", "noopener")}>↗</button>
-          {!isServer && !isLink && (
-            <button type="button" className="views-act"
-                    title="Download" aria-label={`Download ${item.name}`}
-                    onClick={() => triggerDownload(item)}>⤓</button>
-          )}
-          <button type="button" className="views-act"
-                  title={copied === item.path ? "Copied" : "Copy link"}
-                  aria-label="Copy link"
-                  onClick={() => copyLink(item)}>{copied === item.path ? "✓" : "⧉"}</button>
-          {!isServer && !isLink && (
-            /* The FILE, not the page: ?download=1 serves the published bytes as
-               an attachment under their real name (md/csv/json raw, not the
-               rendered view). A window.open, not an anchor: anchors can't nest
-               in the row's own link, and the attachment header keeps the tab
-               from navigating. */
-            <button type="button" className="views-act"
-                    title="Download" aria-label="Download"
-                    onClick={() => window.open(item.path + "?download=1", "_blank", "noopener")}>⤓</button>
-          )}
-          {!isServer && (
-            <button type="button"
-                    className={"views-act danger" + (armedDelete === item.path ? " armed" : "")}
-                    title={armedDelete === item.path ? "Click again to delete" : "Delete"}
-                    aria-label={armedDelete === item.path ? "Click again to delete" : "Delete"}
-                    onClick={() => deleteItem(item)}>
-              {armedDelete === item.path ? "sure?" : "🗑"}
-            </button>
-          )}
-        </span>
-      </a>
-    );
-  });
+  // ── The gallery ──
+  const card = (i: ViewItem, index: number) => (
+    <a key={i.path}
+       className={"vg-card" + (index === sel ? " kbd" : "") + (isFresh(i) ? " fresh" : "")}
+       href={hrefFor(i)} target="_blank" rel="noopener"
+       onClick={(e) => onCardClick(e, i)}
+       onMouseEnter={() => setSel(index)}
+       title={i.title || i.name}>
+      <span className={"vg-thumb" + (isImage(i.name) && i.kind !== "server" ? " image" : ` doc ${filterOf(i)}`)}>
+        {isImage(i.name) && i.kind !== "server"
+          // A small server-made thumbnail: the plots scannable at a glance
+          // without pulling every full image through the tunnel.
+          ? <img className="views-thumb" src={thumbSrc(i)} loading="lazy" decoding="async" alt="" />
+          : (<>
+              <span className="views-kind" aria-hidden="true">{kindTag(i)}</span>
+              <span className="vg-doc-title" aria-hidden="true">{i.title || i.name}</span>
+              <span className="vg-doc-rule" aria-hidden="true" />
+            </>)}
+        {isFresh(i) && <span className="views-dot" aria-label="New" />}
+      </span>
+      <span className="vg-caption">
+        <span className="views-title">{i.title || i.name}</span>
+        <span className="views-meta">{metaOf(i)}</span>
+      </span>
+    </a>
+  );
 
-  const list = (
-    <div className="views-list">
+  let index = 0;
+  const gallery = (
+    <div className="vg-scroll">
       {failed ? (
         <p className="views-empty">Couldn't reach the view index.</p>
       ) : !items ? (
         <p className="views-empty">Loading…</p>
-      ) : groups.length === 0 ? null : (
-        groups.map(([key, rows]) => (
-          <div className="views-group" key={key}>
-            {/* One scoped session's own header would repeat the head badge. */}
-            {(!effectiveScope || groups.length > 1) && (
-              <div className="views-dateline">{label(key)}</div>
-            )}
-            {rowsFor(key, rows)}
-          </div>
-        ))
+      ) : scoped.length === 0 ? (
+        <div className="views-empty views-empty-page">
+          <p>Nothing published yet{effectiveScope ? " by this session" : ""}. Agents
+          hand over results a terminal can't draw — plots, PDFs, rendered
+          write-ups, live dev servers — and they land here, by day.</p>
+          <pre className="views-empty-cmds">{"hop view --title \"ROC curve\" plot.png\nhop port 5173"}</pre>
+        </div>
+      ) : shown.length === 0 ? (
+        <p className="views-empty">Nothing here matches{query ? ` “${query.trim()}”` : ""}.</p>
+      ) : (
+        <div ref={gridRef}>
+          {days.map((d) => (
+            <section key={d.day} className="vg-day">
+              <h4 className="vg-day-head">{d.day}<span className="vg-day-count">{d.rows.length}</span></h4>
+              <div className="vg-grid">{d.rows.map((r) => card(r, index++))}</div>
+            </section>
+          ))}
+        </div>
       )}
     </div>
   );
 
-  const empty = items && groups.length === 0 && (
-    <div className="views-empty views-empty-page">
-      <p>Nothing published yet{effectiveScope ? " by this session" : ""}. Agents
-      hand over results a terminal can't draw — plots, PDFs, rendered
-      write-ups, live dev servers — and they land here, grouped by the
-      session that produced them.</p>
-      <pre className="views-empty-cmds">{"hop view --title \"ROC curve\" plot.png\nhop port 5173"}</pre>
-    </div>
-  );
-
-  // The page: media natively, documents in an iframe. Media gets NATIVE
-  // elements, not an iframe: an iframed raw image sits tiny in a white
-  // top-left corner, and native <video> gives the real controls. Documents
-  // stay iframes — sandboxed only for LIVE servers (an arbitrary dev app
-  // must not frame-bust the wall); our own files skip the sandbox, because a
-  // sandboxed iframe disables the browser's PDF viewer.
-  // A notebook lives in its own app: the pane says where it opens rather
-  // than framing Nebula (another origin, often reached over a forwarded port).
+  // ── The reader ──
   const linkFile = (() => {
-    if (!preview || preview.kind !== "link") return "";
-    try { return new URL(preview.target || "").searchParams.get("file") || ""; } catch { return ""; }
+    if (!open || open.kind !== "link") return "";
+    try { return new URL(open.target || "").searchParams.get("file") || ""; } catch { return ""; }
   })();
-  const page = showPreview && (
-    preview.kind === "link" ? (
+  // Media gets native elements (an iframed raw image sits tiny in a corner;
+  // native <video> gives real controls). Documents are iframes — sandboxed
+  // only for LIVE servers; our own files skip the sandbox, which would
+  // disable the browser's PDF viewer. A notebook lives in its own app.
+  const page = open && (
+    open.kind === "link" ? (
       <div className="views-link-card">
-        <div className="views-link-app">{preview.app === "nebula" ? "Nebula notebook" : "Link"}</div>
-        <div className="views-link-title">{preview.title || preview.name}</div>
+        <div className="views-link-app">{open.app === "nebula" ? "Nebula notebook" : "Link"}</div>
+        <div className="views-link-title">{open.title || open.name}</div>
         {linkFile && <code className="views-link-path">{linkFile}</code>}
-        <a className="views-link-open" href={preview.target} target="_blank" rel="noopener">
-          Open in {preview.app === "nebula" ? "Nebula" : "a new tab"} ↗
+        <a className="views-link-open" href={open.target} target="_blank" rel="noopener">
+          Open in {open.app === "nebula" ? "Nebula" : "a new tab"} ↗
         </a>
-        <div className="views-link-host">{(() => { try { return new URL(preview.target || "").host; } catch { return ""; } })()}</div>
+        <div className="views-link-host">{(() => { try { return new URL(open.target || "").host; } catch { return ""; } })()}</div>
       </div>
-    ) : preview.kind !== "server" && isImage(preview.name) ? (
-      <div className="views-media"><img src={preview.path} alt={preview.title || preview.name} /></div>
-    ) : preview.kind !== "server" && isVideo(preview.name) ? (
-      <div className="views-media"><video src={preview.path} controls autoPlay={false} /></div>
-    ) : preview.kind !== "server" && isAudio(preview.name) ? (
-      <div className="views-media audio"><audio src={preview.path} controls /></div>
+    ) : open.kind !== "server" && isImage(open.name) ? (
+      <div className="views-media"><img src={open.path} alt={open.title || open.name} /></div>
+    ) : open.kind !== "server" && isVideo(open.name) ? (
+      <div className="views-media"><video src={open.path} controls autoPlay={false} /></div>
+    ) : open.kind !== "server" && isAudio(open.name) ? (
+      <div className="views-media audio"><audio src={open.path} controls /></div>
     ) : (
       <iframe
         className="views-frame"
-        key={preview.path}
-        src={previewSrc(preview)}
-        title={preview.title || preview.name}
-        sandbox={preview.kind === "server"
+        key={open.path}
+        src={previewSrc(open)}
+        title={open.title || open.name}
+        sandbox={open.kind === "server"
           ? "allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
           : undefined}
       />
     )
   );
 
-  // The reader's own bar: the index toggle, ‹ n/N ›, the title, and what you
-  // can do with the page you are on.
-  const nav = flatRows.length > 0 && (
-    <div className="views-nav">
-      <button type="button" className={"views-act views-rail-toggle" + (railVisible ? " on" : "")}
-              aria-label={railVisible ? "Hide the index" : "Show the index"} aria-pressed={railVisible}
-              title={railVisible ? "Hide the index (a wider page)" : "Show the index beside the page"}
-              onClick={toggleRail}>☰</button>
-      <button type="button" className="views-act" aria-label="Previous view" title="Previous (←)"
-              disabled={at <= 0} onClick={() => step(-1)}>‹</button>
-      <span className="views-nav-pos">{at < 0 ? "–" : at + 1} / {flatRows.length}</span>
-      <button type="button" className="views-act" aria-label="Next view" title="Next (→)"
-              disabled={at < 0 || at >= flatRows.length - 1} onClick={() => step(1)}>›</button>
-      {preview && (
-        <span className="views-nav-title" title={preview.title || preview.name}>
-          {preview.title || preview.name}
-          <span className="views-nav-meta">
-            {preview.kind === "server" ? "live server" : [label(preview.session), relativeTime((preview.mtime || 0) * 1000, now)].join(" · ")}
-          </span>
+  const reader = open && (
+    <div className="vg-reader">
+      <div className="views-nav">
+        <button type="button" className="views-act vg-back" onClick={direct ? onClose : backToGallery}
+                aria-label={direct ? "Close" : "Back to all views"} title={direct ? "Close (Esc)" : "All views (Esc)"}>
+          {direct ? "×" : "←"}
+        </button>
+        <span className="views-nav-title" title={open.title || open.name}>
+          {open.title || open.name}
+          <span className="views-nav-meta">{[metaOf(open), formatBytes(open.bytes)].filter(Boolean).join(" · ")}</span>
         </span>
-      )}
-      <span className="views-head-spacer" />
-      {preview && (
+        <span className="views-head-spacer" />
+        <button type="button" className="views-act" aria-label="Previous view" title="Previous (←)"
+                disabled={at <= 0} onClick={() => step(-1)}>‹</button>
+        <span className="views-nav-pos">{at < 0 ? "–" : at + 1} / {shown.length}</span>
+        <button type="button" className="views-act" aria-label="Next view" title="Next (→)"
+                disabled={at < 0 || at >= shown.length - 1} onClick={() => step(1)}>›</button>
         <span className="views-nav-acts">
-          {preview.kind !== "server" && preview.kind !== "link" && (
-            <button type="button" className="views-act"
-                    title="Download" aria-label={`Download ${preview.name}`}
-                    onClick={() => triggerDownload(preview)}>⤓</button>
+          {open.kind !== "server" && open.kind !== "link" && (
+            <button type="button" className="views-act" title="Download" aria-label={`Download ${open.name}`}
+                    onClick={() => triggerDownload(open)}>⤓</button>
           )}
-          <button type="button" className="views-act"
-                  title="Open in a new tab" aria-label="Open preview in a new tab"
-                  onClick={() => window.open(hrefFor(preview), "_blank", "noopener")}>↗</button>
-          <button type="button" className="views-act"
-                  title={copied === preview.path ? "Copied" : "Copy link"} aria-label="Copy link"
-                  onClick={() => copyLink(preview)}>{copied === preview.path ? "✓" : "⧉"}</button>
-          {preview.kind !== "server" && (
-            <button type="button"
-                    className={"views-act danger" + (armedDelete === preview.path ? " armed" : "")}
-                    title={armedDelete === preview.path ? "Click again to delete" : "Delete"}
-                    aria-label={armedDelete === preview.path ? "Click again to delete" : "Delete"}
-                    onMouseLeave={() => setArmedDelete((a) => (a === preview.path ? null : a))}
-                    onClick={() => deleteItem(preview)}>
-              {armedDelete === preview.path ? "sure?" : "🗑"}
+          <button type="button" className="views-act" title="Open in a new tab" aria-label="Open in a new tab"
+                  onClick={() => window.open(hrefFor(open), "_blank", "noopener")}>↗</button>
+          <button type="button" className="views-act" title={copied === open.path ? "Copied" : "Copy link"} aria-label="Copy link"
+                  onClick={() => copyLink(open)}>{copied === open.path ? "✓" : "⧉"}</button>
+          {open.kind !== "server" && (
+            <button type="button" className={"views-act danger" + (armedDelete === open.path ? " armed" : "")}
+                    title={armedDelete === open.path ? "Click again to delete" : "Delete"}
+                    aria-label={armedDelete === open.path ? "Click again to delete" : "Delete"}
+                    onMouseLeave={() => setArmedDelete((a) => (a === open.path ? null : a))}
+                    onClick={() => deleteItem(open)}>
+              {armedDelete === open.path ? "sure?" : "🗑"}
             </button>
           )}
         </span>
+      </div>
+      <div className="views-preview">{page}</div>
+      {shown.length > 1 && (
+        // The neighbours, in the order ← → walks: where you are in the set.
+        <div className="vg-strip" role="list" aria-label="Other views">
+          {shown.map((r) => (
+            <button key={r.path} type="button" role="listitem"
+                    className={"vg-strip-item" + (r.path === open.path ? " on" : "")}
+                    ref={r.path === open.path ? (el) => el?.scrollIntoView?.({ block: "nearest", inline: "center" }) : undefined}
+                    title={r.title || r.name} onClick={() => setOpen(r)}>
+              {isImage(r.name) && r.kind !== "server"
+                ? <img src={thumbSrc(r)} loading="lazy" decoding="async" alt="" />
+                : <span className="views-kind">{kindTag(r)}</span>}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
 
   return (
     <>
-      {/* The dock has NO backdrop on purpose: the wall or terminal beside it
-          stays visible and interactive — reading a result must not pause the
-          session that produced it. */}
+      {/* Neither the dock nor the page has a backdrop: the terminal (or the
+          sidebar) beside them stays visible and interactive. */}
       {!docked && !asPage && <div className="views-backdrop" onClick={onClose} />}
-      <div className={"views-panel" + (docked ? " docked" : "") + (asPage ? " page" : "")
-             + (flatRows.length > 0 ? " reading" : "")
-             + (railVisible ? " rail-side" : "")}
+      <div className={"views-panel gallery reading" + (docked ? " docked" : "") + (asPage ? " page" : "") + (open ? " is-reading" : "")}
            style={docked ? { width: dockW } : undefined}
            role="dialog" aria-label="Published views"
            ref={panelRef} tabIndex={-1}>
         {docked && <div className="views-dock-handle" onPointerDown={onHandleDown}
                         role="separator" aria-label="Resize the Views panel" />}
-        <div className="views-head">
-          <span className="views-badge">◧ Views</span>
-          {session && (
-            // The scope is a CHOICE here, not a label: docked beside one
-            // session you almost always want that session's results, but the
-            // rest of the fleet is one click away without reopening.
-            <span className="views-scope-toggle" role="tablist">
-              <button type="button" role="tab" aria-selected={!showAll}
-                      className={showAll ? "" : "on"}
-                      onClick={() => setShowAll(false)}>{label(session)}</button>
-              <button type="button" role="tab" aria-selected={showAll}
-                      className={showAll ? "on" : ""}
-                      onClick={() => setShowAll(true)}>all</button>
-            </span>
-          )}
-          <span className="views-head-spacer" />
-          {(items?.some((i) => i.kind !== "server") ?? false) && (
-            <button type="button"
-                    className={"views-act danger views-clear" + (armedClear ? " armed" : "")}
-                    title="Free the space hop's published copies use — source files are never touched"
-                    onMouseLeave={() => setArmedClear(false)}
-                    onClick={clearScope}>
-              {armedClear ? "release the copies?" : "clear"}
-            </button>
-          )}
-          <button type="button" className="views-close" aria-label="Close views" onClick={onClose}>×</button>
-        </div>
-        {nav}
-        <div className="views-body">
-          {railVisible && list}
-          <div className="views-preview">
-            {empty || (canPreview() ? page : list)}
+        {open ? reader : (<>
+          <div className="views-head">
+            <span className="views-badge">Views</span>
+            <span className="vg-count">{counts.all}</span>
+            {session && (
+              // A session's own results, or the fleet's — one click either way.
+              <span className="views-scope-toggle" role="tablist">
+                <button type="button" role="tab" aria-selected={!showAll}
+                        className={showAll ? "" : "on"} onClick={() => setShowAll(false)}>{label(resolvedSession || session)}</button>
+                <button type="button" role="tab" aria-selected={showAll}
+                        className={showAll ? "on" : ""} onClick={() => setShowAll(true)}>all</button>
+              </span>
+            )}
+            <span className="views-head-spacer" />
+            {(items?.some((i) => i.kind !== "server") ?? false) && (
+              <button type="button"
+                      className={"views-act danger views-clear" + (armedClear ? " armed" : "")}
+                      title="Free the space hop's published copies use — source files are never touched"
+                      onMouseLeave={() => setArmedClear(false)}
+                      onClick={clearScope}>
+                {armedClear ? "release the copies?" : "clear"}
+              </button>
+            )}
+            <button type="button" className="views-close" aria-label="Close views" onClick={onClose}>×</button>
           </div>
-        </div>
+          {scoped.length > 0 && (
+            <div className="vg-bar">
+              <div className="vg-filters" role="tablist" aria-label="Kind">
+                {FILTERS.filter(([f]) => f === "all" || counts[f] > 0).map(([f, name]) => (
+                  <button key={f} type="button" role="tab" aria-selected={filter === f}
+                          className={filter === f ? "on" : ""} onClick={() => setFilter(f)}>
+                    {name}<span className="vg-filter-n">{counts[f]}</span>
+                  </button>
+                ))}
+              </div>
+              <input ref={searchRef} className="vg-search" type="search" placeholder="Search views  /"
+                     value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search views" />
+            </div>
+          )}
+          {gallery}
+        </>)}
       </div>
     </>
   );

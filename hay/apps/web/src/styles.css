@@ -6349,3 +6349,92 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .session-rail.docked .rail-row.kbd { background: var(--rail-hover); }
 .rail-empty kbd { font: 600 11px/1 var(--font-mono); padding: 2px 5px; border-radius: 4px; border: 1px solid var(--rail-line, var(--line)); }
 
+
+/* ── Views as a gallery, then a reader ──
+   Figures are their own thumbnails, on white like a plot in a paper;
+   documents are set like a manuscript's first page — a serif title on
+   faintly ruled paper, an edge in their kind's colour. Days head the
+   groups, as in a lab notebook. */
+.views-panel.gallery { display: flex; flex-direction: column; }
+.views-panel.gallery.page { padding-bottom: 0; }
+.vg-count { font: 500 13px/1 var(--font-mono); color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.views-panel.page .vg-count { font-size: 14px; }
+.vg-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 2px 0 4px; }
+.vg-filters { display: inline-flex; gap: 16px; }
+.vg-filters button {
+  border: 0; background: none; padding: 6px 0; cursor: pointer; border-radius: 0;
+  font: 500 13px/1.2 var(--font-sans); color: var(--ink-muted); transform: none;
+}
+.vg-filters button:hover { color: var(--ink); }
+.vg-filters button.on { color: var(--ink); font-weight: 650; box-shadow: inset 0 -2px 0 var(--ink); }
+.vg-filter-n { margin-left: 5px; font: 500 11px/1 var(--font-mono); color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.vg-search {
+  margin-left: auto; width: min(260px, 100%); padding: 6px 10px; border-radius: 8px;
+  border: 1px solid var(--card-line); background: color-mix(in srgb, var(--ink) 3%, transparent);
+  color: var(--ink); font: 400 13px/1.3 var(--font-sans); outline: none;
+}
+.vg-search:focus { border-color: color-mix(in srgb, #7c3aed 55%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, #7c3aed 13%, transparent); }
+.vg-scroll { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -6px; padding: 0 6px 20px; }
+.vg-day-head {
+  display: flex; align-items: baseline; gap: 8px; margin: 18px 2px 10px;
+  font: 600 11px/1.2 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted);
+}
+.vg-day-count { font-weight: 500; opacity: 0.7; letter-spacing: 0; }
+.vg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 16px 14px; }
+.views-panel.docked .vg-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px 10px; }
+.vg-card {
+  display: flex; flex-direction: column; gap: 7px; min-width: 0;
+  text-decoration: none; color: inherit; border-radius: 12px; padding: 5px; margin: -5px;
+}
+.vg-card:focus { outline: none; }
+.vg-thumb {
+  position: relative; aspect-ratio: 4 / 3; display: flex; overflow: hidden;
+  border-radius: 10px; border: 1px solid var(--card-line); background: var(--card-bg);
+  box-shadow: var(--card-shadow); transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.vg-card:hover .vg-thumb, .vg-card.kbd .vg-thumb { transform: translateY(-2px); box-shadow: var(--card-shadow-hover); }
+.vg-card.kbd .vg-thumb { border-color: color-mix(in srgb, #7c3aed 55%, var(--card-line)); }
+.vg-thumb.image { background: #fff; }
+.vg-thumb .views-thumb { flex: 1; width: 100%; height: 100%; object-fit: contain; border-radius: 0; background: #fff; }
+.vg-thumb.doc {
+  flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px 14px 12px 17px;
+  background-color: var(--card-bg);
+  background-image: repeating-linear-gradient(to bottom, transparent 0 21px, color-mix(in srgb, var(--ink) 5%, transparent) 21px 22px);
+}
+.vg-thumb.doc::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: #7c3aed; opacity: 0.75; }
+.vg-thumb.doc.pages::before { background: #06b6d4; }
+.vg-thumb.doc.live::before { background: var(--settled); }
+.vg-thumb.doc .views-kind { flex: none; width: auto; padding: 3px 6px; }
+.vg-doc-title {
+  font: 600 15px/1.3 "Iowan Old Style", "Palatino Linotype", Charter, Georgia, serif; color: var(--ink);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.vg-doc-rule { margin-top: auto; width: 38%; height: 2px; border-radius: 1px; background: var(--card-line); }
+.vg-thumb .views-dot { position: absolute; top: 8px; right: 8px; width: 8px; height: 8px; border-radius: 4px; box-shadow: 0 0 0 2px var(--card-bg); }
+.vg-caption { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 0 2px; }
+.vg-caption .views-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vg-card.fresh .views-title { font-weight: 700; }
+/* The reader. */
+.vg-reader { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vg-reader .views-nav { gap: 6px; }
+.vg-back { font-size: 16px; }
+.views-panel.page .vg-reader .views-preview {
+  background: var(--card-bg); border: 1px solid var(--card-line); border-radius: 12px; overflow: hidden; box-shadow: var(--card-shadow);
+}
+.vg-strip {
+  flex: none; display: flex; gap: 6px; overflow-x: auto; padding: 10px 2px 12px;
+  margin-top: 8px; border-top: 1px solid var(--card-line); scrollbar-width: thin;
+}
+.vg-strip-item {
+  flex: none; width: 64px; height: 46px; padding: 0; overflow: hidden; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 7px; border: 1px solid var(--card-line); background: var(--card-bg); opacity: 0.72;
+  transition: opacity 0.12s, box-shadow 0.12s; transform: none;
+}
+.vg-strip-item:hover { opacity: 1; transform: none; }
+.vg-strip-item.on { opacity: 1; box-shadow: 0 0 0 2px #7c3aed; border-color: transparent; }
+.vg-strip-item img { width: 100%; height: 100%; object-fit: cover; background: #fff; }
+.vg-strip-item .views-kind { flex: none; width: auto; padding: 3px 5px; }
+/* The panel takes focus so its keys work at once; that is not a ring. */
+.views-panel:focus { outline: none; }

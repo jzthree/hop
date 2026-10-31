@@ -529,6 +529,26 @@ const App = () => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   // The Slack-style session rail (components/SessionRail.tsx).
   const [railOpen, setRailOpen] = useState(false);
+  // Pinned, it stays docked beside the terminal — only where it fits: a wide
+  // window with a mouse. A narrow window keeps the pin and shows it again
+  // when widened.
+  const [railPinned, setRailPinned] = useState(() => {
+    try { return localStorage.getItem("hop_rail_docked") === "1"; } catch { return false; }
+  });
+  const dockQuery = "(min-width: 1100px) and (pointer: fine)";
+  const [railCanDock, setRailCanDock] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(dockQuery).matches);
+  useEffect(() => {
+    const mq = window.matchMedia?.(dockQuery);
+    if (!mq) return;
+    const on = () => setRailCanDock(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  const setRailDocked = (on: boolean) => {
+    setRailPinned(on);
+    if (!on) setRailOpen(false);
+    try { localStorage.setItem("hop_rail_docked", on ? "1" : "0"); } catch { /* per-browser only */ }
+  };
   const [searchActive, setSearchActive] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchInfo, setSearchInfo] = useState({ index: 0, total: 0 });
@@ -4342,8 +4362,11 @@ const App = () => {
     ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)
     : undefined;
 
+  // Docked: pinned, room for it, a session on screen, the wall closed.
+  const railDocked = railPinned && railCanDock && !!session && !switcherOpen && isEmbeddedInHop();
+
   return (
-    <div className="app">
+    <div className={"app" + (railDocked ? " rail-docked" : "")}>
       {switchHud && (() => {
         const curKey = session?.room ?? sessionLabel;
         const SLOT = 152; // card 140 + gap 12; must match .switch-hud CSS
@@ -4415,7 +4438,7 @@ const App = () => {
               className="topbar-sessions-btn topbar-rail-btn"
               title="Sessions by folder"
               aria-label="Sessions by folder"
-              onClick={() => setRailOpen(true)}
+              onClick={() => { if (railDocked) setRailDocked(false); else setRailOpen(true); }}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
             </button>
@@ -5342,13 +5365,26 @@ const App = () => {
       )}
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}
-      {railOpen && session && (
+      {(railOpen || railDocked) && session && (
         <SessionRail
           sessions={sessions}
           folders={folders}
           currentRoom={status === "ended" ? null : session.room}
+          docked={railDocked}
+          canDock={railCanDock}
+          onDockChange={setRailDocked}
+          onPark={(s, parked) => {
+            void fetch("/api/sessions/park", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ internalName: s.internalName || s.name, parked })
+            }).then((r) => {
+              pushNotice(r.ok ? (parked ? `${s.displayName || s.name} parked` : `${s.displayName || s.name} is back`) : "Failed to update park state");
+              void fetchSessions({ showLoading: false });
+            }).catch(() => pushNotice("Failed to update park state"));
+          }}
           onPick={(next) => {
-            setRailOpen(false);
+            if (!railDocked) setRailOpen(false);
             switchSession(next as SessionInfo);
             // The picked row goes away with the rail; keys typed next are
             // the session's, not nobody's.

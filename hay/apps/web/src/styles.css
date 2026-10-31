@@ -5745,6 +5745,32 @@ body.pane-dragging { user-select: none; }
 .rail-count { font-weight: 500; opacity: 0.6; letter-spacing: 0; }
 .rail-count.wants { opacity: 1; background: #f0a53a; color: #000; border-radius: 8px; padding: 1px 6px; font-weight: 700; }
 .rail-empty { padding: 14px; color: var(--ink-muted); font-size: 13px; }
+.rail-mark { flex: none; color: var(--ink-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.rail-order, .rail-pin {
+  border: 0; background: none; color: var(--ink-muted); width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px; cursor: pointer; font-size: 14px; padding: 0;
+}
+.rail-order:hover, .rail-pin:hover { color: var(--ink); background: var(--chip-bg); transform: none; }
+.rail-pin.on { color: var(--accent, var(--ink)); }
+/* Docked: Slack's sidebar — a column beside the terminal, not an overlay.
+   The page makes room for it, and the terminal refits to what is left. */
+.app.rail-docked { --rail-w: 280px; padding-left: var(--rail-w); }
+.session-rail.docked {
+  width: var(--rail-w, 280px); z-index: 30; box-shadow: none; animation: none;
+}
+.session-rail.docked .rail-head { padding-top: 14px; }
+.session-rail.docked .rail-scope button { padding: 5px 7px; }
+.rail-menu {
+  position: fixed; z-index: 420; min-width: 120px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.rail-menu button {
+  display: block; width: 100%; text-align: left; border: 0; background: none;
+  color: var(--ink); padding: 7px 10px; border-radius: 5px; cursor: pointer; font: 500 13px/1.2 inherit;
+}
+.rail-menu button:hover { background: var(--chip-bg); transform: none; }
 .topbar-rail-btn { display: inline-flex; align-items: center; justify-content: center; padding-left: 8px; padding-right: 8px; }
 /* The phone bar's name is the rail's door. */
 .phone-term-title {

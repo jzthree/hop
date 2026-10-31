@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 // The Slack-style side panel, as on the iOS app (SessionDrawer.swift): every
 // session filed by folder, what each one needs at a glance, and a jump to
-// another without going back to the wall. Opened from the terminal's top
-// bar on a phone and from the session header (or ⌘/Ctrl+Shift+K) on a
-// desktop. Folding is remembered per browser; "All sessions" opens the wall.
+// another without going back to the wall. Opened from the session header.
+// On a wide desktop window it can be pinned: docked, it stays beside the
+// terminal like Slack's sidebar, and a pick switches without closing it.
+// Folding, arrangement and pinning are remembered per browser; "All
+// sessions" opens the wall.
 
 export type RailSession = {
   name: string;
@@ -23,6 +25,7 @@ export type RailSession = {
   turnSeen?: boolean;
   unread?: boolean;
   bellUnseen?: boolean;
+  checkbacks?: number;
 };
 
 type Props = {
@@ -32,11 +35,20 @@ type Props = {
   onPick: (s: RailSession) => void;
   onAllSessions: () => void;
   onClose: () => void;
+  /** Docked beside the terminal (no backdrop, stays open on a pick). */
+  docked?: boolean;
+  /** Offered only where a docked rail fits (a wide window, a mouse). */
+  canDock?: boolean;
+  onDockChange?: (docked: boolean) => void;
+  /** Park / unpark from a row's right-click menu. */
+  onPark?: (s: RailSession, parked: boolean) => void;
 };
 
 type Scope = "user" | "agent" | "all";
+type Order = "folder" | "recent";
 const FOLD_KEY = "hop_rail_folded";
 const SCOPE_KEY = "hop_rail_scope";
+const ORDER_KEY = "hop_rail_order";
 
 const load = (key: string): string | null => {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -50,21 +62,35 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose }: Props) => {
+export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark }: Props) => {
   const [filter, setFilter] = useState("");
   const [scope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
+  const [order, setOrder] = useState<Order>(() => (load(ORDER_KEY) === "recent" ? "recent" : "folder"));
+  const [menu, setMenu] = useState<{ s: RailSession; x: number; y: number } | null>(null);
   const [folded, setFolded] = useState<Set<string>>(() => new Set((load(FOLD_KEY) || "").split(",").filter(Boolean)));
   const [parkedOpen, setParkedOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    // Docked, the rail sits beside a terminal you are typing in: it must not
+    // take the keyboard on mount, nor Escape (the session's own key).
+    if (docked) return;
     // Focus the filter only with a real keyboard — on a phone it would pop
     // the on-screen one over the list.
     if (window.matchMedia("(pointer: fine)").matches) inputRef.current?.focus();
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); } };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [onClose, docked]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey, true);
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", onKey, true); };
+  }, [menu]);
 
   const toggle = (id: string) => setFolded((prev) => {
     const next = new Set(prev);
@@ -73,6 +99,7 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
     return next;
   });
   const changeScope = (next: Scope) => { setScope(next); save(SCOPE_KEY, next); };
+  const changeOrder = (next: Order) => { setOrder(next); save(ORDER_KEY, next); };
 
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -88,6 +115,10 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
   const groups = useMemo(() => {
     const live = visible.filter((s) => searching || !shelved(s));
     if (searching) return [{ id: "", title: "Matches", rows: live }];
+    if (order === "recent") {
+      const rows = [...live].sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+      return rows.length ? [{ id: "recent:", title: "Recent", rows }] : [];
+    }
     const known = new Set(folders.map((f) => f.id));
     const out: Array<{ id: string; title: string; rows: RailSession[] }> = [];
     for (const f of folders) {
@@ -97,7 +128,7 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
     const unfiled = live.filter((s) => !s.folderId || !known.has(s.folderId));
     if (unfiled.length) out.push({ id: "", title: folders.length ? "Unfiled" : "Sessions", rows: unfiled });
     return out;
-  }, [visible, folders, searching]);
+  }, [visible, folders, searching, order]);
   const parked = searching ? [] : visible.filter(shelved);
 
   const row = (s: RailSession) => {
@@ -107,9 +138,12 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
               aria-current={current ? "true" : undefined} onClick={() => onPick(s)}
               // Out of the filter at the press (Safari never focuses a clicked button).
               onPointerDown={() => { if (document.activeElement === inputRef.current) inputRef.current?.blur(); }}
+              onContextMenu={onPark ? (e) => { e.preventDefault(); setMenu({ s, x: e.clientX, y: e.clientY }); } : undefined}
               title={s.tagline || s.displayName || s.name}>
         <span className={`rail-dot ${dotClass(s)}`} aria-hidden="true" />
         <span className={"rail-name" + (wantsYou(s) || s.unread ? " strong" : "")}>{s.displayName || s.name}</span>
+        {(s.parked || s.archived) && <span className="rail-mark" aria-label="parked" title="Parked">☾</span>}
+        {!!s.checkbacks && <span className="rail-mark" title={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} scheduled`}>⏰{s.checkbacks}</span>}
         {wantsYou(s) && <span className="rail-badge" aria-label="wants you">!</span>}
       </button>
     );
@@ -117,10 +151,15 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
 
   return (
     <>
-      <div className="rail-backdrop" onClick={onClose} />
-      <aside className="session-rail" role="dialog" aria-label="Sessions">
+      {!docked && <div className="rail-backdrop" onClick={onClose} />}
+      <aside className={"session-rail" + (docked ? " docked" : "")} role={docked ? "navigation" : "dialog"} aria-label="Sessions">
         <div className="rail-head">
           <span className="rail-title">Sessions</span>
+          <button type="button" className="rail-order" aria-label={`Arrange: ${order === "folder" ? "by folder" : "most recent first"}`}
+                  title={order === "folder" ? "By folder — click for most recent first" : "Most recent first — click for by folder"}
+                  onClick={() => changeOrder(order === "folder" ? "recent" : "folder")}>
+            {order === "folder" ? "▤" : "◷"}
+          </button>
           <div className="rail-scope" role="tablist" aria-label="Scope">
             {(["user", "agent", "all"] as const).map((v) => (
               <button key={v} type="button" role="tab" aria-selected={scope === v}
@@ -129,7 +168,15 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
               </button>
             ))}
           </div>
-          <button type="button" className="rail-close" aria-label="Close sessions" onClick={onClose}>×</button>
+          {(canDock || docked) && (
+            <button type="button" className={"rail-pin" + (docked ? " on" : "")} aria-pressed={docked}
+                    aria-label={docked ? "Unpin the sidebar" : "Keep the sidebar open"}
+                    title={docked ? "Unpin — the sidebar closes after a pick" : "Keep open beside the terminal"}
+                    onClick={() => onDockChange?.(!docked)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" />{docked && <path d="M5 8h2M5 12h2" />}</svg>
+            </button>
+          )}
+          {!docked && <button type="button" className="rail-close" aria-label="Close sessions" onClick={onClose}>×</button>}
         </div>
         <input ref={inputRef} className="rail-filter" type="search" placeholder="Jump to…" value={filter}
                onChange={(e) => setFilter(e.target.value)}
@@ -171,6 +218,13 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
           )}
         </div>
       </aside>
+      {menu && onPark && (
+        <div className="rail-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
+          <button type="button" role="menuitem" onClick={() => { const { s } = menu; setMenu(null); onPark(s, !(s.parked || s.archived)); }}>
+            {menu.s.parked || menu.s.archived ? "Unpark" : "Park"}
+          </button>
+        </div>
+      )}
     </>
   );
 };

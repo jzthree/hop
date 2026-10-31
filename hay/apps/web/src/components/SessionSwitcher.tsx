@@ -17,6 +17,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { enableMathHover } from "../utils/mathLinkProvider";
 import { getMathTip } from "../utils/mathTooltip";
 import { claimOnTileFocus, sizeIsForeign } from "../utils/sizeClaim";
+import { parseViewLink, wantsNewTab } from "../utils/viewLinks";
 import { cardPhase, phaseLabel, phaseTitle } from "../utils/agentPhase";
 import { installDragSelect } from "../utils/dragSelect";
 import { enableViewBlocks } from "../utils/viewBlocks";
@@ -532,6 +533,13 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
   codexAppRef.current = codexApp;
   const onOpenViewRef = useRef(onOpenView);
   onOpenViewRef.current = onOpenView;
+  // This hop's `hop view` links open in the Views reader; ⌘/Ctrl-click and
+  // every other link open a tab (see utils/viewLinks).
+  const openLink = (url: string, event?: { metaKey?: boolean; ctrlKey?: boolean; button?: number } | null) => {
+    const view = wantsNewTab(event) ? null : parseViewLink(url);
+    if (view && onOpenViewRef.current) onOpenViewRef.current(view.session, view.name);
+    else window.open(url, "_blank", "noopener");
+  };
   if (!voiceHoldRef.current) {
     voiceHoldRef.current = createVoiceHold({
       send: (data) => sendInputRef.current?.(data),
@@ -627,7 +635,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
         activate: (event, uri) => {
           event.preventDefault();
           lastLinkOpenAtRef.current = Date.now();
-          window.open(uri, "_blank", "noopener");
+          openLink(uri, event);
         }
       },
       theme: theme as never
@@ -647,7 +655,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       const joined = urlAtPoint(event.clientX, event.clientY);
       const target = joined && joined.startsWith(uri) && joined.length > uri.length ? joined : uri;
       lastLinkOpenAtRef.current = Date.now();
-      window.open(target, "_blank", "noopener");
+      openLink(target, event);
     }));
     enableMathHover(term, getMathTip()); // rendered math on hover, here too
     const uninstallViewBlocks = enableViewBlocks(term as never, (b) => onOpenViewRef.current?.(b.session, b.name));
@@ -1295,14 +1303,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
           // not see as one — a continuation row of a hard break — is ours.
           if (Date.now() - lastLinkOpenAtRef.current < 600) return;
           const url = urlAtPoint(e.clientX, e.clientY);
-          if (url) window.open(url, "_blank", "noopener");
+          if (url) openLink(url, e);
           return;
         }
         // Not live yet: the click bubbles and focuses the tile as before,
         // AND a URL under it opens — the first click on a link is not a dud
         // that merely wakes the tile.
         const url = urlAtPoint(e.clientX, e.clientY);
-        if (url) window.open(url, "_blank", "noopener");
+        if (url) openLink(url, e);
       }}
       onPointerDown={live ? (e) => e.stopPropagation() : undefined}
     >

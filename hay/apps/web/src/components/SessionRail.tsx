@@ -61,7 +61,7 @@ type Props = {
 
 /** A place in the docked rail's icon strip (Slack's Home / DMs / Activity
  *  column); `bottom` items sit at its foot (Slack's + / theme / you). */
-export type RailNavItem = { key: string; label: string; icon: ReactNode; count?: number; fresh?: boolean; bottom?: boolean; onClick: () => void };
+export type RailNavItem = { key: string; label: string; icon: ReactNode; count?: number; fresh?: boolean; bottom?: boolean; active?: boolean; onClick: () => void };
 
 /** Line icons for the strip (24-grid, stroke = currentColor). */
 const ICON_PATHS: Record<string, string> = {

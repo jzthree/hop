@@ -25,6 +25,7 @@ import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
+import { parseViewLink, wantsNewTab } from "./utils/viewLinks";
 import { SessionRail, RailIcon, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { DesktopView } from "./components/DesktopView";
@@ -845,6 +846,14 @@ const App = () => {
   // Published views (`hop view`). `session` scopes the panel to one session;
   // an object with none open it fleet-wide. Null = closed.
   const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string } | null>(null);
+  // A link clicked in a terminal: this hop's `hop view` links open in the
+  // Views reader beside the session; ⌘/Ctrl-click (and every other link)
+  // opens a tab. window.open stays inside the click, for popup blockers.
+  const openLinkRef = useRef((url: string, event?: MouseEvent | null) => {
+    const view = wantsNewTab(event) ? null : parseViewLink(url);
+    if (view) setViewsOpen({ session: view.session, item: view.name });
+    else window.open(url, "_blank", "noopener");
+  });
   const [codexAppOpen, setCodexAppOpen] = useState(false);
   // The machine's desktop through hop: offered on the wall once `hop desktop
   // on` has been run there; checked on load and each time the wall opens.
@@ -2325,7 +2334,7 @@ const App = () => {
       linkHandler: {
         activate: (event, uri) => {
           event.preventDefault();
-          window.open(uri, "_blank", "noopener");
+          openLinkRef.current(uri, event);
         }
       },
       theme: resolveTerminalTheme(themeMode)
@@ -2345,7 +2354,7 @@ const App = () => {
         const joined = extractUrlAtCell(terminal.buffer.active.viewportY + cell.row, cell.col);
         if (joined && joined.startsWith(uri) && joined.length > uri.length) target = joined;
       }
-      window.open(target, "_blank", "noopener");
+      openLinkRef.current(target, event);
     }));
     // LaTeX in the output is a hover target: the tooltip renders it with
     // KaTeX, a click pins it. What `hop math` could only approximate in
@@ -4388,10 +4397,13 @@ const App = () => {
   // Docked: pinned and room for it, on the wall and in a session alike.
   const railDocked = railPinned && railCanDock && isEmbeddedInHop();
   // The wall is up: the hub page (no session), or the wall over a session.
-  const railOnWall = !session || switcherOpen;
+  // Views as a page is a place of its own, and then the wall is not.
+  const viewsPage = railDocked && !!viewsOpen && !viewsOpen.session;
+  const railOnWall = (!session || switcherOpen) && !viewsPage;
   const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
   const railNav: RailNavItem[] = !railDocked ? [] : [
-    { key: "views", label: "Views", icon: <RailIcon name="views" />, onClick: () => setViewsOpen({}) },
+    { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage,
+      onClick: () => setViewsOpen(viewsPage ? null : {}) },
     { key: "scheduled", label: "Scheduled", icon: <RailIcon name="scheduled" />,
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
@@ -5489,7 +5501,7 @@ const App = () => {
             // the session's, not nobody's.
             termRef.current?.focus();
           }}
-          onAllSessions={() => { setRailOpen(false); if (session) setSwitcherOpen(true); }}
+          onAllSessions={() => { setRailOpen(false); setViewsOpen(null); if (session) setSwitcherOpen(true); }}
           onClose={() => setRailOpen(false)}
         />
       )}
@@ -5515,6 +5527,10 @@ const App = () => {
       {desktopOpen && <DesktopView wsBase={resolveTunnelWsUrl()} onClose={() => setDesktopOpen(false)} />}
       {viewsOpen && (
         <ViewsPanel session={viewsOpen.session} item={viewsOpen.item} sessions={sessions} dock={viewsOpen.dock}
+                    // Docked sidebar: the fleet's Views is a place beside it
+                    // (a page, like the wall); one session's results peek in
+                    // from the right beside that session.
+                    placement={railDocked ? (viewsOpen.session ? "dock" : "page") : undefined}
                     onClose={() => setViewsOpen(null)} />
       )}
     </div>

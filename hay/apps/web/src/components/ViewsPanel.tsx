@@ -13,8 +13,10 @@ import { relativeTime } from "../utils/switcherModel";
 // window, like a mail client — there is no separate "list mode" to click
 // through first.
 //
-// Two placements of that one shape:
+// Three placements of that one shape:
 //
+// - PAGE (beside the docked sidebar): Views is a PLACE, like the wall —
+//   chosen from the sidebar's strip, it fills the main area, no backdrop.
 // - DOCK (the default on a desk-sized window): a right-side drawer with NO
 //   backdrop, so the wall or the terminal beside it stays visible, live and
 //   INTERACTIVE — you read the plot while the session that produced it keeps
@@ -30,9 +32,9 @@ import { relativeTime } from "../utils/switcherModel";
 // the terminal costs nothing that isn't given back on close.
 //
 // The iframe is what makes in-place reading safe — navigating would tear
-// down the WebSocket attached to the live terminal. Narrow windows keep the
-// old contract (rows are anchors to a new tab), because a preview pane the
-// width of a phone is worse than the browser's own viewer.
+// down the WebSocket attached to the live terminal. Every width reads in
+// place: a new tab is a choice (↗, ⌘-click, middle click), never the only
+// way to see a result.
 
 type ViewItem = {
   // The session's internalName — the same key /api/sessions reports views
@@ -68,6 +70,8 @@ type Props = {
   // the screen's edge was farther from where the eye already is. The dock
   // stays available for a caller that wants it.
   dock?: boolean;
+  // Where the reader sits (see the header comment); overrides `dock`.
+  placement?: "modal" | "dock" | "page";
   // Open straight on this item (its file name within `session`), e.g. from
   // an inline hop view card in the terminal.
   item?: string;
@@ -183,7 +187,7 @@ const DEFAULT_DOCK_W = 760;
 const clampDockW = (w: number) =>
   Math.max(560, Math.min(Math.round(window.innerWidth * 0.75), w));
 
-export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose }: Props) => {
+export const ViewsPanel = ({ session, item, sessions = [], dock = false, placement, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [preview, setPreview] = useState<ViewItem | null>(null);
@@ -202,7 +206,8 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
   const [seenAtOpen] = useState(loadViewsSeen);
   // Decided once at mount: flipping dock/modal under a resize mid-read would
   // teleport the panel. Reopening picks up the new geometry.
-  const [docked] = useState(() => dock && window.innerWidth >= 1100);
+  const [docked] = useState(() => (placement ? placement === "dock" : dock) && window.innerWidth >= 1100);
+  const asPage = placement === "page";
   const [dockW, setDockW] = useState(() => {
     const stored = Number(localStorage.getItem(DOCK_W_KEY));
     return clampDockW(Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_DOCK_W);
@@ -237,7 +242,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
   // The side-by-side preview pane only exists where it has room to be useful.
   // Checked at interaction time, not render time, so a resized window behaves
   // like what it currently is. The dock always previews (stacked).
-  const canPreview = () => docked || window.innerWidth >= 760;
+  const canPreview = () => true;
 
   useEffect(() => {
     let cancelled = false;
@@ -365,11 +370,9 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
   };
 
   // Rows stay real anchors so ⌘-click, middle-click and "copy link address"
-  // keep their browser meaning; only a PLAIN left click is intercepted, and
-  // only where a preview exists to receive it.
+  // keep their browser meaning; a PLAIN left click reads it here.
   const onRowClick = (event: MouseEvent, item: ViewItem) => {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    if (!canPreview()) return;   // narrow: the anchor's new tab is right
     event.preventDefault();
     setPreview(item);
   };
@@ -657,8 +660,8 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, onClose
       {/* The dock has NO backdrop on purpose: the wall or terminal beside it
           stays visible and interactive — reading a result must not pause the
           session that produced it. */}
-      {!docked && <div className="views-backdrop" onClick={onClose} />}
-      <div className={"views-panel" + (docked ? " docked" : "")
+      {!docked && !asPage && <div className="views-backdrop" onClick={onClose} />}
+      <div className={"views-panel" + (docked ? " docked" : "") + (asPage ? " page" : "")
              + (flatRows.length > 0 ? " reading" : "")
              + (railVisible ? " rail-side" : "")}
            style={docked ? { width: dockW } : undefined}

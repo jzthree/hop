@@ -561,6 +561,15 @@ const App = () => {
   };
   const [wallFilter, setWallFilter] = useState("");
   const [createSignal, setCreateSignal] = useState(0);
+  // Views side by side with the session (an option, remembered): a column
+  // right of the terminal, which gives up the width and refits.
+  const [viewsSide, setViewsSide] = useState(() => {
+    try { return localStorage.getItem("hop_views_side") === "1"; } catch { return false; }
+  });
+  const VIEWS_SIDE_DEFAULT_W = 560;
+  const [viewsSideW, setViewsSideW] = useState<number>(() => {
+    try { const v = Number(localStorage.getItem("hop_views_side_w")); return v >= 340 && v <= 1400 ? v : VIEWS_SIDE_DEFAULT_W; } catch { return VIEWS_SIDE_DEFAULT_W; }
+  });
   const [createName, setCreateName] = useState<string | undefined>(undefined);
   // ⌘K in a session with the sidebar docked: search, not the whole wall.
   const [railFocusSignal, setRailFocusSignal] = useState(0);
@@ -4474,14 +4483,38 @@ const App = () => {
   };
   // The wall is up: the hub page (no session), or the wall over a session.
   // Views as a page is a place of its own, and then the wall is not.
-  const viewsPage = railDocked && !!viewsOpen && (!viewsOpen.session || !!viewsOpen.page);
+  // Docked, Views is the page (a session's results are that page filtered
+  // to it: a link, an inline card, ⌘⇧V), or — chosen, and with a session to
+  // sit beside — a column side by side with the terminal. The wall over a
+  // session hides the column until it closes.
+  const viewsSideNow = railDocked && viewsSide && !!session && !!viewsOpen && !switcherOpen;
+  const viewsHidden = railDocked && viewsSide && !!session && !!viewsOpen && switcherOpen;
+  const viewsPage = railDocked && !!viewsOpen && !viewsSideNow && !viewsHidden;
+  const toggleViewsSide = () => {
+    const next = !viewsSide;
+    setViewsSide(next);
+    try { localStorage.setItem("hop_views_side", next ? "1" : "0"); } catch { /* per-browser only */ }
+    // Beside a session, the column is that session's results.
+    if (next && session && viewsOpen && !viewsOpen.session) setViewsOpen({ ...viewsOpen, session: session.room });
+  };
+  const resizeViewsSide = (w: number | null) => {
+    const max = Math.max(360, window.innerWidth - (railWidth + 360));
+    const next = w === null ? VIEWS_SIDE_DEFAULT_W : Math.round(Math.max(340, Math.min(max, w)));
+    setViewsSideW(next);
+    try { localStorage.setItem("hop_views_side_w", String(next)); } catch { /* per-browser only */ }
+  };
+  // The strip says when there is something new to read (sessions with
+  // results this browser has not seen) — the tiles no longer carry it.
+  const freshViewSessions = unseenViewSessions;
   const railOnWall = (!session || switcherOpen) && !viewsPage;
   const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
   const railNav: RailNavItem[] = !railDocked ? [] : [
     // Clicking the place you are in shows all of it (a filter clears), as
     // in Slack; Esc or another place leaves.
-    { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage,
-      onClick: () => setViewsOpen({ page: true }) },
+    { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage || viewsSideNow,
+      count: freshViewSessions || undefined, fresh: freshViewSessions > 0,
+      // Side by side it opens on this session's results; the page shows all.
+      onClick: () => setViewsOpen(viewsSide && session && !switcherOpen ? { session: session.room } : { page: true }) },
     { key: "scheduled", label: "Scheduled", icon: <RailIcon name="scheduled" />,
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
@@ -4504,8 +4537,8 @@ const App = () => {
   };
 
   return (
-    <div className={"app" + (railDocked ? " rail-docked" : "")}
-         style={railDocked ? ({ "--rail-w": `${railWidth}px` } as CSSProperties) : undefined}>
+    <div className={"app" + (railDocked ? " rail-docked" : "") + (viewsSideNow ? " views-side" : "")}
+         style={railDocked ? ({ "--rail-w": `${railWidth}px`, "--views-w": `${viewsSideW}px` } as CSSProperties) : undefined}>
       {switchHud && (() => {
         const curKey = session?.room ?? sessionLabel;
         const SLOT = 152; // card 140 + gap 12; must match .switch-hud CSS
@@ -4601,6 +4634,9 @@ const App = () => {
               <kbd>{isMacPlatform ? "⌘K" : "⌃⇧K"}</kbd>
             </button>
             </>)}
+            {/* Docked, results are the sidebar's Views (this session is a
+                filter there); the per-session button is for narrow windows. */}
+            {!railDocked && (
             <button
               type="button"
               className="topbar-sessions-btn"
@@ -4627,6 +4663,7 @@ const App = () => {
                   : n > 0 ? <span className="views-entry-count">{n}</span> : null;
               })()}
             </button>
+            )}
             <button
               type="button"
               className="topbar-sessions-btn"
@@ -5542,9 +5579,12 @@ const App = () => {
             }).catch(() => pushNotice("Failed to update park state"));
           }}
           onPick={(next) => {
+            // Side by side, the column follows: switch, and show the new
+            // session's results beside it.
+            if (viewsSideNow) setViewsOpen({ session: next.internalName || next.name });
             // In Views, a session in the sidebar is a filter: its results,
             // and the place stays. "Open session" in Views goes in.
-            if (viewsPage) {
+            else if (viewsPage) {
               setViewsOpen({ session: next.internalName || next.name, page: true });
               return;
             }
@@ -5588,12 +5628,14 @@ const App = () => {
       )}
       {desktopOpen && <DesktopView wsBase={resolveTunnelWsUrl()} onClose={() => setDesktopOpen(false)} />}
       {shortcutHelpOpen && <ShortcutsPanel isMac={isMacPlatform} onClose={() => setShortcutHelpOpen(false)} />}
-      {viewsOpen && (
-        <ViewsPanel session={viewsOpen.session} item={viewsOpen.item} sessions={sessions} dock={viewsOpen.dock}
-                    // Docked sidebar: the fleet's Views is a place beside it
-                    // (a page, like the wall); one session's results peek in
-                    // from the right beside that session.
-                    placement={railDocked ? (viewsPage ? "page" : "dock") : undefined}
+      {viewsOpen && !viewsHidden && (
+        <ViewsPanel key={viewsOpen.item ? `${viewsOpen.session}/${viewsOpen.item}` : "views"}
+                    session={viewsOpen.session} item={viewsOpen.item} sessions={sessions}
+                    // Docked sidebar: Views is a place beside it, like the
+                    // wall; elsewhere the centred window.
+                    placement={!railDocked ? "modal" : viewsSideNow ? "side" : "page"}
+                    onToggleSide={railDocked && session ? toggleViewsSide : undefined}
+                    onResizeSide={resizeViewsSide}
                     onOpenSession={viewsPage ? (key) => {
                       setViewsOpen(null);
                       const target = sessions.find((x) => (x.internalName || x.name) === key);

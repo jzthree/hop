@@ -1,4 +1,4 @@
-import { MouseEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import React, { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { relativeTime } from "../utils/switcherModel";
 
 // Views: the results an agent hands a human that a terminal cannot draw — a
@@ -16,11 +16,13 @@ import { relativeTime } from "../utils/switcherModel";
 //
 // Three placements of that one shape:
 //
-// - PAGE (beside the docked sidebar): Views is a place, like the wall.
-// - DOCK (beside a session): a right-side drawer with NO backdrop, so the
-//   terminal beside it stays live and interactive. It overlays rather than
-//   splitting the layout: a split would re-fit the shared PTY, and every
-//   client would reflow because someone glanced at a plot.
+// - PAGE (beside the docked sidebar): Views is a place, like the wall, and
+//   the sidebar's sessions are its filters. A session's results — a link
+//   in its terminal, an inline card, ⌘⇧V — are this page filtered to it.
+// - SIDE (an option, beside a session): a column to the right of the
+//   terminal, its width dragged at its edge. Side by side, not over: the
+//   terminal gives up the width and refits. Its keys are its own only once
+//   you are in it — Esc and the arrows are the shell's otherwise.
 // - MODAL where there is no sidebar.
 //
 // Results read in place (an iframe, or native media): navigating would tear
@@ -49,9 +51,12 @@ type Props = {
   session?: string;
   // Translates internalName into the name the user renamed it to.
   sessions?: { name: string; displayName?: string; internalName?: string }[];
-  dock?: boolean;
-  // Where the reader sits (see above); overrides `dock`.
-  placement?: "modal" | "dock" | "page";
+  // Where the reader sits (see above).
+  placement?: "modal" | "page" | "side";
+  // Switch between full page and side by side (offered beside a session).
+  onToggleSide?: () => void;
+  // Side by side: drag the column's edge (a width), double-click (null).
+  onResizeSide?: (width: number | null) => void;
   // Open straight on this result (its file name within `session`).
   item?: string;
   // Scoped as a page (a session picked in the sidebar): go into it.
@@ -61,7 +66,6 @@ type Props = {
 
 // Per-session high-water mark: the newest mtime this browser has looked at.
 const SEEN_KEY = "hop_views_seen";
-const DOCK_W_KEY = "hop_views_dock_w";
 
 export const loadViewsSeen = (): Record<string, number> => {
   try {
@@ -178,13 +182,7 @@ const previewSrc = (item: ViewItem) =>
 
 const thumbSrc = (item: ViewItem) => item.path.replace(/\/inline$/, "/thumb");
 
-// Wide enough for a readable page; on a 1440 display that still leaves
-// 680px of terminal. The drag handle remembers a choice.
-const DEFAULT_DOCK_W = 760;
-const clampDockW = (w: number) =>
-  Math.max(520, Math.min(Math.round(window.innerWidth * 0.75), w));
-
-export const ViewsPanel = ({ session, item, sessions = [], dock = false, placement, onOpenSession, onClose }: Props) => {
+export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onToggleSide, onResizeSide, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   // The result being read; null is the gallery.
@@ -203,13 +201,8 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
   // and reading live storage during render would clear every "new" dot in
   // the frame that exists to show them.
   const [seenAtOpen] = useState(loadViewsSeen);
-  // Decided once at mount: flipping placement mid-read would teleport it.
-  const [docked] = useState(() => (placement ? placement === "dock" : dock) && window.innerWidth >= 1100);
   const asPage = placement === "page";
-  const [dockW, setDockW] = useState(() => {
-    const stored = Number(localStorage.getItem(DOCK_W_KEY));
-    return clampDockW(Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_DOCK_W);
-  });
+  const asSide = placement === "side";
   const panelRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -257,8 +250,8 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     return () => { cancelled = true; };
   }, []);
 
-  // Take focus once so the keyboard works at once (Esc, arrows) — the dock
-  // has no backdrop, and the page and modal sit over a terminal.
+  // Take focus once so the keyboard works at once (Esc, arrows): the page
+  // and the modal sit over a terminal that had it.
   useEffect(() => { panelRef.current?.focus(); }, []);
 
   // In scope: newest first (the manifest's own order).
@@ -331,12 +324,12 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     return Math.max(1, n);
   };
 
-  // Docked, the terminal beside the panel is live and Esc is a real key
-  // there (vim!): the panel only answers keys that start inside it.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const el = panelRef.current;
-      if (docked) {
+      // Side by side, the terminal beside the column is live and Esc is a
+      // real key there (vim!): answer only keys that start inside Views.
+      if (asSide) {
+        const el = panelRef.current;
         // A keydown dispatched on `window` has a non-Node target; jsdom
         // throws on contains() for it.
         const target = event.target instanceof Node ? event.target : null;
@@ -382,7 +375,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onClose, open, shown, docked, direct, query, sel]);
+  }, [onClose, open, shown, direct, query, sel, asSide]);
 
   // Keep the keyboard's card on screen.
   useEffect(() => {
@@ -464,24 +457,33 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     }).catch(() => { /* nothing claimed to be deleted */ });
   };
 
-  // The dock's width is a reading choice worth remembering: drag its edge.
-  const onHandleDown = (down: ReactPointerEvent<HTMLDivElement>) => {
+  // Side by side: the column's left edge drags its width.
+  const onEdgeDown = (down: React.PointerEvent<HTMLDivElement>) => {
+    if (!onResizeSide) return;
     down.preventDefault();
     const el = down.currentTarget;
     el.setPointerCapture(down.pointerId);
-    const onMove = (move: globalThis.PointerEvent) =>
-      setDockW(clampDockW(window.innerWidth - move.clientX));
-    const onUp = () => {
-      el.removeEventListener("pointermove", onMove);
-      el.removeEventListener("pointerup", onUp);
-      setDockW((w) => {
-        try { localStorage.setItem(DOCK_W_KEY, String(w)); } catch { /* private mode */ }
-        return w;
-      });
+    const move = (ev: PointerEvent) => onResizeSide(window.innerWidth - ev.clientX);
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      document.body.classList.remove("rail-resizing");
     };
-    el.addEventListener("pointermove", onMove);
-    el.addEventListener("pointerup", onUp);
+    document.body.classList.add("rail-resizing");
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
   };
+  const sideToggle = onToggleSide && (
+    <button type="button" className="views-act vg-layout" onClick={onToggleSide}
+            aria-label={asSide ? "Full page" : "Side by side with the session"}
+            title={asSide ? "Full page" : "Side by side with the session — the terminal makes room"}>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {asSide ? <path d="M4 4h16v16H4z" /> : <><path d="M4 4h16v16H4z" /><path d="M14 4v16" /></>}
+      </svg>
+    </button>
+  );
 
   const metaOf = (i: ViewItem) => i.kind === "server"
     ? "live server"
@@ -600,6 +602,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
         <button type="button" className="views-act" aria-label="Next view" title="Next (→)"
                 disabled={at < 0 || at >= shown.length - 1} onClick={() => step(1)}>›</button>
         <span className="views-nav-acts">
+          {sideToggle}
           {open.kind !== "server" && open.kind !== "link" && (
             <button type="button" className="views-act" title="Download" aria-label={`Download ${open.name}`}
                     onClick={() => triggerDownload(open)}>⤓</button>
@@ -640,15 +643,17 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
 
   return (
     <>
-      {/* Neither the dock nor the page has a backdrop: the terminal (or the
-          sidebar) beside them stays visible and interactive. */}
-      {!docked && !asPage && <div className="views-backdrop" onClick={onClose} />}
-      <div className={"views-panel gallery reading" + (docked ? " docked" : "") + (asPage ? " page" : "") + (open ? " is-reading" : "")}
-           style={docked ? { width: dockW } : undefined}
+      {/* Page and side have no backdrop: the sidebar, the terminal beside
+          them stay live. */}
+      {!asPage && !asSide && <div className="views-backdrop" onClick={onClose} />}
+      <div className={"views-panel gallery reading" + (asPage ? " page" : "") + (asSide ? " side" : "") + (open ? " is-reading" : "")}
            role="dialog" aria-label="Published views"
            ref={panelRef} tabIndex={-1}>
-        {docked && <div className="views-dock-handle" onPointerDown={onHandleDown}
-                        role="separator" aria-label="Resize the Views panel" />}
+        {asSide && onResizeSide && (
+          <div className="views-side-handle" role="separator" aria-orientation="vertical" aria-label="Resize Views"
+               title="Drag to resize · double-click for the default width"
+               onPointerDown={onEdgeDown} onDoubleClick={() => onResizeSide(null)} />
+        )}
         {open ? reader : (<>
           <div className="views-head">
             <span className="views-badge">Views</span>
@@ -669,6 +674,7 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
               </button>
             )}
             <span className="views-head-spacer" />
+            {sideToggle}
             {(items?.some((i) => i.kind !== "server") ?? false) && (
               <button type="button"
                       className={"views-act danger views-clear" + (armedClear ? " armed" : "")}

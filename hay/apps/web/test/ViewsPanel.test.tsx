@@ -135,21 +135,33 @@ describe("ViewsPanel", () => {
     }
   });
 
-  it("docked: no backdrop, and keys are focus-scoped", async () => {
-    vi.stubGlobal("innerWidth", 1280);
+  it("as a page beside the sidebar: no backdrop, the sidebar stays live", async () => {
     const onClose = vi.fn();
-    render(<ViewsPanel session="Orion" dock onClose={onClose} />);
+    render(<ViewsPanel session="Orion" placement="page" onClose={onClose} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(2));
+    expect((document.querySelector(".views-panel") as HTMLDivElement).className).toContain("page");
+    expect(document.querySelector(".views-backdrop")).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("side by side: no backdrop, keys only from inside, the layout toggle and the edge", async () => {
+    const onClose = vi.fn(); const onToggleSide = vi.fn(); const onResizeSide = vi.fn();
+    render(<ViewsPanel session="Orion" placement="side" onToggleSide={onToggleSide} onResizeSide={onResizeSide} onClose={onClose} />);
     await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(2));
     const panel = document.querySelector(".views-panel") as HTMLDivElement;
-    expect(panel.className).toContain("docked");
+    expect(panel.className).toContain("side");
     expect(document.querySelector(".views-backdrop")).toBeNull();
-    // A key from OUTSIDE the panel (the terminal) is not the panel's: Esc
-    // is a real key in a shell.
+    // From the terminal beside it, Esc is the shell's.
     (document.activeElement as HTMLElement | null)?.blur();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Full page" }));
+    expect(onToggleSide).toHaveBeenCalled();
+    fireEvent.doubleClick(screen.getByRole("separator", { name: "Resize Views" }));
+    expect(onResizeSide).toHaveBeenCalledWith(null);
   });
 
   it("a session picked in the sidebar refilters the page; Open session goes into it", async () => {

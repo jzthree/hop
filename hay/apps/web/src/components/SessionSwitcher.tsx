@@ -3440,11 +3440,13 @@ export const SessionSwitcher = ({
                   <span className="phase-dot" aria-hidden="true" />{phaseLabel(phase)}
                 </span>
               )}
-              {/* A result waiting on this session is worth as much as its status:
+              {/* Docked, results live in Views (the sidebar's strip, its sessions
+              as filters), so the tiles drop this chip.
+              A result waiting on this session is worth as much as its status:
                   a published PDF or write-up was otherwise invisible from the wall.
                   stopPropagation on pointerdown keeps the long-press sheet out of
                   it, the same way the inline action buttons do. */}
-              {onOpenViews && s.views && s.views.count > 0 && (
+              {!sidebarDocked && onOpenViews && s.views && s.views.count > 0 && (
                 <button
                   type="button"
                   className={"switcher-chip views" + (hasUnseenViews(key, s.views.latestAt, viewsSeen) ? " fresh" : "")}
@@ -3508,7 +3510,7 @@ export const SessionSwitcher = ({
             )}
             {s.createdBy === "agent" ? <span className="phone-row-glyph" title="Started by an agent">⚙</span>
               : s.agentPermitted ? <span className="phone-row-glyph permitted" title="Agents may drive this session">⚙</span> : null}
-            {onOpenViews && s.views && s.views.count > 0 && (
+            {!sidebarDocked && onOpenViews && s.views && s.views.count > 0 && (
               <button type="button"
                       className={"phone-row-views" + (hasUnseenViews(key, s.views.latestAt, viewsSeen) ? " fresh" : "")}
                       aria-label={`${s.views.count} published view${s.views.count === 1 ? "" : "s"} in ${s.displayName}`}

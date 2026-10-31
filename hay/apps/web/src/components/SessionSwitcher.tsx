@@ -135,6 +135,8 @@ type Props = {
   onFilterChange?: (query: string) => void;
   // Bumped by the sidebar's compose button: open the new-session form.
   createSignal?: number;
+  // …with this name filled in (a search that matched nothing).
+  createName?: string;
   // The page theme, switchable straight from the wall: the settings drawer
   // lives in the full-screen view, and the hub (no session open) has none.
   themeMode?: "system" | "light" | "dark";
@@ -1419,7 +1421,8 @@ export const SessionSwitcher = ({
   searchPortal = null,
   onFilterChange,
   scope: scopeProp,
-  createSignal = 0
+  createSignal = 0,
+  createName
 }: Props) => {
   // View state survives a REFRESH but not a new tab: sessionStorage, not
   // localStorage. Reloading the page (or hop reconnecting) used to dump the
@@ -1835,8 +1838,13 @@ export const SessionSwitcher = ({
   useEffect(() => { if (!interactiveTiles) setFocusedKey(null); }, [interactiveTiles]);
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
-  useEffect(() => { if (createSignal > 0) setCreating(true); }, [createSignal]);
   const [createDraft, setCreateDraft] = useState("");
+  useEffect(() => {
+    if (createSignal <= 0) return;
+    setCreating(true);
+    if (createName) setCreateDraft(createName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createSignal]);
   // Where the new session starts. Remembered across creates: several
   // sessions in a row usually belong to the same project.
   const [createCwd, setCreateCwd] = useState(() => {

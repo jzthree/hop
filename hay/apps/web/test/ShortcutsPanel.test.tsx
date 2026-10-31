@@ -6,9 +6,10 @@ afterEach(() => cleanup());
 
 describe("ShortcutsPanel", () => {
   it("teaches a day's routine first, in order, with the chords for the platform", () => {
-    expect(dayRoutine(true).map((r) => r.keys)).toEqual(["⌘K", "⌘G", "⌘E", "⌘⇧V", "⌘K, a name, ⏎", "Esc"]);
+    // Switching is search, so it leads.
+    expect(dayRoutine(true).map((r) => r.keys)).toEqual(["⌘K, type, ⏎", "⌘G", "⌘E", "⌘K ⌘K", "⌘⇧V", "Esc"]);
     // Elsewhere Ctrl+Shift, and no Views chord (Ctrl+Shift+V is paste).
-    expect(dayRoutine(false).map((r) => r.keys)).toEqual(["Ctrl+Shift+K", "Ctrl+Shift+G", "Ctrl+Shift+E", "Ctrl+Shift+K, a name, ⏎", "Esc"]);
+    expect(dayRoutine(false).map((r) => r.keys)).toEqual(["Ctrl+Shift+K, type, ⏎", "Ctrl+Shift+G", "Ctrl+Shift+E", "Ctrl+Shift+K Ctrl+Shift+K", "Esc"]);
   });
 
   it("closes on Escape and keeps the long tail folded", () => {

@@ -6344,3 +6344,8 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 @media (max-width: 560px) { .shortcuts-grid { grid-template-columns: 1fr; } }
 .switcher-empty kbd { font: 600 11px/1 var(--font-mono); padding: 2px 5px; border-radius: 4px; border: 1px solid var(--card-line); }
 
+/* The match ↑ ↓ have chosen: ⏎ opens it. */
+.rail-row.kbd { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, #7c3aed 55%, transparent); }
+.session-rail.docked .rail-row.kbd { background: var(--rail-hover); }
+.rail-empty kbd { font: 600 11px/1 var(--font-mono); padding: 2px 5px; border-radius: 4px; border: 1px solid var(--rail-line, var(--line)); }
+

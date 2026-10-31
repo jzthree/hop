@@ -57,6 +57,24 @@ type Props = {
   onResize?: (width: number | null) => void;
   /** Docked: the header's compose button — a new session. */
   onNew?: () => void;
+  /** Bumped by ⌘K: put the cursor in the search, ready to type. */
+  focusSignal?: number;
+  /** ⏎ on a name no session has: start one called that. */
+  onCreate?: (name: string) => void;
+  /** Esc with the search already empty: back to whatever had the keys. */
+  onSearchDone?: () => void;
+};
+
+/** How well a session answers a search: the name's start beats a word's
+ *  start beats anywhere in the name beats the description; -1 is no match. */
+export const searchRank = (s: { name: string; displayName?: string; tagline?: string }, q: string): number => {
+  if (!q) return 0;
+  const name = (s.displayName || s.name).toLowerCase();
+  if (name.startsWith(q)) return 0;
+  if (name.split(/[-_ ./]+/).some((w) => w.startsWith(q))) return 1;
+  if (name.includes(q)) return 2;
+  if ((s.tagline || "").toLowerCase().includes(q)) return 3;
+  return -1;
 };
 
 /** A place in the docked rail's icon strip (Slack's Home / DMs / Activity
@@ -100,7 +118,7 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew }: Props) => {
+export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew, focusSignal = 0, onCreate, onSearchDone }: Props) => {
   const [ownFilter, setFilter] = useState("");
   const filter = searchSlot ? (externalFilter ?? "") : ownFilter;
   const [ownScope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
@@ -174,12 +192,30 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
 
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return sessions
+    const inScope = sessions
       .filter((s) => s.type !== "port")
-      .filter((s) => scope === "all" || (scope === "agent" ? s.createdBy === "agent" : s.createdBy !== "agent"))
-      .filter((s) => !q || (s.displayName || s.name).toLowerCase().includes(q) || (s.tagline || "").toLowerCase().includes(q))
-      .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name, undefined, { sensitivity: "base" }));
-  }, [sessions, scope, filter]);
+      .filter((s) => scope === "all" || (scope === "agent" ? s.createdBy === "agent" : s.createdBy !== "agent"));
+    if (!q) {
+      return inScope.sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name, undefined, { sensitivity: "base" }));
+    }
+    // Searching is how sessions are switched: best answer first, and among
+    // equals the one you were in most recently. The session already on
+    // screen goes last — a search is for going somewhere else.
+    const here = (s: RailSession) => (keyOf(s) === currentRoom || s.name === currentRoom ? 1 : 0);
+    return inScope
+      .map((s) => ({ s, r: searchRank(s, q) }))
+      .filter((x) => x.r >= 0)
+      .sort((a, b) => here(a.s) - here(b.s) || a.r - b.r || (b.s.lastActivityAt || 0) - (a.s.lastActivityAt || 0))
+      .map((x) => x.s);
+  }, [sessions, scope, filter, currentRoom]);
+  // The keyboard's choice among the matches (↑ ↓), reset as the query changes.
+  const [sel, setSel] = useState(0);
+  useEffect(() => { setSel(0); }, [filter, scope]);
+  useEffect(() => {
+    if (!focusSignal) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [focusSignal]);
 
   const searching = filter.trim().length > 0;
   const shelved = (s: RailSession) => s.parked || s.archived;
@@ -204,8 +240,10 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
 
   const row = (s: RailSession) => {
     const current = keyOf(s) === currentRoom || s.name === currentRoom;
+    const chosen = !searchSlot && filter.trim().length > 0 && visible[sel] === s;
     return (
-      <button key={keyOf(s)} type="button" className={"rail-row" + (current ? " current" : "")}
+      <button key={keyOf(s)} type="button" className={"rail-row" + (current ? " current" : "") + (chosen ? " kbd" : "")}
+              ref={chosen ? (el) => el?.scrollIntoView?.({ block: "nearest" }) : undefined}
               aria-current={current ? "true" : undefined} onClick={() => onPick(s)}
               // Out of the filter at the press (Safari never focuses a clicked button).
               onPointerDown={() => { if (document.activeElement === inputRef.current) inputRef.current?.blur(); }}
@@ -230,7 +268,23 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
     ? <div className="rail-search-slot" ref={searchSlot} />
     : <input ref={inputRef} className="rail-filter" type="search" placeholder={docked ? "Find a session…" : "Jump to…"} value={filter}
              onChange={(e) => setFilter(e.target.value)}
-             onKeyDown={(e) => { if (e.key === "Enter" && visible[0]) onPick(visible[0]); }}
+             onKeyDown={(e) => {
+               const searchingNow = filter.trim().length > 0;
+               if ((e.key === "ArrowDown" || e.key === "ArrowUp") && searchingNow && visible.length) {
+                 e.preventDefault();
+                 setSel((i) => Math.max(0, Math.min(visible.length - 1, i + (e.key === "ArrowDown" ? 1 : -1))));
+               } else if (e.key === "Enter") {
+                 e.preventDefault();
+                 const pick = searchingNow ? visible[sel] : visible[0];
+                 if (pick) { setFilter(""); onPick(pick); }
+                 else if (searchingNow && onCreate) { const name = filter.trim(); setFilter(""); onCreate(name); }
+               } else if (e.key === "Escape") {
+                 e.preventDefault();
+                 e.stopPropagation();
+                 if (filter) setFilter("");
+                 else { inputRef.current?.blur(); onSearchDone?.(); }
+               }
+             }}
              aria-label="Jump to a session" />;
   const list = (
     <div className="rail-list">
@@ -268,7 +322,9 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
         </section>
       )}
       {visible.length === 0 && (
-        <p className="rail-empty">{searching ? `No session matches “${filter.trim()}”.` : "No sessions in this scope."}</p>
+        <p className="rail-empty">
+          {searching ? <>No session matches “{filter.trim()}”.{onCreate && !searchSlot && <> <kbd>⏎</kbd> starts one with that name.</>}</> : "No sessions in this scope."}
+        </p>
       )}
     </div>
   );

@@ -104,4 +104,41 @@ describe("SessionRail", () => {
     fireEvent.click(screen.getByRole("button", { name: /Agents/ }));
     expect(onScopeChange).toHaveBeenLastCalledWith("user");
   });
+
+  it("search switches: best match first, ↑↓ choose, ⏎ opens, an unknown name creates, Esc clears then hands back", () => {
+    const onPick = vi.fn(); const onCreate = vi.fn(); const onSearchDone = vi.fn();
+    const fleet: RailSession[] = [
+      { name: "my-hop", displayName: "my-hop", lastActivityAt: 50 },
+      { name: "hop", displayName: "hop", lastActivityAt: 10 },
+      { name: "chop-suey", displayName: "chop-suey", lastActivityAt: 90 },
+      { name: "notes", displayName: "notes", tagline: "hop design notes", lastActivityAt: 99 }
+    ];
+    render(<SessionRail sessions={fleet} folders={[]} currentRoom={null} docked focusSignal={1}
+                        onPick={onPick} onCreate={onCreate} onSearchDone={onSearchDone}
+                        onAllSessions={() => {}} onClose={() => {}} />);
+    const box = screen.getByLabelText("Jump to a session") as HTMLInputElement;
+    expect(document.activeElement).toBe(box);
+    fireEvent.change(box, { target: { value: "hop" } });
+    // name start, then a word's start, then inside a name, then the tagline
+    expect(names()).toEqual(["hop", "my-hop", "chop-suey", "notes"]);
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ name: "my-hop" }));
+    fireEvent.change(box, { target: { value: "brand-new" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledWith("brand-new");
+    fireEvent.change(box, { target: { value: "x" } });
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(box.value).toBe("");
+    expect(onSearchDone).not.toHaveBeenCalled();
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(onSearchDone).toHaveBeenCalled();
+  });
+
+  it("searching to switch puts the session already on screen last", () => {
+    render(<SessionRail sessions={[{ name: "hop-a", displayName: "hop-a" }, { name: "hop-b", displayName: "hop-b" }]} folders={[]}
+                        currentRoom="hop-a" docked onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText("Jump to a session"), { target: { value: "hop" } });
+    expect(names()).toEqual(["hop-b", "hop-a"]);
+  });
 });

@@ -561,6 +561,10 @@ const App = () => {
   };
   const [wallFilter, setWallFilter] = useState("");
   const [createSignal, setCreateSignal] = useState(0);
+  const [createName, setCreateName] = useState<string | undefined>(undefined);
+  // ⌘K in a session with the sidebar docked: search, not the whole wall.
+  const [railFocusSignal, setRailFocusSignal] = useState(0);
+  const railDockedRef = useRef(false);
   const dockQuery = "(min-width: 1100px) and (pointer: fine)";
   const [railCanDock, setRailCanDock] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(dockQuery).matches);
   useEffect(() => {
@@ -4273,7 +4277,20 @@ const App = () => {
       const key = event.key.toLowerCase();
       const shifted = event.shiftKey;
       const grab = () => { event.preventDefault(); event.stopPropagation(); };
-      if (key === "k" && (isMacPlatform ? !shifted : true)) { grab(); setSwitcherOpen((v) => !v); return; }
+      if (key === "k" && (isMacPlatform ? !shifted : true)) {
+        grab();
+        // Docked, ⌘K is "jump to": the cursor lands in the sidebar's search
+        // and the session stays on screen — switching is search, ↑↓, ⏎.
+        // ⌘K again (from that search) opens the whole wall; on the wall it
+        // closes it, as before.
+        const inRailSearch = (document.activeElement as HTMLElement | null)?.classList?.contains("rail-filter");
+        if (railDockedRef.current && !switcherOpenRef.current && !inRailSearch) {
+          setRailFocusSignal((n) => n + 1);
+          return;
+        }
+        setSwitcherOpen((v) => !v);
+        return;
+      }
       if (isMacPlatform && shifted && key === "v") {
         grab();
         setViewsOpen((v) => v ? null
@@ -4407,6 +4424,7 @@ const App = () => {
 
   // Docked: pinned and room for it, on the wall and in a session alike.
   const railDocked = railPinned && railCanDock && isEmbeddedInHop();
+  railDockedRef.current = railDocked;
   appKeysRef.current = (event: KeyboardEvent) => {
     const mod = isMacPlatform
       ? event.metaKey && !event.ctrlKey && !event.altKey
@@ -4415,6 +4433,14 @@ const App = () => {
     const key = event.key.toLowerCase();
     const grab = () => { event.preventDefault(); event.stopPropagation(); };
     if (key === "/" || key === "?") { grab(); setShortcutHelpOpen((v) => !v); return; }
+    // The wall page has no session's ⌘K: there it is the search box.
+    if (key === "k" && !session && (!isMacPlatform || !event.shiftKey)) {
+      grab();
+      const box = document.querySelector(".rail-search, .switcher-filter") as HTMLInputElement | null;
+      box?.focus();
+      box?.select();
+      return;
+    }
     if (key === "b" && (!isMacPlatform || !event.shiftKey)) {
       grab();
       if (railCanDock) setRailDocked(!railPinned);
@@ -4467,7 +4493,11 @@ const App = () => {
     ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
   ];
   // The sidebar's compose button: the wall's new-session form.
-  const newFromRail = () => { if (session) setSwitcherOpen(true); setCreateSignal((n) => n + 1); };
+  const newFromRail = (name?: string) => {
+    if (session) setSwitcherOpen(true);
+    setCreateName(name);
+    setCreateSignal((n) => n + 1);
+  };
 
   return (
     <div className={"app" + (railDocked ? " rail-docked" : "")}
@@ -4656,6 +4686,7 @@ const App = () => {
             sidebarDocked={railDocked}
             scope={railDocked ? railScope : undefined}
             createSignal={createSignal}
+            createName={createName}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
           />
@@ -5367,6 +5398,7 @@ const App = () => {
             sidebarDocked={railDocked}
             scope={railDocked ? railScope : undefined}
             createSignal={createSignal}
+            createName={createName}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
             onOpenSettings={() => {
@@ -5487,7 +5519,10 @@ const App = () => {
           scope={railScope}
           onScopeChange={changeRailScope}
           onResize={resizeRail}
-          onNew={newFromRail}
+          onNew={() => newFromRail()}
+          focusSignal={railFocusSignal}
+          onCreate={(name) => newFromRail(name)}
+          onSearchDone={() => termRef.current?.focus()}
           docked={railDocked}
           canDock={railCanDock}
           onDockChange={setRailDocked}

@@ -26,6 +26,8 @@ import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
 import { parseViewLink, wantsNewTab } from "./utils/viewLinks";
+import { ShortcutsPanel } from "./components/ShortcutsPanel";
+import { nextSessionWithNews } from "./utils/catchUp";
 import { SessionRail, RailIcon, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { DesktopView } from "./components/DesktopView";
@@ -924,6 +926,16 @@ const App = () => {
   drawerOpenRef.current = drawerOpen;
   const shortcutHelpRef = useRef(shortcutHelpOpen);
   shortcutHelpRef.current = shortcutHelpOpen;
+  // The app-wide chords — they work on the wall (the main page, where no
+  // session is open) as well as in a session: ⌘G catch up, ⌘B sidebar,
+  // ⌘/ the keyboard guide. Set each render (below), read by one listener.
+  const appKeysRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => appKeysRef.current(event);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+  const catchUpVisitedRef = useRef<{ keys: Set<string>; at: number }>({ keys: new Set(), at: 0 });
 
   // ── Panes ──
   // Any binary nesting of splits; the primary leaf can sit anywhere in it
@@ -4275,7 +4287,6 @@ const App = () => {
       if (key === "j") { grab(); hudStep(-1); return; }
       if (key === "l") { grab(); hudStep(1); return; }
       if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
-      if (key === "/" || (shifted && key === "?")) { grab(); setShortcutHelpOpen((v) => !v); return; }
       if (key === "e") {
         const leaves = leafIds(paneTreeRef.current).filter((id) => id !== "primary");
         const swapTarget = focusedPaneIdRef.current !== "primary"
@@ -4396,6 +4407,43 @@ const App = () => {
 
   // Docked: pinned and room for it, on the wall and in a session alike.
   const railDocked = railPinned && railCanDock && isEmbeddedInHop();
+  appKeysRef.current = (event: KeyboardEvent) => {
+    const mod = isMacPlatform
+      ? event.metaKey && !event.ctrlKey && !event.altKey
+      : event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey;
+    if (!mod || !isEmbeddedInHop()) return;
+    const key = event.key.toLowerCase();
+    const grab = () => { event.preventDefault(); event.stopPropagation(); };
+    if (key === "/" || key === "?") { grab(); setShortcutHelpOpen((v) => !v); return; }
+    if (key === "b" && (!isMacPlatform || !event.shiftKey)) {
+      grab();
+      if (railCanDock) setRailDocked(!railPinned);
+      else setRailOpen((v) => !v);
+      return;
+    }
+    if (key === "g" && (!isMacPlatform || !event.shiftKey)) {
+      grab();
+      // A run of ⌘G walks forward; a pause of a minute starts a fresh one.
+      const run = catchUpVisitedRef.current;
+      if (Date.now() - run.at > 60_000) run.keys = new Set();
+      run.at = Date.now();
+      const here = session && !switcherOpen && status !== "ended" ? session.room : null;
+      if (here) run.keys.add(here);
+      const next = nextSessionWithNews(sessions, here, run.keys);
+      if (!next) { showToast("All caught up — nothing new waiting for you"); return; }
+      run.keys.add(next.internalName || next.name);
+      if (!session) {
+        const path = buildSessionPath(next.displayName || next.name);
+        carryTypeaheadTo(path);
+        window.location.href = path;
+        return;
+      }
+      setViewsOpen(null);
+      setSwitcherOpen(false);
+      switchSession(next);
+      termRef.current?.focus();
+    }
+  };
   // The wall is up: the hub page (no session), or the wall over a session.
   // Views as a page is a place of its own, and then the wall is not.
   const viewsPage = railDocked && !!viewsOpen && !viewsOpen.session;
@@ -4414,6 +4462,8 @@ const App = () => {
       return { key: "theme", label: label(themeMode), icon: <RailIcon name={themeMode} />,
                bottom: true, onClick: () => setThemeMode(next) };
     })(),
+    { key: "keys", label: "Shortcuts", icon: <RailIcon name="keyboard" />, bottom: true, active: shortcutHelpOpen,
+      onClick: () => setShortcutHelpOpen((v) => !v) },
     ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
   ];
   // The sidebar's compose button: the wall's new-session form.
@@ -5340,40 +5390,6 @@ const App = () => {
                 : undefined
             }
           />
-          {shortcutHelpOpen && !isMobile && (
-            <>
-              <div className="drawer-overlay" onClick={() => setShortcutHelpOpen(false)} />
-              <div className="shortcut-help" role="dialog" aria-label="Keyboard shortcuts">
-                <h3>Keyboard shortcuts</h3>
-                {[
-                  [isMacPlatform ? "⌘K" : "Ctrl+Shift+K", "session palette (type to filter, ↑↓, ⏎)"],
-                  [isMacPlatform ? "⌘E" : "Ctrl+Shift+E", "back to the last session (press again to return)"],
-                  [isMacPlatform ? "⌘J / ⌘L" : "Ctrl+Shift+J / +L", "previous / next session (left / right)"],
-                  [isMacPlatform ? "⌘," : "Ctrl+Shift+,", "settings drawer"],
-                  [isMacPlatform ? "⌘F" : "Ctrl+Shift+F", "find in terminal"],
-                  ...(isMacPlatform ? [["⌘⇧V", "views — results agents published"]] : []),
-                  ...(isMacPlatform ? [["⌘+ / ⌘− / ⌘0", "terminal font size"]] : []),
-                  ["Ctrl+Shift+C / V", "copy / paste"],
-                  ["Shift+PgUp / PgDn", "scrollback"],
-                  [isMacPlatform ? "⌘D or ⌘\\" : "Ctrl+Shift+D", "split pane to the right"],
-                  [isMacPlatform ? "⌘⇧D or ⌘⇧\\" : "Ctrl+Shift+|", "split pane below"],
-                  [isMacPlatform ? "⌘⌥← ↑ ↓ →" : "Ctrl+Alt+arrows", "focus the pane in that direction"],
-                  [isMacPlatform ? "⌘] / ⌘[" : "Ctrl+Shift+] / [", "next / previous pane"],
-                  [isMacPlatform ? "⌘⇧⏎" : "Ctrl+Shift+⏎", "zoom the focused pane (again to restore)"],
-                  [isMacPlatform ? "⌘⇧E" : "Ctrl+Shift+E", "swap pane with primary"],
-                  [isMacPlatform ? "⌘⇧K" : "Ctrl+Shift+K", "close focused pane"],
-                  ["drag a pane's title bar", "re-dock it — an edge splits there, the middle swaps"],
-                  [isMacPlatform ? "⌘/" : "Ctrl+Shift+/", "this help"],
-                  ["Esc", "close panels"]
-                ].map(([keys, what]) => (
-                  <div key={keys as string} className="shortcut-help-row">
-                    <kbd>{keys}</kbd>
-                    <span>{what}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
           {passkeyNudge && (
             <div className="link-prompt passkey-nudge" role="dialog" aria-label="Enable biometric sign-in">
               <span className="link-prompt-url">
@@ -5525,6 +5541,7 @@ const App = () => {
         />
       )}
       {desktopOpen && <DesktopView wsBase={resolveTunnelWsUrl()} onClose={() => setDesktopOpen(false)} />}
+      {shortcutHelpOpen && <ShortcutsPanel isMac={isMacPlatform} onClose={() => setShortcutHelpOpen(false)} />}
       {viewsOpen && (
         <ViewsPanel session={viewsOpen.session} item={viewsOpen.item} sessions={sessions} dock={viewsOpen.dock}
                     // Docked sidebar: the fleet's Views is a place beside it

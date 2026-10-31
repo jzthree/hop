@@ -73,6 +73,7 @@ const ICON_PATHS: Record<string, string> = {
   light: "M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4 7 17M17 7l1.4-1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
   dark: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z",
   system: "M12 3a9 9 0 1 0 0 18V3ZM12 3a9 9 0 0 1 0 18",
+  keyboard: "M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M17 14H7",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"
 };
 export const RailIcon = ({ name }: { name: keyof typeof ICON_PATHS | string }) => (
@@ -213,7 +214,11 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
         <span className={`rail-dot ${dotClass(s)}`} aria-hidden="true" />
         <span className={"rail-name" + (wantsYou(s) || s.unread ? " strong" : "")}>{s.displayName || s.name}</span>
         {(s.parked || s.archived) && <span className="rail-mark" aria-label="parked" title="Parked">☾</span>}
-        {!!s.checkbacks && <span className="rail-mark" title={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} scheduled`}>◷{s.checkbacks}</span>}
+        {!!s.checkbacks && (
+          <span className="rail-mark rail-sched" title={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} scheduled`}>
+            <RailIcon name="scheduled" />{s.checkbacks}
+          </span>
+        )}
         {/* News, not an error: a spark, never a warning sign. */}
         {wantsYou(s) && <span className="rail-spark" aria-label="has news for you" title={s.attentionReason || "Has news for you"}>✦</span>}
       </button>

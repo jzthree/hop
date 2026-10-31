@@ -41,7 +41,7 @@ describe("SessionRail", () => {
     render(<SessionRail sessions={sessions} folders={folders} currentRoom={null}
                         onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
     expect(names()).toEqual(["alpha", "beta", "gamma"]);
-    expect(screen.getByTitle("2 check-backs scheduled").textContent).toBe("◷2");
+    expect(screen.getByTitle("2 check-backs scheduled").textContent).toBe("2");
     fireEvent.click(screen.getByLabelText("Arrange: by folder"));
     expect(names()).toEqual(["beta", "gamma", "alpha"]);
     expect(localStorage.getItem("hop_rail_order")).toBe("recent");

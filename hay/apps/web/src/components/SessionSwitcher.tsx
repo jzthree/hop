@@ -2726,6 +2726,17 @@ export const SessionSwitcher = ({
           event.preventDefault();
           if (canFocusInPlace(target)) focusInPlace(target);
           else handleTap(target); // ports, dead sessions, non-interactive zoom
+          return;
+        }
+        // A name no session has: ⏎ starts one with it — the keyboard's way
+        // to a new session (⌘K, type, ⏎), no mouse needed.
+        // The box's live value: this listener can outlive the render that
+        // made it while two no-match spellings both leave the wall empty.
+        const typed = (filterInputRef.current?.value ?? filter).trim();
+        if (typed && flatNav.length === 0 && originScope !== "agent") {
+          event.preventDefault();
+          setCreateDraft(typed);
+          setCreating(true);
         }
         return;
       }
@@ -4009,7 +4020,9 @@ export const SessionSwitcher = ({
           // is usually WHY you're looking for the session.
           <>
             {model.rows.length === 0 && extraContentMatches.length === 0 && extraDeepMatches.length === 0 ? (
-              <div className="switcher-empty">No sessions match “{filter.trim()}”</div>
+              <div className="switcher-empty">
+                No sessions match “{filter.trim()}”{originScope !== "agent" && <> — <kbd>⏎</kbd> starts one with that name</>}
+              </div>
             ) : (
               <div className="switcher-grid">{model.rows.map((s) => renderCard(s))}</div>
             )}

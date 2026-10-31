@@ -152,6 +152,20 @@ describe("ViewsPanel", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("a session picked in the sidebar refilters the page; Open session goes into it", async () => {
+    const onOpenSession = vi.fn();
+    const { rerender } = render(<ViewsPanel session="Orion" placement="page" onOpenSession={onOpenSession} onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(2));
+    fireEvent.click(screen.getByRole("tab", { name: "all" }));
+    expect(document.querySelectorAll(".vg-card").length).toBe(3);
+    // Another session picked: its results, and the "all" widening undone.
+    rerender(<ViewsPanel session="Nebula" placement="page" onOpenSession={onOpenSession} onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(1));
+    expect(screen.getByRole("tab", { name: "all" }).getAttribute("aria-selected")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: /Open session/ }));
+    expect(onOpenSession).toHaveBeenCalledWith("Nebula");
+  });
+
   it("a session that has published nothing says so — it never widens by itself", async () => {
     render(<ViewsPanel session="Nowhere" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText(/Nothing published yet by this session/)).toBeTruthy());

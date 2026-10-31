@@ -54,6 +54,8 @@ type Props = {
   placement?: "modal" | "dock" | "page";
   // Open straight on this result (its file name within `session`).
   item?: string;
+  // Scoped as a page (a session picked in the sidebar): go into it.
+  onOpenSession?: (session: string) => void;
   onClose: () => void;
 };
 
@@ -182,7 +184,7 @@ const DEFAULT_DOCK_W = 760;
 const clampDockW = (w: number) =>
   Math.max(520, Math.min(Math.round(window.innerWidth * 0.75), w));
 
-export const ViewsPanel = ({ session, item, sessions = [], dock = false, placement, onClose }: Props) => {
+export const ViewsPanel = ({ session, item, sessions = [], dock = false, placement, onOpenSession, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   // The result being read; null is the gallery.
@@ -226,6 +228,17 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
     return hit?.internalName || session;
   }, [session, sessions]);
   const effectiveScope = showAll ? undefined : resolvedSession;
+  // A new scope from outside (another session picked in the sidebar): its
+  // results, from the gallery, with any "all" widening undone.
+  const firstScope = useRef(session);
+  useEffect(() => {
+    if (firstScope.current === session) return;
+    firstScope.current = session;
+    setShowAll(false);
+    setOpen(null);
+    setDirect(false);
+    setQuery("");
+  }, [session]);
 
   const label = (internalName: string) => {
     const hit = sessions.find((s) => (s.internalName || s.name) === internalName)
@@ -648,6 +661,12 @@ export const ViewsPanel = ({ session, item, sessions = [], dock = false, placeme
                 <button type="button" role="tab" aria-selected={showAll}
                         className={showAll ? "on" : ""} onClick={() => setShowAll(true)}>all</button>
               </span>
+            )}
+            {session && !showAll && onOpenSession && resolvedSession && (
+              <button type="button" className="vg-open-session" onClick={() => onOpenSession(resolvedSession)}
+                      title="Open this session">
+                Open session →
+              </button>
             )}
             <span className="views-head-spacer" />
             {(items?.some((i) => i.kind !== "server") ?? false) && (

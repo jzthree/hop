@@ -851,7 +851,9 @@ const App = () => {
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   // Published views (`hop view`). `session` scopes the panel to one session;
   // an object with none open it fleet-wide. Null = closed.
-  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string } | null>(null);
+  // `page`: Views as a place beside the docked sidebar even when scoped to
+  // one session (picked in the sidebar while in Views).
+  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string; page?: boolean } | null>(null);
   // A link clicked in a terminal: this hop's `hop view` links open in the
   // Views reader beside the session; ⌘/Ctrl-click (and every other link)
   // opens a tab. window.open stays inside the click, for popup blockers.
@@ -4472,12 +4474,14 @@ const App = () => {
   };
   // The wall is up: the hub page (no session), or the wall over a session.
   // Views as a page is a place of its own, and then the wall is not.
-  const viewsPage = railDocked && !!viewsOpen && !viewsOpen.session;
+  const viewsPage = railDocked && !!viewsOpen && (!viewsOpen.session || !!viewsOpen.page);
   const railOnWall = (!session || switcherOpen) && !viewsPage;
   const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
   const railNav: RailNavItem[] = !railDocked ? [] : [
+    // Clicking the place you are in shows all of it (a filter clears), as
+    // in Slack; Esc or another place leaves.
     { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage,
-      onClick: () => setViewsOpen(viewsPage ? null : {}) },
+      onClick: () => setViewsOpen({ page: true }) },
     { key: "scheduled", label: "Scheduled", icon: <RailIcon name="scheduled" />,
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
@@ -5511,7 +5515,8 @@ const App = () => {
         <SessionRail
           sessions={sessions}
           folders={folders}
-          currentRoom={railOnWall || !session || status === "ended" ? null : session.room}
+          currentRoom={viewsPage ? (viewsOpen?.session ?? null)
+            : railOnWall || !session || status === "ended" ? null : session.room}
           onWall={railOnWall}
           searchSlot={railDocked && railOnWall ? setRailSearchEl : undefined}
           externalFilter={wallFilter}
@@ -5537,6 +5542,12 @@ const App = () => {
             }).catch(() => pushNotice("Failed to update park state"));
           }}
           onPick={(next) => {
+            // In Views, a session in the sidebar is a filter: its results,
+            // and the place stays. "Open session" in Views goes in.
+            if (viewsPage) {
+              setViewsOpen({ session: next.internalName || next.name, page: true });
+              return;
+            }
             if (!railDocked) setRailOpen(false);
             // The hub page has no terminal: a session is its own page.
             if (!session) {
@@ -5582,7 +5593,20 @@ const App = () => {
                     // Docked sidebar: the fleet's Views is a place beside it
                     // (a page, like the wall); one session's results peek in
                     // from the right beside that session.
-                    placement={railDocked ? (viewsOpen.session ? "dock" : "page") : undefined}
+                    placement={railDocked ? (viewsPage ? "page" : "dock") : undefined}
+                    onOpenSession={viewsPage ? (key) => {
+                      setViewsOpen(null);
+                      const target = sessions.find((x) => (x.internalName || x.name) === key);
+                      if (!target) return;
+                      if (!session) {
+                        const path = buildSessionPath(target.displayName || target.name);
+                        carryTypeaheadTo(path);
+                        window.location.href = path;
+                        return;
+                      }
+                      setSwitcherOpen(false);
+                      switchSession(target);
+                    } : undefined}
                     onClose={() => setViewsOpen(null)} />
       )}
     </div>

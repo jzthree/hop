@@ -6438,3 +6438,8 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .vg-strip-item .views-kind { flex: none; width: auto; padding: 3px 5px; }
 /* The panel takes focus so its keys work at once; that is not a ring. */
 .views-panel:focus { outline: none; }
+.vg-open-session {
+  border: 1px solid var(--card-line); background: var(--card-bg); color: var(--ink); cursor: pointer;
+  padding: 4px 10px; border-radius: 8px; font: 600 12px/1.3 var(--font-sans); transform: none;
+}
+.vg-open-session:hover { border-color: color-mix(in srgb, #7c3aed 55%, var(--card-line)); color: #6d28d9; transform: none; }

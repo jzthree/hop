@@ -5730,11 +5730,18 @@ body.pane-dragging { user-select: none; }
 .rail-dot.live { background: #35d47a; }
 .rail-dot.working { background: #5aa7e0; }
 .rail-dot.done { background: #35d47a; box-shadow: 0 0 0 2px color-mix(in srgb, #35d47a 30%, transparent); }
-.rail-dot.wants { background: #f0a53a; box-shadow: 0 0 6px rgba(240, 165, 58, 0.7); }
+.rail-dot.wants {
+  background: linear-gradient(135deg, #8b5cf6, #06b6d4);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.18), 0 0 8px rgba(99, 102, 241, 0.55);
+  animation: rail-news 2.4s ease-in-out infinite;
+}
+@keyframes rail-news { 50% { box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.16), 0 0 12px rgba(6, 182, 212, 0.5); } }
+@media (prefers-reduced-motion: reduce) { .rail-dot.wants, .rail-title-cursor { animation: none; } }
 .rail-dot.off { background: transparent; border: 1.5px solid #93a0b4; }
-.rail-badge {
-  flex: none; min-width: 18px; height: 18px; border-radius: 9px; padding: 0 5px;
-  background: #f0a53a; color: #000; font: 700 11px/18px var(--font-sans); text-align: center;
+/* News, not an error: a spark in hop's spectral gradient. */
+.rail-spark {
+  flex: none; font-size: 13px; line-height: 1; font-weight: 700;
+  background: linear-gradient(120deg, #8b5cf6, #06b6d4); -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .rail-folder {
   padding: 14px 14px 4px; color: var(--ink-muted);
@@ -5744,7 +5751,7 @@ body.pane-dragging { user-select: none; }
 .rail-chev { width: 10px; }
 .rail-folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-count { font-weight: 500; opacity: 0.6; letter-spacing: 0; }
-.rail-count.wants { opacity: 1; background: #f0a53a; color: #000; border-radius: 8px; padding: 1px 6px; font-weight: 700; }
+.rail-count.wants { opacity: 1; background: linear-gradient(120deg, #8b5cf6, #06b6d4); color: #fff; border-radius: 8px; padding: 1px 6px; font-weight: 700; }
 .rail-empty { padding: 14px; color: var(--ink-muted); font-size: 13px; }
 .rail-mark { flex: none; color: var(--ink-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .rail-order, .rail-pin {
@@ -5754,68 +5761,108 @@ body.pane-dragging { user-select: none; }
 }
 .rail-order:hover, .rail-pin:hover { color: var(--ink); background: var(--chip-bg); transform: none; }
 .rail-pin.on { color: var(--accent, var(--ink)); }
-/* Docked: Slack's layout — a narrow strip of places (Home, Views,
-   Scheduled…; theme and settings at its foot) and beside it the sidebar
-   proper, which is sessions: header, search, folders. Beside the wall (the
-   main view) and beside a session; the page and the wall make room, and the
-   terminal refits to what is left. Light or dark with the page, as Slack's
-   sidebar is; the strip a shade of the accent. */
+/* Docked sidebar — hop's own: a lab notebook beside an instrument panel.
+   Creative and scientific rather than relaxed and friendly:
+   - the strip of places is a dark instrument panel on faint graph-paper
+     dots, its labels set like readouts (mono, small caps);
+   - the sidebar proper is a warm paper page ruled with hairlines; folders
+     are labelled like specimens (mono caps, a tabular count);
+   - the current session carries hop's signature, the terminal cursor
+     block, not a filled slab;
+   - news is a spark: violet into cyan, a spectral edge — never a warning.
+   Light or dark with the page. It sits beside the wall (the main view) and
+   beside a session; both make room, and the terminal refits. */
 .app.rail-docked { padding-left: var(--rail-w, 320px); }
 .app.rail-docked .switcher-overlay,
 .app.rail-docked .connection-banner { left: var(--rail-w, 320px); }
 .session-rail.docked {
   width: var(--rail-w, 320px); z-index: 30; box-shadow: none; animation: none; overflow: visible;
   flex-direction: row; padding-top: 0;
-  --rail-strip-bg: color-mix(in srgb, var(--accent) 16%, #f4f1fa);
-  --rail-pane-bg: #f8f7fa; --rail-ink: #1d1c1d; --rail-muted: #616061;
-  --rail-hover: rgba(0, 0, 0, 0.05); --rail-current: #6d4fc2; --rail-line: rgba(0, 0, 0, 0.08);
-  --rail-input: #fff;
+  --hop-spark: linear-gradient(120deg, #8b5cf6 0%, #6366f1 45%, #06b6d4 100%);
+  --rail-strip-bg: #16141d; --rail-strip-ink: rgba(255, 255, 255, 0.88); --rail-strip-muted: rgba(255, 255, 255, 0.5);
+  --rail-strip-dot: rgba(255, 255, 255, 0.07);
+  --rail-pane-bg: #fbfaf7; --rail-ink: #24212b; --rail-muted: #78737f;
+  --rail-line: rgba(36, 33, 43, 0.09); --rail-hover: rgba(124, 58, 237, 0.06);
+  --rail-current-bg: rgba(124, 58, 237, 0.09); --rail-cursor: #7c3aed;
+  --rail-input: rgba(36, 33, 43, 0.045);
   background: var(--rail-pane-bg); color: var(--rail-ink); border-right: 1px solid var(--rail-line);
 }
 :root[data-theme="dark"] .session-rail.docked {
-  --rail-strip-bg: #120f17; --rail-pane-bg: #1a1820; --rail-ink: #d8d6dc; --rail-muted: #9a97a1;
-  --rail-hover: rgba(255, 255, 255, 0.06); --rail-current: #6d4fc2; --rail-line: rgba(255, 255, 255, 0.08);
-  --rail-input: rgba(255, 255, 255, 0.07);
+  --rail-strip-bg: #0c0b10; --rail-strip-dot: rgba(255, 255, 255, 0.05);
+  --rail-pane-bg: #15141a; --rail-ink: #e6e3ec; --rail-muted: #8f8a99;
+  --rail-line: rgba(255, 255, 255, 0.07); --rail-hover: rgba(167, 139, 250, 0.08);
+  --rail-current-bg: rgba(167, 139, 250, 0.13); --rail-cursor: #a78bfa;
+  --rail-input: rgba(255, 255, 255, 0.05);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .session-rail.docked {
-    --rail-strip-bg: #120f17; --rail-pane-bg: #1a1820; --rail-ink: #d8d6dc; --rail-muted: #9a97a1;
-    --rail-hover: rgba(255, 255, 255, 0.06); --rail-current: #6d4fc2; --rail-line: rgba(255, 255, 255, 0.08);
-    --rail-input: rgba(255, 255, 255, 0.07);
+    --rail-strip-bg: #0c0b10; --rail-strip-dot: rgba(255, 255, 255, 0.05);
+    --rail-pane-bg: #15141a; --rail-ink: #e6e3ec; --rail-muted: #8f8a99;
+    --rail-line: rgba(255, 255, 255, 0.07); --rail-hover: rgba(167, 139, 250, 0.08);
+    --rail-current-bg: rgba(167, 139, 250, 0.13); --rail-cursor: #a78bfa;
+    --rail-input: rgba(255, 255, 255, 0.05);
   }
 }
+/* Chrome is not text to select: a drag across the sidebar or a header
+   selected labels instead of doing nothing. Terminal output and the
+   briefing's prose stay selectable. */
+.session-rail, .rail-menu, .rail-options, .topbar, .switcher-top,
+.switcher-card-head, .switcher-chip, .switcher-group-label, .rail-strip {
+  -webkit-user-select: none; user-select: none;
+}
+.session-rail input, .switcher-top input { -webkit-user-select: text; user-select: text; }
+
+/* The instrument panel. */
 .rail-strip {
   flex: none; width: 64px; display: flex; flex-direction: column; align-items: center;
-  gap: 2px; padding: 12px 0 14px; background: var(--rail-strip-bg);
+  gap: 4px; padding: 14px 0; color: var(--rail-strip-ink);
+  background-color: var(--rail-strip-bg);
+  background-image: radial-gradient(var(--rail-strip-dot) 1px, transparent 1.2px);
+  background-size: 10px 10px;
 }
 .rail-strip-spacer { flex: 1; }
 .rail-strip-btn {
-  position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px;
-  width: 56px; padding: 6px 0 5px; border: 0; border-radius: 10px; background: none;
-  color: var(--rail-ink); cursor: pointer; transform: none;
+  position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px;
+  width: 58px; padding: 6px 0 5px; border: 0; border-radius: 8px; background: none;
+  color: var(--rail-strip-muted); cursor: pointer; transform: none;
 }
-.rail-strip-btn:hover { background: var(--rail-hover); transform: none; }
+.rail-strip-btn:hover { color: var(--rail-strip-ink); background: rgba(255, 255, 255, 0.05); transform: none; }
 .rail-strip-icon {
-  width: 34px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 9px; font-size: 17px; line-height: 1;
+  width: 36px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px; transition: background 0.15s, box-shadow 0.15s;
 }
-.rail-strip-btn.on .rail-strip-icon { background: var(--rail-current); color: #fff; }
-.rail-strip-label { font: 600 10.5px/1.1 var(--font-sans); color: var(--rail-muted); }
-.rail-strip-btn.on .rail-strip-label { color: var(--rail-ink); }
+.rail-strip-icon svg { width: 19px; height: 19px; }
+.rail-strip-btn.on { color: #fff; }
+.rail-strip-btn.on .rail-strip-icon {
+  background: rgba(139, 92, 246, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.55), 0 0 14px rgba(139, 92, 246, 0.35);
+}
+.rail-strip-label { font: 600 9px/1.1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; }
 .rail-strip-count {
-  position: absolute; top: 1px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px;
-  border-radius: 8px; background: var(--rail-muted); color: var(--rail-pane-bg);
-  font: 700 10px/16px var(--font-sans); text-align: center;
+  position: absolute; top: 0; right: 5px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: rgba(255, 255, 255, 0.16); color: #fff;
+  font: 700 10px/16px var(--font-mono); text-align: center;
 }
-.rail-strip-count.fresh { background: #e01e5a; color: #fff; }
+.rail-strip-count.fresh { background: var(--hop-spark); }
+
+/* The notebook page. */
 .rail-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.session-rail.docked .rail-head { padding: 14px 10px 8px 16px; gap: 4px; }
-.session-rail.docked .rail-title { font: 800 18px/1.2 var(--font-sans); letter-spacing: -0.01em; }
+.session-rail.docked .rail-head { padding: 14px 10px 10px 16px; gap: 4px; }
+.session-rail.docked .rail-title {
+  display: inline-flex; align-items: center; gap: 3px;
+  font: 800 19px/1.2 var(--font-mono); letter-spacing: -0.03em;
+}
+.rail-title-cursor {
+  width: 8px; height: 17px; border-radius: 1px; background: var(--rail-cursor);
+  animation: rail-cursor-blink 1.2s steps(1) infinite;
+}
+@keyframes rail-cursor-blink { 50% { opacity: 0; } }
 .rail-head-spacer { flex: 1; }
 .rail-scope-chip {
-  margin-left: 6px; border: 0; border-radius: 10px; padding: 2px 8px; cursor: pointer;
-  background: var(--rail-hover); color: var(--rail-muted); font: 600 11px/1.4 var(--font-sans);
+  margin-left: 8px; border: 1px solid var(--rail-line); border-radius: 6px; padding: 1px 7px; cursor: pointer;
+  background: none; color: var(--rail-muted); font: 600 10.5px/1.5 var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em;
 }
+.rail-scope-chip:hover { color: var(--rail-ink); transform: none; }
 .rail-icon-btn {
   border: 0; background: none; color: var(--rail-muted); width: 30px; height: 30px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; cursor: pointer;
@@ -5823,11 +5870,11 @@ body.pane-dragging { user-select: none; }
 .rail-icon-btn:hover { background: var(--rail-hover); color: var(--rail-ink); transform: none; }
 .rail-options-wrap { position: relative; }
 .rail-options {
-  position: absolute; top: 34px; right: 0; z-index: 40; min-width: 200px; padding: 6px;
+  position: absolute; top: 34px; right: 0; z-index: 40; min-width: 210px; padding: 6px;
   background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 12px 32px rgba(20, 10, 40, 0.18);
 }
-.rail-options-label { padding: 6px 8px 2px; font: 700 11px/1.2 var(--font-sans); color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.rail-options-label { padding: 8px 8px 3px; font: 600 10px/1.2 var(--font-mono); color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.08em; }
 .rail-options button {
   display: flex; align-items: center; width: 100%; text-align: left; border: 0; background: none;
   color: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: 500 13px/1.2 var(--font-sans);
@@ -5837,33 +5884,61 @@ body.pane-dragging { user-select: none; }
 .rail-options-sep { height: 1px; margin: 6px 4px; background: var(--line); }
 .session-rail.docked .rail-filter,
 .rail-search {
-  margin: 0 12px 10px 12px; padding: 7px 10px; border-radius: 8px; font-size: 13.5px;
-  border: 1px solid var(--rail-line, var(--line)); background: var(--rail-input, var(--bg)); color: var(--rail-ink, var(--ink));
+  margin: 0 12px 10px; padding: 7px 10px; border-radius: 7px; font: 400 13.5px/1.3 var(--font-sans);
+  border: 1px solid transparent; background: var(--rail-input, var(--bg)); color: var(--rail-ink, var(--ink));
+  outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+}
+.session-rail.docked .rail-filter:focus, .rail-search:focus {
+  border-color: color-mix(in srgb, var(--rail-cursor, var(--accent)) 60%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rail-cursor, var(--accent)) 14%, transparent);
 }
 .rail-search::placeholder, .session-rail.docked .rail-filter::placeholder { color: var(--rail-muted, var(--ink-muted)); }
 .rail-search-slot { display: contents; }
-/* Sessions: the content. Readable names (sans, like channel names), Slack's
-   rounded rows, the current one filled. */
-.session-rail.docked .rail-list { padding-top: 2px; }
+.session-rail.docked .rail-list { padding-top: 2px; border-top: 1px solid var(--rail-line); }
+/* Specimen labels. */
 .session-rail.docked .rail-folder {
-  margin: 0 8px; width: calc(100% - 16px); padding: 10px 8px 4px; border-radius: 6px;
-  color: var(--rail-muted); font: 600 13px/1.2 var(--font-sans); letter-spacing: 0; text-transform: none;
+  margin: 0 8px; width: calc(100% - 16px); padding: 14px 8px 5px; border-radius: 6px;
+  color: var(--rail-muted); font: 600 10.5px/1.2 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase;
 }
 .session-rail.docked .rail-folder:hover { color: var(--rail-ink); }
+.session-rail.docked .rail-count { color: var(--rail-muted); font: 500 10.5px/1 var(--font-mono); font-variant-numeric: tabular-nums; opacity: 1; }
 .session-rail.docked .rail-row {
-  margin: 0 8px; width: calc(100% - 16px); padding: 5px 8px 5px 14px; border-radius: 6px;
-  font-size: 14.5px; color: var(--rail-ink);
+  position: relative; margin: 0 8px; width: calc(100% - 16px); padding: 5px 8px 5px 14px; border-radius: 6px;
+  font-size: 14px; color: var(--rail-ink);
 }
 .session-rail.docked .rail-row:hover { background: var(--rail-hover); }
-.session-rail.docked .rail-row.current { background: var(--rail-current); color: #fff; }
-.session-rail.docked .rail-row.current .rail-mark { color: rgba(255, 255, 255, 0.85); }
+/* Where you are: the terminal cursor, hop's signature. */
+.session-rail.docked .rail-row.current { background: var(--rail-current-bg); }
+.session-rail.docked .rail-row.current::before {
+  content: ""; position: absolute; left: 3px; top: 6px; bottom: 6px; width: 4px; border-radius: 1px;
+  background: var(--rail-cursor);
+}
+.session-rail.docked .rail-row.current .rail-name { font-weight: 600; }
 .session-rail.docked .rail-name { font-family: var(--font-sans); font-weight: 400; }
-/* Bold is a signal, as in Slack: the sessions that want you or have news. */
-.session-rail.docked .rail-name.strong { font-weight: 700; }
-.rail-strip-icon svg { width: 19px; height: 19px; }
-.session-rail.docked .rail-mark { color: var(--rail-muted); }
-.session-rail.docked .rail-count { color: var(--rail-muted); }
+/* Bold is a signal: the sessions with news for you. */
+.session-rail.docked .rail-name.strong { font-weight: 650; }
+.session-rail.docked .rail-mark { color: var(--rail-muted); font-family: var(--font-mono); }
 .rail-row .rail-count { margin-left: auto; font-size: 11px; }
+/* The edge drags to resize. The grab zone is 14px wide, centred on the
+   edge (a 6px one was too hard to catch); the line it shows is 2px. */
+.rail-resize {
+  position: absolute; top: 0; right: -7px; bottom: 0; width: 14px; z-index: 5;
+  cursor: col-resize; touch-action: none; background: none;
+}
+.rail-resize::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 2px;
+  background: transparent; transition: background 0.12s;
+}
+.rail-resize:hover::after, body.rail-resizing .rail-resize::after { background: var(--rail-cursor, var(--accent)); }
+body.rail-resizing { cursor: col-resize; -webkit-user-select: none; user-select: none; }
+body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
+/* Docked, the session's bar is its header: the session's name, set like
+   the notebook's specimen labels' bigger sibling. */
+.topbar.channel { padding: 10px 20px; gap: 16px; }
+.channel-name {
+  font: 700 15px/1.2 var(--font-mono); letter-spacing: -0.01em; min-width: 0; flex: 0 1 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .rail-menu {
   position: fixed; z-index: 420; min-width: 120px; padding: 4px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px;

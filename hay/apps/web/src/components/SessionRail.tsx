@@ -213,8 +213,9 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
         <span className={`rail-dot ${dotClass(s)}`} aria-hidden="true" />
         <span className={"rail-name" + (wantsYou(s) || s.unread ? " strong" : "")}>{s.displayName || s.name}</span>
         {(s.parked || s.archived) && <span className="rail-mark" aria-label="parked" title="Parked">☾</span>}
-        {!!s.checkbacks && <span className="rail-mark" title={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} scheduled`}>⏰{s.checkbacks}</span>}
-        {wantsYou(s) && <span className="rail-badge" aria-label="wants you">!</span>}
+        {!!s.checkbacks && <span className="rail-mark" title={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} scheduled`}>◷{s.checkbacks}</span>}
+        {/* News, not an error: a spark, never a warning sign. */}
+        {wantsYou(s) && <span className="rail-spark" aria-label="has news for you" title={s.attentionReason || "Has news for you"}>✦</span>}
       </button>
     );
   };
@@ -290,7 +291,7 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
           {/* The sidebar proper: sessions, front and center. */}
           <div className="rail-pane">
             <div className="rail-head">
-              <span className="rail-title">hop</span>
+              <span className="rail-title">hop<span className="rail-title-cursor" aria-hidden="true" /></span>
               {scope !== "user" && (
                 <button type="button" className="rail-scope-chip" title="Showing this scope — click to show yours"
                         onClick={() => changeScope("user")}>

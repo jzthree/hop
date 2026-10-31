@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 // The Slack-style side panel, as on the iOS app (SessionDrawer.swift): every
 // session filed by folder, what each one needs at a glance, and a jump to
@@ -42,7 +42,17 @@ type Props = {
   onDockChange?: (docked: boolean) => void;
   /** Park / unpark from a row's right-click menu. */
   onPark?: (s: RailSession, parked: boolean) => void;
+  /** The wall is the main view: "All sessions" is where you are. */
+  onWall?: boolean;
+  /** The wall's own search box is rendered here (a portal target), and
+   *  what it holds filters this list too. Without it the rail has its own. */
+  searchSlot?: (el: HTMLDivElement | null) => void;
+  externalFilter?: string;
+  /** Fleet-wide places, Slack's "Threads / Activity" rows. */
+  nav?: RailNavItem[];
 };
+
+export type RailNavItem = { key: string; label: string; icon: ReactNode; count?: number; fresh?: boolean; onClick: () => void };
 
 type Scope = "user" | "agent" | "all";
 type Order = "folder" | "recent";
@@ -62,8 +72,9 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark }: Props) => {
-  const [filter, setFilter] = useState("");
+export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [] }: Props) => {
+  const [ownFilter, setFilter] = useState("");
+  const filter = searchSlot ? (externalFilter ?? "") : ownFilter;
   const [scope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
   const [order, setOrder] = useState<Order>(() => (load(ORDER_KEY) === "recent" ? "recent" : "folder"));
   const [menu, setMenu] = useState<{ s: RailSession; x: number; y: number } | null>(null);
@@ -154,7 +165,7 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
       {!docked && <div className="rail-backdrop" onClick={onClose} />}
       <aside className={"session-rail" + (docked ? " docked" : "")} role={docked ? "navigation" : "dialog"} aria-label="Sessions">
         <div className="rail-head">
-          <span className="rail-title">Sessions</span>
+          <span className="rail-title">{docked ? "hop" : "Sessions"}</span>
           <button type="button" className="rail-order" aria-label={`Arrange: ${order === "folder" ? "by folder" : "most recent first"}`}
                   title={order === "folder" ? "By folder — click for most recent first" : "Most recent first — click for by folder"}
                   onClick={() => changeOrder(order === "folder" ? "recent" : "folder")}>
@@ -178,15 +189,25 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
           )}
           {!docked && <button type="button" className="rail-close" aria-label="Close sessions" onClick={onClose}>×</button>}
         </div>
-        <input ref={inputRef} className="rail-filter" type="search" placeholder="Jump to…" value={filter}
-               onChange={(e) => setFilter(e.target.value)}
-               onKeyDown={(e) => { if (e.key === "Enter" && visible[0]) onPick(visible[0]); }}
-               aria-label="Jump to a session" />
+        {searchSlot
+          ? <div className="rail-search-slot" ref={searchSlot} />
+          : <input ref={inputRef} className="rail-filter" type="search" placeholder="Jump to…" value={filter}
+                   onChange={(e) => setFilter(e.target.value)}
+                   onKeyDown={(e) => { if (e.key === "Enter" && visible[0]) onPick(visible[0]); }}
+                   aria-label="Jump to a session" />}
         <div className="rail-list">
-          <button type="button" className="rail-row all" onClick={onAllSessions}>
+          <button type="button" className={"rail-row all" + (onWall ? " current" : "")} aria-current={onWall ? "page" : undefined}
+                  onClick={onAllSessions}>
             <span className="rail-grid" aria-hidden="true">▦</span>
             <span className="rail-name">All sessions</span>
           </button>
+          {nav.map((n) => (
+            <button key={n.key} type="button" className="rail-row nav" onClick={n.onClick}>
+              <span className="rail-grid" aria-hidden="true">{n.icon}</span>
+              <span className="rail-name">{n.label}</span>
+              {!!n.count && <span className={"rail-count" + (n.fresh ? " wants" : "")}>{n.count}</span>}
+            </button>
+          ))}
           {groups.map((g) => {
             const isFolded = !searching && folded.has(g.id);
             const wanting = g.rows.filter(wantsYou).length;

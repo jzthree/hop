@@ -25,7 +25,7 @@ import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
-import { SessionRail } from "./components/SessionRail";
+import { SessionRail, type RailNavItem } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { DesktopView } from "./components/DesktopView";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -529,12 +529,16 @@ const App = () => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   // The Slack-style session rail (components/SessionRail.tsx).
   const [railOpen, setRailOpen] = useState(false);
-  // Pinned, it stays docked beside the terminal — only where it fits: a wide
-  // window with a mouse. A narrow window keeps the pin and shows it again
-  // when widened.
+  // Docked, it is Slack's sidebar: beside the wall (the main view) and
+  // beside a session, on by default wherever it fits — a wide window with a
+  // mouse. Unpinning is remembered; a narrow window shows it as an overlay.
   const [railPinned, setRailPinned] = useState(() => {
-    try { return localStorage.getItem("hop_rail_docked") === "1"; } catch { return false; }
+    try { return localStorage.getItem("hop_rail_docked") !== "0"; } catch { return true; }
   });
+  // The wall's search box renders into the docked sidebar (a portal target),
+  // and what it holds filters the sidebar's list too.
+  const [railSearchEl, setRailSearchEl] = useState<HTMLDivElement | null>(null);
+  const [wallFilter, setWallFilter] = useState("");
   const dockQuery = "(min-width: 1100px) and (pointer: fine)";
   const [railCanDock, setRailCanDock] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(dockQuery).matches);
   useEffect(() => {
@@ -4362,8 +4366,25 @@ const App = () => {
     ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)
     : undefined;
 
-  // Docked: pinned, room for it, a session on screen, the wall closed.
-  const railDocked = railPinned && railCanDock && !!session && !switcherOpen && isEmbeddedInHop();
+  // Docked: pinned and room for it, on the wall and in a session alike.
+  const railDocked = railPinned && railCanDock && isEmbeddedInHop();
+  // The wall is up: the hub page (no session), or the wall over a session.
+  const railOnWall = !session || switcherOpen;
+  const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
+  const railNav: RailNavItem[] = !railDocked ? [] : [
+    { key: "views", label: "Views", icon: "◧", onClick: () => setViewsOpen({}) },
+    { key: "scheduled", label: "Scheduled", icon: "◷",
+      count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
+    { key: "codex", label: "Codex app", icon: "⧉", onClick: () => setCodexAppOpen(true) },
+    ...(desktopEnabled ? [{ key: "desktop", label: "Desktop", icon: "▭", onClick: () => setDesktopOpen(true) }] : []),
+    (() => {
+      const next = themeMode === "system" ? "light" : themeMode === "light" ? "dark" : "system";
+      const label = (m: string) => (m === "system" ? "Auto" : m === "light" ? "Light" : "Dark");
+      return { key: "theme", label: `Theme: ${label(themeMode)}`, icon: themeMode === "light" ? "☀" : themeMode === "dark" ? "☾" : "◐",
+               onClick: () => setThemeMode(next) };
+    })(),
+    ...(session ? [{ key: "settings", label: "Settings", icon: "⚙", onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
+  ];
 
   return (
     <div className={"app" + (railDocked ? " rail-docked" : "")}>
@@ -4522,6 +4543,9 @@ const App = () => {
             terminalTheme={resolveTerminalTheme(themeMode)}
             themeMode={themeMode}
             onThemeChange={setThemeMode}
+            sidebarDocked={railDocked}
+            searchPortal={wallSearchPortal}
+            onFilterChange={setWallFilter}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -5225,6 +5249,9 @@ const App = () => {
             terminalTheme={resolveTerminalTheme(themeMode)}
             themeMode={themeMode}
             onThemeChange={setThemeMode}
+            sidebarDocked={railDocked}
+            searchPortal={wallSearchPortal}
+            onFilterChange={setWallFilter}
             onOpenSettings={() => {
               setSwitcherOpen(false);
               setDrawerOpen(true);
@@ -5365,11 +5392,15 @@ const App = () => {
       )}
       {/* Outside the mode ternary on purpose: Views opens from the hub, from a
           session, and from over the switcher, and it must outlive a switch. */}
-      {(railOpen || railDocked) && session && (
+      {(railDocked || (railOpen && session)) && (
         <SessionRail
           sessions={sessions}
           folders={folders}
-          currentRoom={status === "ended" ? null : session.room}
+          currentRoom={railOnWall || !session || status === "ended" ? null : session.room}
+          onWall={railOnWall}
+          searchSlot={railDocked && railOnWall ? setRailSearchEl : undefined}
+          externalFilter={wallFilter}
+          nav={railNav}
           docked={railDocked}
           canDock={railCanDock}
           onDockChange={setRailDocked}
@@ -5385,12 +5416,21 @@ const App = () => {
           }}
           onPick={(next) => {
             if (!railDocked) setRailOpen(false);
+            // The hub page has no terminal: a session is its own page.
+            if (!session) {
+              const path = buildSessionPath(next.displayName || next.name);
+              carryTypeaheadTo(path);
+              window.location.href = path;
+              return;
+            }
+            paneTargetRef.current = null;
+            setSwitcherOpen(false);
             switchSession(next as SessionInfo);
             // The picked row goes away with the rail; keys typed next are
             // the session's, not nobody's.
             termRef.current?.focus();
           }}
-          onAllSessions={() => { setRailOpen(false); setSwitcherOpen(true); }}
+          onAllSessions={() => { setRailOpen(false); if (session) setSwitcherOpen(true); }}
           onClose={() => setRailOpen(false)}
         />
       )}

@@ -10,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode
 } from "react";
+import { createPortal } from "react-dom";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -119,6 +120,15 @@ type Props = {
   userName?: string;
   terminalTheme?: object;
   onOpenSettings?: () => void;
+  // The Slack-style sidebar is docked beside the wall: it carries the
+  // fleet-wide entries (Views, Scheduled, Codex app, Desktop, theme,
+  // settings), so the header drops them, and the wall's filter box is
+  // rendered into the sidebar's search slot — the same input (it is the
+  // keyboard's focus home), just shown there. onFilterChange lets the
+  // sidebar's list filter by what is typed.
+  sidebarDocked?: boolean;
+  searchPortal?: HTMLElement | null;
+  onFilterChange?: (query: string) => void;
   // The page theme, switchable straight from the wall: the settings drawer
   // lives in the full-screen view, and the hub (no session open) has none.
   themeMode?: "system" | "light" | "dark";
@@ -1391,7 +1401,10 @@ export const SessionSwitcher = ({
   onOpenViews,
   onOpenCodexApp,
   onOpenDesktop,
-  onOpenCheckbacks
+  onOpenCheckbacks,
+  sidebarDocked = false,
+  searchPortal = null,
+  onFilterChange
 }: Props) => {
   // View state survives a REFRESH but not a new tab: sessionStorage, not
   // localStorage. Reloading the page (or hop reconnecting) used to dump the
@@ -1407,6 +1420,9 @@ export const SessionSwitcher = ({
       else sessionStorage.removeItem("hay_switcher_filter");
     } catch { /* private mode */ }
   }, [filter]);
+  const onFilterChangeRef = useRef(onFilterChange);
+  onFilterChangeRef.current = onFilterChange;
+  useEffect(() => { onFilterChangeRef.current?.(open ? filter : ""); }, [filter, open]);
   const [originScope, setOriginScope] = useState<SessionOriginScope>("user");
   // Tile zoom: bigger tiles show more of each terminal preview.
   const [zoom, setZoom] = useState(() => {
@@ -3765,7 +3781,7 @@ export const SessionSwitcher = ({
           )}
           {/* The hub renders this wall as the whole page, so this is the only
               fleet-wide way in to Views when no session is open. */}
-          {onOpenViews && (
+          {!sidebarDocked && onOpenViews && (
             <button type="button" className="switcher-action views-entry" aria-label="Published views"
                     title="Results agents published with hop view" onClick={() => onOpenViews()}>
               <span aria-hidden="true">◧</span>
@@ -3775,14 +3791,14 @@ export const SessionSwitcher = ({
                 : (() => { const n = visibleSessions.reduce((k, s) => k + (s.views?.count || 0), 0); return n > 0 ? <span className="views-entry-count">{n}</span> : null; })()}
             </button>
           )}
-          {onOpenDesktop && (
+          {!sidebarDocked && onOpenDesktop && (
             <button type="button" className="switcher-action views-entry" aria-label="Remote desktop"
                     title="This machine's screen, through hop" onClick={() => onOpenDesktop()}>
               <span className="switcher-action-icon"><PhoneIcon name="display" size={15} /></span>
               Desktop
             </button>
           )}
-          {onOpenCheckbacks && scheduledTotal > 0 && (
+          {!sidebarDocked && onOpenCheckbacks && scheduledTotal > 0 && (
             <button type="button" className="switcher-action views-entry" aria-label="Scheduled on every session"
                     title="Every check-back hop will type, across your sessions" onClick={() => onOpenCheckbacks("*")}>
               <span className="switcher-action-icon"><PhoneIcon name="clock" size={15} /></span>
@@ -3790,14 +3806,14 @@ export const SessionSwitcher = ({
               <span className="views-entry-count">{scheduledTotal}</span>
             </button>
           )}
-          {onOpenCodexApp && (
+          {!sidebarDocked && onOpenCodexApp && (
             <button type="button" className="switcher-action views-entry" aria-label="Codex app threads"
                     title="Continue a Codex desktop app thread in hop" onClick={onOpenCodexApp}>
               <span aria-hidden="true">⧉</span>
               Codex app
             </button>
           )}
-          {onThemeChange && themeMode && (() => {
+          {!sidebarDocked && onThemeChange && themeMode && (() => {
             const next = themeMode === "system" ? "light" : themeMode === "light" ? "dark" : "system";
             const label = (m: string) => (m === "system" ? "Auto" : m === "light" ? "Light" : "Dark");
             return (
@@ -3809,7 +3825,7 @@ export const SessionSwitcher = ({
               </button>
             );
           })()}
-          {onOpenSettings && (
+          {!sidebarDocked && onOpenSettings && (
             <button type="button" className="switcher-action" aria-label="Settings" title="Settings" onClick={onOpenSettings}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -3886,14 +3902,22 @@ export const SessionSwitcher = ({
           {/* Always rendered: it is the palette's focus home. When it wasn't
               (coarse pointer + a short list) there was nowhere to put focus,
               so keystrokes fell through to the terminal behind. */}
-          <input
-            ref={filterInputRef}
-            className={`switcher-filter${finePointer || visibleSessions.length > FILTER_THRESHOLD || filter ? "" : " compact"}`}
-            placeholder="Filter…"
-            value={filter}
-            onChange={(e) => { setFocusedKey(null); setFilter(e.target.value); }}
-            aria-label="Filter sessions"
-          />
+          {(() => {
+            const input = (
+              <input
+                ref={filterInputRef}
+                className={searchPortal
+                  ? "rail-search"
+                  : `switcher-filter${finePointer || visibleSessions.length > FILTER_THRESHOLD || filter ? "" : " compact"}`}
+                type={searchPortal ? "search" : undefined}
+                placeholder={searchPortal ? "Search sessions…" : "Filter…"}
+                value={filter}
+                onChange={(e) => { setFocusedKey(null); setFilter(e.target.value); }}
+                aria-label="Filter sessions"
+              />
+            );
+            return searchPortal ? createPortal(input, searchPortal) : input;
+          })()}
         </div>
         </>)}
         <UpdateNotice />

@@ -54,4 +54,19 @@ describe("SessionRail", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Park" }));
     expect(onPark).toHaveBeenCalledWith(expect.objectContaining({ name: "gamma" }), true);
   });
+
+  it("on the wall: All sessions is where you are, the wall's search filters the list, nav rows open places", () => {
+    const openViews = vi.fn();
+    let slot: HTMLDivElement | null = null;
+    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} docked onWall
+                        searchSlot={(el) => { slot = el; }} externalFilter="gam"
+                        nav={[{ key: "views", label: "Views", icon: "◧", onClick: openViews }]}
+                        onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    expect(slot).not.toBeNull();
+    expect(screen.queryByLabelText("Jump to a session")).toBeNull();
+    expect(names().filter((n) => n !== "Views")).toEqual(["gamma"]);
+    expect(screen.getByText("All sessions").closest("button")?.getAttribute("aria-current")).toBe("page");
+    fireEvent.click(screen.getByText("Views"));
+    expect(openViews).toHaveBeenCalled();
+  });
 });

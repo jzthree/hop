@@ -65,7 +65,7 @@ export type RailNavItem = { key: string; label: string; icon: ReactNode; count?:
 
 /** Line icons for the strip (24-grid, stroke = currentColor). */
 const ICON_PATHS: Record<string, string> = {
-  home: "M3 10.5 12 3l9 7.5M5 9.5V21h5v-6h4v6h5V9.5",
+  wall: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
   views: "M12 3 3 8l9 5 9-5-9-5ZM3 13l9 5 9-5M3 17.5l9 5 9-5",
   scheduled: "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
   codex: "M4 4h16v16H4zM12 4v16M4 12h8",
@@ -283,7 +283,7 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
         {docked ? (<>
           {/* Slack's left column: places, not sessions. */}
           <nav className="rail-strip" aria-label="Places">
-            {stripButton({ key: "home", label: "Home", icon: <RailIcon name="home" />, active: onWall, onClick: onAllSessions })}
+            {stripButton({ key: "home", label: "Sessions", icon: <RailIcon name="wall" />, active: onWall, onClick: onAllSessions })}
             {nav.filter((n) => !n.bottom).map(stripButton)}
             <span className="rail-strip-spacer" />
             {nav.filter((n) => n.bottom).map(stripButton)}

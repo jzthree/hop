@@ -5763,8 +5763,8 @@ body.pane-dragging { user-select: none; }
 .rail-pin.on { color: var(--accent, var(--ink)); }
 /* Docked sidebar — hop's own: a lab notebook beside an instrument panel.
    Creative and scientific rather than relaxed and friendly:
-   - the strip of places is a dark instrument panel on faint graph-paper
-     dots, its labels set like readouts (mono, small caps);
+   - the strip of places is the same paper a shade deeper, on a whisper of
+     graph-paper dots, divided by a hairline — one surface, not a slab;
    - the sidebar proper is a warm paper page ruled with hairlines; folders
      are labelled like specimens (mono caps, a tabular count);
    - the current session carries hop's signature, the terminal cursor
@@ -5779,8 +5779,8 @@ body.pane-dragging { user-select: none; }
   width: var(--rail-w, 320px); z-index: 30; box-shadow: none; animation: none; overflow: visible;
   flex-direction: row; padding-top: 0;
   --hop-spark: linear-gradient(120deg, #8b5cf6 0%, #6366f1 45%, #06b6d4 100%);
-  --rail-strip-bg: #16141d; --rail-strip-ink: rgba(255, 255, 255, 0.88); --rail-strip-muted: rgba(255, 255, 255, 0.5);
-  --rail-strip-dot: rgba(255, 255, 255, 0.07);
+  --rail-strip-bg: #f2f0eb; --rail-strip-ink: #24212b; --rail-strip-muted: #8a8591;
+  --rail-strip-dot: rgba(36, 33, 43, 0.06); --rail-strip-on: rgba(124, 58, 237, 0.12); --rail-strip-on-ink: #6d28d9;
   --rail-pane-bg: #fbfaf7; --rail-ink: #24212b; --rail-muted: #78737f;
   --rail-line: rgba(36, 33, 43, 0.09); --rail-hover: rgba(124, 58, 237, 0.06);
   --rail-current-bg: rgba(124, 58, 237, 0.09); --rail-cursor: #7c3aed;
@@ -5788,7 +5788,8 @@ body.pane-dragging { user-select: none; }
   background: var(--rail-pane-bg); color: var(--rail-ink); border-right: 1px solid var(--rail-line);
 }
 :root[data-theme="dark"] .session-rail.docked {
-  --rail-strip-bg: #0c0b10; --rail-strip-dot: rgba(255, 255, 255, 0.05);
+  --rail-strip-bg: #111016; --rail-strip-dot: rgba(255, 255, 255, 0.035);
+    --rail-strip-ink: #ece9f1; --rail-strip-muted: #8a8594; --rail-strip-on: rgba(167, 139, 250, 0.16); --rail-strip-on-ink: #c4b5fd;
   --rail-pane-bg: #15141a; --rail-ink: #e6e3ec; --rail-muted: #8f8a99;
   --rail-line: rgba(255, 255, 255, 0.07); --rail-hover: rgba(167, 139, 250, 0.08);
   --rail-current-bg: rgba(167, 139, 250, 0.13); --rail-cursor: #a78bfa;
@@ -5796,7 +5797,8 @@ body.pane-dragging { user-select: none; }
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .session-rail.docked {
-    --rail-strip-bg: #0c0b10; --rail-strip-dot: rgba(255, 255, 255, 0.05);
+    --rail-strip-bg: #111016; --rail-strip-dot: rgba(255, 255, 255, 0.035);
+    --rail-strip-ink: #ece9f1; --rail-strip-muted: #8a8594; --rail-strip-on: rgba(167, 139, 250, 0.16); --rail-strip-on-ink: #c4b5fd;
     --rail-pane-bg: #15141a; --rail-ink: #e6e3ec; --rail-muted: #8f8a99;
     --rail-line: rgba(255, 255, 255, 0.07); --rail-hover: rgba(167, 139, 250, 0.08);
     --rail-current-bg: rgba(167, 139, 250, 0.13); --rail-cursor: #a78bfa;
@@ -5812,38 +5814,39 @@ body.pane-dragging { user-select: none; }
 }
 .session-rail input, .switcher-top input { -webkit-user-select: text; user-select: text; }
 
-/* The instrument panel. */
+/* The strip of places. */
 .rail-strip {
   flex: none; width: 64px; display: flex; flex-direction: column; align-items: center;
-  gap: 4px; padding: 14px 0; color: var(--rail-strip-ink);
+  gap: 2px; padding: 14px 0; color: var(--rail-strip-ink);
   background-color: var(--rail-strip-bg);
   background-image: radial-gradient(var(--rail-strip-dot) 1px, transparent 1.2px);
-  background-size: 10px 10px;
+  background-size: 12px 12px;
+  border-right: 1px solid var(--rail-line);
 }
 .rail-strip-spacer { flex: 1; }
 .rail-strip-btn {
   position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px;
-  width: 58px; padding: 6px 0 5px; border: 0; border-radius: 8px; background: none;
-  color: var(--rail-strip-muted); cursor: pointer; transform: none;
+  width: 58px; padding: 5px 0 6px; border: 0; border-radius: 10px; background: none;
+  color: var(--rail-strip-muted); cursor: pointer; transform: none; transition: color 0.15s;
 }
-.rail-strip-btn:hover { color: var(--rail-strip-ink); background: rgba(255, 255, 255, 0.05); transform: none; }
+.rail-strip-btn:hover { color: var(--rail-strip-ink); background: none; transform: none; }
 .rail-strip-icon {
-  width: 36px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 8px; transition: background 0.15s, box-shadow 0.15s;
+  width: 38px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 10px; transition: background 0.15s, color 0.15s;
 }
+.rail-strip-btn:hover .rail-strip-icon { background: color-mix(in srgb, var(--rail-strip-ink) 6%, transparent); }
 .rail-strip-icon svg { width: 19px; height: 19px; }
-.rail-strip-btn.on { color: #fff; }
-.rail-strip-btn.on .rail-strip-icon {
-  background: rgba(139, 92, 246, 0.28);
-  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.55), 0 0 14px rgba(139, 92, 246, 0.35);
-}
-.rail-strip-label { font: 600 9px/1.1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.rail-strip-btn.on { color: var(--rail-strip-on-ink); }
+.rail-strip-btn.on .rail-strip-icon { background: var(--rail-strip-on); }
+.rail-strip-label { font: 500 10.5px/1.15 var(--font-sans); letter-spacing: 0.005em; }
+.rail-strip-btn.on .rail-strip-label { font-weight: 650; }
 .rail-strip-count {
-  position: absolute; top: 0; right: 5px; min-width: 16px; height: 16px; padding: 0 4px;
-  border-radius: 8px; background: rgba(255, 255, 255, 0.16); color: #fff;
-  font: 700 10px/16px var(--font-mono); text-align: center;
+  position: absolute; top: 1px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--rail-strip-ink); color: var(--rail-strip-bg);
+  font: 650 10px/16px var(--font-sans); font-variant-numeric: tabular-nums; text-align: center;
+  box-shadow: 0 0 0 2px var(--rail-strip-bg);
 }
-.rail-strip-count.fresh { background: var(--hop-spark); }
+.rail-strip-count.fresh { background: var(--hop-spark); color: #fff; }
 
 /* The notebook page. */
 .rail-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }

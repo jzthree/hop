@@ -56,7 +56,7 @@ describe("SessionRail", () => {
     expect(onPark).toHaveBeenCalledWith(expect.objectContaining({ name: "gamma" }), true);
   });
 
-  it("docked on the wall: Home is where you are, places sit in the strip, the wall's search filters the list", () => {
+  it("docked on the wall: Sessions is where you are, places sit in the strip, the wall's search filters the list", () => {
     const openViews = vi.fn();
     let slot: HTMLDivElement | null = null;
     render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} docked onWall
@@ -66,7 +66,7 @@ describe("SessionRail", () => {
     expect(slot).not.toBeNull();
     expect(screen.queryByLabelText("Jump to a session")).toBeNull();
     expect(names()).toEqual(["gamma"]);
-    expect(screen.getByRole("button", { name: "Home" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Sessions" }).getAttribute("aria-current")).toBe("page");
     fireEvent.click(screen.getByRole("button", { name: "Views" }));
     expect(openViews).toHaveBeenCalled();
     // Scope lives in the options menu; a non-default one shows as a chip.

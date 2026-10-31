@@ -6086,7 +6086,7 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
    for meaning. News is a spark (violet into cyan), never a warning: a
    finished turn you have not read, and a question for you, are the two
    things worth being excited about. Working is calm indigo; read is quiet;
-   where you are is the cursor. Later rules win over the older ones above.
+   where you are is a quiet "current" chip. Later rules win over the older ones above.
    ════════════════════════════════════════════════════════════════════════ */
 :root {
   --hop-spark: linear-gradient(120deg, #8b5cf6 0%, #6366f1 45%, #06b6d4 100%);
@@ -6165,8 +6165,9 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .switcher-card-when { flex: none; }
 .switcher-card-dir { font: 400 10.5px/1.4 var(--font-mono); opacity: 0.8; }
 .switcher-card-when { font-variant-numeric: tabular-nums; }
-/* Where you are: the cursor, a short bar at the top-left. */
-.switcher-card.current::before { left: 12px; right: auto; width: 26px; height: 3px; border-radius: 0 0 2px 2px; background: #7c3aed; }
+/* Where you are is said once, by the "current" chip: a short cursor bar
+   here as well read as a stray mark nobody could name. */
+.switcher-card.current::before { display: none; }
 /* Recency, in the spark's hue rather than "alive" green. */
 .switcher-card-fresh { background: var(--hop-spark); width: 2px; }
 /* Activity right now is the fresh bar's pulse, not another ring. */
@@ -6209,7 +6210,8 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .switcher-chip.checkback { background: none; border: 1px solid var(--card-line); color: var(--ink-muted); font-weight: 600; }
 .switcher-chip.waiting { background: var(--hop-spark); color: #fff; text-transform: lowercase; }
 .switcher-chip.waiting::before { content: "✦ "; }
-.switcher-chip.current { background: #7c3aed; color: #fff; }
+.switcher-chip.current { background: color-mix(in srgb, #7c3aed 13%, transparent); color: #6d28d9; text-transform: lowercase; }
+:root[data-theme="dark"] .switcher-chip.current { color: #c4b5fd; }
 :root[data-theme="dark"] .switcher-chip.views, :root[data-theme="dark"] .switcher-chip.views.fresh { color: #c4b5fd; }
 
 /* The briefing, in the same hand: decisions are the accent (a choice

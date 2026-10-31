@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 // The Slack-style side panel, as on the iOS app (SessionDrawer.swift): every
 // session filed by folder, what each one needs at a glance, and a jump to
@@ -50,11 +50,16 @@ type Props = {
   externalFilter?: string;
   /** Fleet-wide places, Slack's "Threads / Activity" rows. */
   nav?: RailNavItem[];
+  /** Scope owned by the page (docked: it scopes the wall too). */
+  scope?: Scope;
+  onScopeChange?: (scope: Scope) => void;
+  /** Docked: drag the right edge to resize (double-click resets). */
+  onResize?: (width: number | null) => void;
 };
 
 export type RailNavItem = { key: string; label: string; icon: ReactNode; count?: number; fresh?: boolean; onClick: () => void };
 
-type Scope = "user" | "agent" | "all";
+export type Scope = "user" | "agent" | "all";
 type Order = "folder" | "recent";
 const FOLD_KEY = "hop_rail_folded";
 const SCOPE_KEY = "hop_rail_scope";
@@ -72,10 +77,11 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [] }: Props) => {
+export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize }: Props) => {
   const [ownFilter, setFilter] = useState("");
   const filter = searchSlot ? (externalFilter ?? "") : ownFilter;
-  const [scope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
+  const [ownScope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
+  const scope = scopeProp ?? ownScope;
   const [order, setOrder] = useState<Order>(() => (load(ORDER_KEY) === "recent" ? "recent" : "folder"));
   const [menu, setMenu] = useState<{ s: RailSession; x: number; y: number } | null>(null);
   const [folded, setFolded] = useState<Set<string>>(() => new Set((load(FOLD_KEY) || "").split(",").filter(Boolean)));
@@ -109,7 +115,28 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
     save(FOLD_KEY, [...next].join(","));
     return next;
   });
-  const changeScope = (next: Scope) => { setScope(next); save(SCOPE_KEY, next); };
+  const changeScope = (next: Scope) => {
+    if (onScopeChange) { onScopeChange(next); return; }
+    setScope(next); save(SCOPE_KEY, next);
+  };
+  // Drag the docked rail's edge: the width follows the pointer.
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!onResize) return;
+    e.preventDefault();
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => onResize(ev.clientX);
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      document.body.classList.remove("rail-resizing");
+    };
+    document.body.classList.add("rail-resizing");
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
   const changeOrder = (next: Order) => { setOrder(next); save(ORDER_KEY, next); };
 
   const visible = useMemo(() => {
@@ -238,6 +265,11 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
             <p className="rail-empty">{searching ? `No session matches “${filter.trim()}”.` : "No sessions in this scope."}</p>
           )}
         </div>
+        {docked && onResize && (
+          <div className="rail-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar"
+               title="Drag to resize · double-click for the default width"
+               onPointerDown={startResize} onDoubleClick={() => onResize(null)} />
+        )}
       </aside>
       {menu && onPark && (
         <div className="rail-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>

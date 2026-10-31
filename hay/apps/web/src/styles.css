@@ -5757,10 +5757,25 @@ body.pane-dragging { user-select: none; }
    and beside a session, not an overlay. The page and the wall make room for
    it; the terminal refits to what is left. Its own palette in both themes,
    set as the tokens its parts already use. */
-.app.rail-docked { --rail-w: 280px; padding-left: var(--rail-w); }
-.app.rail-docked .switcher-overlay { left: var(--rail-w); }
+/* --rail-w is set on .app from the dragged width (default 280px). */
+.app.rail-docked { padding-left: var(--rail-w, 280px); }
+.app.rail-docked .switcher-overlay,
+.app.rail-docked .connection-banner { left: var(--rail-w, 280px); }
+.rail-resize {
+  position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; z-index: 2;
+  cursor: col-resize; touch-action: none;
+}
+.rail-resize:hover, body.rail-resizing .rail-resize { background: color-mix(in srgb, var(--accent) 60%, transparent); }
+body.rail-resizing { cursor: col-resize; user-select: none; }
+body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
+/* Docked, the session's bar is its header — Slack's channel name. */
+.topbar.channel { padding: 10px 20px; gap: 16px; }
+.channel-name {
+  font: 700 15px/1.2 var(--font-mono); min-width: 0; flex: 0 1 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .session-rail.docked {
-  width: var(--rail-w, 280px); z-index: 30; box-shadow: none; animation: none;
+  width: var(--rail-w, 280px); z-index: 30; box-shadow: none; animation: none; overflow: visible;
   --panel: #3b1d48; --bg: rgba(255, 255, 255, 0.1); --chip-bg: rgba(255, 255, 255, 0.1);
   --ink: rgba(255, 255, 255, 0.92); --ink-muted: rgba(255, 255, 255, 0.62);
   --line: rgba(255, 255, 255, 0.12); --accent: #a78bfa;

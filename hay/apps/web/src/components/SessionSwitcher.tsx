@@ -128,6 +128,9 @@ type Props = {
   // sidebar's list filter by what is typed.
   sidebarDocked?: boolean;
   searchPortal?: HTMLElement | null;
+  // Docked, the sidebar's You / Agents / All scopes the wall too: one
+  // control, not two that disagree.
+  scope?: SessionOriginScope;
   onFilterChange?: (query: string) => void;
   // The page theme, switchable straight from the wall: the settings drawer
   // lives in the full-screen view, and the hub (no session open) has none.
@@ -1404,7 +1407,8 @@ export const SessionSwitcher = ({
   onOpenCheckbacks,
   sidebarDocked = false,
   searchPortal = null,
-  onFilterChange
+  onFilterChange,
+  scope: scopeProp
 }: Props) => {
   // View state survives a REFRESH but not a new tab: sessionStorage, not
   // localStorage. Reloading the page (or hop reconnecting) used to dump the
@@ -1423,7 +1427,7 @@ export const SessionSwitcher = ({
   const onFilterChangeRef = useRef(onFilterChange);
   onFilterChangeRef.current = onFilterChange;
   useEffect(() => { onFilterChangeRef.current?.(open ? filter : ""); }, [filter, open]);
-  const [originScope, setOriginScope] = useState<SessionOriginScope>("user");
+  const [originScope, setOriginScope] = useState<SessionOriginScope>(scopeProp ?? "user");
   // Tile zoom: bigger tiles show more of each terminal preview.
   const [zoom, setZoom] = useState(() => {
     const saved = localStorage.getItem("hay_tile_zoom");
@@ -1939,6 +1943,14 @@ export const SessionSwitcher = ({
   // sessions that vanish drop out; brand-new ones append at the end rather
   // than reshuffling the wall.
   const frozenOrderRef = useRef<{ mode: "tiers" | "project"; hero: string[]; groups: Array<{ label: string; rows: string[] }> } | null>(null);
+  // The sidebar's scope, when it owns it. Like a click on the wall's own
+  // control: a different population, so the frozen order goes too.
+  useEffect(() => {
+    if (!scopeProp || scopeProp === originScope) return;
+    setOriginScope(scopeProp);
+    frozenOrderRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeProp]);
   // Search results freeze the same way, per QUERY: the order you see is the
   // order at the moment you searched. Score ties break on attention and
   // recency, and manual mode's unplaced rows sort by name, so without this a
@@ -3839,7 +3851,7 @@ export const SessionSwitcher = ({
           )}
         </header>
         <div className="switcher-filter-row">
-          <div className="switcher-origin" role="group" aria-label="Session origin">
+          {!scopeProp && <div className="switcher-origin" role="group" aria-label="Session origin">
             {([
               ["user", "User"],
               ["agent", "Agent"],
@@ -3860,7 +3872,7 @@ export const SessionSwitcher = ({
                 {label}
               </button>
             ))}
-          </div>
+          </div>}
           <div className="switcher-origin switcher-sort" role="group" aria-label="Organize sessions by">
             {([
               ["recent", "Recent", "Most recently active first"],

@@ -25,7 +25,7 @@ import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
-import { SessionRail, type RailNavItem } from "./components/SessionRail";
+import { SessionRail, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { DesktopView } from "./components/DesktopView";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -538,6 +538,24 @@ const App = () => {
   // The wall's search box renders into the docked sidebar (a portal target),
   // and what it holds filters the sidebar's list too.
   const [railSearchEl, setRailSearchEl] = useState<HTMLDivElement | null>(null);
+  // One scope for the sidebar and the wall (docked).
+  const [railScope, setRailScope] = useState<RailScope>(() => {
+    try { const v = localStorage.getItem("hop_rail_scope"); return v === "agent" || v === "all" ? v : "user"; } catch { return "user"; }
+  });
+  const changeRailScope = (next: RailScope) => {
+    setRailScope(next);
+    try { localStorage.setItem("hop_rail_scope", next); } catch { /* per-browser only */ }
+  };
+  // Width, dragged at its edge (null = the default).
+  const RAIL_DEFAULT_W = 280;
+  const [railWidth, setRailWidth] = useState<number>(() => {
+    try { const v = Number(localStorage.getItem("hop_rail_width")); return v >= 200 && v <= 520 ? v : RAIL_DEFAULT_W; } catch { return RAIL_DEFAULT_W; }
+  });
+  const resizeRail = (w: number | null) => {
+    const next = w === null ? RAIL_DEFAULT_W : Math.round(Math.max(200, Math.min(520, w)));
+    setRailWidth(next);
+    try { localStorage.setItem("hop_rail_width", String(next)); } catch { /* per-browser only */ }
+  };
   const [wallFilter, setWallFilter] = useState("");
   const dockQuery = "(min-width: 1100px) and (pointer: fine)";
   const [railCanDock, setRailCanDock] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(dockQuery).matches);
@@ -4387,7 +4405,8 @@ const App = () => {
   ];
 
   return (
-    <div className={"app" + (railDocked ? " rail-docked" : "")}>
+    <div className={"app" + (railDocked ? " rail-docked" : "")}
+         style={railDocked ? ({ "--rail-w": `${railWidth}px` } as CSSProperties) : undefined}>
       {switchHud && (() => {
         const curKey = session?.room ?? sessionLabel;
         const SLOT = 152; // card 140 + gap 12; must match .switch-hud CSS
@@ -4421,7 +4440,13 @@ const App = () => {
           </div>
         );
       })()}
-      <header className="topbar">
+      {!(railDocked && !session) && (
+      <header className={"topbar" + (railDocked ? " channel" : "")}>
+        {railDocked ? (
+          // Docked: the sidebar carries the wordmark; this bar is the
+          // session's own header, Slack's channel name.
+          <div className="channel-name" title={sessionLabel}>{sessionLabel}</div>
+        ) : (
         <div className="brand">
           <div>
             {/* Wordmark only — no mascot tile. The cursor block is the one
@@ -4435,6 +4460,7 @@ const App = () => {
             </p>
           </div>
         </div>
+        )}
         <div className="presence-strip">
           {sortedPresence.map((client) => (
             <div
@@ -4454,12 +4480,15 @@ const App = () => {
         </div>
         {!isMobile && session && isEmbeddedInHop() && (
           <div className="topbar-actions">
+            {/* Docked, the sidebar is always there and "All sessions" is
+                the wall (⌘K still opens it): these two would repeat it. */}
+            {!railDocked && (<>
             <button
               type="button"
               className="topbar-sessions-btn topbar-rail-btn"
               title="Sessions by folder"
               aria-label="Sessions by folder"
-              onClick={() => { if (railDocked) setRailDocked(false); else setRailOpen(true); }}
+              onClick={() => setRailOpen(true)}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
             </button>
@@ -4472,6 +4501,7 @@ const App = () => {
               Sessions
               <kbd>{isMacPlatform ? "⌘K" : "⌃⇧K"}</kbd>
             </button>
+            </>)}
             <button
               type="button"
               className="topbar-sessions-btn"
@@ -4512,6 +4542,7 @@ const App = () => {
           </div>
         )}
       </header>
+      )}
 
       {!session && isEmbeddedInHop() ? (
         // Hub mode: hop's landing page with nothing to auto-join. The switcher
@@ -4544,6 +4575,7 @@ const App = () => {
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
+            scope={railDocked ? railScope : undefined}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
           />
@@ -4584,7 +4616,10 @@ const App = () => {
         >
           {/* Connection state banner — on mobile the footer is hidden, and on
               desktop the footer dot alone is too easy to miss during an outage. */}
-          {visibleStatus !== "connected" && visibleStatus !== "idle" && (
+          {/* Not while the wall is up: the wall holds this session's socket
+              then, so it always read "disconnected" — and docked, the
+              strip showed over the sidebar as a bare grey band. */}
+          {visibleStatus !== "connected" && visibleStatus !== "idle" && !switcherOpen && (
             <div
               className={`connection-banner${visibleStatus === "ended" ? " ended" : ""}`}
               role="status"
@@ -5250,6 +5285,7 @@ const App = () => {
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
+            scope={railDocked ? railScope : undefined}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
             onOpenSettings={() => {
@@ -5401,6 +5437,9 @@ const App = () => {
           searchSlot={railDocked && railOnWall ? setRailSearchEl : undefined}
           externalFilter={wallFilter}
           nav={railNav}
+          scope={railScope}
+          onScopeChange={changeRailScope}
+          onResize={resizeRail}
           docked={railDocked}
           canDock={railCanDock}
           onDockChange={setRailDocked}

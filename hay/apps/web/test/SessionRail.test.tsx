@@ -69,4 +69,23 @@ describe("SessionRail", () => {
     fireEvent.click(screen.getByText("Views"));
     expect(openViews).toHaveBeenCalled();
   });
+
+  it("a page-owned scope: the sidebar shows it and reports changes instead of keeping its own", () => {
+    const onScopeChange = vi.fn();
+    render(<SessionRail sessions={[...sessions, { name: "bot", displayName: "bot", createdBy: "agent" }]} folders={folders}
+                        currentRoom={null} scope="agent" onScopeChange={onScopeChange}
+                        onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    expect(names()).toEqual(["bot"]);
+    fireEvent.click(screen.getByRole("tab", { name: "All" }));
+    expect(onScopeChange).toHaveBeenCalledWith("all");
+    expect(names()).toEqual(["bot"]);
+  });
+
+  it("docked, double-clicking the edge resets the width", () => {
+    const onResize = vi.fn();
+    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} docked onResize={onResize}
+                        onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.doubleClick(screen.getByRole("separator", { name: "Resize the sidebar" }));
+    expect(onResize).toHaveBeenCalledWith(null);
+  });
 });

@@ -12788,6 +12788,36 @@ happens until someone clicks it.
         // off the end of the path; content-type still comes from the real
         // file name. The legacy /assets/view/<s>/<f> form redirects here, so
         // an edge-cached response is at worst a redirect, never the bytes.
+        // A view link copied out of prose or markdown drags punctuation along
+        // ("…/inline).", "…/REPORT.md**"). Those used to miss the route and
+        // fall through to the SPA — a 200 with hop's own page, so the phone's
+        // reader showed the app instead of the file, with no error. Send a
+        // dirty link to its clean form when that names a published file,
+        // and answer any other /view/ miss with a 404, never the SPA.
+        if ((req.method === 'GET' || req.method === 'HEAD') && parsedUrl.pathname.startsWith('/view/')) {
+            const strictView = /^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download|\/thumb)?$/;
+            const viewFileExists = (p) => {
+                const m = p.match(strictView);
+                if (!m) return false;
+                try {
+                    const root = path.resolve(VIEWS_DIR);
+                    const t = path.resolve(path.join(root, decodeURIComponent(m[1]), decodeURIComponent(m[2])));
+                    return t.startsWith(root + path.sep) && fs.existsSync(t) && fs.statSync(t).isFile();
+                } catch (_) { return false; }
+            };
+            const rawPath = parsedUrl.pathname;
+            const cleanPath = rawPath.replace(/(?:[).,;:!?*'"\]}>]|%29|%5D|%2A|%22|%27)+$/i, '');
+            if (cleanPath !== rawPath && !viewFileExists(rawPath) && viewFileExists(cleanPath)) {
+                res.writeHead(302, { Location: cleanPath + (parsedUrl.search || ''), 'Cache-Control': 'no-store' });
+                res.end();
+                return;
+            }
+            if (!strictView.test(rawPath)) {
+                res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+                res.end('This view is not published on this hop.');
+                return;
+            }
+        }
         const viewMatch = (req.method === 'GET' || req.method === 'HEAD')
             && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download|\/thumb)?$/);
         if (viewMatch) {

@@ -17,8 +17,11 @@ import { relativeTime } from "../utils/switcherModel";
 // Three placements of that one shape:
 //
 // - PAGE (beside the docked sidebar): Views is a place, like the wall, and
-//   the sidebar's sessions are its filters. A session's results — a link
-//   in its terminal, an inline card, ⌘⇧V — are this page filtered to it.
+//   it shares the sidebar with Sessions — one selection, two places. The
+//   session selected there is the filter (no toggle of Views' own), and
+//   clearing it shows every session's results. A session's results — a
+//   link in its terminal, an inline card, ⌘⇧V — are this page filtered to
+//   it.
 // - SIDE (an option, beside a session): a column to the right of the
 //   terminal, its width dragged at its edge. Side by side, not over: the
 //   terminal gives up the width and refits. Its keys are its own only once
@@ -61,6 +64,8 @@ type Props = {
   item?: string;
   // Scoped as a page (a session picked in the sidebar): go into it.
   onOpenSession?: (session: string) => void;
+  // As a page, the sidebar's selection is the scope: this clears it.
+  onClearSession?: () => void;
   onClose: () => void;
 };
 
@@ -182,7 +187,7 @@ const previewSrc = (item: ViewItem) =>
 
 const thumbSrc = (item: ViewItem) => item.path.replace(/\/inline$/, "/thumb");
 
-export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onToggleSide, onResizeSide, onClose }: Props) => {
+export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onClearSession, onToggleSide, onResizeSide, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   // The result being read; null is the gallery.
@@ -658,7 +663,15 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
           <div className="views-head">
             <span className="views-badge">Views</span>
             <span className="vg-count">{counts.all}</span>
-            {session && (
+            {session && asPage && onClearSession && (
+              // The sidebar's selection, shown here; × lets it go.
+              <span className="views-scope-chip">
+                {label(resolvedSession || session)}
+                <button type="button" aria-label="Show every session's results" title="Every session's results"
+                        onClick={onClearSession}>×</button>
+              </span>
+            )}
+            {session && !(asPage && onClearSession) && (
               // A session's own results, or the fleet's — one click either way.
               <span className="views-scope-toggle" role="tablist">
                 <button type="button" role="tab" aria-selected={!showAll}

@@ -4508,6 +4508,22 @@ const App = () => {
   const freshViewSessions = unseenViewSessions;
   const railOnWall = (!session || switcherOpen) && !viewsPage;
   const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
+  // Leave Views for a session (by any of its identifiers) — in place when
+  // a terminal is up, as its own page from the hub.
+  const goToSession = (key: string) => {
+    setViewsOpen(null);
+    const lc = key.toLowerCase();
+    const target = sessions.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
+    if (!target) return;
+    if (!session) {
+      const path = buildSessionPath(target.displayName || target.name);
+      carryTypeaheadTo(path);
+      window.location.href = path;
+      return;
+    }
+    setSwitcherOpen(false);
+    switchSession(target);
+  };
   const railNav: RailNavItem[] = !railDocked ? [] : [
     // Clicking the place you are in shows all of it (a filter clears), as
     // in Slack; Esc or another place leaves.
@@ -5562,6 +5578,7 @@ const App = () => {
           currentRoom={viewsPage ? (viewsOpen?.session ?? null)
             : railOnWall || !session || status === "ended" ? null : session.room}
           onWall={railOnWall}
+          inSessions={!viewsPage}
           searchSlot={railDocked && railOnWall ? setRailSearchEl : undefined}
           externalFilter={wallFilter}
           nav={railNav}
@@ -5610,7 +5627,15 @@ const App = () => {
             // the session's, not nobody's.
             termRef.current?.focus();
           }}
-          onAllSessions={() => { setRailOpen(false); setViewsOpen(null); if (session) setSwitcherOpen(true); }}
+          onAllSessions={() => {
+            // Views and Sessions share the sidebar's selection: from a
+            // session's results, Sessions goes into that session.
+            const selected = viewsPage ? viewsOpen?.session : undefined;
+            setRailOpen(false);
+            if (selected) { goToSession(selected); return; }
+            setViewsOpen(null);
+            if (session) setSwitcherOpen(true);
+          }}
           onClose={() => setRailOpen(false)}
         />
       )}
@@ -5643,19 +5668,8 @@ const App = () => {
                     placement={!railDocked ? "modal" : viewsSideNow ? "side" : "page"}
                     onToggleSide={railDocked && session ? toggleViewsSide : undefined}
                     onResizeSide={resizeViewsSide}
-                    onOpenSession={viewsPage ? (key) => {
-                      setViewsOpen(null);
-                      const target = sessions.find((x) => (x.internalName || x.name) === key);
-                      if (!target) return;
-                      if (!session) {
-                        const path = buildSessionPath(target.displayName || target.name);
-                        carryTypeaheadTo(path);
-                        window.location.href = path;
-                        return;
-                      }
-                      setSwitcherOpen(false);
-                      switchSession(target);
-                    } : undefined}
+                    onOpenSession={viewsPage ? goToSession : undefined}
+                    onClearSession={viewsPage ? () => setViewsOpen({ page: true }) : undefined}
                     onClose={() => setViewsOpen(null)} />
       )}
     </div>

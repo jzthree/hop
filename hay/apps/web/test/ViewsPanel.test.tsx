@@ -178,6 +178,18 @@ describe("ViewsPanel", () => {
     expect(onOpenSession).toHaveBeenCalledWith("Nebula");
   });
 
+  it("as a page sharing the sidebar, the sidebar's selection is the scope: a chip, × clears it", async () => {
+    const onClearSession = vi.fn();
+    const { rerender } = render(<ViewsPanel session="Orion" placement="page" onClearSession={onClearSession} onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(2));
+    expect(screen.queryByRole("tab", { name: "all" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show every session's results" }));
+    expect(onClearSession).toHaveBeenCalled();
+    rerender(<ViewsPanel placement="page" onClearSession={onClearSession} onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(3));
+    expect(document.querySelector(".views-scope-chip")).toBeNull();
+  });
+
   it("a session that has published nothing says so — it never widens by itself", async () => {
     render(<ViewsPanel session="Nowhere" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText(/Nothing published yet by this session/)).toBeTruthy());

@@ -44,6 +44,9 @@ type Props = {
   onPark?: (s: RailSession, parked: boolean) => void;
   /** The wall is the main view: "All sessions" is where you are. */
   onWall?: boolean;
+  /** Sessions is the place shown — the wall, or a session's terminal (Views
+   *  being the other way to look at a session). Defaults to onWall. */
+  inSessions?: boolean;
   /** The wall's own search box is rendered here (a portal target), and
    *  what it holds filters this list too. Without it the rail has its own. */
   searchSlot?: (el: HTMLDivElement | null) => void;
@@ -118,7 +121,7 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew, focusSignal = 0, onCreate, onSearchDone }: Props) => {
+export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, inSessions, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew, focusSignal = 0, onCreate, onSearchDone }: Props) => {
   const [ownFilter, setFilter] = useState("");
   const filter = searchSlot ? (externalFilter ?? "") : ownFilter;
   const [ownScope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
@@ -344,7 +347,7 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
         {docked ? (<>
           {/* Slack's left column: places, not sessions. */}
           <nav className="rail-strip" aria-label="Places">
-            {stripButton({ key: "home", label: "Sessions", icon: <RailIcon name="wall" />, active: onWall, onClick: onAllSessions })}
+            {stripButton({ key: "home", label: "Sessions", icon: <RailIcon name="wall" />, active: inSessions ?? onWall, onClick: onAllSessions })}
             {nav.filter((n) => !n.bottom).map(stripButton)}
             <span className="rail-strip-spacer" />
             {nav.filter((n) => n.bottom).map(stripButton)}

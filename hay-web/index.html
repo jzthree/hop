@@ -7,8 +7,32 @@
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2317181d'/%3E%3Cpath d='M11 9.5 L20.5 16 L11 22.5' fill='none' stroke='%23a78bfa' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <title>hop</title>
     <meta name="apple-mobile-web-app-title" content="hop" />
-    <script type="module" crossorigin src="/assets/index-BQAY94li.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DpebVnuq.css">
+    <script>
+      // Keys typed while a session page loads, before the app's script has
+      // run, would reach nothing. Held here from the first byte; the app
+      // sends them once the session's terminal connects (see App.tsx,
+      // earlyTypeahead).
+      (function () {
+        if (!/^\/s\/[^/]+\/?$/.test(location.pathname)) return;
+        var q = { data: "", on: true };
+        window.__hopEarlyKeys = q;
+        window.addEventListener("keydown", function (e) {
+          if (!q.on || e.metaKey || e.ctrlKey || e.altKey) return;
+          var a = document.activeElement;
+          if (a && a !== document.body && a !== document.documentElement
+              && !(a.classList && a.classList.contains("xterm-helper-textarea"))) return;
+          var k = e.key;
+          var d = k === "Enter" ? "\r" : k === "Backspace" ? "\x7f" : k === "Tab" ? "\t" : k.length === 1 ? k : "";
+          if (!d) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          q.data += d;
+        }, true);
+        setTimeout(function () { q.on = false; }, 15000);
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-huHd51gD.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Ctj_CMhZ.css">
   </head>
   <body>
     <div id="root"></div>

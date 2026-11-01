@@ -129,6 +129,9 @@ type Props = {
   // sidebar's list filter by what is typed.
   sidebarDocked?: boolean;
   searchPortal?: HTMLElement | null;
+  // Another page (Views) is shown over the wall: the wall keeps its state
+  // but stops answering keys, so typing reaches what is on top.
+  covered?: boolean;
   // Docked, the sidebar's You / Agents / All scopes the wall too: one
   // control, not two that disagree.
   scope?: SessionOriginScope;
@@ -1418,6 +1421,7 @@ export const SessionSwitcher = ({
   onOpenDesktop,
   onOpenCheckbacks,
   sidebarDocked = false,
+  covered = false,
   searchPortal = null,
   onFilterChange,
   scope: scopeProp,
@@ -2340,10 +2344,10 @@ export const SessionSwitcher = ({
   // Focus the filter on open (fine-pointer devices only — autofocus on mobile
   // would pop the system keyboard over the grid).
   useEffect(() => {
-    if (!open || !finePointer) return;
+    if (!open || !finePointer || covered) return;
     const t = window.setTimeout(() => filterInputRef.current?.focus(), 40);
     return () => window.clearTimeout(t);
-  }, [open, finePointer]);
+  }, [open, finePointer, covered]);
 
   // Every visit starts on user-owned sessions. Agent sessions stay one toggle
   // away without competing for the default view.
@@ -2382,7 +2386,7 @@ export const SessionSwitcher = ({
   }, [open]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || covered) return;
     const onKey = (event: KeyboardEvent) => {
       // While the focused tile owns the keyboard, Escape belongs to the
       // remote app (vim, claude) — unfocus is the ✕ or a click outside.
@@ -2402,7 +2406,7 @@ export const SessionSwitcher = ({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sheet, focusedKey, filter]);
+  }, [open, covered, sheet, focusedKey, filter]);
 
   // Tile previews: EVERY session gets a preview tile. Hot tiles (the
   // attention/recency heroes) refresh each tick; the long tail refreshes at a
@@ -2590,7 +2594,7 @@ export const SessionSwitcher = ({
   // Arrow/Enter navigation + type-anywhere filtering. The action sheet and
   // the create form own the keyboard while open.
   useEffect(() => {
-    if (!open) return;
+    if (!open || covered) return;
     const onNavKey = (event: KeyboardEvent) => {
       if (sheet || creating) return;
       // ⌘F/Ctrl+F: the switcher's find IS the filter box — never browser
@@ -2760,7 +2764,7 @@ export const SessionSwitcher = ({
     window.addEventListener("keydown", onNavKey);
     return () => window.removeEventListener("keydown", onNavKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sheet, creating, flatNav, kbdIndex, effectiveZoom, maxZoom, interactiveTiles]);
+  }, [open, covered, sheet, creating, flatNav, kbdIndex, effectiveZoom, maxZoom, interactiveTiles]);
 
   const openSheet = (session: SwitcherSession, anchor?: { x: number; y: number }) => {
     cancelLongPress();

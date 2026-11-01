@@ -94,6 +94,15 @@ describe("SessionSwitcher tile zoom", () => {
     expect(card).toBeTruthy();
     expect(card!.querySelector(".switcher-preview")).toBeTruthy();
   });
+
+  it("covered by another page (Views), it leaves typing to that page", () => {
+    render(<><input aria-label="Over the wall" /><SessionSwitcher {...props} open covered /></>);
+    const other = screen.getByLabelText("Over the wall") as HTMLInputElement;
+    other.focus();
+    fireEvent.keyDown(other, { key: "r" });
+    expect(document.activeElement).toBe(other);
+    expect((screen.getByLabelText("Filter sessions") as HTMLInputElement).value).toBe("");
+  });
 });
 
 describe("SessionSwitcher project view density", () => {

@@ -4730,6 +4730,7 @@ const App = () => {
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
+            covered={viewsPage}
             scope={railDocked ? railScope : undefined}
             createSignal={createSignal}
             createName={createName}
@@ -5442,6 +5443,7 @@ const App = () => {
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
+            covered={viewsPage}
             scope={railDocked ? railScope : undefined}
             createSignal={createSignal}
             createName={createName}

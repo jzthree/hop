@@ -20,6 +20,7 @@ const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = re
 const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/auth-sessions');
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
+const notebookView = require('./lib/notebook-view');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
 const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
@@ -11772,7 +11773,18 @@ const STATIC_CONTENT_TYPES = {
 
 // Extensions we RENDER rather than hand over raw, because the raw form is
 // unreadable on a phone and the rendered form is the actual result.
-const VIEW_RENDERED = new Set(['.md', '.markdown', '.csv', '.tsv', '.json']);
+const VIEW_RENDERED = new Set(['.md', '.markdown', '.csv', '.tsv', '.json', '.ipynb']);
+
+// Notebooks (and Nebula links' saved copies) — see lib/notebook-view.js.
+const { renderNotebook, renderNotebookMissing } = notebookView;
+const nebulaSnapshotPath = (session, artifact) => notebookView.snapshotPath(VIEWS_DIR, session, artifact);
+function nebulaToken() {
+    const t = getHopConfig().nebula_token || process.env.NEBULA_TOKEN || '';
+    if (t) return t;
+    try { return fs.readFileSync(path.join(os.homedir(), '.nebula', 'token'), 'utf8').trim(); } catch (e) { return ''; }
+}
+const refreshNebulaSnapshot = (session, artifact, target, timeoutMs) =>
+    notebookView.refreshSnapshot({ viewsDir: VIEWS_DIR, session, artifact, target, token: nebulaToken(), timeoutMs });
 
 /// Delimited data as a table. A CSV is a RESULT — the numbers an agent
 /// computed — and delivering it as one long line of commas on a phone is the
@@ -12795,7 +12807,7 @@ happens until someone clicks it.
         // dirty link to its clean form when that names a published file,
         // and answer any other /view/ miss with a 404, never the SPA.
         if ((req.method === 'GET' || req.method === 'HEAD') && parsedUrl.pathname.startsWith('/view/')) {
-            const strictView = /^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download|\/thumb)?$/;
+            const strictView = /^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download|\/thumb|\/notebook)?$/;
             const viewFileExists = (p) => {
                 const m = p.match(strictView);
                 if (!m) return false;
@@ -12819,7 +12831,7 @@ happens until someone clicks it.
             }
         }
         const viewMatch = (req.method === 'GET' || req.method === 'HEAD')
-            && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download|\/thumb)?$/);
+            && parsedUrl.pathname.match(/^\/view\/([^/]+)\/([^/]+?)(\/inline|\/download|\/thumb|\/notebook)?$/);
         if (viewMatch) {
             // /download: the stored file itself, as an attachment — the
             // markdown an agent wrote rather than the page it renders into,
@@ -12835,6 +12847,39 @@ happens until someone clicks it.
                 return;
             }
             const viewExt = path.extname(target).toLowerCase();
+            // /notebook: a Nebula link, read in place — its saved copy,
+            // refreshed from Nebula first when Nebula answers. The link's
+            // own /inline stays the redirect page older clients follow.
+            if (viewMatch[3] === '/notebook') {
+                const sess = decodeURIComponent(viewMatch[1]);
+                const file = decodeURIComponent(viewMatch[2]);
+                const m = readViewMeta(sess)[file] || {};
+                if (m.kind !== 'link' || !m.target) {
+                    res.writeHead(404, { 'Content-Type': 'text/plain' });
+                    res.end('Not a notebook link');
+                    return;
+                }
+                const caption = m.title || file.replace(/\.nebula\.html$/, '');
+                let nbName = file.replace(/\.nebula\.html$/, '');
+                try { nbName = path.posix.basename(new URL(m.target).searchParams.get('file') || nbName); } catch (e) { }
+                refreshNebulaSnapshot(sess, file, m.target).then((fresh) => {
+                    const snap = nebulaSnapshotPath(sess, file);
+                    let html;
+                    try {
+                        const nb = JSON.parse(fs.readFileSync(snap, 'utf8'));
+                        const when = new Date(fs.statSync(snap).mtimeMs).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+                        html = renderNotebook(nb, caption, nbName, fresh.ok ? null : `Saved copy from ${when}. ${fresh.why}`);
+                    } catch (e) {
+                        html = renderNotebookMissing(caption, `Not read yet. ${fresh.why || ''}`.trim(), m.target);
+                    }
+                    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+                    res.end(req.method === 'HEAD' ? undefined : html);
+                }).catch((e) => {
+                    res.writeHead(500, { 'Content-Type': 'text/plain' });
+                    res.end(String(e && e.message || e));
+                });
+                return;
+            }
             // /thumb: a small JPEG for the Views list. The list used to load
             // every image whole as its own thumbnail — 39 MB through the
             // tunnel to draw one screen of rows, with the view you picked
@@ -12860,7 +12905,8 @@ happens until someone clicks it.
             if (parsedUrl.query.download === '1') {
                 const rawTypes = { '.md': 'text/markdown; charset=utf-8', '.markdown': 'text/markdown; charset=utf-8',
                                    '.csv': 'text/csv; charset=utf-8', '.tsv': 'text/tab-separated-values; charset=utf-8',
-                                   '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8' };
+                                   '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8',
+                                   '.ipynb': 'application/x-ipynb+json; charset=utf-8' };
                 const dlName = path.basename(target).replace(/["\r\n]/g, '_');
                 res.writeHead(200, {
                     'Content-Type': rawTypes[viewExt] || STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream',
@@ -12886,7 +12932,10 @@ happens until someone clicks it.
                 const viewTheme = parsedUrl.query.theme === 'light' ? 'light'
                     : parsedUrl.query.theme === 'dark' ? 'dark' : null;
                 let html;
-                if (viewExt === '.csv') html = renderDelimited(raw, caption, ',', viewTheme);
+                if (viewExt === '.ipynb') {
+                    try { html = renderNotebook(JSON.parse(raw), caption, file, null); }
+                    catch (e) { html = renderMarkdown(`# ${caption}\n\nThis notebook could not be read: ${e.message}`, caption, viewTheme); }
+                } else if (viewExt === '.csv') html = renderDelimited(raw, caption, ',', viewTheme);
                 else if (viewExt === '.tsv') html = renderDelimited(raw, caption, '\t', viewTheme);
                 else if (viewExt === '.json') {
                     // Pretty-printed in a code block: a minified blob is
@@ -18105,7 +18154,7 @@ const HELP_SECTIONS = [
         `hop view <file...>        Publish HTML/PDF/image/video/markdown behind hop's auth and print the link`,
         `hop view --title "..."    Say what the result IS — clients lead with this, not the filename`,
         `hop view --name x.md -    Publish what's on stdin (no temp file needed)`,
-        `hop view --nebula <nb>    Link a notebook on a Nebula server; opens in your Nebula UI (hop config nebula <url>)`,
+        `hop view --nebula <nb>    Link a notebook on a Nebula server; Views reads it, Open in Nebula runs it (hop config nebula <url>, nebula-token -)`,
         `hop view --list [--all]   What this session has published (--all: the whole fleet)`,
         `hop view --rm <name>      Unpublish one`,
         `hop view --clear [--all]  Clear published copies — frees hop's space, never touches source files`,
@@ -19656,6 +19705,12 @@ async function main() {
                     target
                 };
                 console.log(`View: ${target}`);
+                // A first saved copy now, while the agent is here: Views
+                // reads the notebook from it even when Nebula is down later.
+                if (reachable) {
+                    const snap = await refreshNebulaSnapshot(session, artifactName, target);
+                    if (!snap.ok) log(`hop view: no read-only copy yet — ${snap.why} Views will try again when it is opened.`, DIM);
+                }
             }
             writeViewMeta(session, meta);
             rebuildViewManifest();
@@ -19862,6 +19917,26 @@ async function main() {
     // Handle `hop config` command
     if (process.argv[2] === 'config') {
         const subCmd = process.argv[3];
+        // The token hop reads Nebula notebooks with, for Views' read-only
+        // copy. `-` reads it from stdin, which keeps it out of shell history.
+        if (subCmd === 'nebula-token') {
+            let value = String(process.argv[4] || '').trim();
+            const cfg = getHopConfig();
+            if (value === '-') value = fs.readFileSync(0, 'utf8').trim();
+            if (value === 'reset') {
+                delete cfg.nebula_token;
+                saveHopConfig(cfg);
+                log('Nebula token removed: hop reads notebooks with NEBULA_TOKEN, ~/.nebula/token, or a signed-in Nebula.', GREEN);
+            } else if (value) {
+                cfg.nebula_token = value;
+                saveHopConfig(cfg);
+                log('Nebula token saved (private to this account).', GREEN);
+            } else {
+                log(`Nebula token: ${cfg.nebula_token ? 'set' : 'not set'}`, RESET);
+                log(`Set with: ${CYAN}hop config nebula-token -${RESET} (reads stdin)   (reset: hop config nebula-token reset)`, DIM);
+            }
+            process.exit(0);
+        }
         // Where `hop view --nebula` links open: the Nebula UI as THIS
         // machine reaches it (often a port forward to a cluster server).
         if (subCmd === 'nebula') {
@@ -20006,7 +20081,7 @@ async function main() {
         // Show all config
         const config = getHopConfig();
         log(`Hop config (${HOP_CONFIG_FILE}):`, BOLD);
-        log(JSON.stringify(config, null, 2));
+        log(JSON.stringify(config.nebula_token ? { ...config, nebula_token: '(set)' } : config, null, 2));
         process.exit(0);
     }
 

@@ -112,6 +112,7 @@ const kindTag = (item: ViewItem) => {
   if (item.kind === "server") return "LIVE";
   if (item.kind === "link") return "NB";
   const ext = extOf(item.name);
+  if (ext === "ipynb") return "NB";
   if (["csv", "tsv"].includes(ext)) return "TBL";
   if (isAudio(item.name)) return "AUD";
   if (ext === "pdf") return "PDF";
@@ -125,7 +126,7 @@ const kindTag = (item: ViewItem) => {
 
 export type ViewFilter = "all" | "figures" | "docs" | "pages" | "live";
 export const filterOf = (item: { name: string; kind?: string }): Exclude<ViewFilter, "all"> => {
-  if (item.kind === "server" || item.kind === "link") return "live";
+  if (item.kind === "server") return "live";
   const ext = extOf(item.name);
   if (isImage(item.name) || isVideo(item.name) || isAudio(item.name)) return "figures";
   if (ext === "html" || ext === "htm") return "pages";
@@ -566,9 +567,20 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
   // Media gets native elements (an iframed raw image sits tiny in a corner;
   // native <video> gives real controls). Documents are iframes — sandboxed
   // only for LIVE servers; our own files skip the sandbox, which would
-  // disable the browser's PDF viewer. A notebook lives in its own app.
+  // disable the browser's PDF viewer. A Nebula notebook reads here,
+  // read-only (hop's saved copy, refreshed from Nebula when it answers);
+  // running it is the bar's one click into Nebula.
   const page = open && (
-    open.kind === "link" ? (
+    open.kind === "link" && open.app === "nebula" ? (
+      <div className="views-notebook">
+        <div className="views-notebook-bar">
+          <span className="views-notebook-tag">Read-only</span>
+          {linkFile && <code className="views-link-path" title={linkFile}>{linkFile}</code>}
+          <a className="views-notebook-open" href={open.target} target="_blank" rel="noopener">Open in Nebula ↗</a>
+        </div>
+        <iframe className="views-frame" key={open.path} src={open.path.replace(/\/inline$/, "/notebook")} title={open.title || open.name} />
+      </div>
+    ) : open.kind === "link" ? (
       <div className="views-link-card">
         <div className="views-link-app">{open.app === "nebula" ? "Nebula notebook" : "Link"}</div>
         <div className="views-link-title">{open.title || open.name}</div>

@@ -6505,6 +6505,21 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
   .cal-day { min-height: 0; }
   .cal-day + .cal-day { border-left: 0; border-top: 1px solid var(--card-line, var(--line)); }
 }
+/* A Nebula notebook in the reader: read-only, a thin bar above it with the
+   way into the live one. */
+.views-notebook { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; }
+.views-notebook .views-frame { flex: 1; min-height: 0; }
+.views-notebook-bar {
+  display: flex; align-items: center; gap: 10px; padding: 6px 10px; min-width: 0;
+  border: 1px solid var(--card-line, var(--line)); border-bottom: 0; border-radius: 10px 10px 0 0; background: var(--card-bg, var(--panel));
+}
+.views-notebook-tag { font: 600 10px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted, #8a8591); }
+.views-notebook-bar .views-link-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.views-notebook-open {
+  margin-left: auto; flex: none; padding: 3px 10px; border-radius: 7px; text-decoration: none;
+  font: 600 12px/1.4 var(--font-sans); color: #fff; background: #2563eb;
+}
+.views-notebook-open:hover { background: #1d4ed8; }
 /* Beside the wall too: the wall gives up the width as the terminal does. */
 .app.views-side .switcher-overlay { right: var(--views-w, 560px); }
 .views-panel.side,

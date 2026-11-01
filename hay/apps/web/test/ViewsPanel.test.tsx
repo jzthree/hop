@@ -199,6 +199,20 @@ describe("ViewsPanel", () => {
     expect(document.querySelector(".vg-reader")).toBeNull();
   });
 
+  it("a Nebula notebook reads in place, read-only, with Open in Nebula one click away", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ items: [
+      { session: "Orion", name: "fit.ipynb.nebula.html", title: "Model fit", path: "/view/Orion/fit.ipynb.nebula.html/inline",
+        kind: "link", app: "nebula", target: "http://localhost:3000/?file=%2Fdata%2Ffit.ipynb", mtime: 1786303213 }
+    ] }) })));
+    render(<ViewsPanel onClose={() => {}} />);
+    await openCard("Model fit");
+    expect(document.querySelector("iframe.views-frame")!.getAttribute("src")).toBe("/view/Orion/fit.ipynb.nebula.html/notebook");
+    const open = screen.getByText(/Open in Nebula/).closest("a")!;
+    expect(open.getAttribute("href")).toBe("http://localhost:3000/?file=%2Fdata%2Ffit.ipynb");
+    expect(open.getAttribute("target")).toBe("_blank");
+    expect(screen.getByText("/data/fit.ipynb")).toBeTruthy();
+  });
+
   it("a session that has published nothing says so — it never widens by itself", async () => {
     render(<ViewsPanel session="Nowhere" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText(/Nothing published yet by this session/)).toBeTruthy());

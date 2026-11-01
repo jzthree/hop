@@ -73,9 +73,15 @@ quotes), not dumped as raw text:
 generate_summary | hop view --name findings.md --title "What the profiler found" -
 ```
 
-A **Nebula notebook** is handed over as a link, not a copy — it lives (and
-runs) on its Nebula server, and the human opens it in their own Nebula UI
-with the kernel live. Give the path **as the Nebula server sees it** (a
+A **notebook** reads in Views as a notebook — cells, code and saved outputs
+(figures, tables), read-only — so run it and save it before handing it
+over: what the human sees is the outputs the file holds. A finished
+`.ipynb` file is published like any other file (`hop view fit.ipynb`).
+
+A **Nebula notebook** is handed over as a link — it lives (and runs) on its
+Nebula server. Views shows it read-only from a copy hop saves when you file
+it and refreshes whenever Nebula answers, with **Open in Nebula** one click
+away for the live kernel. Give the path **as the Nebula server sees it** (a
 relative path is resolved against the server's working directory):
 
 ```bash

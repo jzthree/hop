@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   chipWhen, conditionLabel, dayHeading, describeRrule, describeState, describeTrigger, isTimed,
   nextOfTrigger, orderForAll, orderForSession, relative, timeOfDay, type Checkback, type CodexAutomation
@@ -23,13 +23,20 @@ type Props = {
   // show there without waiting for the next poll.
   onChanged?: () => void;
   onOpenSession?: (internalName: string) => void;
+  // "tab": a session's Scheduled tab, under its header (no backdrop);
+  // otherwise the centred window.
+  placement?: "modal" | "tab";
 };
 
 type Timed =
   | { source: "hop"; at: number; cb: Checkback }
   | { source: "codex"; at: number; auto: CodexAutomation; rule: string };
 
-export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession }: Props) => {
+export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal" }: Props) => {
+  const asTab = placement === "tab";
+  // A tab takes the keyboard once, as it opens (Esc goes back).
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { if (asTab) panelRef.current?.focus(); }, [asTab]);
   const all = session === ALL_CHECKBACKS;
   const [items, setItems] = useState<Checkback[] | null>(null);
   const [automations, setAutomations] = useState<CodexAutomation[]>([]);
@@ -105,11 +112,13 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
 
   return (
     <>
-      <div className="views-backdrop" onClick={onClose} />
-      <div className="views-panel checkbacks-panel" role="dialog" aria-label={`Scheduled for ${sessionName}`}>
+      {!asTab && <div className="views-backdrop" onClick={onClose} />}
+      <div className={"views-panel checkbacks-panel" + (asTab ? " page in-session" : "")} role={asTab ? "tabpanel" : "dialog"}
+           aria-label={`Scheduled for ${sessionName}`} tabIndex={-1}
+           ref={panelRef}>
         <div className="views-head">
           <span className="views-badge">Scheduled</span>
-          <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>
+          {!asTab && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
           <span className="views-head-spacer" />
           <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>
         </div>

@@ -66,6 +66,9 @@ type Props = {
   onOpenSession?: (session: string) => void;
   // As a page, the sidebar's selection is the scope: this clears it.
   onClearSession?: () => void;
+  // The page is a full-screen session's Views tab: under its header, and
+  // the Terminal tab is the way back (no "Open session").
+  inSession?: boolean;
   onClose: () => void;
 };
 
@@ -187,7 +190,7 @@ const previewSrc = (item: ViewItem) =>
 
 const thumbSrc = (item: ViewItem) => item.path.replace(/\/inline$/, "/thumb");
 
-export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onClearSession, onToggleSide, onResizeSide, onClose }: Props) => {
+export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onClearSession, inSession = false, onToggleSide, onResizeSide, onClose }: Props) => {
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   // The result being read; null is the gallery.
@@ -656,7 +659,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
       {/* Page and side have no backdrop: the sidebar, the terminal beside
           them stay live. */}
       {!asPage && !asSide && <div className="views-backdrop" onClick={onClose} />}
-      <div className={"views-panel gallery reading" + (asPage ? " page" : "") + (asSide ? " side" : "") + (open ? " is-reading" : "")}
+      <div className={"views-panel gallery reading" + (asPage ? " page" : "") + (asPage && inSession ? " in-session" : "") + (asSide ? " side" : "") + (open ? " is-reading" : "")}
            role="dialog" aria-label="Published views"
            ref={panelRef} tabIndex={-1}>
         {asSide && onResizeSide && (
@@ -685,7 +688,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
                         className={showAll ? "on" : ""} onClick={() => setShowAll(true)}>all</button>
               </span>
             )}
-            {session && !showAll && onOpenSession && resolvedSession && (
+            {session && !showAll && onOpenSession && resolvedSession && !inSession && (
               <button type="button" className="vg-open-session" onClick={() => onOpenSession(resolvedSession)}
                       title="Open this session">
                 Open session →

@@ -6432,6 +6432,30 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 /* Side by side: the page makes room on the right as it does for the
    sidebar on the left, so the terminal refits instead of being covered. */
 .app.views-side { padding-right: var(--views-w, 560px); }
+/* A full-screen session's tabs: Terminal, Views, Scheduled — kinds of
+   thing the session has, never one tab per document. A tab's page sits
+   under the header, which stays. */
+.session-tabs { display: flex; align-items: stretch; gap: 2px; align-self: stretch; margin: -10px auto -10px 0; }
+/* The tab names the page: no second heading under it. */
+.views-panel.in-session .views-badge { display: none; }
+.session-tabs button {
+  border: 0; background: none; cursor: pointer; transform: none; color: var(--muted, #8a8591);
+  padding: 0 10px; font: 600 13px/1 var(--font-sans); display: inline-flex; align-items: center; gap: 6px;
+  border-bottom: 2px solid transparent; border-radius: 0;
+}
+.session-tabs button:hover { color: var(--ink); background: none; transform: none; }
+.session-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: #7c3aed; }
+.session-tab-n { font: 600 11px/1 var(--font-mono); color: var(--muted, #8a8591); font-variant-numeric: tabular-nums; }
+.views-panel.page.in-session,
+.views-panel.page.in-session.reading { top: var(--topbar-h, 52px); }
+.views-panel.checkbacks-panel.page.in-session {
+  position: fixed; top: var(--topbar-h, 52px); right: 0; bottom: 0; left: var(--rail-w, 320px); transform: none;
+  width: auto; height: auto; max-height: none; z-index: 650; overflow: auto;
+  border: 0; border-radius: 0; box-shadow: none; background: var(--wall-bg);
+  padding: 16px 24px;
+}
+.views-panel.checkbacks-panel.page.in-session:focus { outline: none; }
+.app.views-side .views-panel.checkbacks-panel.page.in-session { right: var(--views-w, 560px); }
 /* Beside the wall too: the wall gives up the width as the terminal does. */
 .app.views-side .switcher-overlay { right: var(--views-w, 560px); }
 .views-panel.side,

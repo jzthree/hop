@@ -892,6 +892,19 @@ const App = () => {
   }, [switcherOpen]);
   // The ⏰ chip's window: what is waiting on a session.
   const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(null);
+  // A full-screen session's Scheduled tab (Views is its other tab).
+  const [schedTab, setSchedTab] = useState(false);
+  // The session header's height: a tab's page sits under it.
+  const [topbarH, setTopbarH] = useState(52);
+  const topbarObsRef = useRef<ResizeObserver | null>(null);
+  const topbarRef = useCallback((el: HTMLElement | null) => {
+    topbarObsRef.current?.disconnect();
+    topbarObsRef.current = null;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const obs = new ResizeObserver(() => setTopbarH(Math.round(el.getBoundingClientRect().height)));
+    obs.observe(el);
+    topbarObsRef.current = obs;
+  }, []);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   // Claude Code titles its process with a bare version number; hop's session
@@ -4496,6 +4509,14 @@ const App = () => {
   // Views, the session it shows; on the wall, the engaged tile; full
   // screen, the session on screen.
   const wallUnder = !session || switcherOpen;
+  // Full screen, a session is a set of TABS — Terminal, Views, Scheduled,
+  // more to come — each a different kind of thing the session has. Tabs
+  // are kinds, never documents: results open one at a time in Views'
+  // reader, not a tab each (that would be the browser's job, redone).
+  const sessionTabs = railDocked && !!session && !switcherOpen && isEmbeddedInHop();
+  const schedTabNow = sessionTabs && schedTab;
+  useEffect(() => { if (viewsPage) setSchedTab(false); }, [viewsPage]);
+  const focusTerminalSoon = () => window.setTimeout(() => termRef.current?.focus(), 0);
   const selectedRoom: string | null = viewsPage ? (viewsOpen?.session ?? null)
     : wallUnder ? wallFocus
     : status === "ended" ? null : session!.room;
@@ -4506,6 +4527,9 @@ const App = () => {
     const hit = sessions.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
     return hit ? (hit.internalName || hit.name) : id;
   };
+  // The room can still be the name from the URL; lists key by internalName.
+  const currentKey = session ? sessionKeyOf(session.room) : null;
+  const currentInfo = currentKey ? sessions.find((x) => (x.internalName || x.name) === currentKey) : undefined;
   // Side by side, the column follows the selection — a tile engaged on
   // the wall, ⌘E / ⌘G full screen — unless it was opened on one result.
   useEffect(() => {
@@ -4603,7 +4627,7 @@ const App = () => {
 
   return (
     <div className={"app" + (railDocked ? " rail-docked" : "") + (viewsSideNow ? " views-side" : "")}
-         style={railDocked ? ({ "--rail-w": `${railWidth}px`, "--views-w": `${viewsSideW}px` } as CSSProperties) : undefined}>
+         style={railDocked ? ({ "--rail-w": `${railWidth}px`, "--views-w": `${viewsSideW}px`, "--topbar-h": `${topbarH}px` } as CSSProperties) : undefined}>
       {switchHud && (() => {
         const curKey = session?.room ?? sessionLabel;
         const SLOT = 152; // card 140 + gap 12; must match .switch-hud CSS
@@ -4638,12 +4662,30 @@ const App = () => {
         );
       })()}
       {!(railDocked && !session) && (
-      <header className={"topbar" + (railDocked ? " channel" : "")}>
-        {railDocked ? (
-          // Docked: the sidebar carries the wordmark; this bar is the
-          // session's own header, Slack's channel name.
+      <header className={"topbar" + (railDocked ? " channel" : "")} ref={topbarRef}>
+        {railDocked ? (<>
+          {/* Docked: the sidebar carries the wordmark; this bar is the
+              session's own header, Slack's channel name — and its tabs. */}
           <div className="channel-name" title={sessionLabel}>{sessionLabel}</div>
-        ) : (
+          {sessionTabs && (
+            <nav className="session-tabs" role="tablist" aria-label="Session">
+              <button type="button" role="tab" aria-selected={!viewsPage && !schedTabNow}
+                      onClick={() => { setSchedTab(false); if (viewsPage) setViewsOpen(null); focusTerminalSoon(); }}>Terminal</button>
+              <button type="button" role="tab" aria-selected={viewsPage || viewsSideNow}
+                      title={`This session's results (${isMacPlatform ? "⌘⇧V" : "Views"})`}
+                      onClick={() => {
+                        setSchedTab(false);
+                        if (!viewsPage && !viewsSideNow) setViewsOpen(viewsSide ? { session: session!.room } : { session: session!.room, page: true });
+                      }}>
+                Views{!!currentInfo?.views?.count && <span className="session-tab-n">{currentInfo.views.count}</span>}
+              </button>
+              <button type="button" role="tab" aria-selected={schedTabNow}
+                      onClick={() => { setSchedTab(true); if (viewsPage) setViewsOpen(null); }}>
+                Scheduled{!!currentInfo?.checkbacks && <span className="session-tab-n">{currentInfo.checkbacks}</span>}
+              </button>
+            </nav>
+          )}
+        </>) : (
         <div className="brand">
           <div>
             {/* Wordmark only — no mascot tile. The cursor block is the one
@@ -5653,8 +5695,10 @@ const App = () => {
             // Side by side, the column follows: switch, and show the new
             // session's results beside it.
             if (viewsSideNow) setViewsOpen({ session: next.internalName || next.name });
-            // In Views, a session in the sidebar is a filter: its results,
-            // and the place stays. "Open session" in Views goes in.
+            // A full-screen session's Views tab: switch, on the same tab.
+            else if (viewsPage && sessionTabs) setViewsOpen({ session: next.internalName || next.name, page: true });
+            // In Views over the wall, a session in the sidebar is a filter:
+            // its results, and the place stays.
             else if (viewsPage) {
               setViewsOpen({ session: next.internalName || next.name, page: true });
               return;
@@ -5683,6 +5727,14 @@ const App = () => {
             if (session && !switcherOpen) setSwitcherOpen(true);
           }}
           onClose={() => setRailOpen(false)}
+        />
+      )}
+      {schedTabNow && (
+        <CheckbacksPanel placement="tab"
+          session={currentKey!}
+          sessionName={sessionLabel}
+          onClose={() => { setSchedTab(false); focusTerminalSoon(); }}
+          onChanged={() => { void fetchSessions({ showLoading: false }); }}
         />
       )}
       {checkbacksOpen && (
@@ -5715,6 +5767,7 @@ const App = () => {
                     onToggleSide={railDocked ? toggleViewsSide : undefined}
                     onResizeSide={resizeViewsSide}
                     onOpenSession={viewsPage ? goToSession : undefined}
+                    inSession={sessionTabs && viewsPage}
                     onClearSession={viewsPage ? () => setViewsOpen({ page: true }) : undefined}
                     onClose={() => setViewsOpen(null)} />
       )}

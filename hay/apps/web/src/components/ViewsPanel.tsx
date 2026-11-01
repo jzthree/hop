@@ -342,6 +342,11 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
           || (document.activeElement && el.contains(document.activeElement)));
         if (!inside) return;
       }
+      // A box outside Views (the sidebar's search) keeps its keys: ⏎ there
+      // picks a session, it does not open a card.
+      const typing = document.activeElement as HTMLElement | null;
+      if (typing && !panelRef.current?.contains(typing)
+          && (typing.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(typing.tagName))) return;
       const inSearch = document.activeElement === searchRef.current;
       if (event.key === "Escape") {
         event.preventDefault();

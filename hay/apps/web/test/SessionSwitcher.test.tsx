@@ -95,6 +95,17 @@ describe("SessionSwitcher tile zoom", () => {
     expect(card!.querySelector(".switcher-preview")).toBeTruthy();
   });
 
+  it("reports its selected session, and selects one asked for (back from Views)", () => {
+    const two: SwitcherSession[] = [...sessions, { name: "notes", displayName: "notes", internalName: "s_notes", active: true, starting: false, createdBy: "user" }];
+    const onFocusedChange = vi.fn();
+    const { rerender } = render(<SessionSwitcher {...props} sessions={two} open currentRoom="research" onFocusedChange={onFocusedChange} />);
+    expect(onFocusedChange).toHaveBeenLastCalledWith("research");
+    rerender(<SessionSwitcher {...props} sessions={two} open currentRoom="research" onFocusedChange={onFocusedChange}
+                              focusRequest={{ key: "notes", seq: 1 }} />);
+    expect(onFocusedChange).toHaveBeenLastCalledWith("s_notes");
+    expect(screen.getByText("notes").closest(".switcher-card")!.className).toContain("kbd-selected");
+  });
+
   it("covered by another page (Views), it leaves typing to that page", () => {
     render(<><input aria-label="Over the wall" /><SessionSwitcher {...props} open covered /></>);
     const other = screen.getByLabelText("Over the wall") as HTMLInputElement;

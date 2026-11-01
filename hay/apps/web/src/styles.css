@@ -6432,6 +6432,8 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 /* Side by side: the page makes room on the right as it does for the
    sidebar on the left, so the terminal refits instead of being covered. */
 .app.views-side { padding-right: var(--views-w, 560px); }
+/* Beside the wall too: the wall gives up the width as the terminal does. */
+.app.views-side .switcher-overlay { right: var(--views-w, 560px); }
 .views-panel.side,
 .views-panel.side.reading {
   top: 0; right: 0; bottom: 0; left: auto; transform: none; z-index: 40;

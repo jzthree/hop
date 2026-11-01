@@ -571,6 +571,12 @@ const App = () => {
     try { const v = Number(localStorage.getItem("hop_views_side_w")); return v >= 340 && v <= 1400 ? v : VIEWS_SIDE_DEFAULT_W; } catch { return VIEWS_SIDE_DEFAULT_W; }
   });
   const [createName, setCreateName] = useState<string | undefined>(undefined);
+  // The wall's engaged tile — on the wall, the selected session — and a
+  // request to engage one (back from Views with another session picked).
+  const [wallFocus, setWallFocus] = useState<string | null>(null);
+  const [wallFocusReq, setWallFocusReq] = useState<{ key: string; seq: number } | null>(null);
+  // ⌘⇧V does what the strip's Views button does (set where it is built).
+  const toggleViewsRef = useRef<() => void>(() => {});
   // ⌘K in a session with the sidebar docked: search, not the whole wall.
   const [railFocusSignal, setRailFocusSignal] = useState(0);
   const railDockedRef = useRef(false);
@@ -4304,10 +4310,7 @@ const App = () => {
       }
       if (isMacPlatform && shifted && key === "v") {
         grab();
-        setViewsOpen((v) => v ? null
-          : (activeSessionRoomRef.current
-              ? { session: activeSessionRoomRef.current }
-              : {}));
+        toggleViewsRef.current();
         return;
       }
       // ⌘J / ⌘L step the switch HUD left / right (J is left of L on the
@@ -4484,18 +4487,40 @@ const App = () => {
   // The wall is up: the hub page (no session), or the wall over a session.
   // Views as a page is a place of its own, and then the wall is not.
   // Docked, Views is the page (a session's results are that page filtered
-  // to it: a link, an inline card, ⌘⇧V), or — chosen, and with a session to
-  // sit beside — a column side by side with the terminal. The wall over a
-  // session hides the column until it closes.
-  const viewsSideNow = railDocked && viewsSide && !!session && !!viewsOpen && !switcherOpen;
-  const viewsHidden = railDocked && viewsSide && !!session && !!viewsOpen && switcherOpen;
-  const viewsPage = railDocked && !!viewsOpen && !viewsSideNow && !viewsHidden;
+  // to it: a link, an inline card, ⌘⇧V), or — chosen — a column side by
+  // side with the session: beside its terminal, or beside the wall.
+  const viewsSideNow = railDocked && viewsSide && !!viewsOpen;
+  const viewsPage = railDocked && !!viewsOpen && !viewsSideNow;
+  // The sidebar's session is the top of the hierarchy; Sessions (the wall
+  // or full screen) and Views are two ways to look at it. Selected is: in
+  // Views, the session it shows; on the wall, the engaged tile; full
+  // screen, the session on screen.
+  const wallUnder = !session || switcherOpen;
+  const selectedRoom: string | null = viewsPage ? (viewsOpen?.session ?? null)
+    : wallUnder ? wallFocus
+    : status === "ended" ? null : session!.room;
+  // One session, whichever identifier names it.
+  const sessionKeyOf = (id: string | null | undefined) => {
+    if (!id) return null;
+    const lc = id.toLowerCase();
+    const hit = sessions.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
+    return hit ? (hit.internalName || hit.name) : id;
+  };
+  // Side by side, the column follows the selection — a tile engaged on
+  // the wall, ⌘E / ⌘G full screen — unless it was opened on one result.
+  useEffect(() => {
+    if (!viewsSideNow || !viewsOpen || viewsOpen.item || !selectedRoom) return;
+    if (sessionKeyOf(viewsOpen.session) === sessionKeyOf(selectedRoom)) return;
+    setViewsOpen({ session: selectedRoom });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewsSideNow, selectedRoom]);
   const toggleViewsSide = () => {
     const next = !viewsSide;
     setViewsSide(next);
     try { localStorage.setItem("hop_views_side", next ? "1" : "0"); } catch { /* per-browser only */ }
     // Beside a session, the column is that session's results.
-    if (next && session && viewsOpen && !viewsOpen.session) setViewsOpen({ ...viewsOpen, session: session.room });
+    const here = wallUnder ? wallFocus : session?.room;
+    if (next && here && viewsOpen && !viewsOpen.session) setViewsOpen({ ...viewsOpen, session: here });
   };
   const resizeViewsSide = (w: number | null) => {
     const max = Math.max(360, window.innerWidth - (railWidth + 360));
@@ -4506,7 +4531,7 @@ const App = () => {
   // The strip says when there is something new to read (sessions with
   // results this browser has not seen) — the tiles no longer carry it.
   const freshViewSessions = unseenViewSessions;
-  const railOnWall = (!session || switcherOpen) && !viewsPage;
+  const railOnWall = wallUnder && !viewsPage;
   const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
   // Leave Views for a session (by any of its identifiers) — in place when
   // a terminal is up, as its own page from the hub.
@@ -4524,18 +4549,35 @@ const App = () => {
     setSwitcherOpen(false);
     switchSession(target);
   };
+  const openViews = () => {
+    if (viewsSideNow) { setViewsOpen(null); return; }
+    if (viewsPage) { setViewsOpen({ page: true }); return; }
+    if (!railDocked) {
+      // No sidebar: the modal, on the session in hand (again: closed).
+      setViewsOpen((v) => v ? null : activeSessionRoomRef.current ? { session: activeSessionRoomRef.current } : {});
+      return;
+    }
+    const sel = selectedRoom ?? undefined;
+    setViewsOpen(viewsSide ? { session: sel } : { session: sel, page: true });
+  };
+  // Sessions from Views: back where you were — the wall, with the session
+  // picked in Views engaged, or full screen, switched to it.
+  const backToSessions = () => {
+    const sel = viewsOpen?.session;
+    if (!wallUnder && sel && sessionKeyOf(sel) !== sessionKeyOf(session?.room)) { goToSession(sel); return; }
+    setViewsOpen(null);
+    if (wallUnder && sel && sessionKeyOf(sel) !== sessionKeyOf(wallFocus)) {
+      setWallFocusReq((r) => ({ key: sel, seq: (r?.seq ?? 0) + 1 }));
+    }
+  };
   const railNav: RailNavItem[] = !railDocked ? [] : [
     // Clicking the place you are in shows all of it (a filter clears), as
     // in Slack; Esc or another place leaves.
     { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage || viewsSideNow,
       count: freshViewSessions || undefined, fresh: freshViewSessions > 0,
-      // With a session open, Views opens on that session's results ("all"
-      // is one click away in the panel); from the wall, or clicked again
-      // while already in Views, it shows everything.
-      onClick: () => {
-        const here = session && !switcherOpen && !viewsPage ? session.room : undefined;
-        setViewsOpen(viewsSide && here ? { session: here } : { session: here, page: true });
-      } },
+      // Opens on the selected session's results; clicked again, the page
+      // shows everything (nothing selected) and the column closes.
+      onClick: () => openViews() },
     { key: "scheduled", label: "Scheduled", icon: <RailIcon name="scheduled" />,
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
@@ -4550,6 +4592,8 @@ const App = () => {
       onClick: () => setShortcutHelpOpen((v) => !v) },
     ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
   ];
+  // ⌘⇧V: in Views, back to the session; elsewhere, into Views.
+  toggleViewsRef.current = () => (viewsPage ? backToSessions() : viewsSideNow ? setViewsOpen(null) : openViews());
   // The sidebar's compose button: the wall's new-session form.
   const newFromRail = (name?: string) => {
     if (session) setSwitcherOpen(true);
@@ -4726,6 +4770,8 @@ const App = () => {
             open
             sessions={sessions}
             currentRoom={null}
+            onFocusedChange={setWallFocus}
+            focusRequest={wallFocusReq}
             dismissable={false}
             folders={folders}
             onClose={() => {}}
@@ -5449,6 +5495,8 @@ const App = () => {
             onNotice={showToast}
             tileWsBase={resolveTunnelWsUrl()}
             onFocusSession={focusSessionInPlace}
+            onFocusedChange={setWallFocus}
+            focusRequest={wallFocusReq}
             folders={folders}
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             onOpenCodexApp={() => setCodexAppOpen(true)}
@@ -5575,8 +5623,7 @@ const App = () => {
         <SessionRail
           sessions={sessions}
           folders={folders}
-          currentRoom={viewsPage ? (viewsOpen?.session ?? null)
-            : railOnWall || !session || status === "ended" ? null : session.room}
+          currentRoom={sessionKeyOf(selectedRoom)}
           onWall={railOnWall}
           inSessions={!viewsPage}
           searchSlot={railDocked && railOnWall ? setRailSearchEl : undefined}
@@ -5628,13 +5675,12 @@ const App = () => {
             termRef.current?.focus();
           }}
           onAllSessions={() => {
-            // Views and Sessions share the sidebar's selection: from a
-            // session's results, Sessions goes into that session.
-            const selected = viewsPage ? viewsOpen?.session : undefined;
             setRailOpen(false);
-            if (selected) { goToSession(selected); return; }
-            setViewsOpen(null);
-            if (session) setSwitcherOpen(true);
+            // From Views: back to where you were, on the selected session.
+            if (viewsPage) { backToSessions(); return; }
+            // Full screen: out to the wall (a column beside stays). On the
+            // wall already: nothing to do.
+            if (session && !switcherOpen) setSwitcherOpen(true);
           }}
           onClose={() => setRailOpen(false)}
         />
@@ -5660,13 +5706,13 @@ const App = () => {
       )}
       {desktopOpen && <DesktopView wsBase={resolveTunnelWsUrl()} onClose={() => setDesktopOpen(false)} />}
       {shortcutHelpOpen && <ShortcutsPanel isMac={isMacPlatform} onClose={() => setShortcutHelpOpen(false)} />}
-      {viewsOpen && !viewsHidden && (
+      {viewsOpen && (
         <ViewsPanel key={viewsOpen.item ? `${viewsOpen.session}/${viewsOpen.item}` : "views"}
                     session={viewsOpen.session} item={viewsOpen.item} sessions={sessions}
                     // Docked sidebar: Views is a place beside it, like the
                     // wall; elsewhere the centred window.
                     placement={!railDocked ? "modal" : viewsSideNow ? "side" : "page"}
-                    onToggleSide={railDocked && session ? toggleViewsSide : undefined}
+                    onToggleSide={railDocked ? toggleViewsSide : undefined}
                     onResizeSide={resizeViewsSide}
                     onOpenSession={viewsPage ? goToSession : undefined}
                     onClearSession={viewsPage ? () => setViewsOpen({ page: true }) : undefined}

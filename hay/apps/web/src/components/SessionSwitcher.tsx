@@ -114,6 +114,12 @@ type Props = {
   // Interacting with a tile makes THAT session current: the chip moves, and
   // closing the wall lands full-screen in the terminal you were typing in.
   onFocusSession?: (session: SwitcherSession) => void;
+  // The engaged tile is the wall's selected session — the one Views shows
+  // when you switch to it. Reported on every change (null: none engaged).
+  onFocusedChange?: (key: string | null) => void;
+  // Engage this session's tile (back from Views with another session
+  // picked in the sidebar). A new seq asks again.
+  focusRequest?: { key: string; seq: number } | null;
   // User-authored folders (Manual mode only). Server-owned, so they follow
   // you across devices — unlike the drag ORDER, which is per-client taste.
   folders?: SwitcherFolder[];
@@ -1408,6 +1414,8 @@ export const SessionSwitcher = ({
   onNotice,
   tileWsBase,
   onFocusSession,
+  onFocusedChange,
+  focusRequest,
   folders = [],
   userName,
   terminalTheme,
@@ -2591,6 +2599,28 @@ export const SessionSwitcher = ({
     onSwitch(session);
   };
 
+  const onFocusedChangeRef = useRef(onFocusedChange);
+  onFocusedChangeRef.current = onFocusedChange;
+  // Below the live-tile zoom nothing is engaged: the keyboard's tile is.
+  const kbdKey = kbdIndex >= 0 && flatNav[kbdIndex] ? sessionKey(flatNav[kbdIndex]) : null;
+  const selectedKey = open ? ((interactiveTiles ? focusedKey : null) ?? kbdKey) : null;
+  useEffect(() => { onFocusedChangeRef.current?.(selectedKey); }, [selectedKey]);
+  const doneRequestRef = useRef(0);
+  useEffect(() => {
+    if (!open || !focusRequest || doneRequestRef.current === focusRequest.seq) return;
+    const lc = focusRequest.key.toLowerCase();
+    const target = flatNav.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
+    if (!target) return; // not in the list yet: try again when it is
+    doneRequestRef.current = focusRequest.seq;
+    const idx = flatNav.indexOf(target);
+    if (canFocusInPlace(target)) focusInPlace(target);
+    // Not running: started in place, as a click on its tile would.
+    else if (interactiveTiles && target.type !== "port" && !target.active) handleTap(target);
+    else { setFocusedKey(null); setKbdIndex(idx); }
+    requestAnimationFrame(() => { document.querySelector(`[data-nav-index="${idx}"]`)?.scrollIntoView?.({ block: "nearest" }); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, focusRequest, flatNav]);
+
   // Arrow/Enter navigation + type-anywhere filtering. The action sheet and
   // the create form own the keyboard while open.
   useEffect(() => {
@@ -2608,6 +2638,11 @@ export const SessionSwitcher = ({
         return;
       }
       if (document.activeElement?.closest?.(".switcher-live-tile, .switcher-focus-tile")) return;
+      // Keys typed into something beside the wall (Views side by side, the
+      // sidebar's search) are that box's own.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== filterInputRef.current
+          && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.closest?.(".views-panel"))) return;
       // ⌘⏎ (Ctrl⏎): enter FULL SCREEN on the selected session — the one
       // deliberate keyboard route into the mode. Plain Enter engages the
       // tile in place; full screen never happens by accident.

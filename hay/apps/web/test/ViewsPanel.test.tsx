@@ -190,6 +190,15 @@ describe("ViewsPanel", () => {
     expect(document.querySelector(".views-scope-chip")).toBeNull();
   });
 
+  it("leaves keys typed in a box outside it alone (⏎ in the sidebar's search picks a session)", async () => {
+    render(<><input aria-label="Sidebar search" /><ViewsPanel placement="page" onClose={() => {}} /></>);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(3));
+    const box = screen.getByLabelText("Sidebar search");
+    box.focus();
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(document.querySelector(".vg-reader")).toBeNull();
+  });
+
   it("a session that has published nothing says so — it never widens by itself", async () => {
     render(<ViewsPanel session="Nowhere" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText(/Nothing published yet by this session/)).toBeTruthy());

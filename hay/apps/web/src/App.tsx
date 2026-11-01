@@ -577,6 +577,9 @@ const App = () => {
   const [wallFocusReq, setWallFocusReq] = useState<{ key: string; seq: number } | null>(null);
   // ⌘⇧V does what the strip's Views button does (set where it is built).
   const toggleViewsRef = useRef<() => void>(() => {});
+  // ⌘⇧S: a full-screen session's Calendar tab, and back; elsewhere every
+  // session's calendar.
+  const toggleCalendarRef = useRef<() => void>(() => {});
   // ⌘K in a session with the sidebar docked: search, not the whole wall.
   const [railFocusSignal, setRailFocusSignal] = useState(0);
   const railDockedRef = useRef(false);
@@ -892,7 +895,7 @@ const App = () => {
   }, [switcherOpen]);
   // The ⏰ chip's window: what is waiting on a session.
   const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(null);
-  // A full-screen session's Scheduled tab (Views is its other tab).
+  // A full-screen session's Calendar tab (Views is its other tab).
   const [schedTab, setSchedTab] = useState(false);
   // The session header's height: a tab's page sits under it.
   const [topbarH, setTopbarH] = useState(52);
@@ -4321,6 +4324,11 @@ const App = () => {
         setSwitcherOpen((v) => !v);
         return;
       }
+      if (shifted && key === "s") {
+        grab();
+        toggleCalendarRef.current();
+        return;
+      }
       if (isMacPlatform && shifted && key === "v") {
         grab();
         toggleViewsRef.current();
@@ -4509,7 +4517,7 @@ const App = () => {
   // Views, the session it shows; on the wall, the engaged tile; full
   // screen, the session on screen.
   const wallUnder = !session || switcherOpen;
-  // Full screen, a session is a set of TABS — Terminal, Views, Scheduled,
+  // Full screen, a session is a set of TABS — Terminal, Views, Calendar,
   // more to come — each a different kind of thing the session has. Tabs
   // are kinds, never documents: results open one at a time in Views'
   // reader, not a tab each (that would be the browser's job, redone).
@@ -4602,7 +4610,7 @@ const App = () => {
       // Opens on the selected session's results; clicked again, the page
       // shows everything (nothing selected) and the column closes.
       onClick: () => openViews() },
-    { key: "scheduled", label: "Scheduled", icon: <RailIcon name="scheduled" />,
+    { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />,
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
     ...(desktopEnabled ? [{ key: "desktop", label: "Desktop", icon: <RailIcon name="desktop" />, onClick: () => setDesktopOpen(true) }] : []),
@@ -4616,6 +4624,14 @@ const App = () => {
       onClick: () => setShortcutHelpOpen((v) => !v) },
     ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
   ];
+  toggleCalendarRef.current = () => {
+    if (sessionTabs) {
+      if (schedTab) { setSchedTab(false); focusTerminalSoon(); }
+      else { setSchedTab(true); if (viewsPage) setViewsOpen(null); }
+      return;
+    }
+    setCheckbacksOpen((v) => (v ? null : "*"));
+  };
   // ⌘⇧V: in Views, back to the session; elsewhere, into Views.
   toggleViewsRef.current = () => (viewsPage ? backToSessions() : viewsSideNow ? setViewsOpen(null) : openViews());
   // The sidebar's compose button: the wall's new-session form.
@@ -4680,8 +4696,9 @@ const App = () => {
                 Views{!!currentInfo?.views?.count && <span className="session-tab-n">{currentInfo.views.count}</span>}
               </button>
               <button type="button" role="tab" aria-selected={schedTabNow}
+                      title={`What is coming up on this session (${isMacPlatform ? "⌘⇧S" : "Ctrl+Shift+S"})`}
                       onClick={() => { setSchedTab(true); if (viewsPage) setViewsOpen(null); }}>
-                Scheduled{!!currentInfo?.checkbacks && <span className="session-tab-n">{currentInfo.checkbacks}</span>}
+                Calendar{!!currentInfo?.checkbacks && <span className="session-tab-n">{currentInfo.checkbacks}</span>}
               </button>
             </nav>
           )}

@@ -6456,6 +6456,55 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 }
 .views-panel.checkbacks-panel.page.in-session:focus { outline: none; }
 .app.views-side .views-panel.checkbacks-panel.page.in-session { right: var(--views-w, 560px); }
+/* The calendar: a week of days like a lab notebook's spread — hairline
+   columns, today marked with hop's violet, entries as small tags (hop's
+   violet, Codex's cyan), a frequent repeat a soft band, the past faded. */
+.checkbacks-panel { width: min(980px, 94vw); }
+.cal-nav { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; }
+.cal-nav button {
+  border: 1px solid var(--card-line, var(--line)); background: var(--card-bg, var(--panel)); color: var(--ink); cursor: pointer;
+  border-radius: 7px; padding: 2px 9px; font: 600 12px/1.5 var(--font-sans); transform: none;
+}
+.cal-nav button:hover:not(:disabled) { border-color: color-mix(in srgb, #7c3aed 55%, var(--card-line, var(--line))); transform: none; }
+.cal-nav button:disabled { opacity: 0.45; cursor: default; }
+.cal-range { margin-left: 6px; font: 600 13px/1.4 var(--font-sans); color: var(--ink); }
+.cal-week {
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); margin: 6px 0 14px;
+  border: 1px solid var(--card-line, var(--line)); border-radius: 10px; overflow: hidden; background: var(--card-bg, var(--panel));
+}
+.cal-day { min-height: 168px; padding: 8px 6px 10px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cal-day + .cal-day { border-left: 1px solid var(--card-line, var(--line)); }
+.cal-day.before { background: color-mix(in srgb, var(--ink) 2.5%, transparent); }
+.cal-day-head { display: flex; align-items: baseline; gap: 6px; padding: 0 3px 4px; }
+.cal-dow { font: 600 10px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted, #8a8591); }
+.cal-date { font: 600 15px/1 var(--font-sans); color: var(--ink); font-variant-numeric: tabular-nums; }
+.cal-day.today .cal-date {
+  background: #7c3aed; color: #fff; border-radius: 999px; min-width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0 5px; font-size: 13px;
+}
+.cal-entry {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; min-width: 0; text-align: left;
+  border: 0; border-left: 3px solid #7c3aed; border-radius: 5px; padding: 4px 6px; cursor: pointer; transform: none;
+  background: color-mix(in srgb, #7c3aed 9%, transparent); color: var(--ink);
+}
+.cal-entry.codex { border-left-color: #0891b2; background: color-mix(in srgb, #06b6d4 10%, transparent); }
+.cal-entry.band { border-left-style: dotted; background: repeating-linear-gradient(135deg, color-mix(in srgb, #7c3aed 7%, transparent) 0 6px, transparent 6px 12px); }
+.cal-entry.codex.band { background: repeating-linear-gradient(135deg, color-mix(in srgb, #06b6d4 8%, transparent) 0 6px, transparent 6px 12px); }
+.cal-entry.past { opacity: 0.5; }
+.cal-entry:hover { filter: brightness(0.97); transform: none; }
+.cal-entry.on { box-shadow: 0 0 0 2px #7c3aed; }
+.cal-entry.codex.on { box-shadow: 0 0 0 2px #0891b2; }
+.cal-when { font: 600 10.5px/1.2 var(--font-mono); color: var(--muted, #8a8591); font-variant-numeric: tabular-nums; }
+.cal-what { font: 500 12px/1.3 var(--font-sans); width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-when { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-who { font-family: var(--font-sans); font-weight: 600; color: var(--ink); opacity: 0.75; }
+.cal-week { flex-shrink: 0; }
+.cal-detail { border: 1px solid var(--card-line, var(--line)); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; background: var(--card-bg, var(--panel)); }
+@media (max-width: 760px) {
+  .cal-week { grid-template-columns: 1fr; }
+  .cal-day { min-height: 0; }
+  .cal-day + .cal-day { border-left: 0; border-top: 1px solid var(--card-line, var(--line)); }
+}
 /* Beside the wall too: the wall gives up the width as the terminal does. */
 .app.views-side .switcher-overlay { right: var(--views-w, 560px); }
 .views-panel.side,

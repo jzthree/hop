@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from "react";
+import { addDays, rruleOccurrences, startOfDay, triggerOccurrences, weekDays } from "../utils/calendar";
 import {
   chipWhen, conditionLabel, dayHeading, describeRrule, describeState, describeTrigger, isTimed,
   nextOfTrigger, orderForAll, orderForSession, relative, timeOfDay, type Checkback, type CodexAutomation
 } from "../utils/checkbackText";
 
-// What is scheduled on a session, read like a reminders list: the timed ones
-// under their day, the ones waiting on something (a job, a file, idle) in a
-// list of their own, the Codex automations aimed at the same conversation
-// beside hop's, and the recent past folded away. Opened from a card's chip.
-// hop's own can be cancelled here; scheduling stays with `hop checkback` and
-// the agent's MCP tool, and Codex's automations with Codex.
+// A session's CALENDAR: a week, day by day, with everything timed on it —
+// hop's check-backs and the Codex automations aimed at the same
+// conversation, a repeat on every day it runs (a frequent one as a band,
+// "every 30m", rather than a column of times), and what was sent on the
+// days it went. Picking an entry reads it in full below the week. The ones
+// waiting on something rather than a time (a job, a file, idle) have no
+// day: they are listed under the week. hop's own can be cancelled here;
+// scheduling stays with `hop checkback` and the agent's MCP tool, and
+// Codex's automations with Codex.
 
 // session "*" is every session at once: the same list, each row naming
 // whose it is, the session's name opening it.
@@ -28,9 +32,12 @@ type Props = {
   placement?: "modal" | "tab";
 };
 
-type Timed =
-  | { source: "hop"; at: number; cb: Checkback }
-  | { source: "codex"; at: number; auto: CodexAutomation; rule: string };
+// One entry on one day: at a time, or a band (at null) across the day.
+type Entry =
+  | { key: string; source: "hop"; at: number | null; every?: number; cb: Checkback; past: boolean }
+  | { key: string; source: "codex"; at: number | null; every?: number; auto: CodexAutomation; rule: string; past: boolean };
+
+const every = (ms: number) => ms % 3_600_000 === 0 ? `every ${ms / 3_600_000}h` : `every ${Math.round(ms / 60_000)}m`;
 
 export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal" }: Props) => {
   const asTab = placement === "tab";
@@ -43,6 +50,10 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  // The week shown starts here (local midnight); today by default.
+  const [weekStart, setWeekStart] = useState(() => startOfDay(Date.now()));
+  // The entry being read below the week.
+  const [picked, setPicked] = useState<string | null>(null);
   const now = Date.now();
 
   const load = () => {
@@ -57,10 +68,16 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
   };
   useEffect(() => { load(); }, [session]);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); } };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (picked) setPicked(null); else onClose(); return; }
+      // ← → a week back / on, t today — from inside the calendar only.
+      if (!panelRef.current?.contains(document.activeElement) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); setWeekStart((w) => addDays(w, e.key === "ArrowLeft" ? -7 : 7)); }
+      else if (e.key === "t") setWeekStart(startOfDay(Date.now()));
+    };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [onClose, picked]);
 
   const cancel = async (id: string) => {
     setBusy(id);
@@ -85,19 +102,43 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
   const pastDueAutos = autoTimes.filter(({ auto, r }) => auto.status === "ACTIVE" && isPastDue(r, auto.rrule));
   const pausedAutos = automations.filter((a) => a.status !== "ACTIVE");
 
-  // Everything with a clock time, hop's and Codex's together, soonest first.
-  const timed: Timed[] = [
-    ...pending.filter((c) => isTimed(c.trigger)).map((cb) => ({ source: "hop" as const, at: nextOfTrigger(cb.trigger) ?? now, cb })),
-    ...activeAutos.map((auto) => { const r = describeRrule(auto.rrule, now); return { source: "codex" as const, at: r.next ?? Number.MAX_SAFE_INTEGER, auto, rule: r.label }; })
-  ].sort((a, b) => a.at - b.at);
-  const days: Array<[string, Timed[]]> = [];
-  for (const t of timed) {
-    const head = t.at === Number.MAX_SAFE_INTEGER ? "Repeating" : dayHeading(t.at, now);
-    const last = days[days.length - 1];
-    if (last && last[0] === head) last[1].push(t); else days.push([head, [t]]);
-  }
+  // The week: each day's entries, hop's and Codex's together, in time
+  // order with bands first. Sent ones sit on the day they went; one due
+  // but not yet typed (the agent was busy) stays on today until it goes.
+  const today = startOfDay(now);
+  const timedPending = pending.filter((c) => isTimed(c.trigger));
+  const sent = rows.filter((c) => c.status === "delivered");
+  const week = weekDays(weekStart).map((day) => {
+    const from = day, to = addDays(day, 1);
+    const list: Entry[] = [];
+    for (const cb of timedPending) {
+      const o = triggerOccurrences(cb.trigger, from, to);
+      if (o.band) list.push({ key: `${cb.id}~${day}`, source: "hop", at: null, every: o.band, cb, past: false });
+      for (const at of o.times) list.push({ key: `${cb.id}@${at}`, source: "hop", at, cb, past: false });
+      const due = nextOfTrigger(cb.trigger);
+      if (day === today && cb.trigger.kind === "at" && due !== null && due < today) list.push({ key: `${cb.id}@due`, source: "hop", at: due, cb, past: false });
+    }
+    for (const auto of activeAutos.concat(pastDueAutos.map(({ auto }) => auto))) {
+      const o = rruleOccurrences(auto.rrule, from, to);
+      const rule = describeRrule(auto.rrule, now).label;
+      if (o.band) list.push({ key: `${auto.id}~${day}`, source: "codex", at: null, every: o.band, auto, rule, past: false });
+      for (const at of o.times) list.push({ key: `${auto.id}@${at}`, source: "codex", at, auto, rule, past: at < now });
+    }
+    for (const cb of sent) {
+      const at = cb.deliveredAt ?? cb.firedAt ?? nextOfTrigger(cb.trigger);
+      if (at && at >= from && at < to) list.push({ key: `${cb.id}@sent`, source: "hop", at, cb, past: true });
+    }
+    list.sort((a, b) => (a.at ?? -1) - (b.at ?? -1));
+    return { day, list };
+  });
+  const pickedEntry = picked ? week.flatMap((d) => d.list).find((e) => e.key === picked) ?? null : null;
   const waiting = pending.filter((c) => !isTimed(c.trigger));
-  const nothing = timed.length === 0 && waiting.length === 0;
+  const nothing = timedPending.length === 0 && waiting.length === 0 && activeAutos.length === 0;
+  const rangeLabel = (() => {
+    const a = new Date(weekStart), b = new Date(addDays(weekStart, 6));
+    const md = (d: Date) => d.toLocaleDateString([], { month: "short", day: "numeric" });
+    return a.getMonth() === b.getMonth() ? `${md(a)} – ${b.getDate()}` : `${md(a)} – ${md(b)}`;
+  })();
 
   const message = (key: string, text: string) => (
     <div className={"sched-message" + (open === key ? " open" : "")}
@@ -114,11 +155,17 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
     <>
       {!asTab && <div className="views-backdrop" onClick={onClose} />}
       <div className={"views-panel checkbacks-panel" + (asTab ? " page in-session" : "")} role={asTab ? "tabpanel" : "dialog"}
-           aria-label={`Scheduled for ${sessionName}`} tabIndex={-1}
+           aria-label={`Calendar for ${sessionName}`} tabIndex={-1}
            ref={panelRef}>
         <div className="views-head">
-          <span className="views-badge">Scheduled</span>
+          <span className="views-badge">Calendar</span>
           {!asTab && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
+          <span className="cal-nav">
+            <button type="button" aria-label="Previous week" title="Previous week (←)" onClick={() => setWeekStart((w) => addDays(w, -7))}>‹</button>
+            <button type="button" className="cal-today" disabled={weekStart === today} title="This week (t)" onClick={() => setWeekStart(today)}>Today</button>
+            <button type="button" aria-label="Next week" title="Next week (→)" onClick={() => setWeekStart((w) => addDays(w, 7))}>›</button>
+            <span className="cal-range">{rangeLabel}</span>
+          </span>
           <span className="views-head-spacer" />
           <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
@@ -130,40 +177,64 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
           <div className="checkbacks-list">
             {nothing && <p className="checkbacks-empty">{all ? "Nothing scheduled." : "Nothing scheduled on this session."}</p>}
 
-            {days.map(([head, list]) => (
-              <section key={head} className="sched-day">
-                <div className="sched-day-head">{head}</div>
-                {list.map((t) => t.source === "hop" ? (
-                  <div key={t.cb.id} className={"sched-row" + (t.cb.firedAt ? " fired" : "")}>
-                    <div className="sched-time">{t.at === Number.MAX_SAFE_INTEGER ? "—" : timeOfDay(t.at)}</div>
-                    <div className="sched-body">
-                      {whose(t.cb)}
-                      {message(t.cb.id, t.cb.message)}
-                      <div className="sched-meta">
-                        {t.cb.trigger.kind === "every" ? describeTrigger(t.cb.trigger, now) : chipWhen(t.at, now)}
-                        {t.cb.firedAt ? " · due, waiting for the agent to be idle" : ""}
-                        {t.cb.force ? " · typed even mid-turn" : ""} · by {who(t.cb)}
-                      </div>
+            <div className="cal-week" role="grid" aria-label={`Week of ${rangeLabel}`}>
+              {week.map(({ day, list }) => {
+                const d = new Date(day);
+                return (
+                  <div key={day} role="gridcell" className={"cal-day" + (day === today ? " today" : "") + (day < today ? " before" : "")}>
+                    <div className="cal-day-head">
+                      <span className="cal-dow">{d.toLocaleDateString([], { weekday: "short" })}</span>
+                      <span className="cal-date">{d.getDate()}</span>
                     </div>
-                    <button type="button" className="checkback-cancel" disabled={busy === t.cb.id} onClick={() => cancel(t.cb.id)}>Cancel</button>
+                    {list.map((e) => (
+                      <button key={e.key} type="button"
+                              className={"cal-entry " + e.source + (e.at === null ? " band" : "") + (e.past ? " past" : "") + (picked === e.key ? " on" : "")}
+                              onClick={() => setPicked((p) => (p === e.key ? null : e.key))}>
+                        <span className="cal-when">
+                          {e.at === null ? every(e.every!) : timeOfDay(e.at)}
+                          {all && e.source === "hop" ? <span className="cal-who"> · {e.cb.sessionName || e.cb.session}</span> : null}
+                        </span>
+                        <span className="cal-what">{e.source === "hop" ? e.cb.message.split("\n")[0] : e.auto.name}</span>
+                      </button>
+                    ))}
                   </div>
-                ) : (
-                  <div key={"codex-" + t.auto.id} className="sched-row codex">
-                    <div className="sched-time">{t.at === Number.MAX_SAFE_INTEGER ? "—" : timeOfDay(t.at)}</div>
-                    <div className="sched-body">
-                      <div className="sched-title">{t.auto.name}</div>
-                      {message("codex-" + t.auto.id, t.auto.prompt)}
-                      <div className="sched-meta">Codex automation · {t.rule}{t.at !== Number.MAX_SAFE_INTEGER && t.at < now ? " · past due" : ""}</div>
-                    </div>
-                    <span className="sched-owner" title="Codex runs this one; manage it in Codex">Codex</span>
+                );
+              })}
+            </div>
+
+            {pickedEntry && (pickedEntry.source === "hop" ? (
+              <div className={"sched-row cal-detail" + (pickedEntry.past ? " past" : "") + (pickedEntry.cb.firedAt && !pickedEntry.past ? " fired" : "")}>
+                <div className="sched-time">{pickedEntry.at === null ? every(pickedEntry.every!) : timeOfDay(pickedEntry.at)}</div>
+                <div className="sched-body">
+                  {whose(pickedEntry.cb)}
+                  <div className="sched-message open">{pickedEntry.cb.message}</div>
+                  <div className="sched-meta">
+                    {pickedEntry.past ? describeState(pickedEntry.cb, now)
+                      : <>{pickedEntry.cb.trigger.kind === "every" ? describeTrigger(pickedEntry.cb.trigger, now) : chipWhen(nextOfTrigger(pickedEntry.cb.trigger) ?? now, now)}
+                          {pickedEntry.cb.firedAt ? " · due, waiting for the agent to be idle" : ""}
+                          {pickedEntry.cb.force ? " · typed even mid-turn" : ""} · by {who(pickedEntry.cb)}</>}
                   </div>
-                ))}
-              </section>
+                </div>
+                {!pickedEntry.past && (
+                  <button type="button" className="checkback-cancel" disabled={busy === pickedEntry.cb.id}
+                          onClick={() => { setPicked(null); void cancel(pickedEntry.cb.id); }}>Cancel</button>
+                )}
+              </div>
+            ) : (
+              <div className="sched-row codex cal-detail">
+                <div className="sched-time">{pickedEntry.at === null ? every(pickedEntry.every!) : timeOfDay(pickedEntry.at)}</div>
+                <div className="sched-body">
+                  <div className="sched-title">{pickedEntry.auto.name}</div>
+                  <div className="sched-message open">{pickedEntry.auto.prompt}</div>
+                  <div className="sched-meta">Codex automation · {pickedEntry.rule}{pickedEntry.past ? " · past" : ""}</div>
+                </div>
+                <span className="sched-owner" title="Codex runs this one; manage it in Codex">Codex</span>
+              </div>
             ))}
 
             {waiting.length > 0 && (
               <section className="sched-day">
-                <div className="sched-day-head">When something happens</div>
+                <div className="sched-day-head">When something happens — no day of its own</div>
                 {waiting.map((c) => {
                   const cond = conditionLabel(c.trigger);
                   return (

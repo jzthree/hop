@@ -3675,7 +3675,7 @@ export const SessionSwitcher = ({
               </div>
               <div className="phone-menu-section">
                 {onOpenViews && menuItem("Views", () => onOpenViews(), { icon: "tray", note: unseenViewSessions > 0 ? `${unseenViewSessions} new` : undefined })}
-                {onOpenCheckbacks && menuItem("Scheduled", () => onOpenCheckbacks("*"), { icon: "clock", note: scheduledTotal > 0 ? String(scheduledTotal) : undefined })}
+                {onOpenCheckbacks && menuItem("Calendar", () => onOpenCheckbacks("*"), { icon: "clock", note: scheduledTotal > 0 ? String(scheduledTotal) : undefined })}
                 {onOpenCodexApp && menuItem("Codex app threads", onOpenCodexApp, { icon: "window" })}
                 {onOpenDesktop && menuItem("Desktop", onOpenDesktop, { icon: "display" })}
                 {onFind && menuItem("Find in terminal", onFind, { icon: "search" })}
@@ -3891,10 +3891,10 @@ export const SessionSwitcher = ({
             </button>
           )}
           {!sidebarDocked && onOpenCheckbacks && scheduledTotal > 0 && (
-            <button type="button" className="switcher-action views-entry" aria-label="Scheduled on every session"
+            <button type="button" className="switcher-action views-entry" aria-label="Calendar of every session"
                     title="Every check-back hop will type, across your sessions" onClick={() => onOpenCheckbacks("*")}>
               <span className="switcher-action-icon"><PhoneIcon name="clock" size={15} /></span>
-              Scheduled
+              Calendar
               <span className="views-entry-count">{scheduledTotal}</span>
             </button>
           )}

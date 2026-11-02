@@ -524,6 +524,17 @@ This rebuilds Hay and syncs `hay/apps/web/dist` into `hay-web/`. `npm test` runs
 pkill cloudflared
 ```
 
+## Related projects
+
+Built around the same conviction — that humans and agents work best in shared
+spaces:
+
+| Project | What it is |
+|---|---|
+| [nebula-writer](https://github.com/jzthree/nebula-writer) | Local-first, DOCX-compatible writing with AI-assisted revision, in the browser and inside Microsoft Word and Google Docs |
+| [mybot](https://github.com/jzhoulab/mybot) | The connectivity layer for coding agents: every Claude Code and Codex conversation in one searchable local memory, shared across your team |
+| [nebula-notebook](https://github.com/jzhoulab/nebula-notebook) | An agent-native notebook — you and your AI work in the same cells |
+
 ## License
 
 MIT

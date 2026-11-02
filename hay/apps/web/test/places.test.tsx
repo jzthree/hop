@@ -106,6 +106,23 @@ describe("PulsePage", () => {
     expect(screen.getByText("GPT pulse")).toBeTruthy();
   });
 
+  it("an item can be skipped and brought back; a figure is drawn where its caption line was", () => {
+    const withFig = parsePulseFeed({ pulses: [{ engine: "claude", label: "Claude", date: "2026-11-01", title: "T", sections: [
+      { id: "a1", kind: "article", title: "Idea", body: "Before.\n\n*Figure: A sketch.*\n\nAfter.", figures: [{ caption: "A sketch.", name: "a.png", src: "/assets/pulse-figures/2026-11-01/a.png" }] },
+      { id: "o1", kind: "overlooked", body: "Loose end.", figures: [{ caption: "x", src: "https://evil.example/x.png" }] }
+    ], actions: [{ id: "o1", label: "Follow up", cwd: "/w", session_name: "fu", command: "go" }] }] });
+    render(<PulsePage feed={withFig} existing={new Set()} onFollowUp={vi.fn()} markSeen={() => {}} onClose={() => {}} />);
+    const img = document.querySelector(".prose-figure img") as HTMLImageElement;
+    expect(img.getAttribute("src")).toBe("/assets/pulse-figures/2026-11-01/a.png");
+    expect(screen.getByText("A sketch.").tagName).toBe("FIGCAPTION");
+    expect(withFig!.days[0].pulses[0].sections[1].figures).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    expect(document.querySelector(".pulse-card.skipped")?.textContent).toMatch(/Loose end\./);
+    expect(screen.queryByRole("button", { name: /^Follow up/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Skipped · Undo/ }));
+    expect(screen.getByRole("button", { name: /^Follow up/ })).toBeTruthy();
+  });
+
   it("with a session, the page is that session's share: items it owns or that followed up into it", () => {
     const onClearSession = vi.fn(); const markSeen = vi.fn();
     const { unmount } = render(<PulsePage feed={feed} existing={new Set()} onFollowUp={vi.fn()} sessions={sessions} session="orion"

@@ -36,6 +36,16 @@ type Props = {
 };
 
 const ENGINE_KEY = "hop_pulse_engine";
+// An item passed over: it folds to a line, in this browser, and can come back.
+const SKIP_KEY = "hop_pulse_skipped";
+const SKIP_CAP = 300;
+const EARLIER_SHOWN = 3;
+const loadSkipped = (): Set<string> => {
+  try { const a = JSON.parse(localStorage.getItem(SKIP_KEY) || "[]"); return new Set(Array.isArray(a) ? a : []); } catch { return new Set(); }
+};
+const saveSkipped = (set: Set<string>) => {
+  try { localStorage.setItem(SKIP_KEY, JSON.stringify([...set].slice(-SKIP_CAP))); } catch { /* per-browser only */ }
+};
 
 export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, onClearSession, inSession = false, markSeen, onClose }: Props) => {
   const [dayIndex, setDayIndex] = useState(0);
@@ -43,6 +53,8 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
   const [launching, setLaunching] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [skipped, setSkipped] = useState<Set<string>>(loadSkipped);
+  const [allEarlier, setAllEarlier] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const colRef = useRef<HTMLDivElement | null>(null);
 
@@ -86,6 +98,13 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
   const actionTitle = (a: PulseAction) =>
     a.targetName ? `Send to ${a.targetName}` : existing.has(a.sessionName) ? "Open follow-up" : a.label;
 
+  const skipKey = (section: PulseSection, p: Pulse) => `${p.date}|${p.engine}|${section.id}`;
+  const setSkip = (k: string, on: boolean) => setSkipped((prev) => {
+    const next = new Set(prev);
+    if (on) next.add(k); else next.delete(k);
+    saveSkipped(next);
+    return next;
+  });
   const controls = (section: PulseSection, p: Pulse) => {
     const action = p.actions[section.id];
     const subject = section.title || plainText(section.body).slice(0, 70) + "…";
@@ -109,7 +128,64 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
         <button type="button" className="pulse-quiet" onClick={() => copy(section.id, plainText(section.title ? `${section.title}\n\n${section.body}` : section.body))}>
           {copied === section.id ? "Copied" : "Copy"}
         </button>
+        {action && (
+          <button type="button" className="pulse-quiet" title="Pass on this one: nothing is started, and it folds away"
+                  onClick={() => setSkip(skipKey(section, p), true)}>Skip</button>
+        )}
       </div>
+    );
+  };
+
+  // One item — the same card on the day's page, a session's share, and its
+  // Pulse tab; in a share it says which day and pulse it came from.
+  const card = (section: PulseSection, p: Pulse, opts: { when?: boolean } = {}) => {
+    const k = skipKey(section, p);
+    const when = opts.when ? <span className="brief-thread-when">{dayLabel(p.date)} · {p.label}</span> : null;
+    if (skipped.has(k)) {
+      return (
+        <article key={k} className="pulse-card skipped">
+          <span className="brief-skipped-head">{section.title || plainText(section.body).slice(0, 90)}</span>
+          <button type="button" className="brief-skip" onClick={() => setSkip(k, false)} title="Bring it back">Skipped · Undo</button>
+        </article>
+      );
+    }
+    if (section.kind === "article") {
+      return (
+        <article key={k} className="pulse-article">
+          {when}
+          <h3 className="pulse-article-title">{section.title}</h3>
+          {controls(section, p)}
+          <Prose text={section.body} figures={section.figures} />
+        </article>
+      );
+    }
+    return (
+      <article key={k} className="pulse-card">
+        {when}
+        {section.title && <h3 className="brief-headline">{section.title}</h3>}
+        <Prose text={section.body} figures={section.figures} />
+        {controls(section, p)}
+      </article>
+    );
+  };
+  const sectionsOf = (items: Array<{ section: PulseSection; pulse: Pulse }>, opts: { when?: boolean } = {}) => {
+    const over = items.filter((x) => x.section.kind !== "article");
+    const ideas = items.filter((x) => x.section.kind === "article");
+    return (
+      <>
+        {over.length > 0 && (
+          <section className="pulse-overlooked">
+            <h2 className="brief-slot-head"><span>You may have overlooked</span><span className="brief-slot-n">{over.length}</span></h2>
+            {over.map((x) => card(x.section, x.pulse, opts))}
+          </section>
+        )}
+        {ideas.length > 0 && (
+          <section className="pulse-ideas">
+            <h2 className="brief-slot-head"><span>Ideas</span><span className="brief-slot-n">{ideas.length}</span></h2>
+            {ideas.map((x) => card(x.section, x.pulse, opts))}
+          </section>
+        )}
+      </>
     );
   };
 
@@ -164,14 +240,28 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
           <>
             <p className="place-dateline">Everything the pulse raised for {sessionLabel} · {mine.length} {mine.length === 1 ? "item" : "items"}</p>
             {!mine.length && <p className="place-empty-line">The pulse hasn't raised anything for this session.</p>}
-            {mine.map(({ date, pulse: p, section: s }) => (
-              <article key={date + p.engine + s.id} className={s.kind === "article" ? "pulse-article" : "pulse-card"}>
-                <span className="brief-thread-when">{dayLabel(date)} · {p.label}{s.kind === "article" ? " · idea" : ""}</span>
-                {s.title && <h3 className={s.kind === "article" ? "pulse-article-title" : "brief-headline"}>{s.title}</h3>}
-                <Prose text={s.body} />
-                {controls(s, p)}
-              </article>
-            ))}
+            {mine.length > 0 && (() => {
+              // The newest day with anything for this session, laid out as
+              // that day's page is; then earlier days, a few at a time.
+              const latest = mine.filter((x) => x.date === mine[0].date);
+              const earlier = mine.filter((x) => x.date !== mine[0].date);
+              const shown = allEarlier ? earlier : earlier.slice(0, EARLIER_SHOWN);
+              return (
+                <>
+                  <p className="place-dateline">{dayLabel(mine[0].date)}</p>
+                  {sectionsOf(latest, { when: new Set(latest.map((x) => x.pulse.engine)).size > 1 })}
+                  {earlier.length > 0 && (
+                    <section className="brief-slot slot-earlier">
+                      <h2 className="brief-slot-head"><span>Earlier</span><span className="brief-slot-n">{earlier.length}</span></h2>
+                      {shown.map((x) => card(x.section, x.pulse, { when: true }))}
+                      {shown.length < earlier.length && (
+                        <button type="button" className="brief-more" onClick={() => setAllEarlier(true)}>Show {earlier.length - shown.length} more</button>
+                      )}
+                    </section>
+                  )}
+                </>
+              );
+            })()}
           </>
         ) : !pulse ? (
           <div className="place-empty">
@@ -182,32 +272,9 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
           <>
             <p className="place-dateline">{dayLabel(pulse.date)} · {pulse.label}</p>
             <h1 className="pulse-title">{pulse.title}</h1>
-            {pulse.sections.filter((s) => s.kind === "intro").map((s) => <Prose key={s.id} className="place-lede" text={s.body} />)}
-            {pulse.sections.filter((s) => s.kind === "note").map((s) => <Prose key={s.id} className="pulse-note" text={s.body} />)}
-            {overlooked.length > 0 && (
-              <section className="pulse-overlooked">
-                <h2 className="brief-slot-head"><span>You may have overlooked</span><span className="brief-slot-n">{overlooked.length}</span></h2>
-                {overlooked.map((s) => (
-                  <article key={s.id} className="pulse-card">
-                    {s.title && <h3 className="brief-headline">{s.title}</h3>}
-                    <Prose text={s.body} />
-                    {controls(s, pulse)}
-                  </article>
-                ))}
-              </section>
-            )}
-            {articles.length > 0 && (
-              <section className="pulse-ideas">
-                <h2 className="brief-slot-head"><span>Ideas</span><span className="brief-slot-n">{articles.length}</span></h2>
-                {articles.map((s) => (
-                  <article key={s.id} className="pulse-article">
-                    <h3 className="pulse-article-title">{s.title}</h3>
-                    {controls(s, pulse)}
-                    <Prose text={s.body} />
-                  </article>
-                ))}
-              </section>
-            )}
+            {pulse.sections.filter((s) => s.kind === "intro").map((s) => <Prose key={s.id} className="place-lede" text={s.body} figures={s.figures} />)}
+            {pulse.sections.filter((s) => s.kind === "note").map((s) => <Prose key={s.id} className="pulse-note" text={s.body} figures={s.figures} />)}
+            {sectionsOf([...overlooked, ...articles].map((section) => ({ section, pulse: pulse! })))}
           </>
         )}
       </div>

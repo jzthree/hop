@@ -35,8 +35,11 @@ export const blocks = (text: string): Block[] => {
   return out;
 };
 
-/** Prose as paragraphs, lists and subheads. */
-export const Prose = ({ text, className }: { text: string; className?: string }) => {
+const FIGURE_LINE = /^\*Figure: (.+)\*$/;
+
+/** Prose as paragraphs, lists and subheads; a "*Figure: caption*" line
+ *  whose figure is given is drawn as the image with its caption. */
+export const Prose = ({ text, className, figures }: { text: string; className?: string; figures?: Array<{ caption: string; src: string }> }) => {
   const bs = blocks(text);
   const nodes: ReactNode[] = [];
   for (let i = 0; i < bs.length; i++) {
@@ -47,6 +50,16 @@ export const Prose = ({ text, className }: { text: string; className?: string })
       i--;
       nodes.push(<ul key={i}>{items.map((it, j) => <li key={j}>{inline(it.text, `${i}.${j}.`)}</li>)}</ul>);
     } else if (b.kind === "h") nodes.push(<h4 key={i}>{inline(b.text, `${i}.`)}</h4>);
+    else if (figures?.length && FIGURE_LINE.test(b.text) && figures.some((f) => f.caption.trim() === FIGURE_LINE.exec(b.text)![1].trim())) {
+      const cap = FIGURE_LINE.exec(b.text)![1].trim();
+      const fig = figures.find((f) => f.caption.trim() === cap)!;
+      nodes.push(
+        <figure key={i} className="prose-figure">
+          <a href={fig.src} target="_blank" rel="noreferrer"><img src={fig.src} alt={cap} loading="lazy" /></a>
+          <figcaption>{inline(cap, `${i}.`)}</figcaption>
+        </figure>
+      );
+    }
     else nodes.push(<p key={i}>{inline(b.text, `${i}.`)}</p>);
   }
   return <div className={"prose" + (className ? " " + className : "")}>{nodes}</div>;

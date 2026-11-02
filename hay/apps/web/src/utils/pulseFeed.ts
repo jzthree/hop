@@ -7,7 +7,10 @@ import { useCallback, useEffect, useState } from "react";
 // slipped through the cracks. One pulse per engine (Claude, GPT) per day,
 // today's first, then up to two weeks of history.
 
-export type PulseSection = { id: string; kind: string; title: string; body: string };
+// A figure mybot drew: in the body it is an italic "*Figure: caption*" line
+// (what text-only surfaces show); with `src`, the image is drawn there.
+export type PulseFigure = { caption: string; src: string };
+export type PulseSection = { id: string; kind: string; title: string; body: string; figures?: PulseFigure[] };
 export type PulseAction = {
   id: string;
   label: string;
@@ -35,7 +38,12 @@ const parsePulses = (raw: unknown): Pulse[] =>
     const engine = str(p?.engine), date = str(p?.date);
     if (!engine || !date) return [];
     const sections = (Array.isArray(p.sections) ? p.sections : []).map((s: Raw, i: number) => ({
-      id: str(s?.id, `s${i}`), kind: str(s?.kind, "note"), title: str(s?.title), body: str(s?.body)
+      id: str(s?.id, `s${i}`), kind: str(s?.kind, "note"), title: str(s?.title), body: str(s?.body),
+      figures: (Array.isArray(s?.figures) ? s.figures : []).flatMap((f: Raw) => {
+        // Only an image hop serves itself: a path under /assets/.
+        const src = str(f?.src);
+        return /^\/assets\/[\w./-]+\.png$/.test(src) && !src.includes("..") ? [{ caption: str(f?.caption), src }] : [];
+      })
     }));
     const actions: Record<string, PulseAction> = {};
     for (const a of (Array.isArray(p.actions) ? p.actions : []) as Raw[]) {

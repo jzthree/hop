@@ -6446,6 +6446,7 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .session-tabs button:hover { color: var(--ink); background: none; transform: none; }
 .session-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: #7c3aed; }
 .session-tab-n { font: 600 11px/1 var(--font-mono); color: var(--muted, #8a8591); font-variant-numeric: tabular-nums; }
+.session-tab-n.fresh { color: #7c3aed; }
 .views-panel.page.in-session,
 .views-panel.page.in-session.reading { top: var(--topbar-h, 52px); }
 .views-panel.checkbacks-panel.page.in-session {
@@ -6555,6 +6556,11 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
   --serif: "Iowan Old Style", "Palatino Linotype", Charter, Georgia, serif;
 }
 .place-page:focus { outline: none; }
+/* A session's Briefing or Pulse tab: the same page, under the session's
+   header (which names it), beside a Views column when one is open. */
+.place-page.in-session { top: var(--topbar-h, 52px); }
+.app.views-side .place-page.in-session { right: var(--views-w, 560px); }
+.place-page.in-session .place-col { padding-top: 18px; }
 .place-head {
   position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px;
   padding: calc(env(safe-area-inset-top, 0px) + 14px) 28px 12px;

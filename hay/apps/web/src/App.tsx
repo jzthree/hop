@@ -57,8 +57,8 @@ import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPan
 import { BriefingPage } from "./components/BriefingPage";
 import { PulsePage } from "./components/PulsePage";
 import { UpdatePop, useUpdateInfo } from "./components/UpdateNotice";
-import { useBriefing } from "./utils/briefingFeed";
-import { usePulse, type PulseAction } from "./utils/pulseFeed";
+import { threadFor, useBriefing } from "./utils/briefingFeed";
+import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
 import { sendLineToSession } from "./utils/quickReply";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord } from "./utils/fullscreenChord";
@@ -584,6 +584,7 @@ const App = () => {
   // The sidebar's own places beyond Sessions and Views: the briefing (with
   // the session it is narrowed to) and mybot's pulse; and the update panel.
   const [place, setPlace] = useState<null | "briefing" | "pulse">(null);
+  // The sidebar's session narrowing a place (as it filters Views).
   const [briefingSession, setBriefingSession] = useState<string | null>(null);
   const [updateOpen, setUpdateOpen] = useState(false);
   const briefing = useBriefing();
@@ -910,7 +911,11 @@ const App = () => {
   // The ⏰ chip's window: what is waiting on a session.
   const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(null);
   // A full-screen session's Calendar tab (Views is its other tab).
-  const [schedTab, setSchedTab] = useState(false);
+  // Full screen, the tab other than Terminal and Views: Calendar, or the
+  // session's share of the briefing or the pulse.
+  const [sideTab, setSideTab] = useState<null | "calendar" | "briefing" | "pulse">(null);
+  const schedTab = sideTab === "calendar";
+  const setSchedTab = (on: boolean) => setSideTab(on ? "calendar" : null);
   // The session header's height: a tab's page sits under it.
   const [topbarH, setTopbarH] = useState(52);
   const topbarObsRef = useRef<ResizeObserver | null>(null);
@@ -4540,9 +4545,10 @@ const App = () => {
   // reader, not a tab each (that would be the browser's job, redone).
   const sessionTabs = railDocked && !!session && !switcherOpen && isEmbeddedInHop();
   const schedTabNow = sessionTabs && schedTab;
-  useEffect(() => { if (viewsPage) setSchedTab(false); }, [viewsPage]);
+  const feedTabNow = sessionTabs && !placePage && !viewsPage && (sideTab === "briefing" || sideTab === "pulse") ? sideTab : null;
+  useEffect(() => { if (viewsPage) setSideTab(null); }, [viewsPage]);
   const focusTerminalSoon = () => window.setTimeout(() => termRef.current?.focus(), 0);
-  const selectedRoom: string | null = place === "briefing" && placePage ? briefingSession
+  const selectedRoom: string | null = placePage ? briefingSession
     : viewsPage ? (viewsOpen?.session ?? null)
     : wallUnder ? wallFocus
     : status === "ended" ? null : session!.room;
@@ -4556,6 +4562,19 @@ const App = () => {
   // The room can still be the name from the URL; lists key by internalName.
   const currentKey = session ? sessionKeyOf(session.room) : null;
   const currentInfo = currentKey ? sessions.find((x) => (x.internalName || x.name) === currentKey) : undefined;
+  // The tabs' counts: the session's unread briefing notes, today's pulse
+  // items for it.
+  const tabFeed = (() => {
+    if (!sessionTabs) return { briefUnread: 0, pulseToday: 0 };
+    const key = currentKey;
+    if (!key) return { briefUnread: 0, pulseToday: 0 };
+    const isHere = (id: string) => sessionKeyOf(id) === key;
+    const today = pulse.feed?.days[0]?.date;
+    return {
+      briefUnread: threadFor(briefing.editions, isHere).filter((it) => !briefing.read.has(it.at + "|" + it.session)).length,
+      pulseToday: pulseItemsFor(pulse.feed, isHere).filter((it) => it.date === today).length
+    };
+  })();
   // Side by side, the column follows the selection — a tile engaged on
   // the wall, ⌘E / ⌘G full screen — unless it was opened on one result.
   // Views opened as a page (a link, an inline card) takes over from a place.
@@ -4617,7 +4636,7 @@ const App = () => {
   // Sessions from Views: back where you were — the wall, with the session
   // picked in Views engaged, or full screen, switched to it.
   const backToSessions = () => {
-    const sel = placePage ? (place === "briefing" ? briefingSession ?? undefined : undefined) : viewsOpen?.session;
+    const sel = placePage ? briefingSession ?? undefined : viewsOpen?.session;
     setPlace(null);
     if (!wallUnder && sel && sessionKeyOf(sel) !== sessionKeyOf(session?.room)) { goToSession(sel); return; }
     setViewsOpen(null);
@@ -4628,7 +4647,7 @@ const App = () => {
   // Opening a place: clicked again while there, a narrowed briefing shows
   // all of itself again (as Views does), else the place stays.
   const openPlace = (which: "briefing" | "pulse") => {
-    if (place === which) { if (which === "briefing") setBriefingSession(null); return; }
+    if (place === which) { setBriefingSession(null); return; }
     if (viewsPage) setViewsOpen(null);
     setBriefingSession(null);
     setPlace(which);
@@ -4780,7 +4799,7 @@ const App = () => {
           <div className="channel-name" title={sessionLabel}>{sessionLabel}</div>
           {sessionTabs && (
             <nav className="session-tabs" role="tablist" aria-label="Session">
-              <button type="button" role="tab" aria-selected={!viewsPage && !schedTabNow}
+              <button type="button" role="tab" aria-selected={!viewsPage && !schedTabNow && !feedTabNow}
                       onClick={() => { setSchedTab(false); if (viewsPage) setViewsOpen(null); focusTerminalSoon(); }}>Terminal</button>
               <button type="button" role="tab" aria-selected={viewsPage || viewsSideNow}
                       title={`This session's results (${isMacPlatform ? "⌘⇧V" : "Views"})`}
@@ -4790,6 +4809,20 @@ const App = () => {
                       }}>
                 Views{!!currentInfo?.views?.count && <span className="session-tab-n">{currentInfo.views.count}</span>}
               </button>
+              {briefing.editions.length > 0 && (
+                <button type="button" role="tab" aria-selected={feedTabNow === "briefing"}
+                        title="What the briefing said about this session"
+                        onClick={() => { setSideTab("briefing"); if (viewsPage) setViewsOpen(null); }}>
+                  Briefing{tabFeed.briefUnread > 0 && <span className="session-tab-n fresh">{tabFeed.briefUnread}</span>}
+                </button>
+              )}
+              {pulse.feed && (
+                <button type="button" role="tab" aria-selected={feedTabNow === "pulse"}
+                        title="What the pulse raised for this session"
+                        onClick={() => { setSideTab("pulse"); if (viewsPage) setViewsOpen(null); }}>
+                  Pulse{tabFeed.pulseToday > 0 && <span className="session-tab-n">{tabFeed.pulseToday}</span>}
+                </button>
+              )}
               <button type="button" role="tab" aria-selected={schedTabNow}
                       title={`What is coming up on this session (${isMacPlatform ? "⌘⇧S" : "Ctrl+Shift+S"})`}
                       onClick={() => { setSchedTab(true); if (viewsPage) setViewsOpen(null); }}>
@@ -5806,11 +5839,9 @@ const App = () => {
             }).catch(() => pushNotice("Failed to update park state"));
           }}
           onPick={(next) => {
-            // In the briefing, a session in the sidebar narrows it to that
-            // session's thread; the pulse has no per-session view, so a
-            // pick leaves it for the session.
-            if (placePage && place === "briefing") { setBriefingSession(next.internalName || next.name); return; }
-            if (placePage) setPlace(null);
+            // In the briefing or the pulse, a session in the sidebar
+            // narrows the place to that session's share.
+            if (placePage) { setBriefingSession(next.internalName || next.name); return; }
             // Side by side, the column follows: switch, and show the new
             // session's results beside it.
             if (viewsSideNow) setViewsOpen({ session: next.internalName || next.name });
@@ -5847,6 +5878,19 @@ const App = () => {
           }}
           onClose={() => setRailOpen(false)}
         />
+      )}
+      {feedTabNow === "briefing" && (
+        <BriefingPage key={"brief-" + currentKey} inSession editions={briefing.editions} read={briefing.read} sessions={sessions}
+                      session={currentKey} onOpenSession={goToSession}
+                      onReply={replyToSession}
+                      markSeen={briefing.markSeen} markRead={briefing.markRead}
+                      onClose={() => { setSideTab(null); focusTerminalSoon(); }} />
+      )}
+      {feedTabNow === "pulse" && (
+        <PulsePage key={"pulse-" + currentKey} inSession feed={pulse.feed} sessions={sessions} session={currentKey}
+                   existing={new Set(sessions.flatMap((x) => [x.name, x.displayName].filter(Boolean) as string[]))}
+                   onFollowUp={pulseFollowUp} markSeen={pulse.markSeen}
+                   onClose={() => { setSideTab(null); focusTerminalSoon(); }} />
       )}
       {schedTabNow && (
         <CheckbacksPanel placement="tab"
@@ -5886,7 +5930,7 @@ const App = () => {
                       onClose={() => setPlace(null)} />
       )}
       {placePage && place === "pulse" && (
-        <PulsePage feed={pulse.feed} existing={new Set(sessions.flatMap((x) => [x.name, x.displayName].filter(Boolean) as string[]))}
+        <PulsePage feed={pulse.feed} sessions={sessions} session={briefingSession} onClearSession={() => setBriefingSession(null)} existing={new Set(sessions.flatMap((x) => [x.name, x.displayName].filter(Boolean) as string[]))}
                    onFollowUp={pulseFollowUp} markSeen={pulse.markSeen} onClose={() => setPlace(null)} />
       )}
       {updateOpen && update && (

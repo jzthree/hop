@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { BriefingItem, Edition } from "../utils/briefingFeed";
+import { threadFor, type BriefingItem, type Edition } from "../utils/briefingFeed";
 import { createReadWitness, wordCount } from "../utils/readWitness";
 import { Prose } from "../utils/prose";
 type SessionInfo = { name: string; displayName?: string; internalName?: string };
@@ -23,6 +23,8 @@ type Props = {
   /** The sidebar's session: the page shows its thread. */
   session?: string | null;
   onClearSession?: () => void;
+  /** A session's Briefing tab: the tab names the page and the session. */
+  inSession?: boolean;
   onOpenSession: (key: string) => void;
   onReply?: (key: string, text: string) => Promise<boolean>;
   markSeen: (stamp?: string) => void;
@@ -56,7 +58,7 @@ const ago = (iso?: string): string => {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 };
 
-export const BriefingPage = ({ editions, read, sessions, session, onClearSession, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
+export const BriefingPage = ({ editions, read, sessions, session, onClearSession, inSession = false, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
   const [index, setIndex] = useState(0);
   const [sending, setSending] = useState<string | null>(null);
   const [sent, setSent] = useState<Set<string>>(new Set());
@@ -109,11 +111,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
   const sessionKey = session ? keyOf(session) : null;
   const thread = useMemo(() => {
     if (!sessionKey) return [];
-    const out: Array<BriefingItem & { at: string }> = [];
-    for (const e of editions) for (const it of e.items || []) {
-      if (keyOf(it.session) === sessionKey) out.push({ ...it, at: e.generated_at || "" });
-    }
-    return out;
+    return threadFor(editions, (id) => keyOf(id) === sessionKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editions, sessionKey, sessions]);
 
@@ -129,8 +127,26 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose, editions.length]);
 
-  const story = (item: BriefingItem, edition: string) => {
+  const replyChips = (item: BriefingItem, edition: string) => {
+    if (!item.replies?.length) return null;
     const answered = [...sent].some((k) => k.startsWith(edition + "|" + item.session + "|"));
+    return (
+      <div className="brief-replies" role="group" aria-label="Answer">
+        {item.replies.map((r) => {
+          const k = edition + "|" + item.session + "|" + r;
+          return onReply ? (
+            <button key={r} type="button" className={"brief-reply" + (sent.has(k) ? " sent" : "")}
+                    disabled={!!sending || answered} title={`Type “${r}” into ${label(item.session)}`}
+                    onClick={() => void reply(item, edition, r)}>
+              {sent.has(k) ? "✓ " : sending === k ? "… " : ""}{r}
+            </button>
+          ) : <span key={r} className="brief-reply static">{r}</span>;
+        })}
+      </div>
+    );
+  };
+
+  const story = (item: BriefingItem, edition: string) => {
     const unread = !isRead(edition, item.session);
     return (
       <article key={edition + item.session + item.headline}
@@ -147,20 +163,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
         {item.recommendation && (
           <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={item.recommendation} /></div>
         )}
-        {item.replies?.length ? (
-          <div className="brief-replies" role="group" aria-label="Answer">
-            {item.replies.map((r) => {
-              const k = edition + "|" + item.session + "|" + r;
-              return onReply ? (
-                <button key={r} type="button" className={"brief-reply" + (sent.has(k) ? " sent" : "")}
-                        disabled={!!sending || answered} title={`Type “${r}” into ${label(item.session)}`}
-                        onClick={() => void reply(item, edition, r)}>
-                  {sent.has(k) ? "✓ " : sending === k ? "… " : ""}{r}
-                </button>
-              ) : <span key={r} className="brief-reply static">{r}</span>;
-            })}
-          </div>
-        ) : null}
+        {replyChips(item, edition)}
       </article>
     );
   };
@@ -201,8 +204,8 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
   };
 
   return (
-    <div className="place-page briefing-page" role="region" aria-label="Briefing" tabIndex={-1} ref={panelRef}>
-      <header className="place-head">
+    <div className={"place-page briefing-page" + (inSession ? " in-session" : "")} role={inSession ? "tabpanel" : "region"} aria-label="Briefing" tabIndex={-1} ref={panelRef}>
+      {!inSession && <header className="place-head">
         <span className="place-title"><span className="place-spark" aria-hidden="true">✦</span>Briefing</span>
         {sessionKey && onClearSession && (
           <span className="views-scope-chip">
@@ -223,7 +226,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
           </span>
         )}
         <button type="button" className="views-close" aria-label="Close briefing" onClick={onClose}>×</button>
-      </header>
+      </header>}
       <div className="place-col">
         {!editions.length ? (
           <div className="place-empty">
@@ -233,7 +236,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
         ) : sessionKey ? (
           <>
             <p className="place-dateline">Everything the briefing said about {label(sessionKey)} · {thread.length} {thread.length === 1 ? "note" : "notes"}</p>
-            <button type="button" className="brief-open-session" onClick={() => onOpenSession(sessionKey)}>Open {label(sessionKey)} →</button>
+            {!inSession && <button type="button" className="brief-open-session" onClick={() => onOpenSession(sessionKey)}>Open {label(sessionKey)} →</button>}
             {!thread.length && <p className="place-empty-line">The briefing hasn't mentioned this session.</p>}
             <ol className="brief-thread">
               {thread.map((it, i) => (
@@ -243,6 +246,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
                   <h3 className="brief-headline">{it.headline}</h3>
                   {it.why && <Prose className="brief-why" text={it.why} />}
                   {it.recommendation && <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={it.recommendation} /></div>}
+                  {it.at === (editions[0]?.generated_at || "") && replyChips(it, it.at)}
                 </li>
               ))}
             </ol>

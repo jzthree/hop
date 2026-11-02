@@ -99,3 +99,20 @@ export const usePulse = () => {
   }, [newest]);
   return { feed, fresh: !!newest && newest !== seenDay, markSeen, reload: load };
 };
+
+export type PulseItem = { date: string; pulse: Pulse; section: PulseSection; action: PulseAction };
+
+/** A session's share of the pulse, newest day first: the items whose
+ *  follow-up goes to it (it owns the item) or is it (an earlier follow-up).
+ *  `isSession` says whether a session identifier names the session. */
+export const pulseItemsFor = (feed: PulseFeed | null, isSession: (id: string) => boolean): PulseItem[] => {
+  const out: PulseItem[] = [];
+  for (const day of feed?.days || []) for (const pulse of day.pulses) for (const section of pulse.sections) {
+    const action = pulse.actions[section.id];
+    if (!action) continue;
+    if ([action.targetInternalName, action.targetName, action.sessionName].some((n) => n && isSession(n))) {
+      out.push({ date: day.date, pulse, section, action });
+    }
+  }
+  return out;
+};

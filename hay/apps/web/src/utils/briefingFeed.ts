@@ -88,3 +88,13 @@ export const useBriefing = () => {
   const latestUnseen = !!editions[0]?.generated_at && !seen.has(editions[0].generated_at!);
   return { editions, read, seen, markSeen, markRead, reload: load, decisions: unreadDecisions(editions, read), latestUnseen };
 };
+
+/** A session's thread: every story about it, newest edition first, with the
+ *  edition it ran in. `isSession` says whether a story's session names it. */
+export const threadFor = (editions: Edition[], isSession: (id: string) => boolean): Array<BriefingItem & { at: string }> => {
+  const out: Array<BriefingItem & { at: string }> = [];
+  for (const e of editions) for (const it of e.items || []) {
+    if (it.session && isSession(it.session)) out.push({ ...it, at: e.generated_at || "" });
+  }
+  return out;
+};

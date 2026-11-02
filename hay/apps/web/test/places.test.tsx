@@ -51,6 +51,17 @@ describe("BriefingPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show the whole briefing" }));
     expect(onClearSession).toHaveBeenCalled();
   });
+
+  it("as a session's tab: no heading of its own, and the newest ask is answerable there", async () => {
+    const onReply = vi.fn(async () => true);
+    render(<BriefingPage {...base} inSession session="s_orion" onReply={onReply} />);
+    expect(screen.getByRole("tabpanel", { name: "Briefing" })).toBeTruthy();
+    expect(document.querySelector(".place-head")).toBeNull();
+    expect(screen.queryByText(/Open orion/)).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Ship" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Ship" }));
+    await waitFor(() => expect(onReply).toHaveBeenCalledWith("s_orion", "Ship"));
+  });
 });
 
 describe("PulsePage", () => {
@@ -79,5 +90,22 @@ describe("PulsePage", () => {
     await waitFor(() => expect(onFollowUp).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "fu-3" })));
     fireEvent.click(screen.getByRole("tab", { name: "GPT" }));
     expect(screen.getByText("GPT pulse")).toBeTruthy();
+  });
+
+  it("with a session, the page is that session's share: items it owns or that followed up into it", () => {
+    const onClearSession = vi.fn(); const markSeen = vi.fn();
+    const { unmount } = render(<PulsePage feed={feed} existing={new Set()} onFollowUp={vi.fn()} sessions={sessions} session="orion"
+                                          onClearSession={onClearSession} markSeen={markSeen} onClose={() => {}} />);
+    expect(screen.getByText(/raised for orion · 1 item/)).toBeTruthy();
+    expect(screen.getByText("A loose end.")).toBeTruthy();
+    expect(screen.queryByText("Another.")).toBeNull();
+    expect(markSeen).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Show the whole pulse" }));
+    expect(onClearSession).toHaveBeenCalled();
+    unmount();
+    render(<PulsePage feed={feed} existing={new Set()} onFollowUp={vi.fn()} sessions={[...sessions, { name: "fu-2", internalName: "s_fu2" }]}
+                      session="s_fu2" inSession markSeen={() => {}} onClose={() => {}} />);
+    expect(screen.getByRole("tabpanel", { name: "Pulse" })).toBeTruthy();
+    expect(screen.getByText("Another.")).toBeTruthy();
   });
 });

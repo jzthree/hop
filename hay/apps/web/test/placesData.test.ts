@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { mergeEditions, readKeys, unreadDecisions } from "../src/utils/briefingFeed";
-import { dayLabel, parsePulseFeed } from "../src/utils/pulseFeed";
+import { mergeEditions, readKeys, threadFor, unreadDecisions } from "../src/utils/briefingFeed";
+import { dayLabel, parsePulseFeed, pulseItemsFor } from "../src/utils/pulseFeed";
 
 describe("briefing feed", () => {
   const e1 = { generated_at: "2026-11-01T10:00:00Z", summary: "older", items: [] };
@@ -18,6 +18,10 @@ describe("briefing feed", () => {
     const read = readKeys({ [`${e2.generated_at}|a`]: { level: "read" }, [`${e2.generated_at}|b`]: { level: "glimpsed" } });
     expect(unreadDecisions([e2, e1], read)).toBe(1);
     expect(unreadDecisions([], read)).toBe(0);
+  });
+  it("threads a session's stories across editions, newest first", () => {
+    const t = threadFor([e2, { ...e1, items: [{ session: "A", headline: "early" }] }], (id) => id.toLowerCase() === "a");
+    expect(t.map((x) => [x.headline, x.at])).toEqual([["x", e2.generated_at], ["early", e1.generated_at]]);
   });
 });
 
@@ -38,6 +42,13 @@ describe("pulse feed", () => {
     expect(Object.keys(p.actions)).toEqual(["o1"]);
     expect(p.actions.o1).toMatchObject({ sessionName: "fu-1", targetName: "owner", message: "note" });
     expect(parsePulseFeed({ pulses: [] })).toBeNull();
+  });
+  it("finds a session's items by the session that owns them or followed up", () => {
+    const feed = parsePulseFeed(json)!;
+    expect(pulseItemsFor(feed, (id) => id === "s_1").map((x) => x.section.id)).toEqual(["o1"]);
+    expect(pulseItemsFor(feed, (id) => id === "fu-1")).toHaveLength(1);
+    expect(pulseItemsFor(feed, () => false)).toEqual([]);
+    expect(pulseItemsFor(null, () => true)).toEqual([]);
   });
   it("names days as people do", () => {
     const now = new Date(2026, 10, 1, 9);

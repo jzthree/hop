@@ -138,6 +138,10 @@ type Props = {
   // Another page (Views) is shown over the wall: the wall keeps its state
   // but stops answering keys, so typing reaches what is on top.
   covered?: boolean;
+  // With the sidebar, the briefing, the pulse and the update notice are
+  // places of their own; the wall leads with this slim pointer to them
+  // instead of the full briefing card and the update banner.
+  wallLead?: ReactNode;
   // Docked, the sidebar's You / Agents / All scopes the wall too: one
   // control, not two that disagree.
   scope?: SessionOriginScope;
@@ -1430,6 +1434,7 @@ export const SessionSwitcher = ({
   onOpenCheckbacks,
   sidebarDocked = false,
   covered = false,
+  wallLead,
   searchPortal = null,
   onFilterChange,
   scope: scopeProp,
@@ -4012,7 +4017,7 @@ export const SessionSwitcher = ({
           })()}
         </div>
         </>)}
-        <UpdateNotice />
+        {!(sidebarDocked && wallLead !== undefined) && <UpdateNotice />}
         {/* Create form lives in the top bar so the header ＋ works from EVERY
             mode — the dashed grid card only exists in recent mode. */}
         {creating && !createInFolder && (
@@ -4051,7 +4056,8 @@ export const SessionSwitcher = ({
             folders survive), never "filter", so a mode check left the
             briefing sitting on top of every search result in the folder
             layout. */}
-        {!searching && (
+        {!searching && sidebarDocked && wallLead !== undefined && wallLead}
+        {!searching && !(sidebarDocked && wallLead !== undefined) && (
           <DigestCard
             sessions={sessions}
             onOpen={handleTap}

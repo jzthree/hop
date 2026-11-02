@@ -1,0 +1,260 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { BriefingItem, Edition } from "../utils/briefingFeed";
+import { createReadWitness, wordCount } from "../utils/readWitness";
+import { Prose } from "../utils/prose";
+type SessionInfo = { name: string; displayName?: string; internalName?: string };
+
+// The briefing as a place beside the sidebar: one edition at a time, read
+// like the front page of a lab notebook — the summary as its lede, then
+// what wants a decision, what to watch, what finished, and a roll-up of the
+// rest. Earlier editions are a step back (‹ ›, ← →). A session picked in the
+// sidebar narrows the page to that session's thread across editions, the
+// way it filters Views: the sidebar's session is the top of the hierarchy.
+//
+// A story opens its session; a reply chip types that answer into it (and
+// presses Enter) without leaving the page. Reading is witnessed as on the
+// wall and the phone — dwell on a visible story reports it read — so a story
+// read here is not "new" on any device.
+
+type Props = {
+  editions: Edition[];
+  read: Set<string>;
+  sessions: SessionInfo[];
+  /** The sidebar's session: the page shows its thread. */
+  session?: string | null;
+  onClearSession?: () => void;
+  onOpenSession: (key: string) => void;
+  onReply?: (key: string, text: string) => Promise<boolean>;
+  markSeen: (stamp?: string) => void;
+  markRead: (edition: string, session: string) => void;
+  onClose: () => void;
+};
+
+const SLOTS: Array<[NonNullable<BriefingItem["slot"]>, string, string]> = [
+  ["decide", "Decide", "Waiting on you"],
+  ["watch", "Watch", "Moving, worth a look"],
+  ["done", "Done", "Finished"]
+];
+
+const editionWhen = (iso?: string): string => {
+  const t = Date.parse(iso || "");
+  if (Number.isNaN(t)) return "";
+  const d = new Date(t), now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const days = Math.round((new Date(now.toDateString()).getTime() - new Date(d.toDateString()).getTime()) / 86_400_000);
+  if (days === 0) return `Today, ${time}`;
+  if (days === 1) return `Yesterday, ${time}`;
+  return `${d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}, ${time}`;
+};
+const ago = (iso?: string): string => {
+  const t = Date.parse(iso || "");
+  if (Number.isNaN(t)) return "";
+  const m = Math.floor((Date.now() - t) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
+};
+
+export const BriefingPage = ({ editions, read, sessions, session, onClearSession, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
+  const [index, setIndex] = useState(0);
+  const [sending, setSending] = useState<string | null>(null);
+  const [sent, setSent] = useState<Set<string>>(new Set());
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const witnessRef = useRef<ReturnType<typeof createReadWitness> | null>(null);
+  if (!witnessRef.current) {
+    witnessRef.current = createReadWitness((reads) => {
+      fetch("/api/digest/reads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reads }), keepalive: true })
+        .catch(() => { /* the next batch carries it */ });
+    });
+  }
+  useEffect(() => () => { witnessRef.current?.dispose(); witnessRef.current = null; }, []);
+  useEffect(() => { panelRef.current?.focus(); }, []);
+
+  const ed = editions[Math.min(index, Math.max(0, editions.length - 1))];
+  const stamp = ed?.generated_at || "";
+  // An edition on screen a moment counts as seen.
+  useEffect(() => {
+    if (!stamp || session) return;
+    const t = window.setTimeout(() => markSeen(stamp), 1200);
+    return () => window.clearTimeout(t);
+  }, [stamp, session, markSeen]);
+
+  const find = (key: string) => sessions.find((s) => (s.internalName || s.name) === key)
+    || sessions.find((s) => (s.internalName || s.name).toLowerCase() === key.toLowerCase()
+      || (s.displayName || "").toLowerCase() === key.toLowerCase());
+  const label = (key: string) => { const s = find(key); return s ? (s.displayName || s.name) : key; };
+  const keyOf = (key: string) => { const s = find(key); return s ? (s.internalName || s.name) : key; };
+  const isRead = (edition: string, key: string) => read.has(edition + "|" + key);
+
+  const open = (key: string, edition: string) => {
+    witnessRef.current?.acted(edition, key);
+    markRead(edition, key);
+    onOpenSession(keyOf(key));
+  };
+  const reply = async (item: BriefingItem, edition: string, text: string) => {
+    const k = edition + "|" + item.session + "|" + text;
+    if (!onReply || sending || sent.has(k)) return;
+    setSending(k);
+    const ok = await onReply(keyOf(item.session), text);
+    setSending(null);
+    if (ok) {
+      setSent((prev) => new Set(prev).add(k));
+      witnessRef.current?.acted(edition, item.session);
+      markRead(edition, item.session);
+    }
+  };
+
+  // The sidebar's session: its thread, newest first, across every edition.
+  const sessionKey = session ? keyOf(session) : null;
+  const thread = useMemo(() => {
+    if (!sessionKey) return [];
+    const out: Array<BriefingItem & { at: string }> = [];
+    for (const e of editions) for (const it of e.items || []) {
+      if (keyOf(it.session) === sessionKey) out.push({ ...it, at: e.generated_at || "" });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editions, sessionKey, sessions]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); return; }
+      const el = document.activeElement as HTMLElement | null;
+      if (!panelRef.current?.contains(el) || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName || "") || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); setIndex((i) => Math.min(editions.length - 1, i + 1)); }
+      if (e.key === "ArrowRight") { e.preventDefault(); setIndex((i) => Math.max(0, i - 1)); }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose, editions.length]);
+
+  const story = (item: BriefingItem, edition: string) => {
+    const answered = [...sent].some((k) => k.startsWith(edition + "|" + item.session + "|"));
+    const unread = !isRead(edition, item.session);
+    return (
+      <article key={edition + item.session + item.headline}
+               ref={witnessRef.current!.ref({ edition, item: item.session, words: wordCount(`${item.headline} ${item.why || ""} ${item.recommendation || ""}`) })}
+               className={"brief-story" + (unread ? " unread" : "")}>
+        <div className="brief-story-head">
+          {unread && <span className="brief-dot" aria-label="New" />}
+          <button type="button" className="brief-session" onClick={() => open(item.session, edition)} title="Open this session">
+            {label(item.session)}<span aria-hidden="true"> ↗</span>
+          </button>
+        </div>
+        <h3 className="brief-headline">{item.headline}</h3>
+        {item.why && <Prose className="brief-why" text={item.why} />}
+        {item.recommendation && (
+          <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={item.recommendation} /></div>
+        )}
+        {item.replies?.length ? (
+          <div className="brief-replies" role="group" aria-label="Answer">
+            {item.replies.map((r) => {
+              const k = edition + "|" + item.session + "|" + r;
+              return onReply ? (
+                <button key={r} type="button" className={"brief-reply" + (sent.has(k) ? " sent" : "")}
+                        disabled={!!sending || answered} title={`Type “${r}” into ${label(item.session)}`}
+                        onClick={() => void reply(item, edition, r)}>
+                  {sent.has(k) ? "✓ " : sending === k ? "… " : ""}{r}
+                </button>
+              ) : <span key={r} className="brief-reply static">{r}</span>;
+            })}
+          </div>
+        ) : null}
+      </article>
+    );
+  };
+
+  const editionBody = (e: Edition, edition: string) => {
+    const items = e.items || [];
+    if (!items.some((it) => it.slot)) return <section className="brief-slot">{items.map((it) => story(it, edition))}</section>;
+    const also = items.filter((it) => it.slot === "also");
+    return (
+      <>
+        {SLOTS.map(([slot, name, hint]) => {
+          const rows = items.filter((it) => it.slot === slot);
+          if (!rows.length) return null;
+          return (
+            <section key={slot} className={"brief-slot slot-" + slot}>
+              <h2 className="brief-slot-head"><span>{name}</span><span className="brief-slot-n">{rows.length}</span><span className="brief-slot-hint">{hint}</span></h2>
+              {rows.map((it) => story(it, edition))}
+            </section>
+          );
+        })}
+        {also.length > 0 && (
+          <section className="brief-slot slot-also">
+            <h2 className="brief-slot-head"><span>Also</span><span className="brief-slot-n">{also.length}</span></h2>
+            <div className="brief-also">
+              {also.map((it) => (
+                <button key={it.session} type="button" className={"brief-also-row" + (isRead(edition, it.session) ? "" : " unread")}
+                        ref={witnessRef.current!.ref({ edition, item: it.session, words: wordCount(it.headline) })}
+                        onClick={() => open(it.session, edition)}>
+                  <span className="brief-also-name">{label(it.session)}</span>
+                  <span className="brief-also-head">{it.headline}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+      </>
+    );
+  };
+
+  return (
+    <div className="place-page briefing-page" role="region" aria-label="Briefing" tabIndex={-1} ref={panelRef}>
+      <header className="place-head">
+        <span className="place-title"><span className="place-spark" aria-hidden="true">✦</span>Briefing</span>
+        {sessionKey && onClearSession && (
+          <span className="views-scope-chip">
+            {label(sessionKey)}
+            <button type="button" aria-label="Show the whole briefing" title="The whole briefing" onClick={onClearSession}>×</button>
+          </span>
+        )}
+        <span className="place-spacer" />
+        {!sessionKey && editions.length > 1 && (
+          <span className="place-nav">
+            <button type="button" aria-label="Earlier edition" title="Earlier (←)" disabled={index >= editions.length - 1}
+                    onClick={() => setIndex((i) => Math.min(editions.length - 1, i + 1))}>‹</button>
+            <select aria-label="Edition" value={index} onChange={(e) => setIndex(Number(e.target.value))}>
+              {editions.map((x, i) => <option key={x.generated_at || i} value={i}>{i === 0 ? "Latest · " : ""}{editionWhen(x.generated_at)}</option>)}
+            </select>
+            <button type="button" aria-label="Later edition" title="Later (→)" disabled={index === 0}
+                    onClick={() => setIndex((i) => Math.max(0, i - 1))}>›</button>
+          </span>
+        )}
+        <button type="button" className="views-close" aria-label="Close briefing" onClick={onClose}>×</button>
+      </header>
+      <div className="place-col">
+        {!editions.length ? (
+          <div className="place-empty">
+            <p className="place-lede">No briefing yet.</p>
+            <p>The host agent writes one as your sessions work: what wants a decision, what to watch, what finished.</p>
+          </div>
+        ) : sessionKey ? (
+          <>
+            <p className="place-dateline">Everything the briefing said about {label(sessionKey)} · {thread.length} {thread.length === 1 ? "note" : "notes"}</p>
+            <button type="button" className="brief-open-session" onClick={() => onOpenSession(sessionKey)}>Open {label(sessionKey)} →</button>
+            {!thread.length && <p className="place-empty-line">The briefing hasn't mentioned this session.</p>}
+            <ol className="brief-thread">
+              {thread.map((it, i) => (
+                <li key={it.at + i} className={"brief-thread-item" + (isRead(it.at, it.session) ? "" : " unread")}
+                    ref={witnessRef.current!.ref({ edition: it.at, item: it.session, words: wordCount(`${it.headline} ${it.why || ""}`) })}>
+                  <span className="brief-thread-when" title={editionWhen(it.at)}>{ago(it.at)}{it.slot ? ` · ${it.slot}` : ""}</span>
+                  <h3 className="brief-headline">{it.headline}</h3>
+                  {it.why && <Prose className="brief-why" text={it.why} />}
+                  {it.recommendation && <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={it.recommendation} /></div>}
+                </li>
+              ))}
+            </ol>
+          </>
+        ) : ed ? (
+          <>
+            <p className="place-dateline">{editionWhen(stamp)}{index === 0 ? ` · ${ago(stamp)}` : ""}</p>
+            <p className="place-lede">{ed.summary}</p>
+            {editionBody(ed, stamp)}
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+};

@@ -54,6 +54,12 @@ import {
   type Side
 } from "./utils/paneTree";
 import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
+import { BriefingPage } from "./components/BriefingPage";
+import { PulsePage } from "./components/PulsePage";
+import { UpdatePop, useUpdateInfo } from "./components/UpdateNotice";
+import { useBriefing } from "./utils/briefingFeed";
+import { usePulse, type PulseAction } from "./utils/pulseFeed";
+import { sendLineToSession } from "./utils/quickReply";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord } from "./utils/fullscreenChord";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
@@ -575,6 +581,14 @@ const App = () => {
   // request to engage one (back from Views with another session picked).
   const [wallFocus, setWallFocus] = useState<string | null>(null);
   const [wallFocusReq, setWallFocusReq] = useState<{ key: string; seq: number } | null>(null);
+  // The sidebar's own places beyond Sessions and Views: the briefing (with
+  // the session it is narrowed to) and mybot's pulse; and the update panel.
+  const [place, setPlace] = useState<null | "briefing" | "pulse">(null);
+  const [briefingSession, setBriefingSession] = useState<string | null>(null);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const briefing = useBriefing();
+  const pulse = usePulse();
+  const { update, dismiss: dismissUpdate } = useUpdateInfo();
   // ⌘⇧V does what the strip's Views button does (set where it is built).
   const toggleViewsRef = useRef<() => void>(() => {});
   // ⌘⇧S: a full-screen session's Calendar tab, and back; elsewhere every
@@ -4512,6 +4526,9 @@ const App = () => {
   // side with the session: beside its terminal, or beside the wall.
   const viewsSideNow = railDocked && viewsSide && !!viewsOpen;
   const viewsPage = railDocked && !!viewsOpen && !viewsSideNow;
+  // A place (Briefing, Pulse) is a page beside the sidebar, over the wall or
+  // the session; it and the Views page are one at a time.
+  const placePage = railDocked && place !== null;
   // The sidebar's session is the top of the hierarchy; Sessions (the wall
   // or full screen) and Views are two ways to look at it. Selected is: in
   // Views, the session it shows; on the wall, the engaged tile; full
@@ -4525,7 +4542,8 @@ const App = () => {
   const schedTabNow = sessionTabs && schedTab;
   useEffect(() => { if (viewsPage) setSchedTab(false); }, [viewsPage]);
   const focusTerminalSoon = () => window.setTimeout(() => termRef.current?.focus(), 0);
-  const selectedRoom: string | null = viewsPage ? (viewsOpen?.session ?? null)
+  const selectedRoom: string | null = place === "briefing" && placePage ? briefingSession
+    : viewsPage ? (viewsOpen?.session ?? null)
     : wallUnder ? wallFocus
     : status === "ended" ? null : session!.room;
   // One session, whichever identifier names it.
@@ -4540,7 +4558,10 @@ const App = () => {
   const currentInfo = currentKey ? sessions.find((x) => (x.internalName || x.name) === currentKey) : undefined;
   // Side by side, the column follows the selection — a tile engaged on
   // the wall, ⌘E / ⌘G full screen — unless it was opened on one result.
+  // Views opened as a page (a link, an inline card) takes over from a place.
+  useEffect(() => { if (viewsOpen && !viewsSide) setPlace(null); }, [viewsOpen, viewsSide]);
   useEffect(() => {
+    if (placePage) return;
     if (!viewsSideNow || !viewsOpen || viewsOpen.item || !selectedRoom) return;
     if (sessionKeyOf(viewsOpen.session) === sessionKeyOf(selectedRoom)) return;
     setViewsOpen({ session: selectedRoom });
@@ -4563,7 +4584,7 @@ const App = () => {
   // The strip says when there is something new to read (sessions with
   // results this browser has not seen) — the tiles no longer carry it.
   const freshViewSessions = unseenViewSessions;
-  const railOnWall = wallUnder && !viewsPage;
+  const railOnWall = wallUnder && !viewsPage && !placePage;
   const wallSearchPortal = railDocked && railOnWall ? railSearchEl : null;
   // Leave Views for a session (by any of its identifiers) — in place when
   // a terminal is up, as its own page from the hub.
@@ -4582,6 +4603,7 @@ const App = () => {
     switchSession(target);
   };
   const openViews = () => {
+    setPlace(null);
     if (viewsSideNow) { setViewsOpen(null); return; }
     if (viewsPage) { setViewsOpen({ page: true }); return; }
     if (!railDocked) {
@@ -4595,14 +4617,65 @@ const App = () => {
   // Sessions from Views: back where you were — the wall, with the session
   // picked in Views engaged, or full screen, switched to it.
   const backToSessions = () => {
-    const sel = viewsOpen?.session;
+    const sel = placePage ? (place === "briefing" ? briefingSession ?? undefined : undefined) : viewsOpen?.session;
+    setPlace(null);
     if (!wallUnder && sel && sessionKeyOf(sel) !== sessionKeyOf(session?.room)) { goToSession(sel); return; }
     setViewsOpen(null);
     if (wallUnder && sel && sessionKeyOf(sel) !== sessionKeyOf(wallFocus)) {
       setWallFocusReq((r) => ({ key: sel, seq: (r?.seq ?? 0) + 1 }));
     }
   };
+  // Opening a place: clicked again while there, a narrowed briefing shows
+  // all of itself again (as Views does), else the place stays.
+  const openPlace = (which: "briefing" | "pulse") => {
+    if (place === which) { if (which === "briefing") setBriefingSession(null); return; }
+    if (viewsPage) setViewsOpen(null);
+    setBriefingSession(null);
+    setPlace(which);
+  };
+  // A briefing story's reply chip: the answer typed into its session.
+  const replyToSession = (key: string, text: string) => {
+    const info = sessions.find((x) => (x.internalName || x.name) === key);
+    return sendLineToSession(resolveTunnelWsUrl(), key, text, { userName: name, cols: info?.cols, rows: info?.rows });
+  };
+  // A pulse follow-up, as on the phone: the session that owns the item gets
+  // a one-line note; else an earlier follow-up opens; else a new session in
+  // the item's folder runs the command mybot prepared, and opens.
+  const pulseFollowUp = async (a: PulseAction): Promise<boolean> => {
+    if (a.targetInternalName && a.message && sessions.some((x) => (x.internalName || x.name) === a.targetInternalName)) {
+      const ok = await replyToSession(a.targetInternalName, a.message);
+      if (ok) pushNotice(`Sent to ${a.targetName || a.targetInternalName}`);
+      return ok;
+    }
+    const existing = sessions.find((x) => x.name === a.sessionName || x.displayName === a.sessionName);
+    if (existing) { setPlace(null); goToSession(existing.internalName || existing.name); return true; }
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: a.sessionName, type: "terminal", port: null, cwd: a.cwd || undefined })
+      });
+      const data = await res.json().catch(() => ({})) as { name?: string; displayName?: string; internalName?: string };
+      if (!res.ok || !data.name) return false;
+      const room = data.internalName || data.name;
+      // The new shell's prompt first; the pty would buffer it anyway.
+      await new Promise((r) => window.setTimeout(r, 700));
+      if (!(await replyToSession(room, a.command))) return false;
+      void fetchSessions({ showLoading: false });
+      setPlace(null);
+      if (!session) { window.location.href = buildSessionPath(data.displayName || data.name); return true; }
+      setSwitcherOpen(false);
+      switchSession({ name: data.name, displayName: data.displayName || data.name, active: true, internalName: room } as SessionInfo);
+      return true;
+    } catch { return false; }
+  };
   const railNav: RailNavItem[] = !railDocked ? [] : [
+    // The fleet's own pages: what wants you (the briefing) and what may
+    // have slipped by (mybot's pulse), above the session-level places.
+    { key: "briefing", label: "Briefing", icon: <RailIcon name="briefing" />, active: place === "briefing" && placePage,
+      count: briefing.decisions || undefined, fresh: briefing.decisions > 0 || briefing.latestUnseen,
+      onClick: () => openPlace("briefing") },
+    ...(pulse.feed ? [{ key: "pulse", label: "Pulse", icon: <RailIcon name="pulse" />, active: place === "pulse" && placePage,
+      fresh: pulse.fresh, onClick: () => openPlace("pulse") }] : []),
     // Clicking the place you are in shows all of it (a filter clears), as
     // in Slack; Esc or another place leaves.
     { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage || viewsSideNow,
@@ -4620,6 +4693,8 @@ const App = () => {
       return { key: "theme", label: label(themeMode), icon: <RailIcon name={themeMode} />,
                bottom: true, onClick: () => setThemeMode(next) };
     })(),
+    ...(update ? [{ key: "update", label: "Update", icon: <RailIcon name="update" />, bottom: true, fresh: true, active: updateOpen,
+      onClick: () => setUpdateOpen((v) => !v) }] : []),
     { key: "keys", label: "Shortcuts", icon: <RailIcon name="keyboard" />, bottom: true, active: shortcutHelpOpen,
       onClick: () => setShortcutHelpOpen((v) => !v) },
     ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
@@ -4632,6 +4707,26 @@ const App = () => {
     }
     setCheckbacksOpen((v) => (v ? null : "*"));
   };
+  // The wall's lead, with the sidebar: one line each for the briefing and
+  // the pulse — what is there and how much wants you — that opens the place.
+  const latestEdition = briefing.editions[0];
+  const wallLead = (latestEdition || pulse.feed) ? (
+    <div className="wall-lead">
+      {latestEdition && (
+        <button type="button" className={"wall-lead-item" + (briefing.latestUnseen ? " fresh" : "")} onClick={() => openPlace("briefing")}>
+          <span className="wall-lead-kind"><RailIcon name="briefing" />Briefing</span>
+          <span className="wall-lead-text">{latestEdition.summary}</span>
+          {briefing.decisions > 0 && <span className="wall-lead-n">{briefing.decisions} to decide</span>}
+        </button>
+      )}
+      {pulse.feed && (
+        <button type="button" className={"wall-lead-item" + (pulse.fresh ? " fresh" : "")} onClick={() => openPlace("pulse")}>
+          <span className="wall-lead-kind"><RailIcon name="pulse" />Pulse</span>
+          <span className="wall-lead-text">{pulse.feed.days[0]?.pulses[0]?.title}</span>
+        </button>
+      )}
+    </div>
+  ) : null;
   // ⌘⇧V: in Views, back to the session; elsewhere, into Views.
   toggleViewsRef.current = () => (viewsPage ? backToSessions() : viewsSideNow ? setViewsOpen(null) : openViews());
   // The sidebar's compose button: the wall's new-session form.
@@ -4851,7 +4946,8 @@ const App = () => {
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
-            covered={viewsPage}
+            covered={viewsPage || placePage}
+            wallLead={railDocked ? wallLead : undefined}
             scope={railDocked ? railScope : undefined}
             createSignal={createSignal}
             createName={createName}
@@ -5566,7 +5662,8 @@ const App = () => {
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             sidebarDocked={railDocked}
-            covered={viewsPage}
+            covered={viewsPage || placePage}
+            wallLead={railDocked ? wallLead : undefined}
             scope={railDocked ? railScope : undefined}
             createSignal={createSignal}
             createName={createName}
@@ -5684,7 +5781,7 @@ const App = () => {
           folders={folders}
           currentRoom={sessionKeyOf(selectedRoom)}
           onWall={railOnWall}
-          inSessions={!viewsPage}
+          inSessions={!viewsPage && !placePage}
           searchSlot={railDocked && railOnWall ? setRailSearchEl : undefined}
           externalFilter={wallFilter}
           nav={railNav}
@@ -5709,6 +5806,11 @@ const App = () => {
             }).catch(() => pushNotice("Failed to update park state"));
           }}
           onPick={(next) => {
+            // In the briefing, a session in the sidebar narrows it to that
+            // session's thread; the pulse has no per-session view, so a
+            // pick leaves it for the session.
+            if (placePage && place === "briefing") { setBriefingSession(next.internalName || next.name); return; }
+            if (placePage) setPlace(null);
             // Side by side, the column follows: switch, and show the new
             // session's results beside it.
             if (viewsSideNow) setViewsOpen({ session: next.internalName || next.name });
@@ -5738,7 +5840,7 @@ const App = () => {
           onAllSessions={() => {
             setRailOpen(false);
             // From Views: back to where you were, on the selected session.
-            if (viewsPage) { backToSessions(); return; }
+            if (viewsPage || placePage) { backToSessions(); return; }
             // Full screen: out to the wall (a column beside stays). On the
             // wall already: nothing to do.
             if (session && !switcherOpen) setSwitcherOpen(true);
@@ -5775,6 +5877,21 @@ const App = () => {
       )}
       {desktopOpen && <DesktopView wsBase={resolveTunnelWsUrl()} onClose={() => setDesktopOpen(false)} />}
       {shortcutHelpOpen && <ShortcutsPanel isMac={isMacPlatform} onClose={() => setShortcutHelpOpen(false)} />}
+      {placePage && place === "briefing" && (
+        <BriefingPage editions={briefing.editions} read={briefing.read} sessions={sessions}
+                      session={briefingSession} onClearSession={() => setBriefingSession(null)}
+                      onOpenSession={(key) => { setPlace(null); goToSession(key); }}
+                      onReply={session || sessions.length ? replyToSession : undefined}
+                      markSeen={briefing.markSeen} markRead={briefing.markRead}
+                      onClose={() => setPlace(null)} />
+      )}
+      {placePage && place === "pulse" && (
+        <PulsePage feed={pulse.feed} existing={new Set(sessions.flatMap((x) => [x.name, x.displayName].filter(Boolean) as string[]))}
+                   onFollowUp={pulseFollowUp} markSeen={pulse.markSeen} onClose={() => setPlace(null)} />
+      )}
+      {updateOpen && update && (
+        <UpdatePop update={update} onDismiss={dismissUpdate} onClose={() => setUpdateOpen(false)} />
+      )}
       {viewsOpen && (
         <ViewsPanel key={viewsOpen.item ? `${viewsOpen.session}/${viewsOpen.item}` : "views"}
                     session={viewsOpen.session} item={viewsOpen.item} sessions={sessions}

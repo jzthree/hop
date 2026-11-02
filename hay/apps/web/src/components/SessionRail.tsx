@@ -89,6 +89,9 @@ const ICON_PATHS: Record<string, string> = {
   wall: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
   views: "M12 3 3 8l9 5 9-5-9-5ZM3 13l9 5 9-5M3 17.5l9 5 9-5",
   scheduled: "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
+  briefing: "M12 3l1.6 4.9L18.5 9.5l-4.9 1.6L12 16l-1.6-4.9L5.5 9.5l4.9-1.6zM18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z",
+  pulse: "M3 12h4l2.5-6 5 12 2.5-6h4",
+  update: "M12 17V7M7.5 11.5 12 7l4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
   calendar: "M4 6.5A1.5 1.5 0 0 1 5.5 5h13A1.5 1.5 0 0 1 20 6.5v12a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-12ZM4 10h16M8.5 3v4M15.5 3v4",
   codex: "M4 4h16v16H4zM12 4v16M4 12h8",
   desktop: "M3 4h18v12H3zM8 20h8M12 16v4",
@@ -338,6 +341,7 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
       <span className="rail-strip-icon" aria-hidden="true">{n.icon}</span>
       <span className="rail-strip-label">{n.label}</span>
       {!!n.count && <span className={"rail-strip-count" + (n.fresh ? " fresh" : "")}>{n.count}</span>}
+      {!n.count && n.fresh && <span className="rail-strip-dot" aria-label="New" />}
     </button>
   );
 

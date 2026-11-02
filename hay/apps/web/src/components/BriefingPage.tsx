@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { threadFor, type BriefingItem, type Edition } from "../utils/briefingFeed";
 import { createReadWitness, wordCount } from "../utils/readWitness";
 import { Prose } from "../utils/prose";
@@ -32,6 +32,19 @@ type Props = {
   onClose: () => void;
 };
 
+// An ask passed over without an answer: it folds away (here, and on reload
+// in this browser) and counts as handled — read — everywhere.
+const SKIP_KEY = "hop_brief_skipped";
+const SKIP_CAP = 300;
+const loadSkipped = (): Set<string> => {
+  try { const a = JSON.parse(localStorage.getItem(SKIP_KEY) || "[]"); return new Set(Array.isArray(a) ? a : []); } catch { return new Set(); }
+};
+const saveSkipped = (set: Set<string>) => {
+  try { localStorage.setItem(SKIP_KEY, JSON.stringify([...set].slice(-SKIP_CAP))); } catch { /* per-browser only */ }
+};
+
+const EARLIER_SHOWN = 3;
+
 const SLOTS: Array<[NonNullable<BriefingItem["slot"]>, string, string]> = [
   ["decide", "Decide", "Waiting on you"],
   ["watch", "Watch", "Moving, worth a look"],
@@ -62,6 +75,8 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
   const [index, setIndex] = useState(0);
   const [sending, setSending] = useState<string | null>(null);
   const [sent, setSent] = useState<Set<string>>(new Set());
+  const [allEarlier, setAllEarlier] = useState(false);
+  const [skipped, setSkipped] = useState<Set<string>>(loadSkipped);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const witnessRef = useRef<ReturnType<typeof createReadWitness> | null>(null);
   if (!witnessRef.current) {
@@ -107,6 +122,16 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
     }
   };
 
+  const skip = (item: BriefingItem, edition: string) => {
+    const k = edition + "|" + item.session;
+    witnessRef.current?.acted(edition, item.session);
+    markRead(edition, item.session);
+    setSkipped((prev) => { const next = new Set(prev).add(k); saveSkipped(next); return next; });
+  };
+  const unskip = (item: BriefingItem, edition: string) => {
+    setSkipped((prev) => { const next = new Set(prev); next.delete(edition + "|" + item.session); saveSkipped(next); return next; });
+  };
+
   // The sidebar's session: its thread, newest first, across every edition.
   const sessionKey = session ? keyOf(session) : null;
   const thread = useMemo(() => {
@@ -127,12 +152,15 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose, editions.length]);
 
-  const replyChips = (item: BriefingItem, edition: string) => {
-    if (!item.replies?.length) return null;
+  // What the story asks of you, answered in a click — or skipped. A story
+  // with nothing to answer can still be skipped when it wants a decision.
+  const actions = (item: BriefingItem, edition: string) => {
+    const ask = !!item.replies?.length || item.slot === "decide";
+    if (!ask) return null;
     const answered = [...sent].some((k) => k.startsWith(edition + "|" + item.session + "|"));
     return (
       <div className="brief-replies" role="group" aria-label="Answer">
-        {item.replies.map((r) => {
+        {(item.replies || []).map((r) => {
           const k = edition + "|" + item.session + "|" + r;
           return onReply ? (
             <button key={r} type="button" className={"brief-reply" + (sent.has(k) ? " sent" : "")}
@@ -142,36 +170,68 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
             </button>
           ) : <span key={r} className="brief-reply static">{r}</span>;
         })}
+        {!answered && (
+          <button type="button" className="brief-skip" title="Pass on this one: nothing is sent, and it counts as handled"
+                  onClick={() => skip(item, edition)}>Skip</button>
+        )}
       </div>
     );
   };
 
-  const story = (item: BriefingItem, edition: string) => {
+  // One story card — the same on the front page, a session's thread, and
+  // its Briefing tab. In a thread the card says when it ran instead of
+  // whose it is, and only the newest edition's asks can be answered.
+  const story = (item: BriefingItem, edition: string, opts: { thread?: boolean; answerable?: boolean; tag?: boolean } = {}) => {
     const unread = !isRead(edition, item.session);
+    const answerable = opts.answerable ?? true;
+    if (skipped.has(edition + "|" + item.session)) {
+      return (
+        <article key={edition + item.session + item.headline} className="brief-story skipped">
+          <span className="brief-skipped-head">{opts.thread ? "" : label(item.session) + " · "}{item.headline}</span>
+          <button type="button" className="brief-skip" onClick={() => unskip(item, edition)} title="Bring it back">Skipped · Undo</button>
+        </article>
+      );
+    }
     return (
       <article key={edition + item.session + item.headline}
                ref={witnessRef.current!.ref({ edition, item: item.session, words: wordCount(`${item.headline} ${item.why || ""} ${item.recommendation || ""}`) })}
                className={"brief-story" + (unread ? " unread" : "")}>
         <div className="brief-story-head">
           {unread && <span className="brief-dot" aria-label="New" />}
-          <button type="button" className="brief-session" onClick={() => open(item.session, edition)} title="Open this session">
-            {label(item.session)}<span aria-hidden="true"> ↗</span>
-          </button>
+          {opts.thread ? (
+            <span className="brief-thread-when" title={editionWhen(edition)}>{ago(edition)}{opts.tag && item.slot ? ` · ${item.slot}` : ""}</span>
+          ) : (
+            <button type="button" className="brief-session" onClick={() => open(item.session, edition)} title="Open this session">
+              {label(item.session)}<span aria-hidden="true"> ↗</span>
+            </button>
+          )}
         </div>
         <h3 className="brief-headline">{item.headline}</h3>
         {item.why && <Prose className="brief-why" text={item.why} />}
         {item.recommendation && (
           <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={item.recommendation} /></div>
         )}
-        {replyChips(item, edition)}
+        {answerable && actions(item, edition)}
       </article>
     );
   };
 
-  const editionBody = (e: Edition, edition: string) => {
+  const editionBody = (e: Edition, edition: string, opts: { thread?: boolean; answerable?: boolean } = {}): ReactNode => {
     const items = e.items || [];
-    if (!items.some((it) => it.slot)) return <section className="brief-slot">{items.map((it) => story(it, edition))}</section>;
+    if (!items.some((it) => it.slot)) return <section className="brief-slot">{items.map((it) => story(it, edition, opts))}</section>;
     const also = items.filter((it) => it.slot === "also");
+    if (opts.thread && also.length) {
+      const rest = items.filter((it) => it.slot !== "also");
+      return (
+        <>
+          {rest.length > 0 && editionBody({ ...e, items: items.filter((it) => it.slot !== "also") }, edition, opts)}
+          <section className="brief-slot slot-also">
+            <h2 className="brief-slot-head"><span>Also</span><span className="brief-slot-n">{also.length}</span></h2>
+            {also.map((it) => story(it, edition, opts))}
+          </section>
+        </>
+      );
+    }
     return (
       <>
         {SLOTS.map(([slot, name, hint]) => {
@@ -180,7 +240,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
           return (
             <section key={slot} className={"brief-slot slot-" + slot}>
               <h2 className="brief-slot-head"><span>{name}</span><span className="brief-slot-n">{rows.length}</span><span className="brief-slot-hint">{hint}</span></h2>
-              {rows.map((it) => story(it, edition))}
+              {rows.map((it) => story(it, edition, opts))}
             </section>
           );
         })}
@@ -238,18 +298,30 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
             <p className="place-dateline">Everything the briefing said about {label(sessionKey)} · {thread.length} {thread.length === 1 ? "note" : "notes"}</p>
             {!inSession && <button type="button" className="brief-open-session" onClick={() => onOpenSession(sessionKey)}>Open {label(sessionKey)} →</button>}
             {!thread.length && <p className="place-empty-line">The briefing hasn't mentioned this session.</p>}
-            <ol className="brief-thread">
-              {thread.map((it, i) => (
-                <li key={it.at + i} className={"brief-thread-item" + (isRead(it.at, it.session) ? "" : " unread")}
-                    ref={witnessRef.current!.ref({ edition: it.at, item: it.session, words: wordCount(`${it.headline} ${it.why || ""}`) })}>
-                  <span className="brief-thread-when" title={editionWhen(it.at)}>{ago(it.at)}{it.slot ? ` · ${it.slot}` : ""}</span>
-                  <h3 className="brief-headline">{it.headline}</h3>
-                  {it.why && <Prose className="brief-why" text={it.why} />}
-                  {it.recommendation && <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={it.recommendation} /></div>}
-                  {it.at === (editions[0]?.generated_at || "") && replyChips(it, it.at)}
-                </li>
-              ))}
-            </ol>
+            {thread.length > 0 && (() => {
+              const newest = editions[0]?.generated_at || "";
+              const latestAt = thread[0].at;
+              const latest = thread.filter((it) => it.at === latestAt);
+              // Editions restate a story while it lasts: a run of the same
+              // headline is one card, and the past opens a few at a time.
+              const earlier = thread.filter((it, i) => it.at !== latestAt && it.headline !== thread[i - 1]?.headline);
+              const shown = allEarlier ? earlier : earlier.slice(0, EARLIER_SHOWN);
+              const latestEdition: Edition = { generated_at: latestAt, items: latest };
+              return (
+                <>
+                  {editionBody(latestEdition, latestAt, { thread: true, answerable: latestAt === newest })}
+                  {earlier.length > 0 && (
+                    <section className="brief-slot slot-earlier">
+                      <h2 className="brief-slot-head"><span>Earlier</span><span className="brief-slot-n">{earlier.length}</span></h2>
+                      {shown.map((it) => story(it, it.at, { thread: true, answerable: false, tag: true }))}
+                      {shown.length < earlier.length && (
+                        <button type="button" className="brief-more" onClick={() => setAllEarlier(true)}>Show {earlier.length - shown.length} more</button>
+                      )}
+                    </section>
+                  )}
+                </>
+              );
+            })()}
           </>
         ) : ed ? (
           <>

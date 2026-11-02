@@ -47,9 +47,23 @@ describe("BriefingPage", () => {
   it("with the sidebar's session, the page is that session's thread across editions", () => {
     const onClearSession = vi.fn();
     render(<BriefingPage {...base} session="orion" onClearSession={onClearSession} />);
-    expect([...document.querySelectorAll(".brief-thread-item .brief-headline")].map((h) => h.textContent)).toEqual(["Ship the fix?", "Started the fix"]);
+    // The same story cards as the front page: the latest under its slot, then Earlier.
+    expect([...document.querySelectorAll(".brief-story .brief-headline")].map((h) => h.textContent)).toEqual(["Ship the fix?", "Started the fix"]);
+    expect([...document.querySelectorAll(".brief-slot-head")].map((h) => h.firstChild!.textContent)).toEqual(["Decide", "Earlier"]);
+    expect(screen.getAllByText("Ship")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Show the whole briefing" }));
     expect(onClearSession).toHaveBeenCalled();
+  });
+
+  it("an ask can be skipped: nothing is sent, it reads as handled, and it folds away (undoable)", () => {
+    const onReply = vi.fn(async () => true); const markRead = vi.fn();
+    render(<BriefingPage {...base} onReply={onReply} markRead={markRead} />);
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    expect(onReply).not.toHaveBeenCalled();
+    expect(markRead).toHaveBeenCalledWith(editions[0].generated_at, "s_orion");
+    expect(screen.queryByRole("button", { name: "Ship" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Skipped · Undo/ }));
+    expect(screen.getByRole("button", { name: "Ship" })).toBeTruthy();
   });
 
   it("as a session's tab: no heading of its own, and the newest ask is answerable there", async () => {

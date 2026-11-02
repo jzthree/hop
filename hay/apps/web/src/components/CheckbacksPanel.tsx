@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { addDays, rruleOccurrences, startOfDay, triggerOccurrences, weekDays } from "../utils/calendar";
 import {
   chipWhen, conditionLabel, dayHeading, describeRrule, describeState, describeTrigger, isTimed,
@@ -33,6 +33,9 @@ type Props = {
 };
 
 // One entry on one day: at a time, or a band (at null) across the day.
+// Distinct, calm hues that read on light and dark paper.
+const SERIES_COLORS = ["#7c3aed", "#0891b2", "#d97706", "#059669", "#db2777", "#2563eb", "#65a30d", "#dc2626", "#0d9488", "#9333ea", "#ca8a04", "#4f46e5"];
+
 type Entry =
   | { key: string; source: "hop"; at: number | null; every?: number; cb: Checkback; past: boolean }
   | { key: string; source: "codex"; at: number | null; every?: number; auto: CodexAutomation; rule: string; past: boolean };
@@ -132,6 +135,21 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
     return { day, list };
   });
   const pickedEntry = picked ? week.flatMap((d) => d.list).find((e) => e.key === picked) ?? null : null;
+  // One colour per task, so a repeat reads at a glance: a recurring
+  // check-back or automation is one task; one-offs with the same words
+  // (numbers aside — "S198", "S199") in the same session are one too.
+  // Colours are dealt in order of first appearance this week.
+  const seriesOf = (e: Entry) => e.source === "codex" ? `auto:${e.auto.id}`
+    : e.cb.trigger.kind === "every" ? `cb:${e.cb.id}`
+    : `msg:${e.cb.session}|${e.cb.message.split("\n")[0].replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase()}`;
+  const seriesColor = new Map<string, string>();
+  const seriesCount = new Map<string, number>();
+  for (const { list } of week) for (const e of list) {
+    const k = seriesOf(e);
+    if (!seriesColor.has(k)) seriesColor.set(k, SERIES_COLORS[seriesColor.size % SERIES_COLORS.length]);
+    seriesCount.set(k, (seriesCount.get(k) || 0) + 1);
+  }
+  const colorStyle = (e: Entry) => ({ ["--c" as string]: seriesColor.get(seriesOf(e)) }) as React.CSSProperties;
   const waiting = pending.filter((c) => !isTimed(c.trigger));
   const nothing = timedPending.length === 0 && waiting.length === 0 && activeAutos.length === 0;
   const rangeLabel = (() => {
@@ -177,6 +195,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
           <div className="checkbacks-list">
             {nothing && <p className="checkbacks-empty">{all ? "Nothing scheduled." : "Nothing scheduled on this session."}</p>}
 
+            <div className={"cal-body" + (pickedEntry ? " picked" : "")}>
             <div className="cal-week" role="grid" aria-label={`Week of ${rangeLabel}`}>
               {week.map(({ day, list }) => {
                 const d = new Date(day);
@@ -188,11 +207,15 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
                     </div>
                     {list.map((e) => (
                       <button key={e.key} type="button"
-                              className={"cal-entry " + e.source + (e.at === null ? " band" : "") + (e.past ? " past" : "") + (picked === e.key ? " on" : "")}
+                              className={"cal-entry " + e.source + (e.at === null ? " band" : "") + (e.past ? " past" : "") + (picked === e.key ? " on" : "")
+                                + (pickedEntry && seriesOf(pickedEntry) === seriesOf(e) ? " same" : "")}
+                              style={colorStyle(e)}
+                              title={e.source === "hop" ? e.cb.message : `${e.auto.name}\n\n${e.auto.prompt}`}
                               onClick={() => setPicked((p) => (p === e.key ? null : e.key))}>
                         <span className="cal-when">
                           {e.at === null ? every(e.every!) : timeOfDay(e.at)}
                           {all && e.source === "hop" ? <span className="cal-who"> · {e.cb.sessionName || e.cb.session}</span> : null}
+                          {e.source === "codex" ? <span className="cal-src"> · Codex</span> : null}
                         </span>
                         <span className="cal-what">{e.source === "hop" ? e.cb.message.split("\n")[0] : e.auto.name}</span>
                       </button>
@@ -202,7 +225,16 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
               })}
             </div>
 
-            {pickedEntry && (pickedEntry.source === "hop" ? (
+            {/* The picked entry, read in full beside the week. */}
+            {pickedEntry && (
+              <aside className="cal-detail-pane" aria-label="Scheduled message" style={colorStyle(pickedEntry)}>
+                <div className="cal-detail-head">
+                  <span className="cal-swatch" aria-hidden="true" />
+                  <span>{(seriesCount.get(seriesOf(pickedEntry)) || 1) > 1 ? `Repeats ${seriesCount.get(seriesOf(pickedEntry))}× this week` : "Once this week"}</span>
+                  <span className="views-head-spacer" />
+                  <button type="button" className="views-close" aria-label="Close message" onClick={() => setPicked(null)}>×</button>
+                </div>
+            {pickedEntry.source === "hop" ? (
               <div className={"sched-row cal-detail" + (pickedEntry.past ? " past" : "") + (pickedEntry.cb.firedAt && !pickedEntry.past ? " fired" : "")}>
                 <div className="sched-time">{pickedEntry.at === null ? every(pickedEntry.every!) : timeOfDay(pickedEntry.at)}</div>
                 <div className="sched-body">
@@ -230,7 +262,10 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
                 </div>
                 <span className="sched-owner" title="Codex runs this one; manage it in Codex">Codex</span>
               </div>
-            ))}
+            )}
+              </aside>
+            )}
+            </div>
 
             {waiting.length > 0 && (
               <section className="sched-day">

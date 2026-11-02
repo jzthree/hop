@@ -6654,6 +6654,8 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .brief-skipped-head { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--ink-muted); }
 .brief-story-head .brief-thread-when { margin: 0; }
 .pulse-card.skipped { display: flex; align-items: baseline; gap: 10px; padding-top: 8px; padding-bottom: 8px; opacity: 0.7; }
+.pulse-get .update-pop-cmd { max-width: 100%; margin: 4px 0 16px; }
+.pulse-get .update-pop-cmd code { overflow-x: auto; white-space: nowrap; }
 .prose-figure { margin: 18px 0; }
 .prose-figure img {
   display: block; max-width: 100%; height: auto; margin: 0 auto; border-radius: 8px;

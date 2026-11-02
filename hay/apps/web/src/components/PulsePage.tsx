@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { dayLabel, pulseItemsFor, type Pulse, type PulseAction, type PulseFeed, type PulseSection } from "../utils/pulseFeed";
 import { Prose, plainText } from "../utils/prose";
+import { useSavedScroll } from "../utils/savedScroll";
 
 // mybot's pulse as a place beside the sidebar: a day's reading, laid out
 // like a journal page — the title, the intro as its lede, what you may have
@@ -36,6 +37,8 @@ type Props = {
 };
 
 const ENGINE_KEY = "hop_pulse_engine";
+const MYBOT_URL = "https://github.com/jzhoulab/mybot#readme";
+export const MYBOT_INSTALL = "curl -fsSL https://raw.githubusercontent.com/jzhoulab/mybot/main/install.sh | sh";
 // An item passed over: it folds to a line, in this browser, and can come back.
 const SKIP_KEY = "hop_pulse_skipped";
 const SKIP_CAP = 300;
@@ -48,7 +51,9 @@ const saveSkipped = (set: Set<string>) => {
 };
 
 export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, onClearSession, inSession = false, markSeen, onClose }: Props) => {
-  const [dayIndex, setDayIndex] = useState(0);
+  // The day being read survives a refresh (this browser tab).
+  const [dayIndex, setDayIndex] = useState(() => { try { return Number(sessionStorage.getItem("hop_pulse_day") || 0) || 0; } catch { return 0; } });
+  useEffect(() => { try { sessionStorage.setItem("hop_pulse_day", String(dayIndex)); } catch { /* private window */ } }, [dayIndex]);
   const [engine, setEngine] = useState(() => { try { return localStorage.getItem(ENGINE_KEY) || "claude"; } catch { return "claude"; } });
   const [launching, setLaunching] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -59,10 +64,15 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
   const colRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { panelRef.current?.focus(); }, []);
+  useSavedScroll(panelRef, `hop_pulse_scroll:${inSession ? "tab:" : ""}${session || ""}`, !!feed);
   // Today's pulse read whole counts as seen; one session's share doesn't.
   useEffect(() => { if (feed && !session) markSeen(); }, [feed, session, markSeen]);
   // A new day or engine opens at its top.
-  useEffect(() => { colRef.current?.scrollTo?.({ top: 0 }); panelRef.current?.scrollTo?.({ top: 0 }); }, [dayIndex, engine]);
+  const firstLayout = useRef(true);
+  useEffect(() => {
+    if (firstLayout.current) { firstLayout.current = false; return; }   // a refresh keeps its place
+    colRef.current?.scrollTo?.({ top: 0 }); panelRef.current?.scrollTo?.({ top: 0 });
+  }, [dayIndex, engine]);
 
   const days = feed?.days || [];
   const day = days[Math.min(dayIndex, Math.max(0, days.length - 1))];
@@ -264,9 +274,14 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
             })()}
           </>
         ) : !pulse ? (
-          <div className="place-empty">
-            <p className="place-lede">No pulse yet.</p>
-            <p>mybot writes one each morning: ideas, and the things that may have slipped through the cracks.</p>
+          <div className="place-empty pulse-get">
+            <p className="place-lede">A pulse each morning, from mybot.</p>
+            <p>mybot reads your Claude Code and Codex sessions on this machine and writes a short page every morning: ideas worth pursuing, and the things that slipped through the cracks — each one a click from the session it came from. It lands here, on your phone, and in its menu app.</p>
+            <p>Install it with one line (it runs locally and asks what it may read):</p>
+            <button type="button" className="update-pop-cmd" onClick={() => copy("install", MYBOT_INSTALL)} title="Copy the command">
+              <code>{MYBOT_INSTALL}</code><span>{copied === "install" ? "copied" : "copy"}</span>
+            </button>
+            <p className="place-empty-line">Already installed? The first pulse arrives the next morning — <a href={MYBOT_URL} target="_blank" rel="noreferrer">about mybot ↗</a></p>
           </div>
         ) : (
           <>

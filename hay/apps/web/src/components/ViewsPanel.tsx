@@ -191,16 +191,28 @@ const previewSrc = (item: ViewItem) =>
 
 const thumbSrc = (item: ViewItem) => item.path.replace(/\/inline$/, "/thumb");
 
+// Where the reader was, for a refresh to come back to (this browser tab):
+// the result open, the filter, the search, "all" — for the same scope.
+const UI_KEY = "hop_views_ui_v1";
+type SavedViews = { scope?: string | null; open?: string | null; filter?: ViewFilter; query?: string; showAll?: boolean };
+const loadSavedViews = (scope: string | undefined): SavedViews => {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(UI_KEY) || "{}") as SavedViews;
+    return (v.scope ?? null) === (scope ?? null) ? v : {};
+  } catch { return {}; }
+};
+
 export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onClearSession, inSession = false, onToggleSide, onResizeSide, onClose }: Props) => {
+  const [saved] = useState(() => (item ? {} : loadSavedViews(session)));
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   // The result being read; null is the gallery.
   const [open, setOpen] = useState<ViewItem | null>(null);
   // Opened straight on a result: Esc closes rather than "going back".
   const [direct, setDirect] = useState(!!item);
-  const [showAll, setShowAll] = useState(false);
-  const [filter, setFilter] = useState<ViewFilter>("all");
-  const [query, setQuery] = useState("");
+  const [showAll, setShowAll] = useState(!!saved.showAll);
+  const [filter, setFilter] = useState<ViewFilter>(saved.filter || "all");
+  const [query, setQuery] = useState(saved.query || "");
   // The keyboard's place in the gallery.
   const [sel, setSel] = useState(0);
   const [armedDelete, setArmedDelete] = useState<string | null>(null);
@@ -241,6 +253,12 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
     setDirect(false);
     setQuery("");
   }, [session]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(UI_KEY, JSON.stringify({ scope: session ?? null, open: open?.path ?? null, filter, query, showAll }));
+    } catch { /* private window */ }
+  }, [session, open, filter, query, showAll]);
 
   const label = (internalName: string) => {
     const hit = sessions.find((s) => (s.internalName || s.name) === internalName)
@@ -300,6 +318,13 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
 
   // Opened on one result: read it as soon as the index lands.
   useEffect(() => {
+    // Back from a refresh: the result that was open.
+    if (items && !item && !open && saved.open) {
+      const was = items.find((r) => r.path === saved.open);
+      saved.open = null;
+      if (was) setOpen(was);
+      return;
+    }
     if (!items || !item || open) return;
     const asked = scoped.find((r) => r.name === item);
     if (asked) setOpen(asked);

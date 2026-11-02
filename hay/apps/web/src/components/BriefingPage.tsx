@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { threadFor, type BriefingItem, type Edition } from "../utils/briefingFeed";
 import { createReadWitness, wordCount } from "../utils/readWitness";
 import { Prose } from "../utils/prose";
+import { useSavedScroll } from "../utils/savedScroll";
 type SessionInfo = { name: string; displayName?: string; internalName?: string };
 
 // The briefing as a place beside the sidebar: one edition at a time, read
@@ -72,7 +73,9 @@ const ago = (iso?: string): string => {
 };
 
 export const BriefingPage = ({ editions, read, sessions, session, onClearSession, inSession = false, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
-  const [index, setIndex] = useState(0);
+  // The edition being read survives a refresh (this browser tab).
+  const [index, setIndex] = useState(() => { try { return Number(sessionStorage.getItem("hop_brief_index") || 0) || 0; } catch { return 0; } });
+  useEffect(() => { try { sessionStorage.setItem("hop_brief_index", String(index)); } catch { /* private window */ } }, [index]);
   const [sending, setSending] = useState<string | null>(null);
   const [sent, setSent] = useState<Set<string>>(new Set());
   const [allEarlier, setAllEarlier] = useState(false);
@@ -87,6 +90,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
   }
   useEffect(() => () => { witnessRef.current?.dispose(); witnessRef.current = null; }, []);
   useEffect(() => { panelRef.current?.focus(); }, []);
+  useSavedScroll(panelRef, `hop_brief_scroll:${inSession ? "tab:" : ""}${session || ""}`, editions.length > 0);
 
   const ed = editions[Math.min(index, Math.max(0, editions.length - 1))];
   const stamp = ed?.generated_at || "";

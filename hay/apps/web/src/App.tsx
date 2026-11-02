@@ -268,6 +268,21 @@ const SESSION_LIST_STALE_MS = 5000;
 const PENDING_INPUT_MAX_AGE_MS = 15000;
 const PENDING_INPUT_MAX_ENTRIES = 200;
 
+// What is open over the sessions, for a refresh to restore (sessionStorage:
+// this browser tab only, gone with it).
+const UI_KEY = "hop_ui_v1";
+type SavedUi = {
+  place?: "briefing" | "pulse" | null; placeSession?: string | null;
+  views?: { session?: string; dock?: boolean; item?: string; page?: boolean } | null;
+  sideTab?: "calendar" | "briefing" | "pulse" | null; calendar?: string | null;
+};
+let savedUiCache: SavedUi | null = null;
+const savedUi = (): SavedUi => {
+  if (savedUiCache) return savedUiCache;
+  try { savedUiCache = JSON.parse(sessionStorage.getItem(UI_KEY) || "{}") || {}; } catch { savedUiCache = {}; }
+  return savedUiCache!;
+};
+
 // Opening a session from the landing wall loads its page. Until the new
 // page's terminal is connected, the old wall is still there, and its
 // type-to-filter took every key typed in the gap — the text landed in the
@@ -583,9 +598,9 @@ const App = () => {
   const [wallFocusReq, setWallFocusReq] = useState<{ key: string; seq: number } | null>(null);
   // The sidebar's own places beyond Sessions and Views: the briefing (with
   // the session it is narrowed to) and mybot's pulse; and the update panel.
-  const [place, setPlace] = useState<null | "briefing" | "pulse">(null);
+  const [place, setPlace] = useState<null | "briefing" | "pulse">(() => savedUi().place ?? null);
   // The sidebar's session narrowing a place (as it filters Views).
-  const [briefingSession, setBriefingSession] = useState<string | null>(null);
+  const [briefingSession, setBriefingSession] = useState<string | null>(() => savedUi().placeSession ?? null);
   const [updateOpen, setUpdateOpen] = useState(false);
   const briefing = useBriefing();
   const pulse = usePulse();
@@ -886,7 +901,7 @@ const App = () => {
   // an object with none open it fleet-wide. Null = closed.
   // `page`: Views as a place beside the docked sidebar even when scoped to
   // one session (picked in the sidebar while in Views).
-  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string; page?: boolean } | null>(null);
+  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string; page?: boolean } | null>(() => savedUi().views ?? null);
   // A link clicked in a terminal: this hop's `hop view` links open in the
   // Views reader beside the session; ⌘/Ctrl-click (and every other link)
   // opens a tab. window.open stays inside the click, for popup blockers.
@@ -909,11 +924,19 @@ const App = () => {
     return () => { live = false; };
   }, [switcherOpen]);
   // The ⏰ chip's window: what is waiting on a session.
-  const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(null);
+  const [checkbacksOpen, setCheckbacksOpen] = useState<string | null>(() => savedUi().calendar ?? null);
   // A full-screen session's Calendar tab (Views is its other tab).
   // Full screen, the tab other than Terminal and Views: Calendar, or the
   // session's share of the briefing or the pulse.
-  const [sideTab, setSideTab] = useState<null | "calendar" | "briefing" | "pulse">(null);
+  const [sideTab, setSideTab] = useState<null | "calendar" | "briefing" | "pulse">(() => savedUi().sideTab ?? null);
+  // A refresh comes back to exactly this: the place, Views (and the result
+  // being read), the session's tab, the calendar — per browser tab, as the
+  // wall's filter, focus and scroll already are.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(UI_KEY, JSON.stringify({ place, placeSession: briefingSession, views: viewsOpen, sideTab, calendar: checkbacksOpen }));
+    } catch { /* private window */ }
+  }, [place, briefingSession, viewsOpen, sideTab, checkbacksOpen]);
   const schedTab = sideTab === "calendar";
   const setSchedTab = (on: boolean) => setSideTab(on ? "calendar" : null);
   // The session header's height: a tab's page sits under it.
@@ -4693,8 +4716,9 @@ const App = () => {
     { key: "briefing", label: "Briefing", icon: <RailIcon name="briefing" />, active: place === "briefing" && placePage,
       count: briefing.decisions || undefined, fresh: briefing.decisions > 0 || briefing.latestUnseen,
       onClick: () => openPlace("briefing") },
-    ...(pulse.feed ? [{ key: "pulse", label: "Pulse", icon: <RailIcon name="pulse" />, active: place === "pulse" && placePage,
-      fresh: pulse.fresh, onClick: () => openPlace("pulse") }] : []),
+    // Always there: without mybot, the page says how to get a pulse.
+    { key: "pulse", label: "Pulse", icon: <RailIcon name="pulse" />, active: place === "pulse" && placePage,
+      fresh: pulse.fresh, onClick: () => openPlace("pulse") },
     // Clicking the place you are in shows all of it (a filter clears), as
     // in Slack; Esc or another place leaves.
     { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage || viewsSideNow,

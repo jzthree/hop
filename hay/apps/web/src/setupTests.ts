@@ -22,3 +22,8 @@ if (typeof window !== "undefined") {
     };
   }
 }
+
+// UI state kept for a refresh (sessionStorage) must not carry from one test
+// into the next.
+import { beforeEach as clearBetween } from "vitest";
+clearBetween(() => { try { sessionStorage.clear(); } catch { /* not a browser test */ } });

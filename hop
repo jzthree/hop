@@ -20,6 +20,7 @@ const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = re
 const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/auth-sessions');
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
+const recentlyClosed = require('./lib/recently-closed');
 const notebookView = require('./lib/notebook-view');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
@@ -6683,6 +6684,92 @@ function removeClaudeSessionRecord(internalName) {
     for (const ext of ['.json', '.turn', '.meta']) {
         try { fs.unlinkSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}${ext}`)); } catch (e) { /* best effort */ }
     }
+}
+
+// ---- recently closed (lib/recently-closed.js) ------------------------------
+// The undo for a kill, a stop, or a session that ended on its own. A sweep
+// keeps the last snapshot of every live session (config + restore records);
+// one that stops being live is listed for two weeks, and "bring back" writes
+// back what went missing and restores it by name, resuming its conversation.
+const RECENTLY_CLOSED_FILE = path.join(HOME_DIR, 'recently-closed.json');
+const liveSessionSnapshots = new Map();
+let closedStoreCache = null;
+function loadClosedStore() {
+    if (closedStoreCache) return closedStoreCache;
+    try { closedStoreCache = recentlyClosed.normalizeStore(JSON.parse(fs.readFileSync(RECENTLY_CLOSED_FILE, 'utf8'))); }
+    catch (e) { closedStoreCache = recentlyClosed.emptyStore(); }
+    return closedStoreCache;
+}
+function saveClosedStore() {
+    try { writePrivateFile(RECENTLY_CLOSED_FILE, JSON.stringify(loadClosedStore()), 0o600); } catch (e) { /* best effort */ }
+}
+function snapshotLiveSession(entry) {
+    const internalName = entry.internalName;
+    const records = {};
+    for (const ext of recentlyClosed.RECORD_EXTS) {
+        try { records[ext] = fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.${ext}`), 'utf8'); } catch (e) { /* absent */ }
+    }
+    return {
+        displayName: entry.displayName || getSessionDisplayName(internalName) || internalName,
+        cwd: entry.cwd || readClaudeSessionMeta(internalName)?.cwd || null,
+        config: getSessionConfig(internalName) || null,
+        records,
+        agent: recentlyClosed.agentOf(records)
+    };
+}
+/** Say now that a session is closing (a kill, a stop), before its records go. */
+function noteSessionClosing(internalName, how) {
+    if (!internalName) return;
+    const snap = snapshotLiveSession({ internalName, displayName: getSessionDisplayName(internalName) });
+    const last = liveSessionSnapshots.get(internalName);
+    // The sweep's copy may hold records the close is about to delete.
+    if (last) for (const ext of recentlyClosed.RECORD_EXTS) if (!snap.records[ext] && last.records?.[ext]) snap.records[ext] = last.records[ext];
+    if (!snap.config && last?.config) snap.config = last.config;
+    snap.agent = recentlyClosed.agentOf(snap.records);
+    recentlyClosed.noteClosures(loadClosedStore(), new Map([[internalName, snap]]), new Set(), { how: { [internalName]: how } });
+    liveSessionSnapshots.delete(internalName);
+    saveClosedStore();
+}
+async function sweepRecentlyClosed() {
+    const snapshot = await listAllSessionEntriesRuntimeFirst();
+    // No host answering means no news about what is live: never read that
+    // as "everything closed".
+    if (!snapshot.runtimeAvailable) return;
+    const live = snapshot.entries.filter((e) => e && e.live && e.type === 'terminal' && e.internalName);
+    const liveNow = new Set(live.map((e) => e.internalName));
+    const store = loadClosedStore();
+    const added = liveSessionSnapshots.size ? recentlyClosed.noteClosures(store, liveSessionSnapshots, liveNow) : [];
+    const reopened = recentlyClosed.dropReopened(store, liveNow);
+    if (added.length || reopened) saveClosedStore();
+    liveSessionSnapshots.clear();
+    for (const e of live) liveSessionSnapshots.set(e.internalName, snapshotLiveSession(e));
+}
+/** Bring a closed session back: its config and records as they were, then restore. */
+async function bringBackClosedSession(internalName) {
+    const store = loadClosedStore();
+    const entry = store.closed.find((e) => e.internalName === internalName);
+    if (!entry) return { ok: false, status: 404, error: 'Not in recently closed' };
+    if (entry.config && !getSessionConfig(internalName)) {
+        // Brought back on purpose: not parked any more.
+        const { archived, ...config } = entry.config;
+        setSessionConfig(internalName, config);
+    }
+    try { fs.mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true }); } catch (e) { /* best effort */ }
+    for (const ext of recentlyClosed.RECORD_EXTS) {
+        const f = path.join(CLAUDE_SESSIONS_DIR, `${internalName}.${ext}`);
+        if (!entry.records?.[ext] || fs.existsSync(f)) continue;
+        try { writePrivateFile(f, entry.records[ext], 0o600); } catch (e) { /* best effort */ }
+    }
+    // A parked session's meta says archived; bringing it back un-parks it.
+    const meta = readClaudeSessionMeta(internalName);
+    if (meta?.archived) writeClaudeSessionMeta(internalName, { ...meta, archived: false });
+    const result = await restoreSavedSessions({ only: [internalName], includeAgents: true });
+    const restored = Array.isArray(result?.restored) && result.restored.some((r) => r && (r.internalName === internalName || r.name === internalName || r.name === entry.displayName));
+    if (restored) {
+        store.closed = store.closed.filter((e) => e.internalName !== internalName);
+        saveClosedStore();
+    }
+    return { ok: restored, status: restored ? 200 : 409, error: restored ? undefined : (result?.skipped?.[0]?.reason || 'Could not restore it'), result };
 }
 
 // Durable origin marker written by the daemon at creation time. The
@@ -13998,6 +14085,53 @@ happens until someone clicks it.
         // plan (resume command + config root + cwd) is pre-written into the
         // session's startup, so the next open recreates the room and picks
         // the conversation back up; every record/meta/buffer survives.
+        // API: recently closed sessions, and bringing one back.
+        if (parsedUrl.pathname === '/api/sessions/closed' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ closed: recentlyClosed.listing(loadClosedStore()) }));
+            return;
+        }
+        if (parsedUrl.pathname === '/api/sessions/closed/forget' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', () => {
+                try {
+                    const { internalName } = JSON.parse(body || '{}');
+                    const store = loadClosedStore();
+                    const before = store.closed.length;
+                    store.closed = store.closed.filter((e) => e.internalName !== internalName);
+                    if (store.closed.length !== before) saveClosedStore();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, forgot: store.closed.length !== before }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
+        if (parsedUrl.pathname === '/api/sessions/bring-back' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+            req.on('end', async () => {
+                try {
+                    const { internalName } = JSON.parse(body || '{}');
+                    if (typeof internalName !== 'string' || !SESSION_NAME_RE.test(internalName)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid session name' }));
+                        return;
+                    }
+                    const r = await bringBackClosedSession(internalName);
+                    res.writeHead(r.status, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: r.ok, error: r.error, displayName: getSessionDisplayName(internalName) || internalName }));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Bring back failed' }));
+                }
+            });
+            return;
+        }
+
         if (parsedUrl.pathname === '/api/sessions/archive' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
@@ -14010,6 +14144,7 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
+                    try { noteSessionClosing(resolved, 'stopped'); } catch (e) { /* never blocks the stop */ }
                     const r = await stopAndParkSession(resolved);
                     if (!r.ok) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -15010,6 +15145,8 @@ happens until someone clicks it.
                         res.end(JSON.stringify({ error: 'Session not found' }));
                         return;
                     }
+                    // Recently closed keeps what a kill deletes, for "bring back".
+                    try { noteSessionClosing(resolved, 'killed'); } catch (e) { /* never blocks the kill */ }
 
                     // Close the terminal session if it exists
                     if (isExternalTerminalBackend()) {
@@ -17995,7 +18132,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'auth', 'user', 'workspace', 'session', 'wipe', 'restore', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
+    'password', 'auth', 'user', 'workspace', 'session', 'wipe', 'restore', 'closed', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
     'mail', 'registration', 'canonical', 'desktop'
 ];
 
@@ -18127,6 +18264,9 @@ const HELP_SECTIONS = [
         `hop recover [<session>]     Bring back the agent that last ran here: inside a session, relaunch its conversation in this terminal`,
         `hop restore <name>...     Redo just those sessions — even live ones, if they hold only an idle shell or a startup dialog`,
         `hop restore --health      Show sessions the reconciler could not bring back on its own, and why`,
+        `hop closed                Sessions closed in the last two weeks (killed, stopped, ended)`,
+        `hop closed back <name>    Bring one back, resuming its conversation`,
+        `hop closed forget <name>  Drop one from the list`,
         `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
         `hop host restart          Restart only the hay-host — sessions keep running (terminals live in the pty-keeper)`,
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
@@ -19040,6 +19180,36 @@ async function main() {
     }
 
     // Handle `hop restore` - recreate saved sessions, resuming claude conversations
+    // `hop closed`: recently closed sessions; `hop closed back <name>` reopens one.
+    if (process.argv[2] === 'closed') {
+        const state = isServerRunning();
+        if (!state) { log(`Hop is not running.`, YELLOW); process.exit(1); }
+        const res = await callLocalApi(state, '/api/sessions/closed', 'GET');
+        const list = Array.isArray(res?.data?.closed) ? res.data.closed : [];
+        if (process.argv[3] === 'forget') {
+            const want = (process.argv[4] || '').toLowerCase();
+            const hit = list.find((c) => c.internalName.toLowerCase() === want || (c.displayName || '').toLowerCase() === want);
+            if (!hit) { log(`No recently closed session named "${process.argv[4] || ''}".`, RED); process.exit(1); }
+            await callLocalApi(state, '/api/sessions/closed/forget', 'POST', { internalName: hit.internalName });
+            log(`Forgot ${hit.displayName}.`, GREEN);
+            process.exit(0);
+        }
+        if (process.argv[3] === 'back') {
+            const want = (process.argv[4] || '').toLowerCase();
+            const hit = list.find((c) => c.internalName.toLowerCase() === want || (c.displayName || '').toLowerCase() === want);
+            if (!hit) { log(`No recently closed session named "${process.argv[4] || ''}". ${DIM}hop closed${RESET} lists them.`, RED); process.exit(1); }
+            const r = await callLocalApi(state, '/api/sessions/bring-back', 'POST', { internalName: hit.internalName });
+            if (r?.data?.ok) { log(`✓ ${hit.displayName} is back${hit.resumable ? ', resuming its conversation' : ''}.`, GREEN); process.exit(0); }
+            log(`${hit.displayName} didn't come back${r?.data?.error ? `: ${r.data.error}` : ''}.`, RED);
+            process.exit(1);
+        }
+        if (!list.length) { log(`Nothing closed in the last two weeks.`, DIM); process.exit(0); }
+        const ago = (t) => { const m = Math.floor((Date.now() - t) / 60000); return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`; };
+        for (const c of list) log(`  ${c.displayName}  ${DIM}${c.how} ${ago(c.closedAt)}${c.agent ? ` · ${c.agent}` : ''}${c.cwd ? ` · ${c.cwd}` : ''}${RESET}`, RESET);
+        log(`${DIM}Bring one back: ${CYAN}hop closed back <name>${RESET}`, RESET);
+        process.exit(0);
+    }
+
     if (process.argv[2] === 'restore') {
         const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
         const includeAgents = process.argv.includes('--agents');
@@ -21943,6 +22113,14 @@ async function main() {
         // put sessions back in their folders after their records are lost.
         setTimeout(() => writeIdentitySnapshot('start'), 30000).unref?.();
         setInterval(() => writeIdentitySnapshot('hourly'), 3600000).unref?.();
+
+        // Recently closed: a snapshot of every live session, so whatever
+        // ends it — a kill, a stop, a crash, an exit — it can be brought back.
+        const runClosedSweep = () => {
+            sweepRecentlyClosed().catch((e) => log(`[closed-sweep] error: ${e && e.message}`, YELLOW));
+        };
+        setTimeout(runClosedSweep, 15000).unref?.();
+        setInterval(runClosedSweep, 30000).unref?.();
 
         // Check-backs: typed into their sessions when their trigger fires
         // and the session is idle. 15s is finer than any trigger needs.

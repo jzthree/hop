@@ -28,8 +28,15 @@ export type RailSession = {
   checkbacks?: number;
 };
 
+/** A session closed in the last two weeks (a kill, a stop, an exit). */
+export type ClosedSession = { internalName: string; displayName: string; cwd: string | null; agent: string | null; how: string; closedAt: number; resumable: boolean };
+
 type Props = {
   sessions: RailSession[];
+  /** Recently closed, newest first, each one a click from coming back. */
+  closed?: ClosedSession[];
+  onBringBack?: (c: ClosedSession) => Promise<boolean>;
+  onForgetClosed?: (c: ClosedSession) => void;
   folders: Array<{ id: string; name: string }>;
   currentRoom: string | null;
   onPick: (s: RailSession) => void;
@@ -112,6 +119,14 @@ type Order = "folder" | "recent";
 const FOLD_KEY = "hop_rail_folded";
 const SCOPE_KEY = "hop_rail_scope";
 const ORDER_KEY = "hop_rail_order";
+const CLOSED_OPEN_KEY = "hop_rail_closed_open";
+const closedAgo = (at: number): string => {
+  const m = Math.max(0, Math.floor((Date.now() - at) / 60000));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
+};
 
 const load = (key: string): string | null => {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -125,7 +140,7 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, inSessions, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew, focusSignal = 0, onCreate, onSearchDone }: Props) => {
+export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, inSessions, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew, focusSignal = 0, onCreate, onSearchDone }: Props) => {
   const [ownFilter, setFilter] = useState("");
   const filter = searchSlot ? (externalFilter ?? "") : ownFilter;
   const [ownScope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
@@ -135,6 +150,9 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [folded, setFolded] = useState<Set<string>>(() => new Set((load(FOLD_KEY) || "").split(",").filter(Boolean)));
   const [parkedOpen, setParkedOpen] = useState(false);
+  const [closedOpen, setClosedOpen] = useState(() => load(CLOSED_OPEN_KEY) === "1");
+  const [bringing, setBringing] = useState<string | null>(null);
+  const [bringFailed, setBringFailed] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -326,6 +344,41 @@ export const SessionRail = ({ sessions, folders, currentRoom, onPick, onAllSessi
             <span className="rail-count">{parked.length}</span>
           </button>
           {parkedOpen && parked.map(row)}
+        </section>
+      )}
+      {!searching && closed && closed.length > 0 && onBringBack && (
+        <section className="rail-closed">
+          <button type="button" className="rail-folder" aria-expanded={closedOpen}
+                  onClick={() => setClosedOpen((o) => { save(CLOSED_OPEN_KEY, o ? "0" : "1"); return !o; })}>
+            <span className="rail-chev" aria-hidden="true">{closedOpen ? "▾" : "▸"}</span>
+            <span className="rail-folder-name">Recently closed</span>
+            <span className="rail-count">{closed.length}</span>
+          </button>
+          {closedOpen && closed.map((c) => (
+            <div key={c.internalName} className="rail-closed-row">
+              <span className="rail-closed-text">
+                <span className="rail-closed-name">{c.displayName}</span>
+                <span className="rail-closed-meta">
+                  {c.how === "killed" ? "killed" : c.how === "stopped" ? "stopped" : "ended"} {closedAgo(c.closedAt)}
+                  {c.agent ? ` · ${c.agent}` : ""}{bringFailed === c.internalName ? " · didn't come back" : ""}
+                </span>
+              </span>
+              <button type="button" className="rail-closed-back" disabled={bringing !== null}
+                      title={c.resumable ? `Reopen ${c.displayName}, resuming its ${c.agent || "agent"} conversation` : `Reopen ${c.displayName} in ${c.cwd || "its folder"}`}
+                      onClick={async () => {
+                        setBringing(c.internalName); setBringFailed(null);
+                        const ok = await onBringBack(c);
+                        setBringing(null);
+                        if (!ok) setBringFailed(c.internalName);
+                      }}>
+                {bringing === c.internalName ? "…" : "Bring back"}
+              </button>
+              {onForgetClosed && (
+                <button type="button" className="rail-closed-forget" aria-label={`Forget ${c.displayName}`} title="Drop it from this list"
+                        onClick={() => onForgetClosed(c)}>×</button>
+              )}
+            </div>
+          ))}
         </section>
       )}
       {visible.length === 0 && (

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionRail, type RailSession } from "../src/components/SessionRail";
 
@@ -140,5 +140,19 @@ describe("SessionRail", () => {
                         currentRoom="hop-a" docked onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText("Jump to a session"), { target: { value: "hop" } });
     expect(names()).toEqual(["hop-b", "hop-a"]);
+  });
+
+  it("lists recently closed sessions, each a click from coming back (or forgotten)", async () => {
+    const onBringBack = vi.fn(async () => true); const onForgetClosed = vi.fn();
+    const closed = [{ internalName: "s_baby", displayName: "babygame", cwd: "/w", agent: "claude", how: "killed", closedAt: Date.now() - 2 * 3600_000, resumable: true }];
+    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} closed={closed} onBringBack={onBringBack} onForgetClosed={onForgetClosed}
+                        onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /Recently closed/ }));
+    expect(screen.getByText("babygame")).toBeTruthy();
+    expect(screen.getByText(/killed 2h ago · claude/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Bring back" }));
+    await waitFor(() => expect(onBringBack).toHaveBeenCalledWith(closed[0]));
+    fireEvent.click(screen.getByLabelText("Forget babygame"));
+    expect(onForgetClosed).toHaveBeenCalledWith(closed[0]);
   });
 });

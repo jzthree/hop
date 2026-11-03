@@ -28,7 +28,7 @@ import { CheckbacksPanel } from "./components/CheckbacksPanel";
 import { parseViewLink, wantsNewTab } from "./utils/viewLinks";
 import { ShortcutsPanel } from "./components/ShortcutsPanel";
 import { nextSessionWithNews } from "./utils/catchUp";
-import { SessionRail, RailIcon, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
+import { SessionRail, RailIcon, type ClosedSession, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { DesktopView } from "./components/DesktopView";
 import { MobileKeyboard } from "./components/MobileKeyboard";
@@ -598,6 +598,7 @@ const App = () => {
   const [wallFocusReq, setWallFocusReq] = useState<{ key: string; seq: number } | null>(null);
   // The sidebar's own places beyond Sessions and Views: the briefing (with
   // the session it is narrowed to) and mybot's pulse; and the update panel.
+  const [closedSessions, setClosedSessions] = useState<ClosedSession[]>([]);
   const [place, setPlace] = useState<null | "briefing" | "pulse">(() => savedUi().place ?? null);
   // The sidebar's session narrowing a place (as it filters Views).
   const [briefingSession, setBriefingSession] = useState<string | null>(() => savedUi().placeSession ?? null);
@@ -4710,6 +4711,33 @@ const App = () => {
       return true;
     } catch { return false; }
   };
+  // Recently closed (a kill, a stop, an exit): listed in the sidebar, each a
+  // click from coming back with its conversation resumed. Refetched as the
+  // session list changes — a kill shows up there at once.
+  const sessionSetKey = sessions.map((x) => x.internalName || x.name).sort().join("|");
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetch("/api/sessions/closed", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive && d && Array.isArray(d.closed)) setClosedSessions(d.closed); })
+      .catch(() => {});
+    load();
+    const t = window.setInterval(load, 60_000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, [sessionSetKey]);
+  const bringBack = async (c: ClosedSession): Promise<boolean> => {
+    try {
+      const r = await fetch("/api/sessions/bring-back", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ internalName: c.internalName })
+      });
+      const d = await r.json().catch(() => ({})) as { ok?: boolean; error?: string };
+      if (!r.ok || !d.ok) { pushNotice(`${c.displayName} didn't come back${d.error ? `: ${d.error}` : ""}`); return false; }
+      pushNotice(`${c.displayName} is back${c.resumable ? ", resuming its conversation" : ""}`);
+      setClosedSessions((list) => list.filter((x) => x.internalName !== c.internalName));
+      void fetchSessions({ showLoading: false });
+      return true;
+    } catch { pushNotice(`${c.displayName} didn't come back`); return false; }
+  };
   const railNav: RailNavItem[] = !railDocked ? [] : [
     // The fleet's own pages: what wants you (the briefing) and what may
     // have slipped by (mybot's pulse), above the session-level places.
@@ -5834,6 +5862,12 @@ const App = () => {
           session, and from over the switcher, and it must outlive a switch. */}
       {(railDocked || (railOpen && session)) && (
         <SessionRail
+          closed={closedSessions}
+          onBringBack={bringBack}
+          onForgetClosed={(c) => {
+            setClosedSessions((list) => list.filter((x) => x.internalName !== c.internalName));
+            void fetch("/api/sessions/closed/forget", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ internalName: c.internalName }) }).catch(() => {});
+          }}
           sessions={sessions}
           folders={folders}
           currentRoom={sessionKeyOf(selectedRoom)}

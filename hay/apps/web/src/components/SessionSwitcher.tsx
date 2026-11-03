@@ -2981,7 +2981,7 @@ export const SessionSwitcher = ({
 
   const killSessionByRef = async (s: SwitcherSession) => {
     const label = s.displayName || s.name;
-    if (!window.confirm(`Kill session "${label}" for all participants? Its running process is terminated.`)) {
+    if (!window.confirm(`Kill session "${label}" for all participants? Its running process is terminated — "Recently closed" in the sidebar can bring it back.`)) {
       return;
     }
     try {
@@ -2994,7 +2994,7 @@ export const SessionSwitcher = ({
         onNotice("Failed to kill session");
         return;
       }
-      onNotice(`Killed ${label}`);
+      onNotice(`Killed ${label} — Recently closed can bring it back`);
       setSheet(null);
       onRefresh();
     } catch {

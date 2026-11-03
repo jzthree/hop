@@ -15,10 +15,8 @@ import { menuIsOpen } from "./ContextMenu";
 // prepared. "Discuss" continues in mybot's chat, with the question started
 // on the clipboard.
 //
-// A session picked in the sidebar narrows the page to that session's share
-// — the items it owns or that followed up into it, every day kept — as it
-// narrows the briefing and Views; full screen, that is the session's Pulse
-// tab.
+// A session's Pulse tab is that session's share: the items it owns or that
+// followed up into it, every day kept.
 
 type SessionInfo = { name: string; displayName?: string; internalName?: string };
 
@@ -28,9 +26,8 @@ type Props = {
   existing: Set<string>;
   onFollowUp: (action: PulseAction) => Promise<boolean>;
   sessions?: SessionInfo[];
-  /** The sidebar's session: the page shows its items. */
+  /** A session's tab: the page shows its items. */
   session?: string | null;
-  onClearSession?: () => void;
   /** A session's Pulse tab: the tab names the page and the session. */
   inSession?: boolean;
   markSeen: () => void;
@@ -51,7 +48,7 @@ const saveSkipped = (set: Set<string>) => {
   try { localStorage.setItem(SKIP_KEY, JSON.stringify([...set].slice(-SKIP_CAP))); } catch { /* per-browser only */ }
 };
 
-export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, onClearSession, inSession = false, markSeen, onClose }: Props) => {
+export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, inSession = false, markSeen, onClose }: Props) => {
   // The day being read survives a refresh (this browser tab).
   const [dayIndex, setDayIndex] = useState(() => { try { return Number(sessionStorage.getItem("hop_pulse_day") || 0) || 0; } catch { return 0; } });
   useEffect(() => { try { sessionStorage.setItem("hop_pulse_day", String(dayIndex)); } catch { /* private window */ } }, [dayIndex]);
@@ -219,12 +216,6 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
     <div className={"place-page pulse-page" + (inSession ? " in-session" : "")} role={inSession ? "tabpanel" : "region"} aria-label="Pulse" tabIndex={-1} ref={panelRef}>
       {!inSession && <header className="place-head">
         <span className="place-title"><span className="place-sun" aria-hidden="true" />Pulse</span>
-        {sessionKey && onClearSession && (
-          <span className="views-scope-chip">
-            {sessionLabel}
-            <button type="button" aria-label="Show the whole pulse" title="The whole pulse" onClick={onClearSession}>×</button>
-          </span>
-        )}
         {!sessionKey && pulses.length > 1 && (
           <span className="views-scope-toggle" role="tablist" aria-label="Engine">
             {pulses.map((p) => (

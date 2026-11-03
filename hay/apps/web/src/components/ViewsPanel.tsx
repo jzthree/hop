@@ -710,7 +710,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
           <div className="views-head">
             <span className="views-badge">Views</span>
             <span className="vg-count">{counts.all}</span>
-            {session && asPage && onClearSession && (
+            {session && asPage && onClearSession && !inSession && (
               // The sidebar's selection, shown here; × lets it go.
               <span className="views-scope-chip">
                 {label(resolvedSession || session)}

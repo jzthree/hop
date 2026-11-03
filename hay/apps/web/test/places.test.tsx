@@ -44,15 +44,12 @@ describe("BriefingPage", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("with the sidebar's session, the page is that session's thread across editions", () => {
-    const onClearSession = vi.fn();
-    render(<BriefingPage {...base} session="orion" onClearSession={onClearSession} />);
+  it("with a session, the page is that session's thread across editions", () => {
+    render(<BriefingPage {...base} session="orion" />);
     // The same story cards as the front page: the latest under its slot, then Earlier.
     expect([...document.querySelectorAll(".brief-story .brief-headline")].map((h) => h.textContent)).toEqual(["Ship the fix?", "Started the fix"]);
     expect([...document.querySelectorAll(".brief-slot-head")].map((h) => h.firstChild!.textContent)).toEqual(["Decide", "Earlier"]);
     expect(screen.getAllByText("Ship")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Show the whole briefing" }));
-    expect(onClearSession).toHaveBeenCalled();
   });
 
   it("an ask can be skipped: nothing is sent, it reads as handled, and it folds away (undoable)", () => {
@@ -124,15 +121,13 @@ describe("PulsePage", () => {
   });
 
   it("with a session, the page is that session's share: items it owns or that followed up into it", () => {
-    const onClearSession = vi.fn(); const markSeen = vi.fn();
+    const markSeen = vi.fn();
     const { unmount } = render(<PulsePage feed={feed} existing={new Set()} onFollowUp={vi.fn()} sessions={sessions} session="orion"
-                                          onClearSession={onClearSession} markSeen={markSeen} onClose={() => {}} />);
+                                          markSeen={markSeen} onClose={() => {}} />);
     expect(screen.getByText(/raised for orion · 1 item/)).toBeTruthy();
     expect(screen.getByText("A loose end.")).toBeTruthy();
     expect(screen.queryByText("Another.")).toBeNull();
     expect(markSeen).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Show the whole pulse" }));
-    expect(onClearSession).toHaveBeenCalled();
     unmount();
     render(<PulsePage feed={feed} existing={new Set()} onFollowUp={vi.fn()} sessions={[...sessions, { name: "fu-2", internalName: "s_fu2" }]}
                       session="s_fu2" inSession markSeen={() => {}} onClose={() => {}} />);

@@ -28,12 +28,9 @@ type Props = {
   // show there without waiting for the next poll.
   onChanged?: () => void;
   onOpenSession?: (internalName: string) => void;
-  // "page": the Calendar place beside the sidebar, all sessions or (narrowed
-  // by the sidebar) one. "tab": the same calendar as a session's tab, under
-  // its header. Otherwise (no sidebar) the centred window.
+  // "page": the Calendar place beside the sidebar, every session. "tab": a
+  // session's Calendar, under its header. Otherwise (no sidebar) the centred window.
   placement?: "modal" | "tab" | "page";
-  /** The page's narrowing: × shows every session again. */
-  onClearSession?: () => void;
 };
 
 // One entry on one day: at a time, or a band (at null) across the day.
@@ -47,7 +44,7 @@ type Entry =
 
 const every = (ms: number) => ms % 3_600_000 === 0 ? `every ${ms / 3_600_000}h` : `every ${Math.round(ms / 60_000)}m`;
 
-export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal", onClearSession }: Props) => {
+export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal" }: Props) => {
   const asTab = placement === "tab";
   const asPage = placement === "page";
   // A tab takes the keyboard once, as it opens (Esc goes back).
@@ -208,12 +205,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
            ref={panelRef}>
         <div className="views-head">
           <span className="views-badge">Calendar</span>
-          {asPage && !all && onClearSession ? (
-            <span className="views-scope-chip">
-              {sessionName}
-              <button type="button" aria-label="Show every session" title="Every session" onClick={onClearSession}>×</button>
-            </span>
-          ) : !asTab && !asPage && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
+          {!asTab && !asPage && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
           <span className="cal-nav">
             <button type="button" aria-label="Previous week" title="Previous week (←)" onClick={() => setWeekStart((w) => addDays(w, -7))}>‹</button>
             <button type="button" className="cal-today" disabled={weekStart === today} title="This week (t)" onClick={() => setWeekStart(today)}>Today</button>
@@ -225,9 +217,6 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
             <button type="button" role="tab" aria-selected={view === "agenda"} className={view === "agenda" ? "on" : ""} onClick={() => chooseView("agenda")}>Agenda</button>
           </span>
           <span className="views-head-spacer" />
-          {asPage && !all && onOpenSession && (
-            <button type="button" className="brief-open-session cal-open-session" onClick={() => onOpenSession(session)}>Open {sessionName} →</button>
-          )}
           <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
         {items === null ? (

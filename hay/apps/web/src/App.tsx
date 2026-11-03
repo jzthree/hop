@@ -272,7 +272,7 @@ const PENDING_INPUT_MAX_ENTRIES = 200;
 // this browser tab only, gone with it).
 const UI_KEY = "hop_ui_v1";
 type SavedUi = {
-  place?: "briefing" | "pulse" | "calendar" | null; placeSession?: string | null;
+  place?: "briefing" | "pulse" | "calendar" | null;
   views?: { session?: string; dock?: boolean; item?: string; page?: boolean } | null;
   sideTab?: "calendar" | "briefing" | "pulse" | null; calendar?: string | null;
 };
@@ -600,8 +600,6 @@ const App = () => {
   // the session it is narrowed to) and mybot's pulse; and the update panel.
   const [closedSessions, setClosedSessions] = useState<ClosedSession[]>([]);
   const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar">(() => savedUi().place ?? null);
-  // The sidebar's session narrowing a place (as it filters Views).
-  const [briefingSession, setBriefingSession] = useState<string | null>(() => savedUi().placeSession ?? null);
   const [updateOpen, setUpdateOpen] = useState(false);
   const briefing = useBriefing();
   const pulse = usePulse();
@@ -935,9 +933,9 @@ const App = () => {
   // wall's filter, focus and scroll already are.
   useEffect(() => {
     try {
-      sessionStorage.setItem(UI_KEY, JSON.stringify({ place, placeSession: briefingSession, views: viewsOpen, sideTab, calendar: checkbacksOpen }));
+      sessionStorage.setItem(UI_KEY, JSON.stringify({ place, views: viewsOpen, sideTab, calendar: checkbacksOpen }));
     } catch { /* private window */ }
-  }, [place, briefingSession, viewsOpen, sideTab, checkbacksOpen]);
+  }, [place, viewsOpen, sideTab, checkbacksOpen]);
   const schedTab = sideTab === "calendar";
   const setSchedTab = (on: boolean) => setSideTab(on ? "calendar" : null);
   // The session header's height: a tab's page sits under it.
@@ -4572,7 +4570,8 @@ const App = () => {
   const feedTabNow = sessionTabs && !placePage && !viewsPage && (sideTab === "briefing" || sideTab === "pulse") ? sideTab : null;
   useEffect(() => { if (viewsPage) setSideTab(null); }, [viewsPage]);
   const focusTerminalSoon = () => window.setTimeout(() => termRef.current?.focus(), 0);
-  const selectedRoom: string | null = placePage ? briefingSession
+  // A place is about every session: none is selected there.
+  const selectedRoom: string | null = placePage ? null
     : viewsPage ? (viewsOpen?.session ?? null)
     : wallUnder ? wallFocus
     : status === "ended" ? null : session!.room;
@@ -4655,12 +4654,13 @@ const App = () => {
       return;
     }
     const sel = selectedRoom ?? undefined;
-    setViewsOpen(viewsSide ? { session: sel } : { session: sel, page: true });
+    if (sel && !viewsSide && !wallUnder) { openSessionTab(sel, "views"); return; }
+    setViewsOpen(viewsSide ? { session: sel } : { page: true });
   };
   // Sessions from Views: back where you were — the wall, with the session
   // picked in Views engaged, or full screen, switched to it.
   const backToSessions = () => {
-    const sel = placePage ? briefingSession ?? undefined : viewsOpen?.session;
+    const sel = placePage ? undefined : viewsOpen?.session;
     setPlace(null);
     if (!wallUnder && sel && sessionKeyOf(sel) !== sessionKeyOf(session?.room)) { goToSession(sel); return; }
     setViewsOpen(null);
@@ -4671,10 +4671,42 @@ const App = () => {
   // Opening a place: clicked again while there, a narrowed briefing shows
   // all of itself again (as Views does), else the place stays.
   const openPlace = (which: "briefing" | "pulse" | "calendar") => {
-    if (place === which) { setBriefingSession(null); return; }
+    if (place === which) return;
     if (viewsPage) setViewsOpen(null);
-    setBriefingSession(null);
     setPlace(which);
+  };
+  // One session's Views, Briefing, Pulse or Calendar is one page: its tab,
+  // under its header — from the terminal, a place, a tile's chip or a menu
+  // alike. (The hub has no terminal: there, the session's own page opens on
+  // that tab; the tab is saved first, for the page to come back to.)
+  const openSessionTab = (key: string, tab: "views" | "briefing" | "pulse" | "calendar") => {
+    const lc = key.toLowerCase();
+    const target = sessions.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
+    // (Before the list has loaded, the session on screen can still change tab.)
+    if (!target && !session) return;
+    const room = target ? target.internalName || target.name : key;
+    const views = tab === "views" ? (viewsSide ? { session: room } : { session: room, page: true }) : null;
+    const nextTab = tab === "views" ? null : tab;
+    setPlace(null);
+    setViewsOpen(views);
+    setSideTab(nextTab);
+    if (!session) {
+      try { sessionStorage.setItem(UI_KEY, JSON.stringify({ place: null, views, sideTab: nextTab, calendar: null })); } catch { /* private window */ }
+      window.location.href = buildSessionPath(target!.displayName || target!.name);
+      return;
+    }
+    setSwitcherOpen(false);
+    if (target && sessionKeyOf(session.room) !== room) switchSession(target);
+  };
+  // The strip: full screen on a session, its tab of that kind; on that tab
+  // already, or from the wall (whose tile under the keyboard is no choice to
+  // leave for), the page about every session.
+  const openFromStrip = (which: "views" | "briefing" | "pulse" | "calendar") => {
+    const here = which === "views" ? viewsPage && !!viewsOpen?.session
+      : which === "calendar" ? schedTabNow : feedTabNow === which;
+    if (selectedRoom && !wallUnder && !here) { openSessionTab(selectedRoom, which); return; }
+    if (which === "views") { setPlace(null); setViewsOpen({ page: true }); return; }
+    openPlace(which);
   };
   // A briefing story's reply chip: the answer typed into its session.
   const replyToSession = (key: string, text: string) => {
@@ -4741,21 +4773,21 @@ const App = () => {
   const railNav: RailNavItem[] = !railDocked ? [] : [
     // The fleet's own pages: what wants you (the briefing) and what may
     // have slipped by (mybot's pulse), above the session-level places.
-    { key: "briefing", label: "Briefing", icon: <RailIcon name="briefing" />, active: place === "briefing" && placePage,
+    { key: "briefing", label: "Briefing", icon: <RailIcon name="briefing" />, active: (place === "briefing" && placePage) || feedTabNow === "briefing",
       count: briefing.decisions || undefined, fresh: briefing.decisions > 0 || briefing.latestUnseen,
-      onClick: () => openPlace("briefing") },
+      onClick: () => openFromStrip("briefing") },
     // Always there: without mybot, the page says how to get a pulse.
-    { key: "pulse", label: "Pulse", icon: <RailIcon name="pulse" />, active: place === "pulse" && placePage,
-      fresh: pulse.fresh, onClick: () => openPlace("pulse") },
+    { key: "pulse", label: "Pulse", icon: <RailIcon name="pulse" />, active: (place === "pulse" && placePage) || feedTabNow === "pulse",
+      fresh: pulse.fresh, onClick: () => openFromStrip("pulse") },
     // Clicking the place you are in shows all of it (a filter clears), as
     // in Slack; Esc or another place leaves.
     { key: "views", label: "Views", icon: <RailIcon name="views" />, active: viewsPage || viewsSideNow,
       count: freshViewSessions || undefined, fresh: freshViewSessions > 0,
       // Opens on the selected session's results; clicked again, the page
       // shows everything (nothing selected) and the column closes.
-      onClick: () => openViews() },
-    { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />, active: place === "calendar" && placePage,
-      count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => openPlace("calendar") },
+      onClick: () => (railDocked && !viewsSide ? openFromStrip("views") : openViews()) },
+    { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />, active: (place === "calendar" && placePage) || schedTabNow,
+      count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => openFromStrip("calendar") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
     ...(desktopEnabled ? [{ key: "desktop", label: "Desktop", icon: <RailIcon name="desktop" />, onClick: () => setDesktopOpen(true) }] : []),
     (() => {
@@ -4774,9 +4806,9 @@ const App = () => {
   // with the sidebar, the Calendar place narrowed to it; else the window.
   const openCalendar = (scope: string) => {
     if (!railDocked) { setCheckbacksOpen(scope); return; }
+    if (scope !== "*") { openSessionTab(scope, "calendar"); return; }
     if (viewsPage) setViewsOpen(null);
     setPlace("calendar");
-    setBriefingSession(scope === "*" ? null : scope);
   };
   useEffect(() => {
     if (railDocked && checkbacksOpen) { openCalendar(checkbacksOpen); setCheckbacksOpen(null); }
@@ -5887,7 +5919,7 @@ const App = () => {
           folders={folders}
           currentRoom={sessionKeyOf(selectedRoom)}
           onWall={railOnWall}
-          inSessions={!viewsPage && !placePage}
+          inSessions={!viewsPage && !placePage && !schedTabNow && !feedTabNow}
           searchSlot={railDocked && railOnWall ? setRailSearchEl : undefined}
           externalFilter={wallFilter}
           nav={railNav}
@@ -5902,28 +5934,15 @@ const App = () => {
           canDock={railCanDock}
           onDockChange={setRailDocked}
           actionContext={{ notice: pushNotice, refresh: () => { void fetchSessions({ showLoading: false }); } }}
-          onOpenPlace={railDocked ? (s, which) => {
-            const key = s.internalName || s.name;
-            if (which === "views") { setPlace(null); setViewsOpen({ session: key, page: true }); return; }
-            if (viewsPage) setViewsOpen(null);
-            setPlace(which);
-            setBriefingSession(key);
-          } : undefined}
+          onOpenPlace={railDocked ? (s, which) => openSessionTab(s.internalName || s.name, which) : undefined}
           onPick={(next) => {
-            // In the briefing or the pulse, a session in the sidebar
-            // narrows the place to that session's share.
-            if (placePage) { setBriefingSession(next.internalName || next.name); return; }
+            // From a place or Views, a session in the sidebar is that
+            // session on the same kind of tab.
+            if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
+            if (viewsPage) { openSessionTab(next.internalName || next.name, "views"); return; }
             // Side by side, the column follows: switch, and show the new
             // session's results beside it.
             if (viewsSideNow) setViewsOpen({ session: next.internalName || next.name });
-            // A full-screen session's Views tab: switch, on the same tab.
-            else if (viewsPage && sessionTabs) setViewsOpen({ session: next.internalName || next.name, page: true });
-            // In Views over the wall, a session in the sidebar is a filter:
-            // its results, and the place stays.
-            else if (viewsPage) {
-              setViewsOpen({ session: next.internalName || next.name, page: true });
-              return;
-            }
             if (!railDocked) setRailOpen(false);
             // The hub page has no terminal: a session is its own page.
             if (!session) {
@@ -5936,13 +5955,15 @@ const App = () => {
             setSwitcherOpen(false);
             switchSession(next as SessionInfo);
             // The picked row goes away with the rail; keys typed next are
-            // the session's, not nobody's.
-            termRef.current?.focus();
+            // the session's, not nobody's (on another tab, that tab has them).
+            if (!schedTabNow && !feedTabNow) termRef.current?.focus();
           }}
           onAllSessions={() => {
             setRailOpen(false);
             // From Views: back to where you were, on the selected session.
             if (viewsPage || placePage) { backToSessions(); return; }
+            // On a session's other tab: its terminal, as from its Views.
+            if (schedTabNow || feedTabNow) { setSideTab(null); focusTerminalSoon(); return; }
             // Full screen: out to the wall (a column beside stays). On the
             // wall already: nothing to do.
             if (session && !switcherOpen) setSwitcherOpen(true);
@@ -5972,14 +5993,11 @@ const App = () => {
         />
       )}
       {placePage && place === "calendar" && (() => {
-        const key = briefingSession ? sessionKeyOf(briefingSession)! : "*";
-        const info = sessions.find((x) => (x.internalName || x.name) === key);
         return (
-          <CheckbacksPanel placement="page" session={key} sessionName={info?.displayName || info?.name || key}
-                           onClearSession={() => setBriefingSession(null)}
+          <CheckbacksPanel placement="page" session="*" sessionName="every session"
                            onClose={() => setPlace(null)}
                            onChanged={() => { void fetchSessions({ showLoading: false }); }}
-                           onOpenSession={(internal) => { setPlace(null); goToSession(internal); }} />
+                           onOpenSession={(internal) => openSessionTab(internal, "calendar")} />
         );
       })()}
       {checkbacksOpen && (
@@ -6005,14 +6023,13 @@ const App = () => {
       {shortcutHelpOpen && <ShortcutsPanel isMac={isMacPlatform} onClose={() => setShortcutHelpOpen(false)} />}
       {placePage && place === "briefing" && (
         <BriefingPage editions={briefing.editions} read={briefing.read} sessions={sessions}
-                      session={briefingSession} onClearSession={() => setBriefingSession(null)}
                       onOpenSession={(key) => { setPlace(null); goToSession(key); }}
                       onReply={session || sessions.length ? replyToSession : undefined}
                       markSeen={briefing.markSeen} markRead={briefing.markRead}
                       onClose={() => setPlace(null)} />
       )}
       {placePage && place === "pulse" && (
-        <PulsePage feed={pulse.feed} sessions={sessions} session={briefingSession} onClearSession={() => setBriefingSession(null)} existing={new Set(sessions.flatMap((x) => [x.name, x.displayName].filter(Boolean) as string[]))}
+        <PulsePage feed={pulse.feed} sessions={sessions} existing={new Set(sessions.flatMap((x) => [x.name, x.displayName].filter(Boolean) as string[]))}
                    onFollowUp={pulseFollowUp} markSeen={pulse.markSeen} onClose={() => setPlace(null)} />
       )}
       {updateOpen && update && (
@@ -6027,7 +6044,7 @@ const App = () => {
                     onToggleSide={railDocked ? toggleViewsSide : undefined}
                     onResizeSide={resizeViewsSide}
                     onOpenSession={viewsPage ? goToSession : undefined}
-                    inSession={sessionTabs && viewsPage}
+                    inSession={sessionTabs && viewsPage && !!viewsOpen.session}
                     onClearSession={viewsPage ? () => setViewsOpen({ page: true }) : undefined}
                     onClose={() => setViewsOpen(null)} />
       )}

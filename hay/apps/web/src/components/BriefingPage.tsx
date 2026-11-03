@@ -9,9 +9,8 @@ import { menuIsOpen } from "./ContextMenu";
 // The briefing as a place beside the sidebar: one edition at a time, read
 // like the front page of a lab notebook — the summary as its lede, then
 // what wants a decision, what to watch, what finished, and a roll-up of the
-// rest. Earlier editions are a step back (‹ ›, ← →). A session picked in the
-// sidebar narrows the page to that session's thread across editions, the
-// way it filters Views: the sidebar's session is the top of the hierarchy.
+// rest. Earlier editions are a step back (‹ ›, ← →). With a session — its
+// Briefing tab — the page is that session's thread across editions.
 //
 // A story opens its session; a reply chip types that answer into it (and
 // presses Enter) without leaving the page. Reading is witnessed as on the
@@ -22,9 +21,8 @@ type Props = {
   editions: Edition[];
   read: Set<string>;
   sessions: SessionInfo[];
-  /** The sidebar's session: the page shows its thread. */
+  /** A session's tab: the page shows its thread. */
   session?: string | null;
-  onClearSession?: () => void;
   /** A session's Briefing tab: the tab names the page and the session. */
   inSession?: boolean;
   onOpenSession: (key: string) => void;
@@ -73,7 +71,7 @@ const ago = (iso?: string): string => {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 };
 
-export const BriefingPage = ({ editions, read, sessions, session, onClearSession, inSession = false, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
+export const BriefingPage = ({ editions, read, sessions, session, inSession = false, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
   // The edition being read survives a refresh (this browser tab).
   const [index, setIndex] = useState(() => { try { return Number(sessionStorage.getItem("hop_brief_index") || 0) || 0; } catch { return 0; } });
   useEffect(() => { try { sessionStorage.setItem("hop_brief_index", String(index)); } catch { /* private window */ } }, [index]);
@@ -273,12 +271,6 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
     <div className={"place-page briefing-page" + (inSession ? " in-session" : "")} role={inSession ? "tabpanel" : "region"} aria-label="Briefing" tabIndex={-1} ref={panelRef}>
       {!inSession && <header className="place-head">
         <span className="place-title"><span className="place-spark" aria-hidden="true">✦</span>Briefing</span>
-        {sessionKey && onClearSession && (
-          <span className="views-scope-chip">
-            {label(sessionKey)}
-            <button type="button" aria-label="Show the whole briefing" title="The whole briefing" onClick={onClearSession}>×</button>
-          </span>
-        )}
         <span className="place-spacer" />
         {!sessionKey && editions.length > 1 && (
           <span className="place-nav">
@@ -302,7 +294,6 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
         ) : sessionKey ? (
           <>
             <p className="place-dateline">Everything the briefing said about {label(sessionKey)} · {thread.length} {thread.length === 1 ? "note" : "notes"}</p>
-            {!inSession && <button type="button" className="brief-open-session" onClick={() => onOpenSession(sessionKey)}>Open {label(sessionKey)} →</button>}
             {!thread.length && <p className="place-empty-line">The briefing hasn't mentioned this session.</p>}
             {thread.length > 0 && (() => {
               const newest = editions[0]?.generated_at || "";

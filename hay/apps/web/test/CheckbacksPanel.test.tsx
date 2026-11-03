@@ -43,15 +43,10 @@ describe("CheckbacksPanel", () => {
     expect(screen.getByText("look at the run")).toBeTruthy();
   });
 
-  it("as the Calendar place: a page beside the sidebar, its narrowing a chip, the way to the session one click", async () => {
-    const onClearSession = vi.fn(); const onOpenSession = vi.fn();
-    render(<CheckbacksPanel placement="page" session="s_x" sessionName="x" onClose={() => {}} onClearSession={onClearSession} onOpenSession={onOpenSession} />);
-    expect(screen.getByRole("region", { name: "Calendar for x" })).toBeTruthy();
+  it("as the Calendar place: a page about every session, no backdrop", async () => {
+    render(<CheckbacksPanel placement="page" session="*" sessionName="every session" onClose={() => {}} />);
+    expect(screen.getByRole("region", { name: "Calendar for every session" })).toBeTruthy();
     expect(document.querySelector(".views-backdrop")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Show every session" }));
-    expect(onClearSession).toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: /Open x/ }));
-    expect(onOpenSession).toHaveBeenCalledWith("s_x");
   });
 
   it("a day's repeats of a task are one entry; each stays reachable; Agenda shows the whole message", async () => {

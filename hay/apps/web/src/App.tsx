@@ -272,7 +272,7 @@ const PENDING_INPUT_MAX_ENTRIES = 200;
 // this browser tab only, gone with it).
 const UI_KEY = "hop_ui_v1";
 type SavedUi = {
-  place?: "briefing" | "pulse" | null; placeSession?: string | null;
+  place?: "briefing" | "pulse" | "calendar" | null; placeSession?: string | null;
   views?: { session?: string; dock?: boolean; item?: string; page?: boolean } | null;
   sideTab?: "calendar" | "briefing" | "pulse" | null; calendar?: string | null;
 };
@@ -599,7 +599,7 @@ const App = () => {
   // The sidebar's own places beyond Sessions and Views: the briefing (with
   // the session it is narrowed to) and mybot's pulse; and the update panel.
   const [closedSessions, setClosedSessions] = useState<ClosedSession[]>([]);
-  const [place, setPlace] = useState<null | "briefing" | "pulse">(() => savedUi().place ?? null);
+  const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar">(() => savedUi().place ?? null);
   // The sidebar's session narrowing a place (as it filters Views).
   const [briefingSession, setBriefingSession] = useState<string | null>(() => savedUi().placeSession ?? null);
   const [updateOpen, setUpdateOpen] = useState(false);
@@ -4568,7 +4568,7 @@ const App = () => {
   // are kinds, never documents: results open one at a time in Views'
   // reader, not a tab each (that would be the browser's job, redone).
   const sessionTabs = railDocked && !!session && !switcherOpen && isEmbeddedInHop();
-  const schedTabNow = sessionTabs && schedTab;
+  const schedTabNow = sessionTabs && schedTab && !placePage;
   const feedTabNow = sessionTabs && !placePage && !viewsPage && (sideTab === "briefing" || sideTab === "pulse") ? sideTab : null;
   useEffect(() => { if (viewsPage) setSideTab(null); }, [viewsPage]);
   const focusTerminalSoon = () => window.setTimeout(() => termRef.current?.focus(), 0);
@@ -4670,7 +4670,7 @@ const App = () => {
   };
   // Opening a place: clicked again while there, a narrowed briefing shows
   // all of itself again (as Views does), else the place stays.
-  const openPlace = (which: "briefing" | "pulse") => {
+  const openPlace = (which: "briefing" | "pulse" | "calendar") => {
     if (place === which) { setBriefingSession(null); return; }
     if (viewsPage) setViewsOpen(null);
     setBriefingSession(null);
@@ -4754,8 +4754,8 @@ const App = () => {
       // Opens on the selected session's results; clicked again, the page
       // shows everything (nothing selected) and the column closes.
       onClick: () => openViews() },
-    { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />,
-      count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => setCheckbacksOpen("*") },
+    { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />, active: place === "calendar" && placePage,
+      count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => openPlace("calendar") },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
     ...(desktopEnabled ? [{ key: "desktop", label: "Desktop", icon: <RailIcon name="desktop" />, onClick: () => setDesktopOpen(true) }] : []),
     (() => {
@@ -4770,12 +4770,27 @@ const App = () => {
       onClick: () => setShortcutHelpOpen((v) => !v) },
     ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
   ];
+  // The calendar at some scope ("*": every session; a tile's chip: its own):
+  // with the sidebar, the Calendar place narrowed to it; else the window.
+  const openCalendar = (scope: string) => {
+    if (!railDocked) { setCheckbacksOpen(scope); return; }
+    if (viewsPage) setViewsOpen(null);
+    setPlace("calendar");
+    setBriefingSession(scope === "*" ? null : scope);
+  };
+  useEffect(() => {
+    if (railDocked && checkbacksOpen) { openCalendar(checkbacksOpen); setCheckbacksOpen(null); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [railDocked, checkbacksOpen]);
   toggleCalendarRef.current = () => {
+    if (place === "calendar" && placePage) { setPlace(null); return; }
+    if (placePage) setPlace(null);
     if (sessionTabs) {
       if (schedTab) { setSchedTab(false); focusTerminalSoon(); }
       else { setSchedTab(true); if (viewsPage) setViewsOpen(null); }
       return;
     }
+    if (railDocked) { openCalendar("*"); return; }
     setCheckbacksOpen((v) => (v ? null : "*"));
   };
   // The wall's lead, with the sidebar: one line each for the briefing and
@@ -5025,7 +5040,7 @@ const App = () => {
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             onOpenCodexApp={() => setCodexAppOpen(true)}
             onOpenDesktop={desktopEnabled ? () => setDesktopOpen(true) : undefined}
-            onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
+            onOpenCheckbacks={openCalendar}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             themeMode={themeMode}
@@ -5741,7 +5756,7 @@ const App = () => {
             onOpenViews={(scope, item) => setViewsOpen({ session: scope, item })}
             onOpenCodexApp={() => setCodexAppOpen(true)}
             onOpenDesktop={desktopEnabled ? () => setDesktopOpen(true) : undefined}
-            onOpenCheckbacks={(scope) => setCheckbacksOpen(scope)}
+            onOpenCheckbacks={openCalendar}
             userName={name}
             terminalTheme={resolveTerminalTheme(themeMode)}
             themeMode={themeMode}
@@ -5958,6 +5973,17 @@ const App = () => {
           onChanged={() => { void fetchSessions({ showLoading: false }); }}
         />
       )}
+      {placePage && place === "calendar" && (() => {
+        const key = briefingSession ? sessionKeyOf(briefingSession)! : "*";
+        const info = sessions.find((x) => (x.internalName || x.name) === key);
+        return (
+          <CheckbacksPanel placement="page" session={key} sessionName={info?.displayName || info?.name || key}
+                           onClearSession={() => setBriefingSession(null)}
+                           onClose={() => setPlace(null)}
+                           onChanged={() => { void fetchSessions({ showLoading: false }); }}
+                           onOpenSession={(internal) => { setPlace(null); goToSession(internal); }} />
+        );
+      })()}
       {checkbacksOpen && (
         <CheckbacksPanel
           session={checkbacksOpen}

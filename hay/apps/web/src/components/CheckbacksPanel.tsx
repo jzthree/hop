@@ -27,12 +27,16 @@ type Props = {
   // show there without waiting for the next poll.
   onChanged?: () => void;
   onOpenSession?: (internalName: string) => void;
-  // "tab": a session's Scheduled tab, under its header (no backdrop);
-  // otherwise the centred window.
-  placement?: "modal" | "tab";
+  // "page": the Calendar place beside the sidebar, all sessions or (narrowed
+  // by the sidebar) one. "tab": the same calendar as a session's tab, under
+  // its header. Otherwise (no sidebar) the centred window.
+  placement?: "modal" | "tab" | "page";
+  /** The page's narrowing: × shows every session again. */
+  onClearSession?: () => void;
 };
 
 // One entry on one day: at a time, or a band (at null) across the day.
+const VIEW_KEY = "hop_calendar_view";
 // Distinct, calm hues that read on light and dark paper.
 const SERIES_COLORS = ["#7c3aed", "#0891b2", "#d97706", "#059669", "#db2777", "#2563eb", "#65a30d", "#dc2626", "#0d9488", "#9333ea", "#ca8a04", "#4f46e5"];
 
@@ -42,11 +46,12 @@ type Entry =
 
 const every = (ms: number) => ms % 3_600_000 === 0 ? `every ${ms / 3_600_000}h` : `every ${Math.round(ms / 60_000)}m`;
 
-export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal" }: Props) => {
+export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal", onClearSession }: Props) => {
   const asTab = placement === "tab";
+  const asPage = placement === "page";
   // A tab takes the keyboard once, as it opens (Esc goes back).
   const panelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { if (asTab) panelRef.current?.focus(); }, [asTab]);
+  useEffect(() => { if (asTab || asPage) panelRef.current?.focus(); }, [asTab, asPage]);
   const all = session === ALL_CHECKBACKS;
   const [items, setItems] = useState<Checkback[] | null>(null);
   const [automations, setAutomations] = useState<CodexAutomation[]>([]);
@@ -57,6 +62,9 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
   const [weekStart, setWeekStart] = useState(() => startOfDay(Date.now()));
   // The entry being read below the week.
   const [picked, setPicked] = useState<string | null>(null);
+  // Week (a spread) or Agenda (the same days as readable rows).
+  const [view, setView] = useState<"week" | "agenda">(() => { try { return localStorage.getItem(VIEW_KEY) === "agenda" ? "agenda" : "week"; } catch { return "week"; } });
+  const chooseView = (v: "week" | "agenda") => { setView(v); try { localStorage.setItem(VIEW_KEY, v); } catch { /* per-browser only */ } };
   const now = Date.now();
 
   const load = () => {
@@ -69,7 +77,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
       })
       .catch(() => { setFailed(true); setItems([]); });
   };
-  useEffect(() => { load(); }, [session]);
+  useEffect(() => { setPicked(null); load(); }, [session]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (picked) setPicked(null); else onClose(); return; }
@@ -149,6 +157,27 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
     if (!seriesColor.has(k)) seriesColor.set(k, SERIES_COLORS[seriesColor.size % SERIES_COLORS.length]);
     seriesCount.set(k, (seriesCount.get(k) || 0) + 1);
   }
+  // A day's repeats of one task are one entry: "6× 3:27 AM – 11:27 PM", not
+  // six slivers. Every occurrence stays reachable from the reading pane.
+  const groupsOf = (list: Entry[]) => {
+    const groups = new Map<string, Entry[]>();
+    for (const e of list) {
+      const k = seriesOf(e) + (e.at === null ? "~band" : "");
+      groups.set(k, [...(groups.get(k) || []), e]);
+    }
+    return [...groups.values()];
+  };
+  const groupWhen = (members: Entry[]) => {
+    const e = members[0];
+    if (e.at === null) return every(e.every!);
+    if (members.length === 1) return timeOfDay(e.at);
+    return `${members.length}× ${timeOfDay(e.at)} – ${timeOfDay(members[members.length - 1].at!)}`;
+  };
+  const pickedGroup = pickedEntry
+    ? week.map(({ list }) => groupsOf(list)).flat().find((g) => g.some((m) => m.key === pickedEntry.key)) ?? [pickedEntry]
+    : [];
+  const entryText = (e: Entry) => (e.source === "hop" ? e.cb.message : `${e.auto.name}\n${e.auto.prompt}`);
+  const entryWho = (e: Entry) => (e.source === "hop" ? (all ? e.cb.sessionName || e.cb.session : "") : "Codex");
   const colorStyle = (e: Entry) => ({ ["--c" as string]: seriesColor.get(seriesOf(e)) }) as React.CSSProperties;
   const waiting = pending.filter((c) => !isTimed(c.trigger));
   const nothing = timedPending.length === 0 && waiting.length === 0 && activeAutos.length === 0;
@@ -171,20 +200,32 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
 
   return (
     <>
-      {!asTab && <div className="views-backdrop" onClick={onClose} />}
-      <div className={"views-panel checkbacks-panel" + (asTab ? " page in-session" : "")} role={asTab ? "tabpanel" : "dialog"}
-           aria-label={`Calendar for ${sessionName}`} tabIndex={-1}
+      {!asTab && !asPage && <div className="views-backdrop" onClick={onClose} />}
+      <div className={"views-panel checkbacks-panel" + (asTab ? " page in-session" : asPage ? " page" : "")} role={asTab ? "tabpanel" : asPage ? "region" : "dialog"}
+           aria-label={all ? "Calendar for every session" : `Calendar for ${sessionName}`} tabIndex={-1}
            ref={panelRef}>
         <div className="views-head">
           <span className="views-badge">Calendar</span>
-          {!asTab && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
+          {asPage && !all && onClearSession ? (
+            <span className="views-scope-chip">
+              {sessionName}
+              <button type="button" aria-label="Show every session" title="Every session" onClick={onClearSession}>×</button>
+            </span>
+          ) : !asTab && !asPage && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
           <span className="cal-nav">
             <button type="button" aria-label="Previous week" title="Previous week (←)" onClick={() => setWeekStart((w) => addDays(w, -7))}>‹</button>
             <button type="button" className="cal-today" disabled={weekStart === today} title="This week (t)" onClick={() => setWeekStart(today)}>Today</button>
             <button type="button" aria-label="Next week" title="Next week (→)" onClick={() => setWeekStart((w) => addDays(w, 7))}>›</button>
             <span className="cal-range">{rangeLabel}</span>
           </span>
+          <span className="views-scope-toggle" role="tablist" aria-label="Layout">
+            <button type="button" role="tab" aria-selected={view === "week"} className={view === "week" ? "on" : ""} onClick={() => chooseView("week")}>Week</button>
+            <button type="button" role="tab" aria-selected={view === "agenda"} className={view === "agenda" ? "on" : ""} onClick={() => chooseView("agenda")}>Agenda</button>
+          </span>
           <span className="views-head-spacer" />
+          {asPage && !all && onOpenSession && (
+            <button type="button" className="brief-open-session cal-open-session" onClick={() => onOpenSession(session)}>Open {sessionName} →</button>
+          )}
           <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
         {items === null ? (
@@ -196,6 +237,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
             {nothing && <p className="checkbacks-empty">{all ? "Nothing scheduled." : "Nothing scheduled on this session."}</p>}
 
             <div className={"cal-body" + (pickedEntry ? " picked" : "")}>
+            {view === "week" ? (
             <div className="cal-week" role="grid" aria-label={`Week of ${rangeLabel}`}>
               {week.map(({ day, list }) => {
                 const d = new Date(day);
@@ -205,25 +247,56 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
                       <span className="cal-dow">{d.toLocaleDateString([], { weekday: "short" })}</span>
                       <span className="cal-date">{d.getDate()}</span>
                     </div>
-                    {list.map((e) => (
-                      <button key={e.key} type="button"
-                              className={"cal-entry " + e.source + (e.at === null ? " band" : "") + (e.past ? " past" : "") + (picked === e.key ? " on" : "")
-                                + (pickedEntry && seriesOf(pickedEntry) === seriesOf(e) ? " same" : "")}
-                              style={colorStyle(e)}
-                              title={e.source === "hop" ? e.cb.message : `${e.auto.name}\n\n${e.auto.prompt}`}
-                              onClick={() => setPicked((p) => (p === e.key ? null : e.key))}>
-                        <span className="cal-when">
-                          {e.at === null ? every(e.every!) : timeOfDay(e.at)}
-                          {all && e.source === "hop" ? <span className="cal-who"> · {e.cb.sessionName || e.cb.session}</span> : null}
-                          {e.source === "codex" ? <span className="cal-src"> · Codex</span> : null}
-                        </span>
-                        <span className="cal-what">{e.source === "hop" ? e.cb.message.split("\n")[0] : e.auto.name}</span>
-                      </button>
-                    ))}
+                    {groupsOf(list).map((g) => {
+                      const e = g[0];
+                      const who = entryWho(e);
+                      return (
+                        <button key={e.key} type="button"
+                                className={"cal-entry " + e.source + (e.at === null ? " band" : "") + (g.every((m) => m.past) ? " past" : "") + (g.some((m) => m.key === picked) ? " on" : "")
+                                  + (pickedEntry && seriesOf(pickedEntry) === seriesOf(e) ? " same" : "")}
+                                style={colorStyle(e)} title={entryText(e)}
+                                onClick={() => setPicked((p) => (g.some((m) => m.key === p) ? null : e.key))}>
+                          <span className="cal-when">{groupWhen(g)}</span>
+                          {who && <span className={e.source === "codex" ? "cal-src" : "cal-who"}>{who}</span>}
+                          <span className="cal-what">{e.source === "hop" ? e.cb.message.split("\n")[0] : e.auto.name}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 );
               })}
             </div>
+            ) : (
+            <div className="cal-agenda" aria-label={`Agenda for ${rangeLabel}`}>
+              {week.every(({ list }) => !list.length) && <p className="checkbacks-empty">Nothing this week.</p>}
+              {week.filter(({ list }) => list.length).map(({ day, list }) => {
+                const d = new Date(day);
+                return (
+                  <section key={day} className={"cal-agenda-day" + (day === today ? " today" : "") + (day < today ? " before" : "")}>
+                    <h3 className="cal-agenda-head">
+                      {d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })}{day === today ? " · Today" : ""}
+                    </h3>
+                    {groupsOf(list).map((g) => {
+                      const e = g[0];
+                      const who = entryWho(e);
+                      return (
+                        <button key={e.key} type="button"
+                                className={"cal-row" + (g.every((m) => m.past) ? " past" : "") + (g.some((m) => m.key === picked) ? " on" : "")}
+                                style={colorStyle(e)}
+                                onClick={() => setPicked((p) => (g.some((m) => m.key === p) ? null : e.key))}>
+                          <span className="cal-row-when">{groupWhen(g)}</span>
+                          <span className="cal-row-body">
+                            {who && <span className={e.source === "codex" ? "cal-src" : "cal-who"}>{who}</span>}
+                            <span className="cal-row-what">{e.source === "hop" ? e.cb.message : `${e.auto.name} — ${e.auto.prompt}`}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </section>
+                );
+              })}
+            </div>
+            )}
 
             {/* The picked entry, read in full beside the week. */}
             {pickedEntry && (
@@ -234,6 +307,13 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
                   <span className="views-head-spacer" />
                   <button type="button" className="views-close" aria-label="Close message" onClick={() => setPicked(null)}>×</button>
                 </div>
+                {pickedGroup.length > 1 && (
+                  <div className="cal-occurrences" role="group" aria-label="This task that day">
+                    {pickedGroup.map((m) => (
+                      <button key={m.key} type="button" className={m.key === pickedEntry.key ? "on" : ""} onClick={() => setPicked(m.key)}>{timeOfDay(m.at!)}</button>
+                    ))}
+                  </div>
+                )}
             {pickedEntry.source === "hop" ? (
               <div className={"sched-row cal-detail" + (pickedEntry.past ? " past" : "") + (pickedEntry.cb.firedAt && !pickedEntry.past ? " fired" : "")}>
                 <div className="sched-time">{pickedEntry.at === null ? every(pickedEntry.every!) : timeOfDay(pickedEntry.at)}</div>

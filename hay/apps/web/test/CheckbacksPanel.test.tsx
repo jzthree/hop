@@ -43,6 +43,36 @@ describe("CheckbacksPanel", () => {
     expect(screen.getByText("look at the run")).toBeTruthy();
   });
 
+  it("as the Calendar place: a page beside the sidebar, its narrowing a chip, the way to the session one click", async () => {
+    const onClearSession = vi.fn(); const onOpenSession = vi.fn();
+    render(<CheckbacksPanel placement="page" session="s_x" sessionName="x" onClose={() => {}} onClearSession={onClearSession} onOpenSession={onOpenSession} />);
+    expect(screen.getByRole("region", { name: "Calendar for x" })).toBeTruthy();
+    expect(document.querySelector(".views-backdrop")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show every session" }));
+    expect(onClearSession).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Open x/ }));
+    expect(onOpenSession).toHaveBeenCalledWith("s_x");
+  });
+
+  it("a day's repeats of a task are one entry; each stays reachable; Agenda shows the whole message", async () => {
+    const at = addDays(Date.now(), 1);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ automations: [], items: [
+      { id: "a", session: "s_x", message: "Review S198\nsecond line", trigger: { kind: "at", at: at + 9 * 3_600_000 }, status: "pending" },
+      { id: "b", session: "s_x", message: "Review S199", trigger: { kind: "at", at: at + 10 * 3_600_000 }, status: "pending" },
+      { id: "c", session: "s_x", message: "Something else", trigger: { kind: "at", at: at + 11 * 3_600_000 }, status: "pending" }
+    ] }) })));
+    render(<CheckbacksPanel placement="page" session="s_x" sessionName="x" onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".cal-entry").length).toBe(2));
+    expect(document.querySelector(".cal-entry .cal-when")!.textContent).toMatch(/^2× /);
+    fireEvent.click(document.querySelector(".cal-entry")!);
+    const chips = document.querySelectorAll(".cal-occurrences button");
+    expect(chips.length).toBe(2);
+    fireEvent.click(chips[1]);
+    expect(document.querySelector(".cal-detail .sched-message")!.textContent).toBe("Review S199");
+    fireEvent.click(screen.getByRole("tab", { name: "Agenda" }));
+    expect(document.querySelector(".cal-row .cal-row-what")!.textContent).toBe("Review S198\nsecond line");
+  });
+
   it("elsewhere, the centred window over a backdrop", async () => {
     render(<CheckbacksPanel session="s_x" sessionName="x" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByRole("dialog", { name: "Calendar for x" })).toBeTruthy());

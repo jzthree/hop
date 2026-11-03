@@ -6463,13 +6463,14 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .session-tab-n.fresh { color: #7c3aed; }
 .views-panel.page.in-session,
 .views-panel.page.in-session.reading { top: var(--topbar-h, 52px); }
-.views-panel.checkbacks-panel.page.in-session {
-  position: fixed; top: var(--topbar-h, 52px); right: 0; bottom: 0; left: var(--rail-w, 320px); transform: none;
+.views-panel.checkbacks-panel.page.in-session { top: var(--topbar-h, 52px); }
+.views-panel.checkbacks-panel.page {
+  position: fixed; top: 0; right: 0; bottom: 0; left: var(--rail-w, 320px); transform: none;
   width: auto; height: auto; max-height: none; z-index: 650; overflow: auto;
   border: 0; border-radius: 0; box-shadow: none; background: var(--wall-bg);
   padding: 16px 24px;
 }
-.views-panel.checkbacks-panel.page.in-session:focus { outline: none; }
+.views-panel.checkbacks-panel.page:focus { outline: none; }
 .app.views-side .views-panel.checkbacks-panel.page.in-session { right: var(--views-w, 560px); }
 /* The calendar: a week of days like a lab notebook's spread — hairline
    columns, today marked with hop's violet, entries as small tags (hop's
@@ -6504,19 +6505,45 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
   background: color-mix(in srgb, var(--c) 11%, transparent); color: var(--ink);
 }
 .cal-entry.band { border-left-style: dotted; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 9%, transparent) 0 6px, transparent 6px 12px); }
-.cal-entry.past { opacity: 0.5; }
+.cal-entry.past { opacity: 0.72; }
 .cal-entry:hover { filter: brightness(0.97); transform: none; }
 /* Picked: it, and the rest of its task, stand out. */
 .cal-entry.same { box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 60%, transparent); }
 .cal-entry.on { box-shadow: 0 0 0 2px var(--c); }
-.cal-when { font: 600 10.5px/1.2 var(--font-mono); color: var(--muted, #8a8591); font-variant-numeric: tabular-nums; }
+.cal-when { width: 100%; font: 600 11.5px/1.3 var(--font-mono); color: var(--muted, #8a8591); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .cal-what {
-  font: 500 12px/1.3 var(--font-sans); width: 100%; overflow: hidden; word-break: break-word;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  font: 500 13.5px/1.35 var(--font-sans); width: 100%; overflow: hidden; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical;
 }
-.cal-when { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cal-src { font-family: var(--font-sans); font-weight: 700; color: #0891b2; }
-.cal-who { font-family: var(--font-sans); font-weight: 600; color: var(--ink); opacity: 0.75; }
+.cal-src, .cal-who { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 12px/1.35 var(--font-sans); }
+.cal-src { color: #0891b2; }
+.cal-who { color: var(--ink); opacity: 0.8; }
+/* Agenda: the same days as rows you can read. */
+.cal-agenda { display: flex; flex-direction: column; gap: 16px; margin-top: 6px; min-width: 0; }
+.cal-agenda-head { margin: 0 0 6px; font: 700 13px/1.4 var(--font-sans); color: var(--ink); }
+.cal-agenda-day.today .cal-agenda-head { color: #7c3aed; }
+.cal-row {
+  --c: #7c3aed;
+  display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 14px; width: 100%; text-align: left; align-items: baseline;
+  border: 0; border-left: 3px solid var(--c); border-radius: 6px; margin-bottom: 5px; padding: 8px 12px; cursor: pointer; transform: none;
+  background: color-mix(in srgb, var(--c) 8%, transparent); color: var(--ink);
+}
+.cal-row:hover { background: color-mix(in srgb, var(--c) 14%, transparent); transform: none; }
+.cal-row.on { box-shadow: 0 0 0 2px var(--c); }
+.cal-row.past { opacity: 0.75; }
+.cal-row-when { font: 600 12.5px/1.4 var(--font-mono); color: var(--muted, #8a8591); font-variant-numeric: tabular-nums; }
+.cal-row-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cal-row-what {
+  font: 500 14.5px/1.45 var(--font-sans); white-space: pre-wrap; word-break: break-word; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+}
+.cal-occurrences { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.cal-occurrences button {
+  border: 1px solid var(--card-line, var(--line)); background: none; color: var(--ink); cursor: pointer; transform: none;
+  border-radius: 999px; padding: 1px 8px; font: 600 11.5px/1.5 var(--font-mono);
+}
+.cal-occurrences button.on { background: var(--c); border-color: var(--c); color: #fff; }
+.cal-open-session { margin: 0; }
 .cal-week { flex-shrink: 0; }
 /* The week, and the picked entry read in full beside it. */
 .cal-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }

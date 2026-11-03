@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { dayLabel, pulseItemsFor, type Pulse, type PulseAction, type PulseFeed, type PulseSection } from "../utils/pulseFeed";
 import { Prose, plainText } from "../utils/prose";
 import { useSavedScroll } from "../utils/savedScroll";
+import { menuIsOpen } from "./ContextMenu";
 
 // mybot's pulse as a place beside the sidebar: a day's reading, laid out
 // like a journal page — the title, the intro as its lede, what you may have
@@ -82,6 +83,7 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (menuIsOpen()) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); return; }
       const el = document.activeElement as HTMLElement | null;
       if (!panelRef.current?.contains(el) || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName || "") || e.metaKey || e.ctrlKey || e.altKey) return;

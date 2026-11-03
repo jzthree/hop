@@ -1,5 +1,6 @@
 import React, { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { relativeTime } from "../utils/switcherModel";
+import { menuIsOpen } from "./ContextMenu";
 
 // Views: the results an agent hands a human that a terminal cannot draw — a
 // plot, a PDF, a rendered write-up, a live dev server.
@@ -360,6 +361,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (menuIsOpen()) return;
       // Side by side, the terminal beside the column is live and Esc is a
       // real key there (vim!): answer only keys that start inside Views.
       if (asSide) {

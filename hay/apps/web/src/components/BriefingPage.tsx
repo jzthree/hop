@@ -4,6 +4,7 @@ import { createReadWitness, wordCount } from "../utils/readWitness";
 import { Prose } from "../utils/prose";
 import { useSavedScroll } from "../utils/savedScroll";
 type SessionInfo = { name: string; displayName?: string; internalName?: string };
+import { menuIsOpen } from "./ContextMenu";
 
 // The briefing as a place beside the sidebar: one edition at a time, read
 // like the front page of a lab notebook — the summary as its lede, then
@@ -146,6 +147,7 @@ export const BriefingPage = ({ editions, read, sessions, session, onClearSession
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (menuIsOpen()) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); return; }
       const el = document.activeElement as HTMLElement | null;
       if (!panelRef.current?.contains(el) || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName || "") || e.metaKey || e.ctrlKey || e.altKey) return;

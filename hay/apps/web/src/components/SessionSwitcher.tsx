@@ -23,7 +23,8 @@ import { installDragSelect } from "../utils/dragSelect";
 import { enableViewBlocks } from "../utils/viewBlocks";
 import { urlAtCell, cellAtPoint, oscUrlAtCell } from "../utils/urlAtCell";
 import { attachScrollFlywheel } from "../utils/scrollFlywheel";
-import { ContextMenu, type MenuRequest } from "./ContextMenu";
+import { ContextMenu, menuIsOpen, type MenuRequest } from "./ContextMenu";
+import * as actions from "../utils/sessionActions";
 import { CwdField } from "./CwdField";
 import { UpdateNotice } from "./UpdateNotice";
 import { pasteableUploadPaths } from "../utils/fileDrop";
@@ -2631,6 +2632,7 @@ export const SessionSwitcher = ({
   useEffect(() => {
     if (!open || covered) return;
     const onNavKey = (event: KeyboardEvent) => {
+      if (menuIsOpen()) return;
       if (sheet || creating) return;
       // ⌘F/Ctrl+F: the switcher's find IS the filter box — never browser
       // find. Handled BEFORE the focused-tile guard so it's the rescue hatch
@@ -2818,261 +2820,50 @@ export const SessionSwitcher = ({
 
   // Fork (same tool) or hand off (target names the other tool). One call
   // for both so the two can never disagree about the endpoint.
-  const switchAccount = async (s: SwitcherSession, home: AgentHome) => {
-    setSheet(null);
-    if (home.login && !home.login.loggedIn && !window.confirm(`The ${home.label} account is logged out. Switch anyway? You will need to run /login in the session.`)) return;
-    onNotice(`Moving ${s.displayName} to the ${home.label} account…`);
-    try {
-      const res = await fetch("/api/sessions/agent-home", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: sessionKey(s), home: home.dir })
-      });
-      const data = await res.json().catch(() => null) as { ok?: boolean; error?: string; restarted?: boolean } | null;
-      if (!res.ok || !data?.ok) { onNotice(data?.error || `Switch failed (${res.status})`); return; }
-      onNotice(data.restarted ? `${s.displayName} now runs as ${home.label}` : `${s.displayName} is set to ${home.label}; it switches on its next start`);
-      onRefresh();
-    } catch {
-      onNotice("Switch failed");
-    }
-  };
-
-  // Back to the agent's desktop app on the Mac: Codex lets one process
-  // write a thread, and the Claude app adopts the CLI transcript in place —
-  // either way this session's agent stops first (Stop & park, resumable).
-  const handOffToApp = async (s: SwitcherSession, app: "codex" | "claude") => {
-    setSheet(null);
-    const name = s.displayName || s.name;
-    const label = app === "codex" ? "Codex app" : "Claude app";
-    if (!window.confirm(`Stop ${name} here and open it in the ${label} on the Mac?\n\nIt is parked, and opening it in hop again picks it back up.`)) return;
-    try {
-      const res = await fetch(`/api/${app}/open-in-app`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-hop-actor": "user" },
-        body: JSON.stringify({ internalName: sessionKey(s), handOff: true })
-      });
-      const data = await res.json().catch(() => ({} as { error?: string }));
-      onNotice(res.ok ? `${name} handed to the ${label}` : (data.error || `Could not open the ${label}`));
-      if (res.ok) onRefresh?.();
-    } catch {
-      onNotice(`Could not open the ${label}`);
-    }
-  };
-
-  // The reverse: the Codex app keeps a thread for hours after its window
-  // closes, and while it does the CLI here cannot resume it. The only way to
-  // make it let go is to quit the app; then this session relaunches on it.
-  const takeFromCodexApp = async (s: SwitcherSession) => {
-    setSheet(null);
-    const name = s.displayName || s.name;
-    if (!window.confirm(`Take ${name}'s conversation back from the Codex app?\n\nThis quits the Codex app (all its windows; it reopens normally) and pauses any app automation in this conversation, then resumes it here if its codex has exited (a running codex is left alone).`)) return;
-    onNotice(`Taking ${name} back from the Codex app…`);
-    try {
-      const res = await fetch("/api/codex/take", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-hop-actor": "user" },
-        body: JSON.stringify({ internalName: sessionKey(s) })
-      });
-      const data = await res.json().catch(() => ({})) as { error?: string; freed?: boolean; paused?: string[]; restarted?: boolean; skipped?: string | null };
-      if (!res.ok) { onNotice(data.error || "Could not take the conversation back"); return; }
-      const paused = data.paused?.length ? ` (paused app automation ${data.paused.map((a) => `“${a}”`).join(", ")})` : "";
-      // A codex still running in the session is left alone: retry there.
-      onNotice(data.restarted
-        ? `${name} resumed here${data.freed ? " — the Codex app let go" : ""}${paused}`
-        : data.freed
-          ? `The Codex app let go of ${name}'s conversation${paused} — retry in the session`
-          : `The Codex app was not holding ${name}'s conversation — nothing changed`);
-      onRefresh?.();
-    } catch {
-      onNotice("Could not take the conversation back");
-    }
-  };
-
+  const actionCtx = { notice: onNotice, refresh: onRefresh };
+  const switchAccount = (s: SwitcherSession, home: AgentHome) => { setSheet(null); return actions.switchAccount(actionCtx, s, home); };
+  const handOffToApp = (s: SwitcherSession, app: "codex" | "claude") => { setSheet(null); return actions.handOffToApp(actionCtx, s, app); };
+  const takeFromCodexApp = (s: SwitcherSession) => { setSheet(null); return actions.takeFromCodexApp(actionCtx, s); };
   const forkSession = async (s: SwitcherSession, target?: "claude" | "codex") => {
     setSheet(null);
-    onNotice(target ? `Condensing for ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
-    try {
-      const res = await fetch("/api/sessions/fork", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: sessionKey(s), ...(target ? { target, condense: true } : {}) })
-      });
-      const data = await res.json().catch(() => ({} as { error?: string; name?: string; internalName?: string; kind?: string; extract?: { turns?: number; bytes?: number } }));
-      if (!res.ok) {
-        onNotice(data.error || (target ? "Handoff failed" : "Fork failed"));
-        return;
-      }
-      // The new session belongs beside its source: the daemon files it in
-      // the same folder; on a hand-arranged wall it takes the next slot.
-      if (typeof data.internalName === "string" && data.internalName) {
-        persistManualOrder(insertAfter(manualOrder, sessionKey(s), data.internalName));
-      }
-      if (data.kind === "handoff") {
-        const kb = Math.max(1, Math.round((data.extract?.bytes || 0) / 1024));
-        onNotice(`${data.name} — ${data.extract?.turns ?? "?"} turns handed off (${kb} KB); it reads them first`);
-      } else {
-        onNotice(
-          data.kind === "claude" ? `Forked conversation → ${data.name}`
-            : data.kind === "codex" ? `${data.name} opened — resuming the conversation`
-            : `Forked → ${data.name} (new shell, same directory)`
-        );
-      }
-      onRefresh();
-    } catch {
-      onNotice(target ? "Handoff failed" : "Fork failed");
+    const made = await actions.forkSession(actionCtx, s, target);
+    // The new session belongs beside its source: the daemon files it in
+    // the same folder; on a hand-arranged wall it takes the next slot.
+    if (typeof made?.internalName === "string" && made.internalName) {
+      persistManualOrder(insertAfter(manualOrder, sessionKey(s), made.internalName));
     }
   };
 
   const submitRename = async (event: FormEvent) => {
     event.preventDefault();
     if (!sheet) return;
-    const next = renameDraft.trim();
-    const oldName = sheet.session.displayName || sheet.session.name;
-    if (!next || next === oldName) {
-      setSheet(null);
-      return;
-    }
-    if (!/^[a-zA-Z0-9_-]+$/.test(next)) {
-      onNotice("Only letters, numbers, - and _ allowed");
-      return;
-    }
-    try {
-      const res = await fetch("/api/sessions/rename", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // Address by internal name: display names can collide, and then
-        // renaming by display name picks an arbitrary one of the two.
-        body: JSON.stringify({ oldName, newName: next, internalName: sessionKey(sheet.session) })
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({} as { error?: string }));
-        onNotice(data.error || "Rename failed");
-        return;
-      }
-      onNotice(`Renamed to ${next}`);
-      setSheet(null);
-      onRefresh();
-    } catch {
-      onNotice("Rename failed");
-    }
+    if (await actions.renameSession(actionCtx, sheet.session, renameDraft)) setSheet(null);
   };
 
   const toggleAgentAccess = async () => {
     if (!sheet) return;
-    const key = sessionKey(sheet.session);
-    const allowed = sheet.session.agentPermitted !== true;
-    try {
-      const res = await fetch("/api/sessions/agent-permission", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: key, allowed })
-      });
-      if (!res.ok) {
-        onNotice("Failed to update agent access");
-        return;
-      }
-      onNotice(allowed ? "Agent access enabled" : "Agent access disabled");
-      setSheet(null);
-      onRefresh();
-    } catch {
-      onNotice("Failed to update agent access");
-    }
+    if (await actions.toggleAgentAccess(actionCtx, sheet.session)) setSheet(null);
   };
 
   const killSessionByRef = async (s: SwitcherSession) => {
-    const label = s.displayName || s.name;
-    if (!window.confirm(`Kill session "${label}" for all participants? Its running process is terminated — "Recently closed" in the sidebar can bring it back.`)) {
-      return;
-    }
-    try {
-      const res = await fetch("/api/sessions/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: sessionKey(s) })
-      });
-      if (!res.ok) {
-        onNotice("Failed to kill session");
-        return;
-      }
-      onNotice(`Killed ${label} — Recently closed can bring it back`);
-      setSheet(null);
-      onRefresh();
-    } catch {
-      onNotice("Failed to kill session");
-    }
+    if (await actions.killSession(actionCtx, s)) setSheet(null);
   };
-  // Reclassify origin (user <-> agent): adopting an agent-spawned session you
-  // now drive yourself (a forked conversation, a worker you took over) moves
-  // it to the user side of the origin filter — and into default restore.
   const toggleOrigin = async () => {
     if (!sheet) return;
-    const next = sheet.session.createdBy === "agent" ? "user" : "agent";
-    try {
-      const res = await fetch("/api/sessions/origin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: sessionKey(sheet.session), createdBy: next })
-      });
-      if (!res.ok) {
-        onNotice("Failed to change session origin");
-        return;
-      }
-      onNotice(next === "user" ? "Moved to user sessions" : "Moved to agent sessions");
-      setSheet(null);
-      onRefresh();
-    } catch {
-      onNotice("Failed to change session origin");
-    }
+    if (await actions.toggleOrigin(actionCtx, sheet.session)) setSheet(null);
   };
-
   const killSession = async () => {
     if (!sheet) return;
     await killSessionByRef(sheet.session);
   };
-  // Park: hide from the wall, keep running — instant bring-back via the
-  // parked section or the filter. Unparking also clears the archived flag.
   const togglePark = async () => {
     if (!sheet) return;
-    const next = sheet.session.parked !== true;
-    try {
-      const res = await fetch("/api/sessions/park", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: sessionKey(sheet.session), parked: next })
-      });
-      if (!res.ok) {
-        onNotice("Failed to update park state");
-        return;
-      }
-      onNotice(next ? "Parked — find it under “parked” at the bottom" : "Back on the wall");
-      setSheet(null);
-      onRefresh();
-    } catch {
-      onNotice("Failed to update park state");
-    }
+    if (await actions.togglePark(actionCtx, sheet.session)) setSheet(null);
   };
-  // Archive: stop the process but stay resumable — the daemon pre-writes the
-  // resume command into the session's startup, so reopening it later picks
-  // the conversation back up.
   const archiveSession = async () => {
     if (!sheet) return;
-    try {
-      const res = await fetch("/api/sessions/archive", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ internalName: sessionKey(sheet.session) })
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({} as { error?: string }));
-        onNotice(data.error || "Failed to stop session");
-        return;
-      }
-      onNotice("Stopped & parked — opening it later resumes the conversation");
-      setSheet(null);
-      onRefresh();
-    } catch {
-      onNotice("Failed to stop session");
-    }
+    setSheet(null);
+    await actions.stopAndPark(actionCtx, sheet.session);
   };
   const startRename = (s: SwitcherSession, anchor?: { x: number; y: number }) => {
     setRenameDraft(s.displayName || s.name);

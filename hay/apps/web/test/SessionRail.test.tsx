@@ -47,13 +47,82 @@ describe("SessionRail", () => {
     expect(localStorage.getItem("hop_rail_order")).toBe("recent");
   });
 
-  it("right-click on a row parks it", () => {
-    const onPark = vi.fn();
-    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} onPark={onPark}
+  const ctx = () => ({ notice: vi.fn(), refresh: vi.fn() });
+  const fetched = () => (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([u]) => String(u) !== "/api/agent-homes");
+
+  it("a row's right-click: the session's whole menu; Park goes to the daemon and refreshes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ claude: [], codex: [] }) })));
+    const c = ctx();
+    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} actionContext={c}
                         onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
     fireEvent.contextMenu(screen.getByText("gamma"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Park" }));
-    expect(onPark).toHaveBeenCalledWith(expect.objectContaining({ name: "gamma" }), true);
+    const labels = screen.getAllByRole("menuitem").map((b) => b.textContent);
+    for (const want of ["Open full screen", "Rename", "Fork session", "Park session", "Kill session"]) expect(labels.join("|")).toContain(want);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Park session" }));
+    await waitFor(() => expect(c.refresh).toHaveBeenCalled());
+    const [url, init] = fetched()[0];
+    expect(url).toBe("/api/sessions/park");
+    expect(JSON.parse(init.body)).toEqual({ internalName: "gamma", parked: true });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("submenus open by hover or by keyboard, tick the current choice, and act", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ claude: [], codex: [] }) })));
+    const c = ctx();
+    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} actionContext={c}
+                        onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.contextMenu(screen.getByText("alpha"));
+    fireEvent.mouseEnter(screen.getByRole("menuitem", { name: /Move to folder/ }));
+    expect(screen.getByRole("menuitem", { name: /Work/ }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitem", { name: /No folder/ }));
+    await waitFor(() => expect(fetched().length).toBe(1));
+    expect(JSON.parse(fetched()[0][1].body)).toEqual({ internalName: "alpha", folderId: null });
+    // The keyboard: down to Rename's neighbour, → in, Esc out, Esc closed.
+    fireEvent.contextMenu(screen.getByText("alpha"));
+    const move = screen.getByRole("menuitem", { name: /Move to folder/ });
+    fireEvent.mouseEnter(move);
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(screen.getAllByRole("menu").length).toBe(2);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getAllByRole("menu").length).toBe(1);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("Rename edits in place: Enter saves, Esc leaves it", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ claude: [], codex: [] }) })));
+    const c = ctx();
+    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} actionContext={c}
+                        onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.contextMenu(screen.getByText("gamma"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByLabelText("New name for gamma") as HTMLInputElement;
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByLabelText("New name for gamma")).toBeNull();
+    fireEvent.contextMenu(screen.getByText("gamma"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(screen.getByLabelText("New name for gamma"), { target: { value: "delta" } });
+    fireEvent.submit(screen.getByLabelText("New name for gamma").closest("form")!);
+    await waitFor(() => expect(c.refresh).toHaveBeenCalled());
+    expect(JSON.parse(fetched()[0][1].body)).toMatchObject({ newName: "delta", internalName: "gamma" });
+    await waitFor(() => expect(screen.queryByLabelText("New name for gamma")).toBeNull());
+  });
+
+  it("the ⋯ opens the same menu; a folder's menu and the list's have their own", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ claude: [], codex: [] }) })));
+    const onPlace = vi.fn();
+    render(<SessionRail sessions={sessions} folders={folders} currentRoom={null} actionContext={ctx()} onOpenPlace={onPlace}
+                        onPick={() => {}} onAllSessions={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByLabelText("Actions for beta"));
+    fireEvent.mouseEnter(screen.getByRole("menuitem", { name: /^Show/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Calendar/ }));
+    expect(onPlace).toHaveBeenCalledWith(expect.objectContaining({ name: "beta" }), "calendar");
+    fireEvent.contextMenu(screen.getByText("Work"));
+    expect(screen.getByRole("menuitem", { name: "Rename folder…" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Collapse" }));
+    expect(screen.queryByText("alpha")).toBeNull();
+    fireEvent.contextMenu(document.querySelector(".rail-list")!);
+    expect(screen.getByRole("menuitem", { name: /Arrange/ })).toBeTruthy();
   });
 
   it("docked on the wall: Sessions is where you are, places sit in the strip, the wall's search filters the list", () => {

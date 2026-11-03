@@ -5901,16 +5901,14 @@ const App = () => {
           docked={railDocked}
           canDock={railCanDock}
           onDockChange={setRailDocked}
-          onPark={(s, parked) => {
-            void fetch("/api/sessions/park", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ internalName: s.internalName || s.name, parked })
-            }).then((r) => {
-              pushNotice(r.ok ? (parked ? `${s.displayName || s.name} parked` : `${s.displayName || s.name} is back`) : "Failed to update park state");
-              void fetchSessions({ showLoading: false });
-            }).catch(() => pushNotice("Failed to update park state"));
-          }}
+          actionContext={{ notice: pushNotice, refresh: () => { void fetchSessions({ showLoading: false }); } }}
+          onOpenPlace={railDocked ? (s, which) => {
+            const key = s.internalName || s.name;
+            if (which === "views") { setPlace(null); setViewsOpen({ session: key, page: true }); return; }
+            if (viewsPage) setViewsOpen(null);
+            setPlace(which);
+            setBriefingSession(key);
+          } : undefined}
           onPick={(next) => {
             // In the briefing or the pulse, a session in the sidebar
             // narrows the place to that session's share.

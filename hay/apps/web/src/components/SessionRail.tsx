@@ -1,4 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { ContextMenu, menuIsOpen, type MenuItem, type MenuRequest } from "./ContextMenu";
+import { copyText, newFolderThen, sessionMenuItems, shortPath, type MenuSession, type SessionPlace } from "./sessionMenu";
+import * as actions from "../utils/sessionActions";
+import type { AgentHomes } from "../utils/switcherModel";
 
 // The Slack-style side panel, as on the iOS app (SessionDrawer.swift): every
 // session filed by folder, what each one needs at a glance, and a jump to
@@ -26,6 +31,11 @@ export type RailSession = {
   unread?: boolean;
   bellUnseen?: boolean;
   checkbacks?: number;
+  cwd?: string;
+  agent?: "claude" | "codex" | null;
+  agentHome?: { dir: string; label: string; isDefault: boolean } | null;
+  agentPermitted?: boolean;
+  views?: { count?: number } | null;
 };
 
 /** A session closed in the last two weeks (a kill, a stop, an exit). */
@@ -47,8 +57,10 @@ type Props = {
   /** Offered only where a docked rail fits (a wide window, a mouse). */
   canDock?: boolean;
   onDockChange?: (docked: boolean) => void;
-  /** Park / unpark from a row's right-click menu. */
-  onPark?: (s: RailSession, parked: boolean) => void;
+  /** The right-click menus' way to act and to report (no menus without it). */
+  actionContext?: actions.ActionContext;
+  /** A session's other views, from its menu (only where they can open). */
+  onOpenPlace?: (s: RailSession, place: SessionPlace) => void;
   /** The wall is the main view: "All sessions" is where you are. */
   onWall?: boolean;
   /** Sessions is the place shown — the wall, or a session's terminal (Views
@@ -140,13 +152,16 @@ const wantsYou = (s: RailSession) => !!s.attentionReason || !!s.bellUnseen;
 const dotClass = (s: RailSession) =>
   wantsYou(s) ? "wants" : s.agentPhase === "working" ? "working" : s.agentPhase === "done" && !s.turnSeen ? "done" : s.active === false ? "off" : "live";
 
-export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, onPark, onWall = false, inSessions, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew, focusSignal = 0, onCreate, onSearchDone }: Props) => {
+export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, folders, currentRoom, onPick, onAllSessions, onClose, docked = false, canDock = false, onDockChange, actionContext, onOpenPlace, onWall = false, inSessions, searchSlot, externalFilter, nav = [], scope: scopeProp, onScopeChange, onResize, onNew, focusSignal = 0, onCreate, onSearchDone }: Props) => {
   const [ownFilter, setFilter] = useState("");
   const filter = searchSlot ? (externalFilter ?? "") : ownFilter;
   const [ownScope, setScope] = useState<Scope>(() => (load(SCOPE_KEY) as Scope) || "user");
   const scope = scopeProp ?? ownScope;
   const [order, setOrder] = useState<Order>(() => (load(ORDER_KEY) === "recent" ? "recent" : "folder"));
-  const [menu, setMenu] = useState<{ s: RailSession; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<MenuRequest>(null);
+  const [homes, setHomes] = useState<AgentHomes>({ claude: [], codex: [] });
+  // The row being renamed, in place, and what has been typed.
+  const [renaming, setRenaming] = useState<{ s: RailSession; draft: string } | null>(null);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [folded, setFolded] = useState<Set<string>>(() => new Set((load(FOLD_KEY) || "").split(",").filter(Boolean)));
   const [parkedOpen, setParkedOpen] = useState(false);
@@ -162,7 +177,7 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
     // Focus the filter only with a real keyboard — on a phone it would pop
     // the on-screen one over the list.
     if (window.matchMedia("(pointer: fine)").matches) inputRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); } };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !menuIsOpen()) { e.preventDefault(); e.stopPropagation(); onClose(); } };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose, docked]);
@@ -177,13 +192,12 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
   }, [optionsOpen]);
 
   useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", onKey, true);
-    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", onKey, true); };
-  }, [menu]);
+    if (!actionContext) return;
+    fetch("/api/agent-homes", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && Array.isArray(d.claude) && Array.isArray(d.codex)) setHomes(d); })
+      .catch(() => { /* no accounts info: no account item */ });
+  }, [!actionContext]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggle = (id: string) => setFolded((prev) => {
     const next = new Set(prev);
@@ -263,8 +277,95 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
   }, [visible, folders, searching, order]);
   const parked = searching ? [] : visible.filter(shelved);
 
+  // Right-click, the row's ⋯, or the keyboard's menu key: the same menu.
+  const openSessionMenu = (s: RailSession, x: number, y: number) => {
+    if (!actionContext) return;
+    setMenu({
+      x, y, title: s.displayName || s.name, subtitle: s.cwd ? shortPath(s.cwd) : undefined,
+      items: sessionMenuItems(s, {
+        ctx: actionContext, folders, homes, onOpen: (m) => onPick(m as RailSession), onOpenPlace: onOpenPlace as ((m: MenuSession, p: SessionPlace) => void) | undefined,
+        isCurrent: (m) => (m.internalName || m.name) === currentRoom || m.name === currentRoom,
+        onStartRename: (m) => setRenaming({ s: m as RailSession, draft: m.displayName || m.name })
+      })
+    });
+  };
+  const openFolderMenu = (e: React.MouseEvent, g: { id: string; title: string }) => {
+    if (!actionContext) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const isFolded = folded.has(g.id);
+    const ids = groups.map((x) => x.id);
+    const setAll = (fold: boolean) => setFolded(() => {
+      const next = new Set(fold ? ids : []);
+      save(FOLD_KEY, [...next].join(","));
+      return next;
+    });
+    // Only a real folder has a name to change (not "Unfiled", not a day).
+    const real = folders.some((f) => f.id === g.id);
+    const items: MenuItem[] = [
+      { label: isFolded ? "Expand" : "Collapse", onSelect: () => toggle(g.id) },
+      { label: "Collapse all", onSelect: () => setAll(true) },
+      { label: "Expand all", onSelect: () => setAll(false) },
+      { kind: "separator" },
+      ...(real ? [
+        { label: "Rename folder…", onSelect: () => {
+          const name = window.prompt("Rename folder", g.title)?.trim();
+          if (name && name !== g.title) void actions.renameFolder(actionContext, g.id, name);
+        } },
+        { label: "Delete folder", danger: true, onSelect: () => { void actions.deleteFolder(actionContext, g.id, g.title); } },
+        { kind: "separator" as const }
+      ] : []),
+      { label: "New folder", onSelect: () => { void newFolderThen(actionContext); } }
+    ];
+    setMenu({ x: e.clientX, y: e.clientY, title: g.title, items });
+  };
+  const openListMenu = (e: React.MouseEvent) => {
+    if (!actionContext || (e.target as HTMLElement)?.closest?.(".rail-row, .rail-folder, .rail-closed-row")) return;
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, items: [
+      ...(onNew ? [{ label: "New session", onSelect: () => onNew() }] : []),
+      { label: "New folder", onSelect: () => { void newFolderThen(actionContext); } },
+      { kind: "separator" as const },
+      { label: "Arrange", items: [
+        { label: "By folder", checked: order === "folder", onSelect: () => changeOrder("folder") },
+        { label: "Most recent first", checked: order === "recent", onSelect: () => changeOrder("recent") }
+      ] },
+      { label: "Show", items: (["user", "agent", "all"] as Scope[]).map((v): MenuItem => ({
+        label: scopeLabel(v), checked: scope === v, onSelect: () => changeScope(v)
+      })) },
+      ...(docked && onDockChange ? [{ kind: "separator" as const }, { label: "Hide sidebar", onSelect: () => onDockChange(false) }] : [])
+    ] });
+  };
+  const openClosedMenu = (e: React.MouseEvent, c: ClosedSession) => {
+    if (!actionContext) return;
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, title: c.displayName, subtitle: c.cwd ? shortPath(c.cwd) : undefined, items: [
+      { label: "Bring back", disabled: !onBringBack, onSelect: () => { void onBringBack?.(c); } },
+      ...(c.cwd ? [{ label: "Copy folder path", onSelect: () => copyText(actionContext, "the path", c.cwd!) }] : []),
+      { kind: "separator" as const },
+      { label: "Forget", disabled: !onForgetClosed, onSelect: () => onForgetClosed?.(c) }
+    ] });
+  };
+  const submitRename = async () => {
+    if (!renaming || !actionContext) return;
+    if (await actions.renameSession(actionContext, renaming.s, renaming.draft)) setRenaming(null);
+  };
+
   const row = (s: RailSession) => {
     const current = keyOf(s) === currentRoom || s.name === currentRoom;
+    if (renaming && keyOf(renaming.s) === keyOf(s)) {
+      return (
+        <form key={keyOf(s)} className={"rail-row rail-renaming" + (current ? " current" : "")}
+              onSubmit={(e) => { e.preventDefault(); void submitRename(); }}>
+          <span className={`rail-dot ${dotClass(s)}`} aria-hidden="true" />
+          <input autoFocus aria-label={`New name for ${s.displayName || s.name}`} maxLength={64} value={renaming.draft}
+                 onFocus={(e) => e.currentTarget.select()}
+                 onChange={(e) => setRenaming({ ...renaming, draft: e.target.value })}
+                 onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); setRenaming(null); } }}
+                 onBlur={() => setRenaming(null)} />
+        </form>
+      );
+    }
     const chosen = !searchSlot && filter.trim().length > 0 && visible[sel] === s;
     return (
       <button key={keyOf(s)} type="button" className={"rail-row" + (current ? " current" : "") + (chosen ? " kbd" : "")}
@@ -272,7 +373,14 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
               aria-current={current ? "true" : undefined} onClick={() => onPick(s)}
               // Out of the filter at the press (Safari never focuses a clicked button).
               onPointerDown={() => { if (document.activeElement === inputRef.current) inputRef.current?.blur(); }}
-              onContextMenu={onPark ? (e) => { e.preventDefault(); setMenu({ s, x: e.clientX, y: e.clientY }); } : undefined}
+              onContextMenu={actionContext ? (e) => { e.preventDefault(); openSessionMenu(s, e.clientX, e.clientY); } : undefined}
+              onKeyDown={actionContext ? (e) => {
+                if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                  e.preventDefault();
+                  const r = e.currentTarget.getBoundingClientRect();
+                  openSessionMenu(s, r.left + 24, r.bottom);
+                }
+              } : undefined}
               title={s.tagline || s.displayName || s.name}>
         <span className={`rail-dot ${dotClass(s)}`} aria-hidden="true" />
         <span className={"rail-name" + (wantsYou(s) || s.unread ? " strong" : "")}>{s.displayName || s.name}</span>
@@ -284,6 +392,12 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
         )}
         {/* News, not an error: a spark, never a warning sign. */}
         {wantsYou(s) && <span className="rail-spark" aria-label="has news for you" title={s.attentionReason || "Has news for you"}>✦</span>}
+        {/* Right-click is a shortcut, never the only way (and touch has none). */}
+        {actionContext && (
+          <span className="rail-more" role="button" aria-label={`Actions for ${s.displayName || s.name}`} title="Actions"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); openSessionMenu(s, r.left, r.bottom + 2); }}>⋯</span>
+        )}
       </button>
     );
   };
@@ -312,7 +426,7 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
              }}
              aria-label="Jump to a session" />;
   const list = (
-    <div className="rail-list">
+    <div className="rail-list" onContextMenu={openListMenu}>
       {!docked && (
         <button type="button" className={"rail-row all" + (onWall ? " current" : "")} aria-current={onWall ? "page" : undefined}
                 onClick={onAllSessions}>
@@ -325,7 +439,8 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
         const wanting = g.rows.filter(wantsYou).length;
         return (
           <section key={g.id || "unfiled"}>
-            <button type="button" className="rail-folder" aria-expanded={!isFolded} onClick={() => toggle(g.id)}>
+            <button type="button" className="rail-folder" aria-expanded={!isFolded} onClick={() => toggle(g.id)}
+                    onContextMenu={(e) => openFolderMenu(e, g)}>
               <span className="rail-chev" aria-hidden="true">{isFolded ? "▸" : "▾"}</span>
               <span className="rail-folder-name">{g.title}</span>
               {isFolded && wanting > 0
@@ -355,7 +470,7 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
             <span className="rail-count">{closed.length}</span>
           </button>
           {closedOpen && closed.map((c) => (
-            <div key={c.internalName} className="rail-closed-row">
+            <div key={c.internalName} className="rail-closed-row" onContextMenu={(e) => openClosedMenu(e, c)}>
               <span className="rail-closed-text">
                 <span className="rail-closed-name">{c.displayName}</span>
                 <span className="rail-closed-meta">
@@ -494,13 +609,7 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
           {list}
         </>)}
       </aside>
-      {menu && onPark && (
-        <div className="rail-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
-          <button type="button" role="menuitem" onClick={() => { const { s } = menu; setMenu(null); onPark(s, !(s.parked || s.archived)); }}>
-            {menu.s.parked || menu.s.archived ? "Unpark" : "Park"}
-          </button>
-        </div>
-      )}
+      {createPortal(<ContextMenu request={menu} onClose={() => setMenu(null)} />, document.body)}
     </>
   );
 };

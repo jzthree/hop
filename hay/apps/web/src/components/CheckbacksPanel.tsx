@@ -4,6 +4,7 @@ import {
   chipWhen, conditionLabel, dayHeading, describeRrule, describeState, describeTrigger, isTimed,
   nextOfTrigger, orderForAll, orderForSession, relative, timeOfDay, type Checkback, type CodexAutomation
 } from "../utils/checkbackText";
+import { menuIsOpen } from "./ContextMenu";
 
 // A session's CALENDAR: a week, day by day, with everything timed on it —
 // hop's check-backs and the Codex automations aimed at the same
@@ -80,6 +81,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
   useEffect(() => { setPicked(null); load(); }, [session]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (menuIsOpen()) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (picked) setPicked(null); else onClose(); return; }
       // ← → a week back / on, t today — from inside the calendar only.
       if (!panelRef.current?.contains(document.activeElement) || e.metaKey || e.ctrlKey || e.altKey) return;

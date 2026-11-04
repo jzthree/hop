@@ -10,7 +10,7 @@ const nb = { nbformat: 4, cells: [{ cell_type: 'code', source: 'print("</script>
 
 test('the page mounts Nebula\'s viewer on the notebook, and a cell cannot end the script', () => {
     const html = renderNotebook(nb, 'Fit <v2>', 'fit.ipynb', 'Saved copy from Nov 1.');
-    assert.match(html, /<script src="\/assets\/nebula-viewer\/viewer\.global\.js"><\/script>/);
+    assert.match(html, /<script src="\/assets\/nebula-viewer\/viewer\.global\.js\?v=\w+"><\/script>/);
     assert.match(html, /NebulaNotebookViewer\.mountNotebook/);
     assert.equal(html.match(/<\/script>/g).length, 2, 'only the page\'s own two scripts close');
     assert.match(html, /\\u003c\/script>/);

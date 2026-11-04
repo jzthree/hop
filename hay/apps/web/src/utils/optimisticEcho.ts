@@ -81,7 +81,6 @@ export const createOptimisticEcho = (options: OptimisticEchoOptions = {}): Optim
   const now = options.now ?? (() => Date.now());
   let pending = "";
   let lastEchoAt = 0;
-  let mismatchCount = 0;
 
   const onInput = (data: string, enabled: boolean) => {
     if (!enabled) {
@@ -96,117 +95,73 @@ export const createOptimisticEcho = (options: OptimisticEchoOptions = {}): Optim
     return filtered;
   };
 
+  // Take back the predictions still on screen: step over them and blank
+  // them, so the cursor is where the server believes it is. Everything the
+  // server sends is placed relative to ITS cursor — a shell that redraws
+  // the word being typed (zsh's syntax highlighting and autosuggestions:
+  // "\bho") would otherwise land one column per unconfirmed prediction too
+  // far right, doubling letters ("hop recover" read "hhopp recover").
+  const rollback = () => {
+    const n = pending.length;
+    pending = "";
+    return n ? "\b".repeat(n) + `\u001b[${n}X` : "";
+  };
+
   const reconcileOutput = (data: string) => {
     if (!pending) {
       return data;
     }
 
     if (now() - lastEchoAt > maxPendingMs) {
-      pending = "";
-      mismatchCount = 0;
-      return data;
+      return rollback() + data;
     }
 
-    // TUI guard: a chunk carrying cursor-movement/erase/OSC controls is a
-    // REDRAW (Claude Code's composer, editors), not a keystroke echo.
-    // Consuming pending chars out of a redraw deletes the user's typed text
-    // from the repainted screen — "I can't see what I typed" in multi-line
-    // composers. Redraw chunks pass through untouched; the repaint is the
-    // truth, so pending is dropped rather than matched later out of context.
-    {
-      let scan = 0;
-      let complex = false;
-      while (scan < data.length) {
-        const c = data[scan];
-        if (c === "\u001b") {
-          const next = data[scan + 1];
-          if (next === "[") {
-            let j = scan + 2;
-            while (j < data.length) {
-              const code = data.charCodeAt(j);
-              j += 1;
-              if (code >= 0x40 && code <= 0x7e) {
-                // SGR (m) is styling, safe; anything else moves/erases.
-                if (data[j - 1] !== "m") complex = true;
-                break;
-              }
-            }
-            scan = j;
-            continue;
-          }
-          complex = true; // OSC / other escapes: treat as redraw
-          break;
-        }
-        scan += 1;
-      }
-      if (complex) {
-        pending = "";
-        mismatchCount = 0;
-        return data;
-      }
-    }
-
-    // Consume echoed copies of pending chars wherever they sit in the
-    // chunk's PRINTABLE stream, preserving control sequences verbatim. The
-    // old head-anchored raw prefix match broke on the first escape byte the
-    // shell interleaves under rapid typing (echoes arrive coalesced), then
-    // two strikes cleared pending — after which every server echo rendered
-    // on top of the optimistic one: typing "alal..." fast displayed
-    // "llllllalalal..." (reproduced deterministically in emulation).
+    // Consume the chunk's leading echo of what was predicted. Styling (SGR)
+    // and erase-to-end-of-line may sit between the echoed characters (a
+    // highlighting shell, coalesced echoes under fast typing): they are kept
+    // and change nothing about where the cursor is. The first thing that is
+    // not the next predicted character — another character, a cursor move, a
+    // backspace, a carriage return, any other control or escape — means the
+    // server has moved on from echoing: the remaining predictions are taken
+    // back and the rest of the chunk is written as the server sent it. That
+    // includes a TUI's repaint (Claude Code's composer, editors), which
+    // then draws onto the screen the server expects, with nothing typed
+    // left behind or deleted from it.
     let out = "";
     let i = 0;
     let consumed = 0;
-    let sawForeign = false;
-    while (i < data.length) {
+    while (i < data.length && consumed < pending.length) {
       const ch = data[i];
-      if (ch === "\u001b") {
-        let j = i + 1;
-        if (data[j] === "[") {
-          j += 1;
-          while (j < data.length) {
-            const code = data.charCodeAt(j);
-            j += 1;
-            if (code >= 0x40 && code <= 0x7e) break;
-          }
-        } else {
-          j += 1;
+      if (ch === "\u001b" && data[i + 1] === "[") {
+        let j = i + 2;
+        while (j < data.length && !(data.charCodeAt(j) >= 0x40 && data.charCodeAt(j) <= 0x7e)) j += 1;
+        const final = data[j];
+        const param = data.slice(i + 2, j);
+        // Styling, or erase from the cursor to the end of the line (never
+        // the erases that reach left of it).
+        if (final === "m" || (final === "K" && (param === "" || param === "0"))) {
+          out += data.slice(i, j + 1);
+          i = j + 1;
+          continue;
         }
-        out += data.slice(i, j);
-        i = j;
-        continue;
+        break;
       }
-      if (!sawForeign && consumed < pending.length && isPrintable(ch) && ch === pending[consumed]) {
+      if (ch === pending[consumed]) {
         consumed += 1;
         i += 1;
         continue;
       }
-      if (!sawForeign && consumed < pending.length && isPrintable(ch)) {
-        // A printable that isn't the next expected echo: stop consuming so we
-        // never swallow real program output out of order.
-        sawForeign = true;
-      }
-      out += ch;
-      i += 1;
+      break;
     }
-
-    if (consumed > 0) {
-      pending = pending.slice(consumed);
-      mismatchCount = 0;
-      return out;
-    }
-
-    mismatchCount += 1;
-    if (mismatchCount >= 2) {
-      pending = "";
-      mismatchCount = 0;
-    }
-
-    return data;
+    pending = pending.slice(consumed);
+    if (i >= data.length) return out;
+    // The server has moved on: what is still predicted comes off the screen
+    // first (nothing, when every prediction was confirmed).
+    return out + rollback() + data.slice(i);
   };
 
   const reset = () => {
     pending = "";
-    mismatchCount = 0;
   };
 
   const getPending = () => pending;

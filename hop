@@ -21,6 +21,7 @@ const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const recentlyClosed = require('./lib/recently-closed');
+const nebulaRelay = require('./lib/nebula-relay');
 const notebookView = require('./lib/notebook-view');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
@@ -11784,6 +11785,72 @@ function passkeyRpInfo(req) {
     return { rpID: hostname, origin: `${proto}://${hostHeader}` };
 }
 
+// ---- Nebula inside hop (lib/nebula-relay.js) ------------------------------
+// /nebula/<port>/… → the Nebula this machine reaches on localhost:<port>.
+// Only for a signed-in viewer, only to ports the configured Nebula or a
+// Nebula link names, and never with hop's cookies or tokens; Nebula's own
+// sign-in still applies (the relay always sends an Origin).
+let nebulaPortsCache = { at: 0, ports: new Set() };
+function nebulaRelayPorts() {
+    const now = Date.now();
+    if (now - nebulaPortsCache.at < 30000) return nebulaPortsCache.ports;
+    const targets = [];
+    try {
+        for (const sess of fs.readdirSync(VIEWS_DIR)) {
+            const meta = readViewMeta(sess);
+            for (const m of Object.values(meta)) if (m && m.app === 'nebula' && m.target) targets.push(m.target);
+        }
+    } catch (e) { /* no views yet */ }
+    nebulaPortsCache = { at: now, ports: nebulaRelay.allowedPorts(getHopConfig().nebula_url || process.env.HOP_NEBULA_URL, targets) };
+    return nebulaPortsCache.ports;
+}
+function nebulaRelayHeaders(req, port) {
+    const out = nebulaRelay.relayRequestHeaders(req.headers, { port, publicOrigin: passkeyRpInfo(req).origin });
+    if (out.authorization === `Bearer ${SESSION_SECRET}`) delete out.authorization;
+    return out;
+}
+function handleNebulaRelay(req, res, parsed) {
+    if (!nebulaRelayPorts().has(parsed.port)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('No Nebula on that port is linked from Views (hop config nebula <url> names one).');
+        return;
+    }
+    if (parsed.needsSlash) {
+        res.writeHead(301, { Location: `/nebula/${parsed.port}/` });
+        res.end();
+        return;
+    }
+    const upstream = http.request({
+        host: 'localhost', port: parsed.port, method: req.method, path: parsed.rest || '/',
+        headers: nebulaRelayHeaders(req, parsed.port)
+    }, (up) => {
+        const headers = nebulaRelay.relayResponseHeaders(up.headers);
+        if (headers.location) headers.location = nebulaRelay.relayLocation(headers.location, parsed.port);
+        // Nebula decides how its own files are cached, not hop's no-store default.
+        if (up.headers['cache-control']) res.hopCacheControl = String(up.headers['cache-control']);
+        res.writeHead(up.statusCode || 502, headers);
+        up.pipe(res);
+    });
+    upstream.on('error', () => {
+        if (res.headersSent) { try { res.destroy(); } catch (e) { } return; }
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end(`Nebula is not answering on localhost:${parsed.port} — is its tunnel up?`);
+    });
+    req.pipe(upstream);
+}
+function handleNebulaRelayUpgrade(req, socket, head, parsed) {
+    if (!nebulaRelayPorts().has(parsed.port) || parsed.needsSlash) {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+        return;
+    }
+    req.headers = nebulaRelayHeaders(req, parsed.port);
+    const proxy = httpProxy.createProxyServer({ target: `ws://localhost:${parsed.port}`, ws: true });
+    proxy.once('error', () => { try { socket.destroy(); } catch (e) { } });
+    req.url = parsed.rest;
+    proxy.ws(req, socket, head);
+}
+
 function readRequestJson(req, limit = 262144) {
     return new Promise((resolve) => {
         let body = '';
@@ -12877,6 +12944,12 @@ happens until someone clicks it.
                 res.end(JSON.stringify({ ok: false, error: e.message }));
             }
             return;
+        }
+
+        // ---- Nebula, relayed (handleNebulaRelay) ---------------------------
+        if (parsedUrl.pathname.startsWith('/nebula/')) {
+            const relay = nebulaRelay.parseRelayPath(req.url);
+            if (relay) { handleNebulaRelay(req, res, relay); return; }
         }
 
         // ---- Views files --------------------------------------------------
@@ -16024,6 +16097,11 @@ happens until someone clicks it.
         if (parsedUrl.pathname === '/desktop/ws') {
             handleDesktopUpgrade(req, socket, head, wsAuth, parsedUrl);
             return;
+        }
+
+        if (parsedUrl.pathname.startsWith('/nebula/')) {
+            const relay = nebulaRelay.parseRelayPath(req.url);
+            if (relay) { handleNebulaRelayUpgrade(req, socket, head, relay); return; }
         }
 
         // The fast-path probe: a page on the public hostname checking that

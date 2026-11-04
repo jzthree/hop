@@ -207,10 +207,28 @@ describe("ViewsPanel", () => {
     render(<ViewsPanel onClose={() => {}} />);
     await openCard("Model fit");
     expect(document.querySelector("iframe.views-frame")!.getAttribute("src")).toBe("/view/Orion/fit.ipynb.nebula.html/notebook");
-    const open = screen.getByText(/Open in Nebula/).closest("a")!;
-    expect(open.getAttribute("href")).toBe("http://localhost:3000/?file=%2Fdata%2Ffit.ipynb");
-    expect(open.getAttribute("target")).toBe("_blank");
     expect(screen.getByText("/data/fit.ipynb")).toBeTruthy();
+    // Run it here: the live Nebula, through hop's relay, in place.
+    fireEvent.click(screen.getByRole("button", { name: "Open in Nebula" }));
+    expect(document.querySelector("iframe.views-frame")!.getAttribute("src")).toBe("/nebula/3000/?file=%2Fdata%2Ffit.ipynb");
+    expect(screen.getByText("Live · Nebula")).toBeTruthy();
+    const tab = screen.getByTitle("Nebula in its own tab");
+    expect(tab.getAttribute("href")).toBe("/nebula/3000/?file=%2Fdata%2Ffit.ipynb");
+    expect(tab.getAttribute("target")).toBe("_blank");
+    fireEvent.click(screen.getByRole("button", { name: "Read-only" }));
+    expect(document.querySelector("iframe.views-frame")!.getAttribute("src")).toBe("/view/Orion/fit.ipynb.nebula.html/notebook");
+  });
+
+  it("a Nebula that is not on this machine's localhost opens in its own tab", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ items: [
+      { session: "Orion", name: "far.ipynb.nebula.html", title: "Far fit", path: "/view/Orion/far.ipynb.nebula.html/inline",
+        kind: "link", app: "nebula", target: "https://nebula.example.org/?file=%2Fdata%2Ffar.ipynb", mtime: 1786303213 }
+    ] }) })));
+    render(<ViewsPanel onClose={() => {}} />);
+    await openCard("Far fit");
+    expect(screen.queryByRole("button", { name: "Open in Nebula" })).toBeNull();
+    const out = screen.getByText(/Open in Nebula ↗/).closest("a")!;
+    expect(out.getAttribute("href")).toBe("https://nebula.example.org/?file=%2Fdata%2Ffar.ipynb");
   });
 
   it("a session that has published nothing says so — it never widens by itself", async () => {

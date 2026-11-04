@@ -6597,6 +6597,13 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
   font: 600 12px/1.4 var(--font-sans); color: #fff; background: #2563eb;
 }
 .views-notebook-open:hover { background: #1d4ed8; }
+button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
+.views-notebook-back, .views-notebook-out {
+  border: 1px solid var(--card-line, var(--line)); background: var(--card-bg, var(--panel)); color: var(--ink); cursor: pointer;
+  border-radius: 7px; padding: 3px 10px; font: 600 12px/1.5 var(--font-sans); text-decoration: none; transform: none;
+}
+.views-notebook-back:hover, .views-notebook-out:hover { border-color: #2563eb; color: #2563eb; transform: none; }
+.views-notebook.live .views-notebook-tag { color: #2563eb; }
 /* Beside the wall too: the wall gives up the width as the terminal does. */
 .app.views-side .switcher-overlay { right: var(--views-w, 560px); }
 .views-panel.side,

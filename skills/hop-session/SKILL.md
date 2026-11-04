@@ -81,7 +81,8 @@ over: what the human sees is the outputs the file holds. A finished
 A **Nebula notebook** is handed over as a link — it lives (and runs) on its
 Nebula server. Views shows it read-only from a copy hop saves when you file
 it and refreshes whenever Nebula answers, with **Open in Nebula** one click
-away for the live kernel. Give the path **as the Nebula server sees it** (a
+away for the live kernel — inside hop itself when that Nebula is on the
+human's localhost (hop relays it; Nebula still asks for its own sign-in). Give the path **as the Nebula server sees it** (a
 relative path is resolved against the server's working directory):
 
 ```bash

@@ -203,12 +203,23 @@ const loadSavedViews = (scope: string | undefined): SavedViews => {
   } catch { return {}; }
 };
 
+/** A Nebula link on this machine's localhost, as the same page through hop's relay. */
+export const nebulaRelayUrl = (target?: string): string | null => {
+  try {
+    const u = new URL(target || "");
+    if (u.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)) return null;
+    return `/nebula/${u.port || "80"}${u.pathname || "/"}${u.search}${u.hash}`;
+  } catch { return null; }
+};
+
 export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onClearSession, inSession = false, onToggleSide, onResizeSide, onClose }: Props) => {
   const [saved] = useState(() => (item ? {} : loadSavedViews(session)));
   const [items, setItems] = useState<ViewItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   // The result being read; null is the gallery.
   const [open, setOpen] = useState<ViewItem | null>(null);
+  // The notebook being run live (its path), rather than read.
+  const [liveNotebook, setLiveNotebook] = useState<string | null>(null);
   // Opened straight on a result: Esc closes rather than "going back".
   const [direct, setDirect] = useState(!!item);
   const [showAll, setShowAll] = useState(!!saved.showAll);
@@ -597,15 +608,27 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
   // disable the browser's PDF viewer. A Nebula notebook reads here,
   // read-only (hop's saved copy, refreshed from Nebula when it answers);
   // running it is the bar's one click into Nebula.
+  // Running it: the live Nebula, in place, through hop's relay — when the
+  // link names a Nebula this machine reaches on localhost (else a new tab).
+  const liveSrc = open && open.kind === "link" && open.app === "nebula" ? nebulaRelayUrl(open.target) : null;
+  const isLive = !!open && liveNotebook === open.path && !!liveSrc;
   const page = open && (
     open.kind === "link" && open.app === "nebula" ? (
-      <div className="views-notebook">
+      <div className={"views-notebook" + (isLive ? " live" : "")}>
         <div className="views-notebook-bar">
-          <span className="views-notebook-tag">Read-only</span>
+          <span className="views-notebook-tag">{isLive ? "Live · Nebula" : "Read-only"}</span>
           {linkFile && <code className="views-link-path" title={linkFile}>{linkFile}</code>}
-          <a className="views-notebook-open" href={open.target} target="_blank" rel="noopener">Open in Nebula ↗</a>
+          {isLive ? (
+            <button type="button" className="views-notebook-back" onClick={() => setLiveNotebook(null)} title="Back to hop's read-only copy">Read-only</button>
+          ) : liveSrc ? (
+            <button type="button" className="views-notebook-open" onClick={() => setLiveNotebook(open.path)} title="Run it here, in Nebula">Open in Nebula</button>
+          ) : null}
+          <a className={liveSrc ? "views-notebook-out" : "views-notebook-open"} href={liveSrc || open.target} target="_blank" rel="noopener"
+             title="Nebula in its own tab">{liveSrc ? "↗" : "Open in Nebula ↗"}</a>
         </div>
-        <iframe className="views-frame" key={open.path} src={open.path.replace(/\/inline$/, "/notebook")} title={open.title || open.name} />
+        {isLive
+          ? <iframe className="views-frame" key={"live:" + open.path} src={liveSrc!} title={`${open.title || open.name} — Nebula`} allow="clipboard-read; clipboard-write" />
+          : <iframe className="views-frame" key={open.path} src={open.path.replace(/\/inline$/, "/notebook")} title={open.title || open.name} />}
       </div>
     ) : open.kind === "link" ? (
       <div className="views-link-card">

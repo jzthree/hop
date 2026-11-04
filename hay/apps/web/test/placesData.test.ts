@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeEditions, readKeys, threadFor, unreadDecisions } from "../src/utils/briefingFeed";
+import { currentNames, mergeEditions, readKeys, renamer, threadFor, unreadDecisions } from "../src/utils/briefingFeed";
 import { dayLabel, parsePulseFeed, pulseItemsFor } from "../src/utils/pulseFeed";
 
 describe("briefing feed", () => {
@@ -18,6 +18,16 @@ describe("briefing feed", () => {
     const read = readKeys({ [`${e2.generated_at}|a`]: { level: "read" }, [`${e2.generated_at}|b`]: { level: "glimpsed" } });
     expect(unreadDecisions([e2, e1], read)).toBe(1);
     expect(unreadDecisions([], read)).toBe(0);
+  });
+  it("prose reads in the names sessions have now, never their ids or born-with names", () => {
+    const say = renamer(currentNames([
+      { name: "Meridian", displayName: "nebula", internalName: "Meridian" },
+      { name: "s_e15f120ce7", displayName: "hop", internalName: "s_e15f120ce7" },
+      { name: "room", displayName: "room" }
+    ]));
+    expect(say("Meridian revert due; s_e15f120ce7 waits on Meridian-2 and room.")).toBe("nebula revert due; hop waits on Meridian-2 and room.");
+    expect(say(undefined)).toBe("");
+    expect(renamer(new Map())("as is")).toBe("as is");
   });
   it("threads a session's stories across editions, newest first", () => {
     const t = threadFor([e2, { ...e1, items: [{ session: "A", headline: "early" }] }], (id) => id.toLowerCase() === "a");

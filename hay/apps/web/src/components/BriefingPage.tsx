@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { threadFor, type BriefingItem, type Edition } from "../utils/briefingFeed";
+import { currentNames, renamer, threadFor, type BriefingItem, type Edition } from "../utils/briefingFeed";
 import { createReadWitness, wordCount } from "../utils/readWitness";
 import { Prose } from "../utils/prose";
 import { useSavedScroll } from "../utils/savedScroll";
@@ -104,6 +104,9 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
     || sessions.find((s) => (s.internalName || s.name).toLowerCase() === key.toLowerCase()
       || (s.displayName || "").toLowerCase() === key.toLowerCase());
   const label = (key: string) => { const s = find(key); return s ? (s.displayName || s.name) : key; };
+  // The prose names sessions as they were called when it was written (or by
+  // id); it reads in the names they have now.
+  const say = useMemo(() => renamer(currentNames(sessions)), [sessions]);
   const keyOf = (key: string) => { const s = find(key); return s ? (s.internalName || s.name) : key; };
   const isRead = (edition: string, key: string) => read.has(edition + "|" + key);
 
@@ -210,10 +213,10 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
             </button>
           )}
         </div>
-        <h3 className="brief-headline">{item.headline}</h3>
-        {item.why && <Prose className="brief-why" text={item.why} />}
+        <h3 className="brief-headline">{say(item.headline)}</h3>
+        {item.why && <Prose className="brief-why" text={say(item.why)} />}
         {item.recommendation && (
-          <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={item.recommendation} /></div>
+          <div className="brief-reco"><span className="brief-reco-label">Suggested</span><Prose text={say(item.recommendation)} /></div>
         )}
         {answerable && actions(item, edition)}
       </article>
@@ -257,7 +260,7 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
                         ref={witnessRef.current!.ref({ edition, item: it.session, words: wordCount(it.headline) })}
                         onClick={() => open(it.session, edition)}>
                   <span className="brief-also-name">{label(it.session)}</span>
-                  <span className="brief-also-head">{it.headline}</span>
+                  <span className="brief-also-head">{say(it.headline)}</span>
                 </button>
               ))}
             </div>
@@ -323,7 +326,7 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
         ) : ed ? (
           <>
             <p className="place-dateline">{editionWhen(stamp)}{index === 0 ? ` · ${ago(stamp)}` : ""}</p>
-            <p className="place-lede">{ed.summary}</p>
+            <p className="place-lede">{say(ed.summary)}</p>
             {editionBody(ed, stamp)}
           </>
         ) : null}

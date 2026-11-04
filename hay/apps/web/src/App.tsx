@@ -57,7 +57,7 @@ import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPan
 import { BriefingPage } from "./components/BriefingPage";
 import { PulsePage } from "./components/PulsePage";
 import { UpdatePop, useUpdateInfo } from "./components/UpdateNotice";
-import { threadFor, useBriefing } from "./utils/briefingFeed";
+import { currentNames, renamer, threadFor, useBriefing } from "./utils/briefingFeed";
 import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
 import { sendLineToSession } from "./utils/quickReply";
 import type { ViewsSummary } from "./utils/switcherModel";
@@ -4833,7 +4833,7 @@ const App = () => {
       {latestEdition && (
         <button type="button" className={"wall-lead-item" + (briefing.latestUnseen ? " fresh" : "")} onClick={() => openPlace("briefing")}>
           <span className="wall-lead-kind"><RailIcon name="briefing" />Briefing</span>
-          <span className="wall-lead-text">{latestEdition.summary}</span>
+          <span className="wall-lead-text">{renamer(currentNames(sessions))(latestEdition.summary)}</span>
           {briefing.decisions > 0 && <span className="wall-lead-n">{briefing.decisions} to decide</span>}
         </button>
       )}

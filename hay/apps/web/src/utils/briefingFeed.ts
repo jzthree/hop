@@ -98,3 +98,24 @@ export const threadFor = (editions: Edition[], isSession: (id: string) => boolea
   }
   return out;
 };
+
+type Named = { name: string; displayName?: string; internalName?: string };
+/** Old name → the reader's name now: ids and born-with names a session has
+ *  outgrown, skipping any that is another session's current name. */
+export const currentNames = (sessions: Named[]): Map<string, string> => {
+  const shown = new Set(sessions.map((s) => s.displayName || s.name).filter(Boolean));
+  const map = new Map<string, string>();
+  for (const s of sessions) {
+    const now = s.displayName || s.name;
+    if (!now) continue;
+    for (const old of [s.internalName, s.name]) if (old && old !== now && !shown.has(old)) map.set(old, now);
+  }
+  return map;
+};
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A briefing's prose with sessions called what the reader calls them now. */
+export const renamer = (names: Map<string, string>) => {
+  if (!names.size) return (t?: string) => t || "";
+  const re = new RegExp(`(?<![\\w-])(${[...names.keys()].sort((a, b) => b.length - a.length).map(escapeRe).join("|")})(?![\\w-])`, "g");
+  return (t?: string) => (t ? t.replace(re, (m) => names.get(m) ?? m) : "");
+};

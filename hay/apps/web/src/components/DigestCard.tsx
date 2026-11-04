@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createReadWitness, wordCount } from "../utils/readWitness";
 import type { SwitcherSession } from "../utils/switcherModel";
+import { currentNames, renamer } from "../utils/briefingFeed";
 
 // The briefing, on the desktop wall — the same editions the iOS app renders,
 // written by the host-side agent (hop-ios tools/digest.mjs) into the
@@ -105,6 +106,8 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
   /** Types a decision reply into the session (+ Enter); true when delivered. */
   onReply?: (session: SwitcherSession, text: string) => Promise<boolean>;
 }) => {
+  // Sessions in the prose by the names they have now (see utils/briefingFeed).
+  const say = useMemo(() => renamer(currentNames(sessions)), [sessions]);
   const [editions, setEditions] = useState<Edition[]>([]);
   // The read witness: dwell on a visible story, with the human present,
   // reports glimpsed/read to the daemon; opening a session from a story
@@ -265,10 +268,10 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
       onClick={() => openItem(item.session, s)}
     >
       <span className="digest-dateline">{sessionLabel(item.session)}</span>
-      <span className="digest-headline">{item.headline}</span>
-      {item.why ? <span className="digest-why">{item.why}</span> : null}
+      <span className="digest-headline">{say(item.headline)}</span>
+      {item.why ? <span className="digest-why">{say(item.why)}</span> : null}
       {item.recommendation ? (
-        <span className="digest-reco"><span className="digest-reco-label">Suggested</span>{item.recommendation}</span>
+        <span className="digest-reco"><span className="digest-reco-label">Suggested</span>{say(item.recommendation)}</span>
       ) : null}
       {item.replies?.length ? (
         // The ways the agent offered to go — words, not buttons: the card
@@ -304,11 +307,11 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
                 key={it.session}
                 ref={witnessRef.current!.ref({ edition: s || "", item: it.session, words: wordCount(it.headline) })}
                 className="digest-also-chip"
-                title={it.headline}
+                title={say(it.headline)}
                 onClick={() => openItem(it.session, s)}
               >
                 <span className="digest-also-name">{sessionLabel(it.session)}</span>
-                <span className="digest-also-head">{it.headline}</span>
+                <span className="digest-also-head">{say(it.headline)}</span>
               </button>
             ))}
           </div>
@@ -372,9 +375,9 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
                 {!isRead(edition, item.session) && <span className="pdigest-unread" aria-label="Unread" />}
                 <span className={"pdigest-name " + urgencyClass(item.urgency)}>{sessionLabel(item.session)}</span>
               </span>
-              <span className={"pdigest-headline" + (isRead(edition, item.session) ? " read" : "")}>{item.headline}</span>
-              {item.why ? <span className="pdigest-why">{item.why}</span> : null}
-              {item.recommendation ? <span className="pdigest-reco">→ {item.recommendation}</span> : null}
+              <span className={"pdigest-headline" + (isRead(edition, item.session) ? " read" : "")}>{say(item.headline)}</span>
+              {item.why ? <span className="pdigest-why">{say(item.why)}</span> : null}
+              {item.recommendation ? <span className="pdigest-reco">→ {say(item.recommendation)}</span> : null}
             </span>
             <span className="pdigest-chev" aria-hidden="true">›</span>
           </button>
@@ -415,7 +418,7 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
                           ref={witnessRef.current!.ref({ edition, item: it.session, words: wordCount(it.headline) })}
                           onClick={() => openStory(it.session, edition)}>
                     <span className="pdigest-also-name">{sessionLabel(it.session)}</span>
-                    <span className="pdigest-also-head">{it.headline}</span>
+                    <span className="pdigest-also-head">{say(it.headline)}</span>
                     <span className="pdigest-chev" aria-hidden="true">›</span>
                   </button>
                 )) : rows.map((it) => story(it, edition))}
@@ -435,7 +438,7 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
           <button type="button" className="pdigest-dismiss" aria-label="Dismiss briefing"
                   onClick={() => { setDismissed(stamp); try { localStorage.setItem(DISMISS_KEY, stamp); } catch { /* ok */ } }}>✕</button>
         </div>
-        <p className="pdigest-summary">{editions[0].summary}</p>
+        <p className="pdigest-summary">{say(editions[0].summary)}</p>
         {page(editions[0], stamp)}
         {earlier.length > 0 && (
           <div className="pdigest-earlier">
@@ -450,7 +453,7 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
                 <div key={s2} className="pdigest-edition">
                   <button type="button" className="pdigest-edition-head" aria-expanded={open} onClick={() => toggleEdition(s2)}>
                     <span className="pdigest-when">{ago(s2)}</span>
-                    <span className={"pdigest-edition-summary" + (open ? " open" : "")}>{ed.summary}</span>
+                    <span className={"pdigest-edition-summary" + (open ? " open" : "")}>{say(ed.summary)}</span>
                     <span className="pdigest-chev" aria-hidden="true">{open ? "⌄" : "›"}</span>
                   </button>
                   {open && <div className="pdigest-edition-body">{page(ed, s2)}</div>}
@@ -497,7 +500,7 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
                 <button className="digest-edition-head" onClick={() => toggleEdition(s)} aria-expanded={open}>
                   {isUnseen && <span className="digest-dot" />}
                   <span className="digest-when">{ago(s)}</span>
-                  <span className="digest-edition-summary">{ed.summary}</span>
+                  <span className="digest-edition-summary">{say(ed.summary)}</span>
                   <span className="digest-caret">{open ? "▾" : "▸"}</span>
                 </button>
                 {open && renderEdition(ed, s)}
@@ -533,10 +536,10 @@ export const DigestCard = ({ sessions, onOpen, phone = false, onReply }: {
                     {g.items.map((item, i) => (
                       <div key={i} ref={witnessRef.current!.ref({ edition: item.at || "", item: g.session, words: wordCount(item.headline + " " + (item.why || "")) })} className={"digest-thread-item " + urgencyClass(item.urgency)}>
                         <span className="digest-when">{ago(item.at)}</span>
-                        <span className="digest-headline">{item.headline}</span>
-                        {item.why ? <span className="digest-why">{item.why}</span> : null}
+                        <span className="digest-headline">{say(item.headline)}</span>
+                        {item.why ? <span className="digest-why">{say(item.why)}</span> : null}
                         {item.recommendation ? (
-                          <span className="digest-reco"><span className="digest-reco-label">Suggested</span>{item.recommendation}</span>
+                          <span className="digest-reco"><span className="digest-reco-label">Suggested</span>{say(item.recommendation)}</span>
                         ) : null}
                       </div>
                     ))}

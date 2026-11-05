@@ -368,7 +368,7 @@ type SessionInfo = {
   agentPermitted?: boolean;
   createdBy?: "user" | "agent";
   createdVia?: string | null;
-  agent?: "claude" | "codex" | null;
+  agent?: "claude" | "codex" | "antigravity" | null;
   agentHome?: { dir: string; label: string; isDefault: boolean } | null;
   // Server-decided: a turn in flight, or the last one finished — and whether
   // a human has opened the session since it finished (see lib/agent-phase.js).
@@ -993,7 +993,7 @@ const App = () => {
   };
   foregroundIsClaudeRef.current = foregroundIsClaude;
   // Which agent the current session runs, by the daemon's hook records.
-  const currentSessionAgentRef = useRef<(() => "claude" | "codex" | null) | null>(null);
+  const currentSessionAgentRef = useRef<(() => "claude" | "codex" | "antigravity" | null) | null>(null);
   currentSessionAgentRef.current = () => {
     const room = activeSessionRoomRef.current;
     if (!room) return null;
@@ -3565,7 +3565,7 @@ const App = () => {
           agentPermitted: s.agentPermitted === true,
           createdBy: s.createdBy === "agent" ? "agent" : "user",
           createdVia: typeof s.createdVia === "string" ? s.createdVia : null,
-          agent: s.agent === "claude" || s.agent === "codex" ? s.agent : null,
+          agent: s.agent === "claude" || s.agent === "codex" || s.agent === "antigravity" ? s.agent : null,
           agentHome: s.agentHome && typeof s.agentHome.dir === "string" ? s.agentHome : null,
           agentModel: typeof s.agentModel === "string" && s.agentModel ? s.agentModel : null,
           agentPhase: s.agentPhase === "working" || s.agentPhase === "done" ? s.agentPhase : null,

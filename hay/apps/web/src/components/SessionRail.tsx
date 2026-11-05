@@ -32,7 +32,7 @@ export type RailSession = {
   bellUnseen?: boolean;
   checkbacks?: number;
   cwd?: string;
-  agent?: "claude" | "codex" | null;
+  agent?: "claude" | "codex" | "antigravity" | null;
   agentHome?: { dir: string; label: string; isDefault: boolean } | null;
   agentPermitted?: boolean;
   views?: { count?: number } | null;

@@ -13,7 +13,7 @@ export type MenuSession = actions.ActionTarget & {
   archived?: boolean;
   folderId?: string | null;
   cwd?: string;
-  agent?: "claude" | "codex" | null;
+  agent?: "claude" | "codex" | "antigravity" | null;
   agentHome?: { dir: string; label: string; isDefault: boolean } | null;
   views?: { count?: number } | null;
   checkbacks?: number;
@@ -54,7 +54,7 @@ export const sessionMenuItems = (s: MenuSession, d: SessionMenuDeps): MenuItem[]
   const name = s.displayName || s.name;
   const current = s.folderId || null;
   const file = (id: string | null, label: string) => { if (id !== current) void actions.moveToFolder(ctx, s, id, label); };
-  const accounts = s.agent ? homes[s.agent] || [] : [];
+  const accounts = s.agent === "claude" || s.agent === "codex" ? homes[s.agent] || [] : [];
   const sep: MenuItem = { kind: "separator" };
   const items: MenuItem[] = [];
   if (!isCurrent(s)) items.push({ label: "Open full screen", onSelect: () => onOpen(s) });
@@ -88,7 +88,8 @@ export const sessionMenuItems = (s: MenuSession, d: SessionMenuDeps): MenuItem[]
       label: `${s.agent === target ? "Fresh " : ""}${target === "codex" ? "Codex" : "Claude"}…`,
       onSelect: () => { void actions.forkSession(ctx, s, target); }
     })) });
-    if (s.agent) {
+    // The desktop apps hop can hand a conversation to: Claude's and Codex's.
+    if (s.agent === "claude" || s.agent === "codex") {
       const agent = s.agent;
       items.push({ label: `Hand off to ${agent === "codex" ? "Codex" : "Claude"} app…`, onSelect: () => { void actions.handOffToApp(ctx, s, agent); } });
     }

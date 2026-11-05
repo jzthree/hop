@@ -79,6 +79,13 @@ function codexPresetCommand(ceiling = DEFAULT_AGENT_PERMISSION_CEILING) {
   return 'command codex --dangerously-bypass-approvals-and-sandbox -c check_for_update_on_startup=false';
 }
 
+function antigravityPresetCommand(ceiling = DEFAULT_AGENT_PERMISSION_CEILING) {
+  // Antigravity CLI (`agy`): a managed worker cannot answer its permission
+  // prompts, so at the top ceiling it approves its own tools; below, it runs
+  // in auto mode inside agy's terminal sandbox.
+  return ceiling === 'bypassPermissions' ? 'agy --dangerously-skip-permissions' : 'agy --mode auto';
+}
+
 function withAgentSessionMarker(task) {
   if (typeof task !== 'string' || task.length === 0) return task;
   if (task.includes('<!-- agent-session:')) return task; // already tagged
@@ -3702,7 +3709,7 @@ class HopMCPServer {
           properties: {
             name: { type: 'string', description: 'Session name for the subagent terminal (default: auto-named).' },
             cwd: { type: 'string', description: 'Working directory for the terminal.' },
-            agent: { type: 'string', enum: ['claude', 'codex', 'gemini', 'custom'], description: 'Agent CLI preset (default: claude, launched with the Opus model alias — override via HOP_SPAWN_CLAUDE_MODEL or args — in autonomous permission mode). Use custom with command=... for anything else.' },
+            agent: { type: 'string', enum: ['claude', 'codex', 'antigravity', 'gemini', 'custom'], description: 'Agent CLI preset (antigravity = the Antigravity CLI, agy; default: claude, launched with the Opus model alias — override via HOP_SPAWN_CLAUDE_MODEL or args — in autonomous permission mode). Use custom with command=... for anything else.' },
             command: { type: 'string', description: 'Override the launch command (required when agent=custom).' },
             args: { type: 'string', description: 'Extra CLI arguments appended to the launch command (e.g. "--model opus").' },
             permission_mode: { type: 'string', enum: ['acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'manual', 'plan'], description: 'Claude worker permission mode (default: bypassPermissions so delegated tasks cannot park on an approval prompt). Set manual or another Claude mode for restricted workers. The host may cap this (hop config agent-ceiling); a request above the cap is clamped and reported in permission_note. Ignored by other presets and explicit command overrides.' },
@@ -6131,7 +6138,7 @@ class HopMCPServer {
     const permissionCeiling = readAgentPermissionCeiling();
     let permissionNote = null;
     let appliedPermissionMode = null;
-    const presetCommands = { claude: claudePresetCommand(), codex: codexPresetCommand(permissionCeiling), gemini: 'gemini' };
+    const presetCommands = { claude: claudePresetCommand(), codex: codexPresetCommand(permissionCeiling), antigravity: antigravityPresetCommand(permissionCeiling), gemini: 'gemini' };
     let command = typeof args.command === 'string' && args.command.trim() ? args.command.trim() : '';
     const usesPresetCommand = command.length === 0;
     if (args.permission_mode !== undefined && !CLAUDE_PERMISSION_MODES.has(args.permission_mode)) {

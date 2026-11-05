@@ -51,7 +51,7 @@ export type SwitcherSession = {
   attentionNote?: string;
   foregroundProcess?: string;
   /** What the session runs, by its hooks' records: claude, codex, or nothing known. */
-  agent?: "claude" | "codex" | null;
+  agent?: "claude" | "codex" | "antigravity" | null;
   /** The account (config root) the agent runs as: CLAUDE_CONFIG_DIR / CODEX_HOME. */
   agentHome?: AgentHome | null;
   /** The model the agent is running, from its own log (e.g. claude-opus-5-5, gpt-6-astra). */

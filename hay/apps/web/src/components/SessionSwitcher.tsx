@@ -1878,7 +1878,7 @@ export const SessionSwitcher = ({
   }, [sessions]);
   // What a new session boots into: a plain shell, or straight into an agent.
   // Maps to the create API's `startup` command.
-  const [createType, setCreateType] = useState<"terminal" | "claude" | "codex">("terminal");
+  const [createType, setCreateType] = useState<"terminal" | "claude" | "codex" | "antigravity">("terminal");
   // The agents' logins on the host (one per config root). Fetched when the
   // wall opens; labels and pickers appear only where there is a choice.
   const [agentHomes, setAgentHomes] = useState<AgentHomes>({ claude: [], codex: [] });
@@ -1892,14 +1892,14 @@ export const SessionSwitcher = ({
   const homesFor = (agent?: string | null): AgentHome[] => (agent === "claude" || agent === "codex" ? agentHomes[agent] : []);
   // The account a NEW agent session starts in; "" = the agent's default.
   const [createHome, setCreateHome] = useState("");
-  const startupFor = (t: "terminal" | "claude" | "codex") => (t === "claude" ? "claude" : t === "codex" ? "codex" : "");
+  const startupFor = (t: "terminal" | "claude" | "codex" | "antigravity") => (t === "claude" ? "claude" : t === "codex" ? "codex" : t === "antigravity" ? "agy" : "");
   // Rendered by BOTH create forms. submitCreate has always sent createType, but
   // only the top-bar form let you set it, so creating a session inside a folder
   // silently produced whatever was last chosen — a plain terminal by default,
   // with no way to ask for claude or codex from the ＋ on a folder.
   const createTypePicker = () => (
     <div className="switcher-create-type" role="radiogroup" aria-label="Session type">
-      {(["terminal", "claude", "codex"] as const).map((t) => (
+      {(["terminal", "claude", "codex", "antigravity"] as const).map((t) => (
         <button
           key={t}
           type="button"
@@ -1907,9 +1907,9 @@ export const SessionSwitcher = ({
           aria-checked={createType === t}
           className={"create-type" + (createType === t ? " on" : "")}
           onClick={() => setCreateType(t)}
-        >{t === "terminal" ? "Terminal" : t === "claude" ? "Claude" : "Codex"}</button>
+        >{t === "terminal" ? "Terminal" : t === "claude" ? "Claude" : t === "codex" ? "Codex" : "Antigravity"}</button>
       ))}
-      {createType !== "terminal" && homesFor(createType).length > 1 && (
+      {(createType === "claude" || createType === "codex") && homesFor(createType).length > 1 && (
         <select
           className="create-account"
           aria-label={`${createType === "claude" ? "Claude" : "Codex"} account`}
@@ -2890,7 +2890,7 @@ export const SessionSwitcher = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: next, type: "terminal", port: null, startup: startupFor(createType), cwd: createCwd.trim() || undefined,
-          agentHome: createType !== "terminal" && createHome && homesFor(createType).some((h) => h.dir === createHome) ? createHome : undefined
+          agentHome: (createType === "claude" || createType === "codex") && createHome && homesFor(createType).some((h) => h.dir === createHome) ? createHome : undefined
         })
       });
       const data = await res.json().catch(() => ({} as { name?: string; displayName?: string; internalName?: string; error?: string }));

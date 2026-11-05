@@ -2433,6 +2433,7 @@ function detectAgentKindFromCommandToken(token) {
     const base = path.basename(raw);
     if (base.startsWith('claude') || raw.includes('claude')) return 'claude';
     if (base.startsWith('codex') || raw.includes('openai/codex')) return 'codex';
+    if (base === 'agy' || base.startsWith('antigravity') || raw.includes('/antigravity')) return 'antigravity';
     if (base.startsWith('gemini') || raw.includes('/gemini')) return 'gemini';
     if (base.startsWith('opencode') || raw.includes('/opencode')) return 'opencode';
     return null;
@@ -6062,8 +6063,98 @@ function readTurnInfo(internalName) {
     try {
         const t = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.turn`), 'utf8'));
         if (typeof t.sessionId !== 'string' || !t.sessionId) return null;
-        return { sessionId: t.sessionId, agent: t.agent === 'codex' ? 'codex' : 'claude' };
+        return { sessionId: t.sessionId, agent: t.agent === 'codex' || t.agent === 'antigravity' ? t.agent : 'claude' };
     } catch (e) { return null; }
+}
+
+// ---- Antigravity CLI (`agy`) ---------------------------------------------
+// Its hook (scripts/antigravity-hook.js) files the conversation in
+// <session>.agy — not .json, which every Claude path reads as a Claude
+// conversation — and its turns in the shared .turn/.prompt, tagged.
+const AGY_DATA_DIR = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+function readAgyRecord(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    try {
+        const rec = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.agy`), 'utf8'));
+        return rec && typeof rec.sessionId === 'string' && /^[A-Za-z0-9-]{8,}$/.test(rec.sessionId) ? rec : null;
+    } catch (e) { return null; }
+}
+/** Did agy, not claude, start the session's current conversation? (Both can have run in one room.) */
+function agyRecordIsCurrent(internalName) {
+    const agy = readAgyRecord(internalName);
+    if (!agy) return null;
+    const claude = readClaudeSessionRecord(internalName);
+    if (claude && Date.parse(claude.updatedAt || 0) > Date.parse(agy.updatedAt || 0)) return null;
+    return agy;
+}
+/** The flags of the agy launch worth keeping on a resume (permissions, mode, model, effort). */
+function agyResumeFlags(launchCmd) {
+    const argv = String(launchCmd || '').split(/\s+/).filter(Boolean);
+    const keep = [];
+    const withValue = new Set(['--mode', '--model', '--effort', '--agent', '--project']);
+    const alone = new Set(['--dangerously-skip-permissions', '--sandbox']);
+    for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        const [flag, inline] = a.split('=');
+        if (alone.has(a)) keep.push(a);
+        else if (withValue.has(flag)) {
+            const v = inline ?? argv[i + 1];
+            if (inline === undefined) i += 1;
+            if (v && /^[\w.:@/-]+$/.test(v)) keep.push(`${flag} ${v}`);
+        }
+    }
+    return keep;
+}
+function agyConversationExists(rec) {
+    if (rec.transcriptPath && fs.existsSync(rec.transcriptPath)) return true;
+    return fs.existsSync(path.join(AGY_DATA_DIR, 'brain', rec.sessionId));
+}
+function agyRestorePlan(rec, cwd) {
+    if (!agyConversationExists(rec)) {
+        return { command: null, cwd, warning: `recorded Antigravity conversation ${rec.sessionId.slice(0, 8)}… is not on this host — opening a plain shell instead` };
+    }
+    const flags = agyResumeFlags(rec.launchCmd);
+    return { command: ['agy', '--conversation', `'${rec.sessionId}'`, ...flags].join(' '), cwd, agent: 'antigravity' };
+}
+
+// ---- antigravity-hook install/remove (~/.gemini/config/hooks.json) --------
+const AGY_HOOK_SCRIPT = path.join(__dirname, 'scripts', 'antigravity-hook.js');
+const AGY_HOOK_EVENTS = ['SessionStart', 'PreInvocation', 'Stop'];
+const AGY_HOOK_NAME = 'hop';
+function getAgyHooksPath() { return path.join(os.homedir(), '.gemini', 'config', 'hooks.json'); }
+function readAgyHooks() {
+    const p = getAgyHooksPath();
+    try { return { path: p, data: JSON.parse(fs.readFileSync(p, 'utf8')) || {} }; }
+    catch (e) { return { path: p, data: {}, missing: !fs.existsSync(p) }; }
+}
+function agyHookCommand(event) { return `${process.execPath} ${AGY_HOOK_SCRIPT} ${event}`; }
+function agyHookIsInstalled(data) {
+    const h = data && data[AGY_HOOK_NAME];
+    return !!h && AGY_HOOK_EVENTS.every((ev) => Array.isArray(h[ev]) && h[ev].some((x) => x && x.command === agyHookCommand(ev)));
+}
+function installAgyHook() {
+    const { path: p, data } = readAgyHooks();
+    if (agyHookIsInstalled(data)) return { ok: true, already: true, path: p };
+    if (!fs.existsSync(AGY_HOOK_SCRIPT)) return { ok: false, error: `hook script missing: ${AGY_HOOK_SCRIPT}` };
+    const entry = {};
+    for (const ev of AGY_HOOK_EVENTS) entry[ev] = [{ type: 'command', command: agyHookCommand(ev), timeout: 10 }];
+    data[AGY_HOOK_NAME] = entry;
+    try {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        if (fs.existsSync(p)) fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, JSON.stringify(data, null, 2));
+        return { ok: true, already: false, path: p };
+    } catch (e) { return { ok: false, error: e.message }; }
+}
+function removeAgyHook() {
+    const { path: p, data } = readAgyHooks();
+    if (!data[AGY_HOOK_NAME]) return { ok: true, already: true, path: p };
+    delete data[AGY_HOOK_NAME];
+    try {
+        fs.copyFileSync(p, `${p}.hop-backup`);
+        fs.writeFileSync(p, JSON.stringify(data, null, 2));
+        return { ok: true, already: false, path: p };
+    } catch (e) { return { ok: false, error: e.message }; }
 }
 
 /**
@@ -6253,6 +6344,7 @@ function sessionAgentFields(internalName, config) {
 }
 
 function sessionAgentKind(internalName) {
+    if (agyRecordIsCurrent(internalName)) return 'antigravity';
     if (readClaudeSessionRecord(internalName)?.sessionId) return 'claude';
     const turn = readTurnInfo(internalName);
     return turn ? turn.agent : null;
@@ -6682,7 +6774,7 @@ function listClaudeSessionRecords() {
 // session is not resurrected by `hop restore`.
 function removeClaudeSessionRecord(internalName) {
     if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
-    for (const ext of ['.json', '.turn', '.meta']) {
+    for (const ext of ['.json', '.turn', '.meta', '.agy']) {
         try { fs.unlinkSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}${ext}`)); } catch (e) { /* best effort */ }
     }
 }
@@ -7516,6 +7608,9 @@ async function switchSessionAgentHome(name, homeDir) {
 }
 
 function restorePlanForSession(entry) {
+    // An Antigravity conversation, when agy is what last ran here.
+    const agy = agyRecordIsCurrent(entry.internalName);
+    if (agy) return agyRestorePlan(agy, readClaudeSessionMeta(entry.internalName)?.cwd || agy.cwd || entry.cwd);
     let rec = readClaudeSessionRecord(entry.internalName);
     // Codex has no SessionStart record; its notify hook leaves only the
     // .turn naming the thread. Without this, every codex session came back
@@ -7938,7 +8033,7 @@ async function roomIsRedoable(entry) {
     // — the screen shows no turn in flight ("esc to interrupt").
     const agentIdle = !screenSaysWorking(text);
     if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: 'claude is running', agentIdle };
-    if (fg && !isShellProcName(fg)) return { ok: false, reason: `${fg} is running`, agentIdle: agentIdle && /^(claude|codex|node)$/.test(fg.split('/').pop()) };
+    if (fg && !isShellProcName(fg)) return { ok: false, reason: `${fg} is running`, agentIdle: agentIdle && /^(claude|codex|agy|node)$/.test(fg.split('/').pop()) };
     // The grid text can carry stray control bytes a shell left on: ESC c
     // (reset), CSI sequences, and a trailing SGR mouse-report fragment
     // ("...% 35;11;17M") from an app that had mouse tracking on — angler
@@ -8024,7 +8119,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
             // predates ?preserve=1 deletes them on session_end; rewrite
             // whatever went missing so the plan below still sees them.
             const backups = {};
-            for (const ext of ['json', 'turn', 'meta']) {
+            for (const ext of ['json', 'turn', 'meta', 'agy']) {
                 const f = path.join(CLAUDE_SESSIONS_DIR, `${internalName}.${ext}`);
                 try { backups[f] = fs.readFileSync(f); } catch (e) { /* absent */ }
             }
@@ -14534,6 +14629,11 @@ happens until someone clicks it.
                     // persisted so restore relaunches the same app.
                     const launchCmd = typeof startup === 'string' && startup.trim()
                         ? startup.trim().slice(0, 400) : null;
+                    // An Antigravity session is only restorable with hop's
+                    // hooks in agy's config: put them there on first use.
+                    if (launchCmd && /^(command\s+)?agy(\s|$)/.test(launchCmd)) {
+                        try { installAgyHook(); } catch (e) { /* the session still starts */ }
+                    }
                     // Sessions created by an agent-marked request (X-Hop-Actor,
                     // set by MCP/hopa and by the CLI under a claude env) land
                     // in the agent bucket instead of impersonating the human.
@@ -18210,7 +18310,7 @@ async function attachToAllSessions(existingTunnel) {
 const KNOWN_COMMANDS = [
     'client', 'start', 'attach', 'local', 'stop', 'status', 'doctor', 'logs',
     'help', 'config', 'url', 'qr', 'health', 'domain', 'domain-clear',
-    'password', 'auth', 'user', 'workspace', 'session', 'wipe', 'restore', 'closed', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
+    'password', 'auth', 'user', 'workspace', 'session', 'wipe', 'restore', 'closed', 'recover', 'update', 'resume-waiting', 'claude-hook', 'codex-notify', 'codex-hook', 'antigravity-hook', 'claude-skill', 'agent-skill', 'math', 'view', 'port', 'notify', 'whoami', 'new',
     'mail', 'registration', 'canonical', 'desktop'
 ];
 
@@ -18348,6 +18448,7 @@ const HELP_SECTIONS = [
         `hop update [--check|--no-host] Self-update from GitHub (daemon + host restart, host waits for the fleet to go idle; --no-host skips the host cycle)`,
         `hop host restart          Restart only the hay-host — sessions keep running (terminals live in the pty-keeper)`,
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
+        `hop antigravity-hook install  Same for the Antigravity CLI (agy): restore, recover, working / done`,
         `hop claude-hook status|remove   Check or remove the hook`,
         `hop checkback ...          Type a message into a session later: --in 30m, --at 15:00, --every 2h, --when-idle, --when-file, --when-cmd`,
         `hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`,
@@ -19425,6 +19526,31 @@ async function main() {
         log(codexHookIsInstalled(data)
             ? `${GREEN}✓${RESET} Codex PermissionRequest hook installed (${p}) — trusted in Codex's /hooks?`
             : `${YELLOW}!${RESET} Codex PermissionRequest hook not installed. Run ${CYAN}hop codex-hook install${RESET} to get a phone notification when Codex asks.`, RESET);
+        process.exit(0);
+    }
+
+    // `hop antigravity-hook [install|remove|status]` — the Antigravity CLI's
+    // hooks (~/.gemini/config/hooks.json), so agy sessions restore, recover
+    // and show working / done like Claude's and Codex's.
+    if (process.argv[2] === 'antigravity-hook') {
+        const sub = process.argv[3] || 'status';
+        if (sub === 'install') {
+            const r = installAgyHook();
+            if (!r.ok) { log(`Failed to install Antigravity hooks: ${r.error}`, RED); process.exit(1); }
+            log(r.already ? `Antigravity hooks already installed (${r.path}).` : `${GREEN}Installed${RESET} Antigravity hooks → ${r.path}`, RESET);
+            if (!r.already) log(`New agy sessions in hop terminals are now restorable. Running agy sessions pick it up when restarted.`, DIM);
+            process.exit(0);
+        }
+        if (sub === 'remove') {
+            const r = removeAgyHook();
+            if (!r.ok) { log(`Failed to remove Antigravity hooks: ${r.error}`, RED); process.exit(1); }
+            log(r.already ? `Antigravity hooks were not installed.` : `${GREEN}Removed${RESET} Antigravity hooks from ${r.path}`, RESET);
+            process.exit(0);
+        }
+        const { path: p, data } = readAgyHooks();
+        log(agyHookIsInstalled(data)
+            ? `${GREEN}✓${RESET} Antigravity hooks installed (${p})`
+            : `${YELLOW}!${RESET} Antigravity hooks not installed. Run ${CYAN}hop antigravity-hook install${RESET} so agy sessions can be restored.`, RESET);
         process.exit(0);
     }
 

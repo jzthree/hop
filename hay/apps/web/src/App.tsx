@@ -6033,7 +6033,9 @@ const App = () => {
                    onFollowUp={pulseFollowUp} markSeen={pulse.markSeen} onClose={() => setPlace(null)} />
       )}
       {updateOpen && update && (
-        <UpdatePop update={update} onDismiss={dismissUpdate} onClose={() => setUpdateOpen(false)} />
+        <UpdatePop update={update} onDismiss={dismissUpdate} onClose={() => setUpdateOpen(false)}
+                   live={sessions.filter((x) => x.active && x.type !== "port").length}
+                   working={sessions.filter((x) => x.agentPhase === "working").length} />
       )}
       {viewsOpen && (
         <ViewsPanel key={viewsOpen.item ? `${viewsOpen.session}/${viewsOpen.item}` : "views"}

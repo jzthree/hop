@@ -839,6 +839,57 @@ const updateChecker = createUpdateChecker({
     current: (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version; } catch (e) { return '0.0.0'; } })(),
     log: (msg) => log(`[Update] ${msg}`, YELLOW),
 });
+const keeperUpdate = require('./lib/keeper-update');
+// ---- Updates and the terminal keeper (lib/keeper-update.js) ---------------
+const UPDATE_PROGRESS_FILE = path.join(HOME_DIR, 'update-progress.json');
+const PTY_KEEPER_SOURCE = path.join(__dirname, 'scripts', 'pty-keeper.js');
+/** The running keeper, asked without taking the host's place: {version, pid, terminals, startedAt}. */
+function queryPtyKeeper(timeoutMs = 1500) {
+    const sock = process.env.HOP_PTY_KEEPER_SOCK || path.join(HOME_DIR, 'pty-keeper.sock');
+    if (!fs.existsSync(sock)) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        let buf = '';
+        const c = require('net').connect(sock);
+        const done = (v) => { try { c.destroy(); } catch (e) { /* ignore */ } resolve(v); };
+        const timer = setTimeout(() => done(null), timeoutMs);
+        c.on('connect', () => c.write(JSON.stringify({ op: 'hello', req: 'update-check' }) + '\n'));
+        c.on('data', (d) => {
+            buf += d.toString('utf8');
+            const nl = buf.indexOf('\n');
+            if (nl < 0) return;
+            clearTimeout(timer);
+            let msg = null;
+            try { msg = JSON.parse(buf.slice(0, nl)); } catch (e) { /* ignore */ }
+            if (!msg || msg.op !== 'hello') return done(null);
+            let startedAt = 0;
+            try { startedAt = Date.parse(execFileSync('ps', ['-o', 'lstart=', '-p', String(msg.pid)], { encoding: 'utf8', timeout: 2000 }).trim()) || 0; } catch (e) { /* unknown */ }
+            done({ version: Number(msg.version) || 0, pid: Number(msg.pid) || 0, terminals: Number(msg.terminals) || 0, startedAt });
+        });
+        c.on('error', () => { clearTimeout(timer); done(null); });
+    });
+}
+/** The keeper code on disk: its protocol, and when it last changed (git, else the file). */
+function installedKeeperInfo() {
+    let protocol = null, changedAt = 0;
+    try { protocol = keeperUpdate.parseKeeperProtocol(fs.readFileSync(PTY_KEEPER_SOURCE, 'utf8')); } catch (e) { /* none */ }
+    try {
+        if (fs.existsSync(path.join(__dirname, '.git'))) {
+            changedAt = 1000 * Number(execFileSync('git', ['log', '-1', '--format=%ct', '--', 'scripts/pty-keeper.js'], { cwd: __dirname, encoding: 'utf8', timeout: 5000 }).trim());
+        }
+    } catch (e) { /* not a checkout */ }
+    if (!changedAt) { try { changedAt = fs.statSync(PTY_KEEPER_SOURCE).mtimeMs; } catch (e) { /* none */ } }
+    return { protocol, changedAt };
+}
+async function keeperUpdateStatus() {
+    const running = await queryPtyKeeper();
+    const latest = updateChecker.info().keeperProtocol ? { protocol: updateChecker.info().keeperProtocol } : null;
+    const plan = keeperUpdate.keeperPlan({ running, installed: installedKeeperInfo(), latest });
+    return { ...plan, terminals: running ? running.terminals : 0, startedAt: running ? running.startedAt : null };
+}
+function readUpdateProgress() {
+    try { return JSON.parse(fs.readFileSync(UPDATE_PROGRESS_FILE, 'utf8')); } catch (e) { return null; }
+}
+
 const sessionSearchCorpus = new TranscriptCorpus({
     budgetChars: parsePositiveIntEnv('HOP_SEARCH_TEXT_CHARS', 256 * 1024)
 });
@@ -15207,8 +15258,44 @@ happens until someone clicks it.
 
         // API: is a newer hop published? (lib/update-check.js) — for the web notice.
         if (parsedUrl.pathname === '/api/update' && req.method === 'GET') {
+            // With what the update means for the terminals (keeperUpdateStatus).
+            const keeper = await keeperUpdateStatus().catch(() => null);
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            res.end(JSON.stringify(updateChecker.info()));
+            res.end(JSON.stringify({ ...updateChecker.info(), keeper }));
+            return;
+        }
+        if (parsedUrl.pathname === '/api/update/progress' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify(readUpdateProgress() || { phase: 'idle' }));
+            return;
+        }
+        // One-click update: `hop update` runs detached (it restarts this
+        // daemon), reporting into update-progress.json. An update that has
+        // to replace the terminal keeper ends every terminal, so it runs only
+        // when the caller said so (restartTerminals) — then hop reopens the
+        // sessions that were live and resumes their conversations.
+        if (parsedUrl.pathname === '/api/update/apply' && req.method === 'POST') {
+            const body = await readRequestJson(req, 4096) || {};
+            const restartTerminals = body.restartTerminals === true;
+            const keeper = await keeperUpdateStatus().catch(() => null);
+            const respond = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+            if (resolveActor(req) !== 'user') return respond(403, { error: 'Only a person updates hop' });
+            const running = readUpdateProgress();
+            if (running && running.active && Date.now() - (running.at || 0) < 15 * 60 * 1000) return respond(409, { error: 'An update is already running', progress: running });
+            if (keeper?.requiresRestart && !restartTerminals) {
+                return respond(409, { error: 'This update ends every terminal session; confirm to restart them', keeper });
+            }
+            try {
+                fs.mkdirSync(path.join(HOME_DIR, 'logs'), { recursive: true });
+                writePrivateFile(UPDATE_PROGRESS_FILE, JSON.stringify({ active: true, phase: 'starting', at: Date.now(), restartTerminals }), 0o600);
+                const out = fs.openSync(path.join(HOME_DIR, 'logs', 'update.log'), 'a');
+                const args = [__filename, 'update', ...(restartTerminals ? ['--restart-terminals'] : [])];
+                const child = spawn(process.execPath, args, { detached: true, stdio: ['ignore', out, out], env: { ...process.env, HOP_UPDATE_PROGRESS: UPDATE_PROGRESS_FILE } });
+                child.unref();
+                respond(202, { ok: true, restartTerminals });
+            } catch (e) {
+                respond(500, { error: `Could not start the update: ${e.message}` });
+            }
             return;
         }
 
@@ -19217,6 +19304,40 @@ async function main() {
         // an update (the daemon alone leaves every session's terminal running
         // OLD code). Skipping it is the exception, and has to say so.
         const withHost = !process.argv.includes('--no-host');
+        // --restart-terminals: also replace the terminal keeper — every
+        // terminal ends, then the sessions that were live are reopened and
+        // their conversations resumed. Required when the new code needs a
+        // newer keeper protocol (lib/keeper-update.js); never done otherwise.
+        const restartTerminals = process.argv.includes('--restart-terminals');
+        // Progress for the one-click update (the web polls it): phases, and on
+        // a stop that was not "done", the last lines of the log.
+        let progressDone = false;
+        const progress = (phase, extra = {}) => {
+            const done = phase === 'done';
+            if (done) progressDone = true;
+            try { writePrivateFile(UPDATE_PROGRESS_FILE, JSON.stringify({ active: !done, phase, at: Date.now(), restartTerminals, ...extra }), 0o600); } catch (e) { /* best effort */ }
+        };
+        process.on('exit', (code) => {
+            if (progressDone || checkOnly) return;
+            let tail = '';
+            try { tail = fs.readFileSync(path.join(HOME_DIR, 'logs', 'update.log'), 'utf8').split('\n').filter(Boolean).slice(-4).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); } catch (e) { /* run from a terminal */ }
+            const up = code === 0;
+            try { writePrivateFile(UPDATE_PROGRESS_FILE, JSON.stringify({ active: false, phase: up ? 'done' : 'failed', at: Date.now(), restartTerminals, ...(up ? {} : { error: tail || `hop update exited with ${code}` }) }), 0o600); } catch (e) { /* best effort */ }
+        });
+        // An update that needs a newer keeper than the running one cannot
+        // keep the terminals: say so and stop, unless asked to restart them.
+        const guardKeeper = async (newProtocol) => {
+            const running = await queryPtyKeeper();
+            if (!running || !Number.isInteger(newProtocol) || newProtocol <= running.version) return true;
+            if (restartTerminals) {
+                log(`This update replaces the terminal keeper (protocol ${running.version} → ${newProtocol}): all ${running.terminals} terminal(s) will end, then reopen with their conversations resumed.`, YELLOW);
+                return true;
+            }
+            log(`This update needs a new terminal keeper (protocol ${running.version} → ${newProtocol}), which ends all ${running.terminals} terminal session(s).`, YELLOW);
+            log(`Nothing was changed. To go ahead (hop reopens them and resumes their conversations): ${CYAN}hop update --restart-terminals${RESET}`, RESET);
+            process.exit(3);
+        };
+        if (!checkOnly) progress('checking');
         const runGit = (cmd, timeout = 60000) =>
             execSync(cmd, { cwd: __dirname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim();
         let isGit = true;
@@ -19239,13 +19360,18 @@ async function main() {
                 }
                 log(`Update available: ${current} → ${latest}`, YELLOW);
                 if (checkOnly) process.exit(0);
+                let nextProtocol = null;
+                try { nextProtocol = Number(execFileSync('npm', ['view', 'hop2@latest', 'hopKeeperProtocol'], { encoding: 'utf8', timeout: 60000 }).trim()) || null; } catch (e) { /* not published: assume unchanged */ }
+                await guardKeeper(nextProtocol);
+                progress('installing', { version: latest });
                 try {
                     execFileSync('npm', ['install', '-g', 'hop2@latest'], { stdio: 'inherit', timeout: 600000 });
                 } catch (e) {
                     log(`npm install failed — run it yourself: npm install -g hop2@latest && hop update --restart`, RED);
                     process.exit(1);
                 }
-                const child = spawn(process.execPath, [process.argv[1], 'update', '--restart', ...(withHost ? [] : ['--no-host'])], { stdio: 'inherit' });
+                const child = spawn(process.execPath, [process.argv[1], 'update', '--restart', ...(withHost ? [] : ['--no-host']), ...(restartTerminals ? ['--restart-terminals'] : [])], { stdio: 'inherit' });
+                progressDone = true; // the new script reports from here on
                 child.on('exit', (code) => process.exit(code ?? 0));
                 return;
             }
@@ -19283,6 +19409,10 @@ async function main() {
                 try { log(runGit(`git log --oneline --no-decorate HEAD..${upstream} -15`), RESET); } catch (e) { }
                 if (checkOnly) process.exit(0);
                 if (ahead !== '0') process.exit(1);
+                let nextKeeper = null;
+                try { nextKeeper = keeperUpdate.parseKeeperProtocol(runGit(`git show ${upstream}:scripts/pty-keeper.js`)); } catch (e) { /* no keeper there */ }
+                await guardKeeper(nextKeeper);
+                progress('pulling', { behind: Number(behind) });
                 let dirty = '';
                 try { dirty = runGit('git status --porcelain'); } catch (e) { }
                 if (dirty) {
@@ -19320,6 +19450,7 @@ async function main() {
                 let changed = '';
                 try { changed = runGit(`git diff --name-only ${local} HEAD -- hay/packages hay/apps`); } catch (e) { changed = 'unknown'; }
                 if (changed) {
+                    progress('building');
                     log('Hay changed — rebuilding…', CYAN);
                     try {
                         execFileSync('npm', ['run', 'build'], { cwd: path.join(__dirname, 'hay'), stdio: 'inherit', timeout: 900000 });
@@ -19332,7 +19463,18 @@ async function main() {
         }
         // Restart the daemon onto the new code. The host keeps every session
         // alive through this.
+        progress('restarting');
         const state = isServerRunning();
+        // Which sessions are live, to reopen exactly those if the terminals
+        // are restarted (by name: a fleet restore would skip agent sessions
+        // and could revive long-dead ones).
+        let liveNames = [];
+        if (restartTerminals && state) {
+            try {
+                const listed = await fetchSessionList(state);
+                liveNames = (listed.sessions || []).filter((x) => x && x.type === 'terminal' && x.live === true).map((x) => x.internalName || x.name).filter(Boolean);
+            } catch (e) { /* none known: nothing reopened */ }
+        }
         if (state) {
             log('Restarting daemon…', CYAN);
             try { process.kill(state.pid, 'SIGTERM'); } catch (e) { }
@@ -19343,6 +19485,54 @@ async function main() {
             await waitForDaemonReady();
         }
         log(`✓ Updated to ${isGit ? runGit('git rev-parse --short HEAD') : JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version} — daemon restarted; sessions untouched.`, GREEN);
+        // The keeper is never replaced unasked; say when fixes to it wait.
+        if (!restartTerminals) {
+            try {
+                const k = await keeperUpdateStatus();
+                if (k.stale) log(`The terminal keeper (running since ${new Date(k.startedAt).toLocaleDateString()}) predates fixes to it. ${CYAN}hop update --restart --restart-terminals${RESET} applies them — it ends all ${k.terminals} terminal(s), then reopens them.`, DIM);
+            } catch (e) { /* informational */ }
+        }
+        if (restartTerminals) {
+            progress('restarting-terminals', { sessions: liveNames.length });
+            log(`Ending ${liveNames.length} terminal session(s) to replace the terminal keeper…`, YELLOW);
+            // Everything stops before anything starts: a host started while
+            // the old keeper is still ending its terminals connects to IT, and
+            // the sessions reopened there die with it a second later. So the
+            // daemon (which restarts a missing host) goes first, then the
+            // host, then the keeper — waited out until its process is gone.
+            const oldKeeper = await queryPtyKeeper();
+            const daemonNow = isServerRunning();
+            if (daemonNow) {
+                try { process.kill(daemonNow.pid, 'SIGTERM'); } catch (e) { /* gone */ }
+                for (let i = 0; i < 40 && isProcessAlive(daemonNow.pid); i++) await new Promise((r) => setTimeout(r, 250));
+            }
+            const hostNow = readHayHostStateFile();
+            if (hostNow) { await stopExternalHayHostProcess(hostNow, 8000); clearHayHostStateFile(); }
+            await stopPtyKeeper();
+            for (let i = 0; i < 120 && oldKeeper && isProcessAlive(oldKeeper.pid); i++) await new Promise((r) => setTimeout(r, 250));
+            if (oldKeeper && isProcessAlive(oldKeeper.pid)) {
+                log(`The old terminal keeper (pid ${oldKeeper.pid}) did not exit — stopping it.`, YELLOW);
+                try { process.kill(oldKeeper.pid, 'SIGTERM'); } catch (e) { /* gone */ }
+                for (let i = 0; i < 40 && isProcessAlive(oldKeeper.pid); i++) await new Promise((r) => setTimeout(r, 250));
+            }
+            // Now the daemon starts a new host, and the host a new keeper.
+            startDaemon();
+            const after = await waitForDaemonReady();
+            try { await fetchSessionList(after); } catch (e) { /* host still starting */ }
+            if (liveNames.length) {
+                progress('restoring', { sessions: liveNames.length });
+                log(`Reopening ${liveNames.length} session(s), resuming their conversations…`, CYAN);
+                try {
+                    const r = await callLocalApi(after, '/api/sessions/restore', 'POST', { only: liveNames });
+                    const n = Array.isArray(r?.data?.restored) ? r.data.restored.length : 0;
+                    log(`✓ ${n} session(s) reopened. ${CYAN}hop restore --health${RESET}${GREEN} lists any that need you.`, GREEN);
+                } catch (e) {
+                    log(`Restore did not complete: ${e.message} — run ${CYAN}hop restore${RESET}`, RED);
+                }
+            }
+            progress('done');
+            process.exit(0);
+        }
         if (withHost) {
             // restart-host.js: a keeper-backed host restarts with every
             // session left RUNNING; a pre-keeper host falls back to the old

@@ -229,6 +229,17 @@ const resolveTerminalTheme = (mode: string) => {
   return lightTerminalTheme;
 };
 
+// Passkeys (Touch ID / Face ID sign-in) need a real domain: WebAuthn refuses
+// an IP address ("the effective domain … is not a valid domain"), and the
+// Mac app signs itself in and has no use for them. Offered only where they
+// can work.
+const passkeysUsable = () => {
+  if (typeof window === "undefined" || !("PublicKeyCredential" in window)) return false;
+  if ((window as { hopNative?: unknown }).hopNative) return false;
+  const host = window.location.hostname;
+  return !/^\d{1,3}(\.\d{1,3}){3}$/.test(host) && !host.includes(":") && host !== "";
+};
+
 const isMobileDevice = () => {
   if (typeof window === "undefined") return false;
   const ua = navigator.userAgent || "";
@@ -4147,7 +4158,7 @@ const App = () => {
   const [passkeyNudge, setPasskeyNudge] = useState(false);
   useEffect(() => {
     if (!isEmbeddedInHop()) return;
-    if (typeof window === "undefined" || !window.PublicKeyCredential) return;
+    if (!passkeysUsable()) return;
     if (localStorage.getItem("hay_passkey_nudge_done") === "1") return;
     let cancelled = false;
     const t = window.setTimeout(async () => {
@@ -5459,7 +5470,7 @@ const App = () => {
             <details className="drawer-details">
               <summary>More settings</summary>
               <div className="drawer-group">
-                {isEmbeddedInHop() && typeof window !== "undefined" && "PublicKeyCredential" in window && (
+                {isEmbeddedInHop() && passkeysUsable() && (
                   <div className="drawer-row">
                     <label>Passkey</label>
                     <button type="button" className="quick-btn" onClick={enrollPasskey}>
@@ -5834,21 +5845,17 @@ const App = () => {
             }
           />
           {passkeyNudge && (
-            <div className="link-prompt passkey-nudge" role="dialog" aria-label="Enable biometric sign-in">
-              <span className="link-prompt-url">
-                {isMacPlatform ? "Sign in with Touch ID / Face ID next time?" : "Sign in with a passkey next time?"}
+            <div className="passkey-nudge" role="dialog" aria-label="Enable biometric sign-in">
+              <span className="passkey-nudge-icon" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 11c0 3-1 6-3 8M8 5.5A7 7 0 0 1 19 11c0 2-.3 4-1 6M5 9a7 7 0 0 0-.5 6M12 7a4 4 0 0 1 4 4c0 1.5-.2 3-.7 4.4M8.5 9.5A4 4 0 0 0 8 11c0 2-.6 4-1.8 5.6"/></svg>
               </span>
-              <button
-                type="button"
-                className="link-prompt-open"
-                onClick={async () => {
-                  dismissPasskeyNudge();
-                  await enrollPasskey();
-                }}
-              >
-                Enable
-              </button>
-              <button type="button" onClick={dismissPasskeyNudge}>Not now</button>
+              <span className="passkey-nudge-text">
+                <strong>{isMacPlatform ? "Sign in with Touch ID next time?" : "Sign in with a passkey next time?"}</strong>
+                <span>No authenticator code on this device again.</span>
+              </span>
+              <button type="button" className="passkey-nudge-yes"
+                      onClick={async () => { dismissPasskeyNudge(); await enrollPasskey(); }}>Enable</button>
+              <button type="button" className="passkey-nudge-no" onClick={dismissPasskeyNudge}>Not now</button>
             </div>
           )}
           {linkPrompt && (

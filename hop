@@ -11831,7 +11831,11 @@ function issueAuthSession(req, res, via) {
     appendSetCookie(res, [
         cookie.serialize(SESSION_COOKIE_NAME, created.token, {
             httpOnly: true,
-            secure: true,
+            // Secure only over HTTPS (the public hostname). A login on this
+            // Mac's own http://127.0.0.1 — the Mac app — got a Secure cookie
+            // its browser engine refused to keep: the right code "did not
+            // work", and the login page came back.
+            secure: requestIsHttps(req),
             sameSite: 'lax',
             path: '/',
             maxAge: Math.floor(AUTH_SESSION_TTL_MS / 1000)
@@ -11841,12 +11845,20 @@ function issueAuthSession(req, res, via) {
     return created;
 }
 
-function clearAuthCookies(res) {
+function requestIsHttps(req) {
+    const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+    if (proto) return proto === 'https';
+    if (req.headers['cf-connecting-ip']) return true;
+    return !!req.socket?.encrypted || !isDirectLoopbackRequest(req);
+}
+
+function clearAuthCookies(res, req = null) {
+    const secure = req ? requestIsHttps(req) : true;
     const expires = new Date(0);
     appendSetCookie(res, [
         cookie.serialize(SESSION_COOKIE_NAME, '', {
             httpOnly: true,
-            secure: true,
+            secure,
             sameSite: 'lax',
             path: '/',
             expires,
@@ -11854,7 +11866,7 @@ function clearAuthCookies(res) {
         }),
         cookie.serialize(SESSION_COOKIE_NAME, '', {
             httpOnly: true,
-            secure: true,
+            secure,
             sameSite: 'lax',
             path: '/api',
             expires,
@@ -12281,7 +12293,7 @@ function startAuthProxy(authEmitter) {
                     authSessions.revoke(auth.session.id);
                     log(`[auth] logout: session ${auth.session.id}`, YELLOW);
                 }
-                clearAuthCookies(res);
+                clearAuthCookies(res, req);
                 if (req.method === 'GET') {
                     setNoCache(res);
                     res.writeHead(302, { Location: '/' });
@@ -12889,7 +12901,7 @@ happens until someone clicks it.
                 ? `<input type="hidden" name="session" value="${escapeHtml(requestedDisplayName)}">`
                 : '';
 
-            clearAuthCookies(res);
+            clearAuthCookies(res, req);
             setNoCache(res);
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(`

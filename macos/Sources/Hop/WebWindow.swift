@@ -95,7 +95,10 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     private func isHop(_ url: URL) -> Bool {
         if url.scheme == "about" || url.scheme == "blob" || url.scheme == "data" { return true }
-        return url.host == origin.host && url.port == origin.port && url.scheme == origin.scheme
+        if url.host == origin.host && url.port == origin.port && url.scheme == origin.scheme { return true }
+        // This Mac's hop, wherever it is listening now, is always the app's.
+        if ServerChoice.current == .local, let d = LocalDaemon.read(), url.host == "127.0.0.1", url.port == d.port { return true }
+        return false
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -132,6 +135,10 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Log.note("loaded \(webView.url?.absoluteString ?? "-")")
+        // hop's own login page, on this Mac's hop: the app lost its login.
+        if webView.title == "Verify Identity", webView.url?.host == "127.0.0.1" {
+            (NSApp.delegate as? AppDelegate)?.landedOnLoginPage()
+        }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         Log.note("load failed: \(error.localizedDescription)")

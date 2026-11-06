@@ -29,7 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Connecting
 
     /// Point the window at the chosen hop, signing in on the way for this Mac's.
-    func connect() {
+    /// `reload`: load the page again even when it is already on that hop
+    /// (after a fresh sign-in).
+    func connect(reload: Bool = false) {
         guard !connecting else { return }
         connecting = true
         Task { @MainActor in
@@ -39,10 +41,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 base = url
                 show(url)
             case .local:
-                guard let daemon = LocalDaemon.read(), await daemon.isUp() else {
+                // Right after a restart hop is still starting: give it time
+                // (saying so) before calling it not running.
+                var daemon: LocalDaemon? = nil
+                for attempt in 0..<90 {
+                    if let d = LocalDaemon.read(), await d.isUp() { daemon = d; break }
+                    if attempt == 1 { showPage(Pages.starting()) }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                guard let daemon else {
+                    Log.note("hop did not come up on this Mac")
                     showPage(Pages.notRunning())
+                    watchForDaemon()
                     return
                 }
+                Log.note("hop is up on port \(daemon.port); signing in")
                 guard let token = await daemon.signIn() else {
                     showPage(Pages.cannotSignIn())
                     return
@@ -52,8 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .expires: Date().addingTimeInterval(400 * 86400)
                 ])!
                 await WebWindowController.dataStore.httpCookieStore.setCookie(cookie)
-                base = daemon.base
-                show(daemon.base)
+                base = LocalDaemon.read()?.base ?? daemon.base
+                show(base!, reload: reload)
                 watchLocalPort()
             }
         }
@@ -84,6 +97,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// While the window says hop is not running, keep looking: the moment
+    /// it is (started from a terminal, or by itself after a restart), connect.
+    private var daemonWatch: Timer?
+    private func watchForDaemon() {
+        daemonWatch?.invalidate()
+        daemonWatch = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] t in
+            guard let self, ServerChoice.current == .local, !self.connecting, let d = LocalDaemon.read() else { return }
+            Task { @MainActor in
+                guard await d.isUp() else { return }
+                t.invalidate()
+                self.daemonWatch = nil
+                self.connect()
+            }
+        }
+    }
+
     func startLocalDaemon() {
         showPage(Pages.starting())
         Task.detached {
@@ -99,9 +128,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func show(_ url: URL) {
+    /// The app never needs hop's login page for this Mac (it signs itself
+    /// in). Landing there means its login was lost: sign in again, once a
+    /// minute at most, and reload.
+    private var lastRecovery = Date.distantPast
+    func landedOnLoginPage() {
+        guard ServerChoice.current == .local, Date().timeIntervalSince(lastRecovery) > 60 else { return }
+        lastRecovery = Date()
+        Log.note("on hop's login page — signing this Mac in again")
+        connect(reload: true)
+    }
+
+    private func show(_ url: URL, reload: Bool = false) {
         if let w = windows.first {
-            if w.webView.url?.host != url.host || w.webView.url?.port != url.port || w.webView.url?.scheme == nil { w.load(url) }
+            // The window may have been made for a page of the app's own ("hop
+            // is starting") before hop was there: hop's pages are its pages
+            // now. Without this, loading hop counted as leaving for another
+            // site — it opened hop's login page in the browser instead.
+            w.retarget(origin: url)
+            if reload || w.webView.url?.host != url.host || w.webView.url?.port != url.port || w.webView.url?.scheme == nil { w.load(url) }
             w.showWindow(nil)
             w.window?.makeKeyAndOrderFront(nil)
         } else {

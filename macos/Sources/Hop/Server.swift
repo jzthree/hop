@@ -62,13 +62,23 @@ struct LocalDaemon {
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
 
-    /// Does this device token still open hop?
-    func tokenWorks(_ token: String) async -> Bool {
+    enum TokenCheck { case ok, rejected, unreachable }
+
+    /// Does this device token still open hop — and if not, did hop say no,
+    /// or not answer (still starting after a restart)? Only a "no" is a
+    /// reason to mint a new one.
+    func check(_ token: String) async -> TokenCheck {
         var req = URLRequest(url: base.appendingPathComponent("api/auth"))
         req.timeoutInterval = 4
+        // This cookie, not whatever the shared cookie jar holds.
+        req.httpShouldHandleCookies = false
         req.setValue("tunnel_session=\(token)", forHTTPHeaderField: "Cookie")
-        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
-        return (resp as? HTTPURLResponse)?.statusCode == 200
+        guard let (_, resp) = try? await URLSession.shared.data(for: req), let http = resp as? HTTPURLResponse else { return .unreachable }
+        switch http.statusCode {
+        case 200: return .ok
+        case 401, 403: return .rejected
+        default: return .unreachable
+        }
     }
 
     /// A new device session for this app, minted with the daemon secret (as `hop auth token` does).
@@ -79,6 +89,7 @@ struct LocalDaemon {
         req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("cli", forHTTPHeaderField: "x-hop-via")
+        req.httpShouldHandleCookies = false
         let host = Host.current().localizedName ?? "Mac"
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["label": "hop for Mac · \(host)"])
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
@@ -88,12 +99,35 @@ struct LocalDaemon {
         return token
     }
 
-    /// A working token: the Keychain's if hop still takes it, else a new one.
-    func signIn() async -> String? {
-        if let saved = Keychain.read(), await tokenWorks(saved) { return saved }
-        guard let fresh = await mintToken() else { return nil }
-        Keychain.write(fresh)
-        return fresh
+    /// A working token: the Keychain's if hop still takes it, else a new
+    /// one. Patient with a hop that is still coming up (right after a
+    /// restart it answers /health before it answers sign-ins): it retries
+    /// for a while instead of falling through to the login page.
+    func signIn(attempts: Int = 20) async -> String? {
+        var daemon = self
+        for attempt in 0..<attempts {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                // A restart writes a new secret (and maybe a port): read it again.
+                if let fresh = LocalDaemon.read() { daemon = fresh }
+            }
+            if let saved = Keychain.read() {
+                let verdict = await daemon.check(saved)
+                Log.note("sign-in attempt \(attempt + 1): saved login \(verdict)")
+                switch verdict {
+                case .ok: return saved
+                case .unreachable: continue
+                case .rejected: break
+                }
+            }
+            let minted = await daemon.mintToken()
+            Log.note("sign-in attempt \(attempt + 1): new login \(minted == nil ? "refused" : "minted")")
+            if let fresh = minted {
+                Keychain.write(fresh)
+                return fresh
+            }
+        }
+        return nil
     }
 }
 

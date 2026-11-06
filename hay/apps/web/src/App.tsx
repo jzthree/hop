@@ -53,7 +53,7 @@ import {
   type PaneNode,
   type Side
 } from "./utils/paneTree";
-import { ViewsPanel, hasUnseenViews, loadViewsSeen } from "./components/ViewsPanel";
+import { ViewsPanel, hasUnseenViews, loadViewsSeen, syncViewsSeen } from "./components/ViewsPanel";
 import { BriefingPage } from "./components/BriefingPage";
 import { PulsePage } from "./components/PulsePage";
 import { UpdatePop, useUpdateInfo } from "./components/UpdateNotice";
@@ -4489,10 +4489,21 @@ const App = () => {
   // Rides the 5s /api/sessions poll rather than fetching the manifest again;
   // `viewsOpen` is a dep because closing the panel is what rewrites the
   // seen-markers this reads — without it the dot stayed lit after a read.
+  // What has been seen is shared through hop (syncViewsSeen): pulled now,
+  // every half minute, and whenever this window comes back into view.
+  const [viewsSeenRev, setViewsSeenRev] = useState(0);
+  useEffect(() => {
+    const pull = () => { void syncViewsSeen().then((changed) => { if (changed) setViewsSeenRev((n) => n + 1); }); };
+    pull();
+    const t = window.setInterval(pull, 30_000);
+    const onVis = () => { if (!document.hidden) pull(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
   const unseenViewSessions = useMemo(() => {
     const seen = loadViewsSeen();
     return sessions.filter((s) => hasUnseenViews(s.internalName || s.name, s.views?.latestAt, seen)).length;
-  }, [sessions, viewsOpen]);
+  }, [sessions, viewsOpen, viewsSeenRev]);
 
   const sessionStyle = isMobile
     ? ({ "--mobile-keyboard-height": `${keyboardVisible ? keyboardHeight : 0}px` } as CSSProperties)

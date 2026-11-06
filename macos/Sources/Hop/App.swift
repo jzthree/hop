@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windows: [WebWindowController] = []
     private var base: URL?
     private var connecting = false
+    private var portWatch: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMenu()
@@ -53,6 +54,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await WebWindowController.dataStore.httpCookieStore.setCookie(cookie)
                 base = daemon.base
                 show(daemon.base)
+                watchLocalPort()
+            }
+        }
+    }
+
+    /// The daemon can come back on another port (a restart that could not
+    /// reuse its old one): follow it, every window staying on its page.
+    private func watchLocalPort() {
+        portWatch?.invalidate()
+        portWatch = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            guard let self, ServerChoice.current == .local, let base = self.base,
+                  let now = LocalDaemon.read(), now.port != base.port else { return }
+            Task { @MainActor in
+                guard await now.isUp(), let token = await now.signIn() else { return }
+                let cookie = HTTPCookie(properties: [.name: "tunnel_session", .value: token, .domain: "127.0.0.1", .path: "/",
+                                                     .expires: Date().addingTimeInterval(400 * 86400)])!
+                await WebWindowController.dataStore.httpCookieStore.setCookie(cookie)
+                self.base = now.base
+                for w in self.windows {
+                    var parts = URLComponents(url: w.webView.url ?? now.base, resolvingAgainstBaseURL: false) ?? URLComponents()
+                    if parts.host == nil || parts.host == "127.0.0.1" {
+                        parts.scheme = "http"; parts.host = "127.0.0.1"; parts.port = now.port
+                        w.retarget(origin: now.base)
+                        w.load(parts.url ?? now.base)
+                    }
+                }
             }
         }
     }

@@ -84,8 +84,30 @@ export const loadViewsSeen = (): Record<string, number> => {
   } catch { return {}; }  // private mode, or a half-written value
 };
 
-const saveViewsSeen = (seen: Record<string, number>) => {
+const saveLocal = (seen: Record<string, number>) => {
   try { localStorage.setItem(SEEN_KEY, JSON.stringify(seen)); } catch { /* private mode */ }
+};
+const postSeen = (seen: Record<string, number>) =>
+  fetch("/api/views/seen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seen }), keepalive: true })
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null) as Promise<{ seen?: Record<string, number> } | null>;
+const saveViewsSeen = (seen: Record<string, number>) => {
+  saveLocal(seen);
+  void postSeen(seen);
+};
+
+/** Seen-markers are shared through hop (every browser, the Mac app, the
+ *  phone): fold hop's into this browser's, and hand back any this browser
+ *  has that hop lacks. True when this browser's changed. */
+export const syncViewsSeen = async (): Promise<boolean> => {
+  const local = loadViewsSeen();
+  const theirs = await fetch("/api/views/seen", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null) as { seen?: Record<string, number> } | null;
+  if (!theirs?.seen) return false;
+  let changed = false, ahead = false;
+  for (const [k, v] of Object.entries(theirs.seen)) if (v > (local[k] || 0)) { local[k] = v; changed = true; }
+  for (const [k, v] of Object.entries(local)) if (v > (theirs.seen[k] || 0)) ahead = true;
+  if (changed) saveLocal(local);
+  if (ahead) void postSeen(local);
+  return changed;
 };
 
 /**

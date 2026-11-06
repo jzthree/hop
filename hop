@@ -4424,8 +4424,23 @@ function loadAuthSecret() {
     }
 }
 
-// Port configuration
-const BASE_PORT = existingState ? existingState.port : Math.floor(Math.random() * (50000 - 10000 + 1) + 10000);
+// Port configuration. A daemon starting afresh reuses the port it last ran
+// on when nothing else has taken it: whatever reaches this machine's hop
+// directly (the Mac app, a bookmarked http://127.0.0.1:<port>) keeps working
+// across a restart. (A new random port on every restart stranded the Mac
+// app on the old one.) The free check runs only in the daemon itself.
+const LAST_PORT_FILE = path.join(HOME_DIR, '.last-port');
+function rememberedFreePort() {
+    if (!process.argv.includes('--daemon')) return null;
+    let port = 0;
+    try { port = Number(fs.readFileSync(LAST_PORT_FILE, 'utf8').trim()); } catch (e) { return null; }
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
+    try {
+        execFileSync(process.execPath, ['-e', `const s=require('net').createServer();s.once('error',()=>process.exit(1));s.listen(${port},'127.0.0.1',()=>s.close(()=>process.exit(0)));`], { timeout: 3000, stdio: 'ignore' });
+        return port;
+    } catch (e) { return null; }
+}
+const BASE_PORT = existingState ? existingState.port : (rememberedFreePort() || Math.floor(Math.random() * (50000 - 10000 + 1) + 10000));
 const PROXY_PORT = BASE_PORT;
 
 // Session Management (using hay server - no tmux/ttyd)
@@ -15264,6 +15279,31 @@ happens until someone clicks it.
             res.end(JSON.stringify({ ...updateChecker.info(), keeper }));
             return;
         }
+        // API: which Views results have been seen — per session, the newest
+        // mtime anyone looked at, shared by every browser, the Mac app and
+        // the phone (it was per browser: a new one called everything new).
+        if (parsedUrl.pathname === '/api/views/seen' && (req.method === 'GET' || req.method === 'POST')) {
+            const file = path.join(HOME_DIR, 'views-seen.json');
+            let seen = {};
+            try { seen = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch (e) { seen = {}; }
+            if (req.method === 'POST') {
+                const body = await readRequestJson(req, 262144) || {};
+                let changed = false;
+                for (const [k, v] of Object.entries(body.seen || {})) {
+                    const ms = Number(v);
+                    if (typeof k !== 'string' || k.length > 128 || !Number.isFinite(ms) || ms <= 0) continue;
+                    if (ms > (Number(seen[k]) || 0)) { seen[k] = ms; changed = true; }
+                }
+                if (changed) {
+                    const keep = Object.entries(seen).sort((x, y) => y[1] - x[1]).slice(0, 2000);
+                    seen = Object.fromEntries(keep);
+                    try { writePrivateFile(file, JSON.stringify(seen), 0o600); } catch (e) { /* next write */ }
+                }
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ seen }));
+            return;
+        }
         if (parsedUrl.pathname === '/api/update/progress' && req.method === 'GET') {
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
             res.end(JSON.stringify(readUpdateProgress() || { phase: 'idle' }));
@@ -16507,7 +16547,9 @@ happens until someone clicks it.
         });
     });
 
-    server.listen(PROXY_PORT, '127.0.0.1');
+    server.listen(PROXY_PORT, '127.0.0.1', () => {
+        try { writePrivateFile(LAST_PORT_FILE, String(PROXY_PORT), 0o600); } catch (e) { /* next start picks anew */ }
+    });
     return server;
 }
 

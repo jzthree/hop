@@ -8,7 +8,7 @@ import WebKit
 
 final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     let webView: WKWebView
-    private let origin: URL
+    private var origin: URL
     private var onClose: ((WebWindowController) -> Void)?
 
     /// The app's web data (cookies, storage) is one shared store, so every
@@ -66,6 +66,8 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     }
 
     func load(_ url: URL) { webView.load(URLRequest(url: url)) }
+    /// The daemon moved (another port): its pages are still hop's.
+    func retarget(origin: URL) { self.origin = origin }
 
     func windowWillClose(_ notification: Notification) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "hop")

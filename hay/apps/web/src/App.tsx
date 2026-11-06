@@ -1586,7 +1586,9 @@ const App = () => {
     if (echoed) {
       writeToTerminal(echoed);
     }
-    sendMessage({ type: "input", data: sanitized });
+    // From a window the person is not in, input reaches the app but never
+    // takes the shared size (two windows otherwise traded it back and forth).
+    sendMessage({ type: "input", data: sanitized, ...(document.hasFocus() ? {} : { passive: true }) });
     const kbDiag = (window as any).__hopKbDiag;
     if (kbDiag) kbDiag.sent++;
     // Fit-on-type exists to reclaim the shared size when the user STARTS
@@ -3029,7 +3031,7 @@ const App = () => {
     const PAGE_DOWN_KEY = "\x1b[6~";
     const ALT_SCREEN_DRAG_LINES_PER_PAGE = 3;
     const sendScrollKey = (seq: string) => {
-      sendMessage({ type: "input", data: seq });
+      sendMessage({ type: "input", data: seq, ...(document.hasFocus() ? {} : { passive: true }) });
     };
     // When the app itself requested SGR mouse tracking (Claude Code does),
     // scroll it with per-LINE wheel events instead of coarse Page keys —
@@ -3043,7 +3045,7 @@ const App = () => {
       const row = Math.max(1, Math.floor((term?.rows || 24) / 2));
       const code = lines > 0 ? 65 : 64; // 65 = wheel down, 64 = wheel up
       const seq = `\x1b[<${code};${col};${row}M`.repeat(Math.min(Math.abs(lines), 40));
-      sendMessage({ type: "input", data: seq });
+      sendMessage({ type: "input", data: seq, ...(document.hasFocus() ? {} : { passive: true }) });
     };
 
     const getTwoFingerCenter = (touches: TouchList) => {

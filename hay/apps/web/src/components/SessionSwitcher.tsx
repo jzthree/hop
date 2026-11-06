@@ -1254,7 +1254,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
         }
         return;
       }
-      ws.send(JSON.stringify({ type: "input", data }));
+      ws.send(JSON.stringify({ type: "input", data, ...(document.hasFocus() ? {} : { passive: true }) }));
     };
     onSender?.(sendInputRef.current);
     const hiddenReconnect = { hiddenAt: 0 };

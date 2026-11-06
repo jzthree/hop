@@ -1,7 +1,11 @@
 import { z } from "zod";
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("input"), data: z.string().min(1) }),
+  // passive:true: input from a window the person is not in (it does not
+  // have focus) — its terminal answering an app's query, a background tab.
+  // It reaches the app but never takes the shared size: only the window the
+  // person is typing in can, so two open windows cannot trade it.
+  z.object({ type: z.literal("input"), data: z.string().min(1), passive: z.boolean().optional() }),
   // claim:"attach" marks a fresh client's first autofit after connecting.
   // Opening a session is user intent: the server lets it take the shared size
   // unless someone else typed within the last few seconds, instead of the

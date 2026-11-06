@@ -250,6 +250,30 @@ const PURE_MOUSE_REPORT = new RegExp(
   ].join("|") + ")+$"
 );
 const CONTROL_SEQUENCE_TAIL = 32;
+
+// What a piece of input looked like, for the resize-storm log — its shape,
+// never its text: printable runs become their length (·5), escape
+// sequences keep their form with numbers folded (ESC[#;#R), controls ^X.
+export const inputShape = (data: string): string => {
+  let out = "";
+  for (let i = 0; i < data.length && out.length < 48;) {
+    const c = data[i];
+    if (c === "\x1b") {
+      const m = /^\x1b(?:\[[?<>=]?[\d;]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|P[^\x1b]*(?:\x1b\\)?|.)/.exec(data.slice(i));
+      const seq = m ? m[0] : c;
+      out += seq.replace(/\x1b/g, "ESC").replace(/\d+/g, "#").replace(/(ESC\][#;]*)[^\x07]*/, "$1…").slice(0, 16);
+      i += seq.length;
+    } else if (c >= " " && c !== "\x7f") {
+      let n = 0;
+      while (i < data.length && data[i] >= " " && data[i] !== "\x7f" && data[i] !== "\x1b") { n++; i++; }
+      out += `·${n}`;
+    } else {
+      out += c === "\x7f" ? "^?" : `^${String.fromCharCode(c.charCodeAt(0) + 64)}`;
+      i++;
+    }
+  }
+  return out;
+};
 const DEBUG_STATE = process.env.HAY_DEBUG === "1";
 
 const now = () => Date.now();
@@ -705,7 +729,7 @@ export class Room extends EventEmitter {
 
     switch (message.type) {
       case "input":
-        this.handleInput(client, message.data);
+        this.handleInput(client, message.data, message.passive === true);
         break;
       case "resize":
         this.handleResize(client, message.cols, message.rows, message.claim, message.user === true, message.take === true, message.passive === true);
@@ -1068,7 +1092,7 @@ export class Room extends EventEmitter {
     });
   }
 
-  private handleInput(client: ClientState, data: string) {
+  private handleInput(client: ClientState, data: string, passive = false) {
     if (!this.collabMode && this.controllerId !== client.id) {
       client.socket.send(
         JSON.stringify({ type: "input_rejected", reason: "Control is locked" } satisfies ServerMessage)
@@ -1077,7 +1101,7 @@ export class Room extends EventEmitter {
     }
     client.lastActive = now();
     // Typing keeps the size (and, below, takes it).
-    if (this.sizeOwnerId === client.id && client.source !== "monitor" && !PURE_MOUSE_REPORT.test(data)) {
+    if (this.sizeOwnerId === client.id && client.source !== "monitor" && !passive && !PURE_MOUSE_REPORT.test(data)) {
       this.sizeOwnerTypedAt = now();
     }
     // A real keystroke takes the size: transfer ownership and bring the PTY
@@ -1085,15 +1109,21 @@ export class Room extends EventEmitter {
     // reshapes the session even before its next resize message arrives.
     // Wheel/mouse reports are reading, not typing — a phone scrolling claude
     // must not take the size from someone typing at a desk.
+    // Only from the window the person is in (not passive): a background
+    // window's automatic input — a terminal answering a query, scroll keys
+    // from a window that missed the app's mouse mode — took the size, the
+    // other window took it back, and the session flashed between their two
+    // grids (lightscope, 2026-11-06: 192x53 <-> 136x52, 39 times in 5s).
     if (
       client.source !== "monitor" &&
+      !passive &&
       this.sizeOwnerId !== client.id &&
       !PURE_MOUSE_REPORT.test(data)
     ) {
       this.sizeOwnerId = client.id;
       this.sizeOwnerTypedAt = now();
       if (client.cols !== this.activeCols || client.rows !== this.activeRows) {
-        this.applySize(client, client.cols, client.rows, "typed");
+        this.applySize(client, client.cols, client.rows, `typed ${inputShape(data)}`);
       }
     }
     this.pty.write(data);

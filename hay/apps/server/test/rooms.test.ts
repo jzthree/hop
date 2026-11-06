@@ -405,6 +405,49 @@ describe("Room", () => {
     expect(pty!.resizes.at(-1)).toEqual({ cols: 114, rows: 33 });
   });
 
+  it("input from a window the person is not in reaches the app but never takes the size", () => {
+    let pty: FakePty | null = null;
+    const manager = new RoomManager(() => (pty = new FakePty() as unknown as FakePty) as any);
+    const room = manager.getRoom("passive", { cols: 80, rows: 24 }, "/tmp");
+    const app = new FakeSocket();
+    room.attachClient({ id: "app", name: "Mac app", colorIndex: 0, cols: 136, rows: 52 }, app);
+    const browser = new FakeSocket();
+    room.attachClient({ id: "br", name: "Chrome", colorIndex: 1, cols: 192, rows: 53 }, browser);
+    app.emitMessage({ type: "input", data: "x" });            // typing in the app: it owns 136x52
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 136, rows: 52 });
+    const n = pty!.resizes.length;
+    // The browser behind it sends whatever its terminal sends on its own
+    // (page keys from a scroll, a reply the filter does not know) — all of
+    // it arrives, none of it moves the size (it used to: 192x53 <-> 136x52,
+    // 39 times in 5 s).
+    for (const data of ["\x1b[5~", "\x1b[?12;40;1R", "q"]) browser.emitMessage({ type: "input", data, passive: true });
+    expect(pty!.resizes.length).toBe(n);
+    expect(pty!.writes.slice(-3)).toEqual(["\x1b[5~", "\x1b[?12;40;1R", "q"]);
+    // Once the person is in the browser, its keystroke takes the size.
+    browser.emitMessage({ type: "input", data: "y" });
+    expect(pty!.resizes.at(-1)).toEqual({ cols: 192, rows: 53 });
+  });
+
+  it("a storm names the shape of the input that moved the size, never its text", () => {
+    const manager = new RoomManager(() => new FakePty() as any);
+    const room = manager.getRoom("shape", { cols: 80, rows: 24 }, "/tmp");
+    const a = new FakeSocket(), b = new FakeSocket();
+    room.attachClient({ id: "a", name: "A", colorIndex: 0, cols: 100, rows: 30 }, a);
+    room.attachClient({ id: "b", name: "B", colorIndex: 1, cols: 60, rows: 20 }, b);
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...x: unknown[]) => { logs.push(x.join(" ")); });
+    try {
+      for (let i = 0; i < 4; i++) {
+        a.emitMessage({ type: "input", data: "secret\x1b[5~" });
+        b.emitMessage({ type: "input", data: "\x1b[?12;40;1R" });
+      }
+    } finally { spy.mockRestore(); }
+    const storm = logs.find((l) => l.includes("resize storm")) || "";
+    expect(storm).toContain("(typed ·6ESC[#~)");
+    expect(storm).toContain("(typed ESC[?#;#;#R)");
+    expect(storm).not.toContain("secret");
+  });
+
   it("an explicit take wins even over an active typist", () => {
     let pty: FakePty | null = null;
     const manager = new RoomManager(() => (pty = new FakePty() as unknown as FakePty) as any);

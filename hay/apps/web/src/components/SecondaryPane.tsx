@@ -189,7 +189,7 @@ export const SecondaryPane = ({
     const dataSub = term.onData((data) => {
       const ws = wsRef.current;
       if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "input", data }));
+        ws.send(JSON.stringify({ type: "input", data, ...(document.hasFocus() ? {} : { passive: true }) }));
       }
     });
 

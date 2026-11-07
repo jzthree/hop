@@ -6362,7 +6362,9 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 .vg-count { font: 500 13px/1 var(--font-mono); color: var(--ink-muted); font-variant-numeric: tabular-nums; }
 .views-panel.page .vg-count { font-size: 14px; }
 .vg-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 2px 0 4px; }
-.vg-filters { display: inline-flex; gap: 16px; }
+/* Every kind present (All, Figures, Docs, Pages, Live) is wider than a
+   narrow column: the tabs wrap rather than run off its edge. */
+.vg-filters { display: inline-flex; flex-wrap: wrap; gap: 0 16px; min-width: 0; }
 .vg-filters button {
   border: 0; background: none; padding: 6px 0; cursor: pointer; border-radius: 0;
   font: 500 13px/1.2 var(--font-sans); color: var(--ink-muted); transform: none;
@@ -6454,6 +6456,15 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
   font: 500 14px/1.2 var(--font-sans); opacity: 0.7; transform: none;
 }
 .views-scope-chip button:hover { opacity: 1; background: color-mix(in srgb, #7c3aed 16%, transparent); transform: none; }
+/* A narrow column (Views beside a session can be 340px wide) still shows
+   every control in the head: the session's name gives up its width to an
+   ellipsis; the buttons never shrink, so none is pushed past the edge. */
+.views-badge, .vg-count, .views-head .views-act, .views-close, .vg-open-session { flex-shrink: 0; }
+.views-scope-toggle, .views-scope-chip { min-width: 0; flex-shrink: 1; overflow: hidden; }
+.views-scope-toggle button { min-width: 0; flex: 0 1 auto; }
+.views-scope-toggle button:last-child { flex-shrink: 0; }
+.views-scope-chip button { flex-shrink: 0; }
+.views-scope-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .views-scope-chip { color: #c4b5fd; } }
 :root[data-theme="dark"] .views-scope-chip { color: #c4b5fd; }
 
@@ -6615,6 +6626,8 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 }
 .views-panel.side .vg-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px 10px; }
 .views-panel.side .vg-search { width: 100%; margin-left: 0; }
+/* The reader's nine buttons fit a 340px column with room left for the title. */
+.views-panel.side .views-nav .views-act { padding: 3px 5px; }
 .views-side-handle {
   position: absolute; top: 0; bottom: 0; left: -7px; width: 14px; z-index: 5; cursor: col-resize; touch-action: none;
 }

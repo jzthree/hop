@@ -758,7 +758,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
             {session && asPage && onClearSession && !inSession && (
               // The sidebar's selection, shown here; × lets it go.
               <span className="views-scope-chip">
-                {label(resolvedSession || session)}
+                <span className="views-scope-chip-name">{label(resolvedSession || session)}</span>
                 <button type="button" aria-label="Show every session's results" title="Every session's results"
                         onClick={onClearSession}>×</button>
               </span>

@@ -12,6 +12,9 @@ import { sanitizeName, sanitizeRoom } from "./utils";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT ?? 4001);
+// This machine only, unless asked: the server hands a shell to anyone who
+// connects, so it must never listen on the network by default.
+const HOST = process.env.HOST || "127.0.0.1";
 const SERVE_WEB = process.env.SERVE_WEB === "true";
 const WEB_DIST_PATH = process.env.WEB_DIST_PATH;
 const CWD = process.env.CWD || process.cwd(); // Working directory for PTY sessions
@@ -101,6 +104,6 @@ wss.on("connection", (ws, req) => {
   );
 });
 
-server.listen(PORT, () => {
-  console.log(`Termshare server running on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Termshare server running on http://${HOST}:${PORT}`);
 });

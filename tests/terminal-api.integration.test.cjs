@@ -512,8 +512,9 @@ test('incremental output endpoint + grid-backed preview', async () => {
   // Direct host endpoint: /rooms/:id/output hands out a reset tail, then
   // exact deltas from the returned cursor.
   const hostState = JSON.parse(await fs.readFile(path.join(hopHome, '.hay-host-state'), 'utf8'));
-  const hostGet = (p) => new Promise((resolve, reject) => {
-    const req = http.request({ hostname: '127.0.0.1', port: hostState.port, path: p, method: 'GET' }, (res) => {
+  const hostKey = (await fs.readFile(path.join(hopHome, '.host-token'), 'utf8')).trim();
+  const hostGet = (p, headers = { 'x-hop-host-token': hostKey }) => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port: hostState.port, path: p, method: 'GET', headers }, (res) => {
       let data = '';
       res.on('data', (c) => { data += c; });
       res.on('end', () => resolve({ status: res.statusCode, data: data ? JSON.parse(data) : null }));
@@ -1699,4 +1700,61 @@ test('a view image has a small thumbnail; other kinds fall back to the file', as
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+// The host runs every terminal and listens on 127.0.0.1 — which every user of
+// a shared machine, and a web page that finds the port, can reach. Without
+// hop's private key it must not list, read, start, end, or attach to anything.
+test('the terminal host turns away every request that lacks hop\'s key', async () => {
+  const WebSocket = require('ws');
+  const hostState = JSON.parse(await fs.readFile(path.join(hopHome, '.hay-host-state'), 'utf8'));
+  const keyFile = path.join(hopHome, '.host-token');
+  const key = (await fs.readFile(keyFile, 'utf8')).trim();
+  assert.equal((await fs.stat(keyFile)).mode & 0o077, 0, 'the key is readable by this account only');
+  const hostCall = (method, p, headers = {}, body = null) => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port: hostState.port, path: p, method,
+      headers: body ? { ...headers, 'Content-Type': 'text/plain' } : headers }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+  const wrong = { 'x-hop-host-token': 'x'.repeat(key.length) };
+
+  assert.equal(await hostCall('GET', '/health'), 200, '/health stays open: it only says "up"');
+  assert.equal(await hostCall('GET', '/rooms'), 401);
+  assert.equal(await hostCall('GET', '/rooms', wrong), 401);
+  assert.equal(await hostCall('GET', '/rooms/anything/output'), 401);
+  assert.equal(await hostCall('DELETE', '/rooms/anything'), 401);
+  // What a web page could send without asking first: a text/plain POST.
+  assert.equal(await hostCall('POST', '/rooms', {}, JSON.stringify({ id: 'keyless', command: 'true' })), 401);
+  assert.equal(await hostCall('GET', '/rooms', { 'x-hop-host-token': key }), 200);
+
+  const attach = (headers) => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${hostState.port}/ws?room=keyless&name=probe&cols=80&rows=24`, { headers });
+    const done = (v) => { try { ws.terminate(); } catch (e) { /* gone */ } resolve(v); };
+    ws.on('open', () => done('opened'));
+    ws.on('unexpected-response', (req, res) => done(res.statusCode));
+    ws.on('error', () => done('error'));
+  });
+  assert.equal(await attach({}), 401);
+  assert.equal(await attach(wrong), 401);
+  // A key in the URL is not the key: URLs end up in logs and command lines.
+  const viaQuery = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${hostState.port}/ws?room=keyless&name=probe&x-hop-host-token=${encodeURIComponent(key)}`);
+    const done = (v) => { try { ws.terminate(); } catch (e) { /* gone */ } resolve(v); };
+    ws.on('open', () => done('opened'));
+    ws.on('unexpected-response', (req, res) => done(res.statusCode));
+    ws.on('error', () => done('error'));
+  });
+  assert.equal(viaQuery, 401);
+
+  const rooms = await new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: hostState.port, path: '/rooms', headers: { 'x-hop-host-token': key } }, (res) => {
+      let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => resolve(JSON.parse(d).rooms || []));
+    }).on('error', reject);
+  });
+  assert.ok(!rooms.some((r) => r && r.id === 'keyless'), 'nothing was started without the key');
 });

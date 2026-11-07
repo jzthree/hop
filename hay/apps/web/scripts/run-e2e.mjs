@@ -8,7 +8,7 @@ import { chromium } from "playwright";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "../../..");
 const port = "4170";
-const baseUrl = `http://localhost:${port}`;
+const baseUrl = `http://127.0.0.1:${port}`;
 const serverEntry = path.join(root, "apps/server/dist/index.js");
 const webDist = path.join(root, "apps/web/dist");
 

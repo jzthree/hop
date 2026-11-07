@@ -34,8 +34,9 @@ anything confirmed.
    Failed attempts back off per IP: 5 failures → 30 s, doubling.
 3. **Per-device sessions.** A successful login mints a random 256-bit token
    for *that device* (stored only as a SHA-256 hash in
-   `~/.hop2/.auth-sessions.json`, mode 0600), set as an `httpOnly`, `Secure`,
-   `SameSite=Lax`, host-scoped cookie valid for **30 days**
+   `~/.hop2/.auth-sessions.json`, mode 0600), set as an `httpOnly`,
+   `SameSite=Lax`, host-scoped cookie valid for **30 days**, and `Secure`
+   whenever it is served over HTTPS (always, through the tunnel)
    (`HOP_SESSION_TTL_DAYS`). `hop auth` lists devices; `hop auth revoke <id>`
    logs one out; `hop auth revoke --all` logs everyone out. Logging out
    revokes the session server-side.
@@ -45,6 +46,15 @@ anything confirmed.
    cookie, and in a WebSocket `?token=` query only on a direct loopback
    connection (never through the tunnel). `hop auth token` mints a
    revocable device token for apps and scripts instead.
+5. **The terminal host.** Terminals run in a separate host process
+   (`scripts/hay-host.js`), which can read, type into, start and end any of
+   them. It listens on `127.0.0.1` — reachable by every other user of a
+   shared machine, and by a web page that finds the port — so it answers only
+   requests carrying a per-install key (`~/.hop2/.host-token`, 0600) in the
+   `X-Hop-Host-Token` header. Never in a URL: URLs land in logs and command
+   lines, and a browser cannot put a custom header on a cross-site request or
+   WebSocket. Below the host, the pty-keeper listens on a Unix socket inside
+   `~/.hop2` (0700), itself 0600.
 
 ## Password is required for remote access
 
@@ -94,9 +104,28 @@ confirmation link or a verified Cloudflare Access JWT. An approved user can
 serve anything they like at their subdomain; only approve people you would
 give a subdomain of your own domain to.
 
+### Running hop on a machine other people log into
+
+A cluster login node or a shared workstation: every other user there can
+connect to `127.0.0.1` and list processes. Hop is built for that:
+
+- `~/.hop2` is forced to 0700 and its files to 0600, whatever your umask.
+- The daemon and the terminal host each require a credential on every
+  request; reaching their port gets nothing.
+- Secrets reach child processes through their environment (readable by your
+  account only), never their command line, which `ps` shows to everyone.
+- Background AI helpers (session taglines, summaries) run in
+  `~/.hop2/ai-scratch`, not the shared `/tmp`, where anyone could leave
+  instructions or settings for them to pick up.
+
+What hop cannot hide there: root sees everything, and unless the machine
+mounts `/proc` with `hidepid`, other users can see the command lines of the
+programs you run.
+
 ## Files that are secrets
 
 Under `~/.hop2/` (all 0600): `.auth_secret` (TOTP seed), `.password_hash`,
-`.session_secret` (local IPC), `.auth-sessions.json` (session hashes),
+`.session_secret` (local IPC), `.host-token` (the terminal host's key),
+`.auth-sessions.json` (session hashes),
 `.passkeys.json` (public keys only), tunnel credentials/tokens, and the
 `workspaces/**/logs` audit trail. Back them up like passwords.

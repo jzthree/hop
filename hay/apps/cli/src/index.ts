@@ -452,6 +452,24 @@ if (themePref === "light" || themePref === "dark") {
 
 const hopHomeDir = process.env.HOP_HOME || path.join(os.homedir(), ".hop2");
 const hopTunnelStateFile = path.join(hopHomeDir, ".tunnel-state");
+
+// hop's terminal host answers only requests that carry its private key
+// (lib/host-token.js in hop). `hop attach` passes the key in the environment;
+// a client started some other way on this machine reads it from hop's
+// private folder. It goes only to this machine, never to a --server elsewhere.
+const hostKeyHeaders = (target: string): Record<string, string> => {
+  try {
+    const host = new URL(target).hostname;
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "::1") return {};
+  } catch {
+    return {};
+  }
+  let key = process.env.HAY_HOST_TOKEN || "";
+  if (!key) {
+    try { key = fs.readFileSync(path.join(hopHomeDir, ".host-token"), "utf8").trim(); } catch { /* no hop here */ }
+  }
+  return key ? { "x-hop-host-token": key } : {};
+};
 const explicitShareEnv = process.env.HAY_SHARE_URL || process.env.HOP_PUBLIC_URL || "";
 
 const normalizeUrlOrigin = (raw: string) => {
@@ -1835,7 +1853,7 @@ const fetchHostJson = (pathname: string): Promise<any> =>
     try {
       const u = new URL(panelHttpOrigin + pathname);
       const req = http.request(
-        { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: "GET" },
+        { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: "GET", headers: hostKeyHeaders(panelHttpOrigin) },
         (res) => {
           if ((res.statusCode || 0) !== 200) { res.resume(); done(null); return; }
           let data = "";
@@ -2462,7 +2480,7 @@ const connect = () => {
   }
 
   const url = getUrl();
-  ws = new WebSocket(url);
+  ws = new WebSocket(url, { headers: hostKeyHeaders(url) });
   setStatus("connecting");
 
   ws.on("open", () => {

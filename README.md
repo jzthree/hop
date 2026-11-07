@@ -426,9 +426,9 @@ Notes:
 
 - Login is password + TOTP, or a passkey (Touch ID / Face ID / security key). **A password is required before the public tunnel opens**; `hop config totp-only on` opts out.
 - Every login gets its **own per-device session** (random token, stored hashed), valid for 30 days (`HOP_SESSION_TTL_DAYS`). `hop auth` lists logged-in devices, `hop auth revoke <id>` logs one out, `hop auth revoke --all` logs everyone out, `hop auth token` mints a revocable token for an app or script.
-- Login cookies are `httpOnly`, `secure`, `sameSite=lax`, and host-scoped; they survive `hop stop/start`.
+- Login cookies are `httpOnly`, `sameSite=lax`, host-scoped, and `secure` over HTTPS (always, through the tunnel); they survive `hop stop/start`.
 - The daemon's own secret is only for local processes (CLI, MCP, hay) as a Bearer header; it is never a cookie.
-- The local server binds only to `127.0.0.1`; Cloudflare Tunnel provides end-to-end TLS.
+- The local server binds only to `127.0.0.1`; Cloudflare Tunnel provides end-to-end TLS. The terminal host behind it also wants a private key on every request, so other users of a shared machine get nothing from either port.
 - Audit logs rotate at 64 MB and dead sessions' logs are removed after 90 days (see Logging).
 - `hop config agent-ceiling <mode>` caps the permission mode spawned agents may run with.
 

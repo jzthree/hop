@@ -18,6 +18,7 @@ const WebSocket = require('ws');
 const { resolveActorFromHeaders, canActorAccessSession } = require('./lib/terminal-access');
 const { generateSessionName, getThemeChoices, isValidTheme, DEFAULT_THEME } = require('./lib/naming-themes');
 const { AuthSessionStore, isSessionToken: isAuthSessionToken } = require('./lib/auth-sessions');
+const { HOST_TOKEN_HEADER, hostToken } = require('./lib/host-token');
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const recentlyClosed = require('./lib/recently-closed');
@@ -215,6 +216,18 @@ function writePrivateFile(filePath, data, mode = PRIVATE_FILE_MODE) {
 
 ensurePrivateDir(HOME_DIR);
 
+// The terminal host answers only requests carrying hop's private key
+// (lib/host-token.js): it listens on 127.0.0.1, which every user of a shared
+// machine — and a web page that finds the port — can reach. Every request
+// and WebSocket to the host goes out with these headers.
+let __hostToken = null;
+function hostAuthHeaders() {
+    if (!__hostToken) {
+        try { __hostToken = hostToken(HOME_DIR); } catch (e) { return {}; }
+    }
+    return { [HOST_TOKEN_HEADER]: __hostToken };
+}
+
 // Sanity check: detect nested config directories (common after manual moves)
 function validateConfigDir() {
     const suspiciousDirs = ['.hop-shell', '.hop-shell2', '.hop2'];
@@ -410,7 +423,7 @@ function listPublishTargets(state) {
         const out = execFileSync(process.execPath, ['-e', `
             const http = require('http');
             http.get({ host: '127.0.0.1', port: ${Number(state.port)}, path: '/api/sessions',
-                       headers: { Authorization: 'Bearer ' + process.argv[1] } }, (r) => {
+                       headers: { Authorization: 'Bearer ' + process.env.HOP_LIST_SECRET } }, (r) => {
                 let b = ''; r.on('data', (c) => b += c);
                 r.on('end', () => {
                     try {
@@ -419,7 +432,12 @@ function listPublishTargets(state) {
                     } catch (e) { }
                 });
             }).on('error', () => {});
-        `, String(state.sessionSecret)], { encoding: 'utf8', timeout: 4000 });
+        `], {
+            encoding: 'utf8', timeout: 4000,
+            // The secret goes in the environment, which only this account can
+            // read — a command line is visible to every user via `ps`.
+            env: { ...process.env, HOP_LIST_SECRET: String(state.sessionSecret) }
+        });
         return out.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 12);
     } catch (e) {
         return [];
@@ -5708,7 +5726,7 @@ async function attachExternalTerminalApiClient(sessionName, displayName, opts = 
         cwd: sessionCwd,
         ...(opts.typeOnly ? { replay: 0, nudge: false } : {})
     });
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl, { headers: hostAuthHeaders() });
     let open = false;
     let closed = false;
     const pendingPayloads = [];
@@ -9901,7 +9919,8 @@ function fetchHayRoomPreviewSource(internalName, bytes) {
             hostname: '127.0.0.1',
             port: host.port,
             path: `/rooms/${encodeURIComponent(internalName)}/preview${bytes ? `?bytes=${bytes}` : ''}`,
-            method: 'GET'
+            method: 'GET',
+            headers: hostAuthHeaders()
         }, (res) => {
             if ((res.statusCode || 0) !== 200) { res.resume(); done(null); return; }
             let data = '';
@@ -9989,7 +10008,8 @@ function fetchHayRoomSerializedScreen(internalName) {
             hostname: '127.0.0.1',
             port: host.port,
             path: `/rooms/${encodeURIComponent(internalName)}/serialized`,
-            method: 'GET'
+            method: 'GET',
+            headers: hostAuthHeaders()
         }, (res) => {
             let data = '';
             res.on('data', (chunk) => { data += chunk; });
@@ -10017,7 +10037,8 @@ function fetchHayRoomOutputSince(internalName, since) {
             hostname: '127.0.0.1',
             port: host.port,
             path: `/rooms/${encodeURIComponent(internalName)}/output${since === undefined ? '' : `?since=${since}`}`,
-            method: 'GET'
+            method: 'GET',
+            headers: hostAuthHeaders()
         }, (res) => {
             let data = '';
             res.on('data', (chunk) => { data += chunk; });
@@ -10260,7 +10281,7 @@ const TAGLINE_DISABLED = /^(0|false|off|no)$/i.test(String(process.env.HOP_AI_TA
 function aiChildEnv() {
     const env = { ...process.env };
     // HOP_SESSION must NOT leak into a helper claude: the SessionStart hook
-    // keys its record on it, so a tagline helper running in os.tmpdir()
+    // keys its record on it, so a tagline helper running in its scratch folder
     // recorded ITSELF as that session's conversation — and restore then had
     // to refuse it (correctly) and open a plain shell. Observed live:
     // Solstice's record became `claude -p --model haiku` in a tmpdir.
@@ -10291,14 +10312,25 @@ function detectAiProvider() {
     return found;
 }
 
+// Where the helper model runs: hop's own private folder, never the system
+// temp folder. On a shared Linux machine /tmp belongs to everyone — another
+// user could leave a CLAUDE.md, AGENTS.md or settings file there for the
+// helper to obey, and read its answer file before hop deletes it.
+function aiWorkDir() {
+    const dir = path.join(HOME_DIR, 'ai-scratch');
+    ensurePrivateDir(dir);
+    return dir;
+}
+
 // Async so the daemon's event loop keeps serving while a model thinks — a
 // synchronous exec here would freeze every session for the duration.
 function askAiProvider(provider, prompt, timeoutMs = 120000) {
     return new Promise((resolve) => {
+        const cwd = aiWorkDir();
         if (provider === 'codex') {
-            const tmpOut = path.join(os.tmpdir(), `hop-ai-${crypto.randomBytes(6).toString('hex')}.txt`);
+            const tmpOut = path.join(cwd, `hop-ai-${crypto.randomBytes(6).toString('hex')}.txt`);
             const child = execFile('codex', ['exec', '--skip-git-repo-check', '-o', tmpOut], {
-                timeout: timeoutMs, env: aiChildEnv(), cwd: os.tmpdir(), maxBuffer: 8 * 1024 * 1024
+                timeout: timeoutMs, env: aiChildEnv(), cwd, maxBuffer: 8 * 1024 * 1024
             }, () => {
                 let text = '';
                 try { text = fs.readFileSync(tmpOut, 'utf8'); } catch (e) { /* nothing produced */ }
@@ -10309,7 +10341,7 @@ function askAiProvider(provider, prompt, timeoutMs = 120000) {
             return;
         }
         const child = execFile('claude', ['-p', '--model', 'haiku'], {
-            timeout: timeoutMs, env: aiChildEnv(), cwd: os.tmpdir(), maxBuffer: 4 * 1024 * 1024
+            timeout: timeoutMs, env: aiChildEnv(), cwd, maxBuffer: 4 * 1024 * 1024
         }, (err, stdout) => resolve(err ? '' : String(stdout || '')));
         try { child.stdin.end(prompt); } catch (e) { resolve(''); }
     });
@@ -10667,7 +10699,8 @@ async function fetchExternalHayRuntimeRoomsFromHost(hostState) {
             hostname: '127.0.0.1',
             port: hostState.port,
             path: '/rooms',
-            method: 'GET'
+            method: 'GET',
+            headers: hostAuthHeaders()
         };
         const req = http.request(opts, (res) => {
             let data = '';
@@ -11221,7 +11254,7 @@ async function callExternalHayHostApi(apiPath, method = 'GET', body = null, time
     if (!isExternalTerminalBackend()) return null;
     const state = await ensureExternalHayHostReady();
     return await new Promise((resolve, reject) => {
-        const headers = {};
+        const headers = { ...hostAuthHeaders() };
         let payload = null;
         if (body !== null && body !== undefined) {
             payload = JSON.stringify(body);
@@ -11634,7 +11667,7 @@ async function terminateExternalHaySession(sessionName, { preserveRecords = fals
             cols: 80,
             rows: 24,
             source: 'hop-kill'
-        }));
+        }), { headers: hostAuthHeaders() });
     } catch (e) {
         return false;
     }
@@ -16469,7 +16502,7 @@ happens until someone clicks it.
 
                 try {
                     const targetPort = getExternalHayHostPortForSession(sessionName);
-                    const proxy = httpProxy.createProxyServer({ target: `ws://127.0.0.1:${targetPort}`, ws: true });
+                    const proxy = httpProxy.createProxyServer({ target: `ws://127.0.0.1:${targetPort}`, ws: true, headers: hostAuthHeaders() });
                     proxy.once('error', () => {
                         handleDisconnect();
                         try { socket.destroy(); } catch (e) { }
@@ -18126,6 +18159,10 @@ async function runHayCliConnect(wsUrl, roomName, shareUrl) {
             env: {
                 ...process.env,
                 FORCE_COLOR: '1',
+                // The host's key, for the terminal client's connection and
+                // its session panel. In the environment, never on the
+                // command line, where every user of the machine could read it.
+                HAY_HOST_TOKEN: hostAuthHeaders()[HOST_TOKEN_HEADER] || '',
                 HAY_SHARE_URL: shareUrl || '',
                 HAY_BRAND: 'hop',
                 HAY_REATTACH_CMD: 'hop attach'
@@ -22490,6 +22527,18 @@ async function main() {
     const authEmitter = new EventEmitter();
 
     const proxyServer = startAuthProxy(authEmitter);
+    // Announce the daemon (the state file below) only once it answers: a
+    // client that reads the file — the CLI, the Mac app, a test — and asks at
+    // once was refused when the file got there before the port was bound.
+    if (!proxyServer.listening) {
+        await new Promise((resolve) => {
+            proxyServer.once('listening', resolve);
+            proxyServer.once('error', (err) => {
+                try { log(`[listen] port ${BASE_PORT}: ${describeError(err)}`); } catch (e) { /* logging only */ }
+                resolve();
+            });
+        });
+    }
     const { tunnel: tunnelProc, publicUrl } = await startTunnel();
 
     // Save state for other terminals to find

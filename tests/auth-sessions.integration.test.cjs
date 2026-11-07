@@ -196,16 +196,19 @@ test('per-device login sessions: login, list, device tokens, revoke, logout, ws 
   assert.notEqual(ck.value, secret, 'cookie must not be the daemon secret');
   assert.match(ck.raw, /Max-Age=2592000/, '30-day cookie');
   assert.match(ck.raw, /HttpOnly/);
-  assert.match(ck.raw, /Secure/);
+  // Plain http on this machine (the Mac app): a Secure cookie would be thrown
+  // away by the browser there, so the login would silently not stick.
+  assert.doesNotMatch(ck.raw, /Secure/, 'no Secure flag over plain local http');
   const asCookie = { Cookie: `${COOKIE}=${ck.value}` };
   assert.equal((await request(port, { path: '/api/auth', headers: asCookie })).status, 200);
 
   // A second login is a second, independent session.
   await delay(1100); // fresh TOTP window not required (same code is fine), but avoid rate-limit clustering
-  const login2 = await request(port, { method: 'POST', path: '/api/login', body: { totp: await d.totp() }, headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) Chrome/126.0 Safari/537.36' } });
+  const login2 = await request(port, { method: 'POST', path: '/api/login', body: { totp: await d.totp() }, headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) Chrome/126.0 Safari/537.36', 'X-Forwarded-Proto': 'https' } });
   assert.equal(login2.status, 200, JSON.stringify(login2.data));
   const ck2 = cookieValue(login2.headers['set-cookie']);
   assert.notEqual(ck2.value, ck.value);
+  assert.match(ck2.raw, /Secure/, 'over HTTPS the cookie is Secure');
 
   // Listing shows both, marks the caller, hides token material.
   const list = await request(port, { path: '/api/auth/sessions', headers: asCookie });

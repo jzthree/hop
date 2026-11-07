@@ -11,6 +11,8 @@ const { execFileSync, execSync } = require('node:child_process');
 const WebSocket = require(path.join(__dirname, '..', 'node_modules', 'ws'));
 
 const HOME = path.join(os.homedir(), '.hop2');
+const { HOST_TOKEN_HEADER, hostToken } = require(path.join(__dirname, '..', 'lib', 'host-token'));
+const hostHeaders = () => ({ [HOST_TOKEN_HEADER]: hostToken(HOME) });
 const OUT = path.join(HOME, 'transcript-salvage');
 fs.mkdirSync(OUT, { recursive: true });
 const LOG = path.join(OUT, 'restart.log');
@@ -24,7 +26,7 @@ const hostState = () => JSON.parse(fs.readFileSync(path.join(HOME, '.hay-host-st
 const daemonState = () => JSON.parse(fs.readFileSync(path.join(HOME, '.tunnel-state'), 'utf8'));
 
 const hostGet = (p) => new Promise((resolve, reject) => {
-  const req = http.get({ host: '127.0.0.1', port: hostState().port, path: p }, (res) => {
+  const req = http.get({ host: '127.0.0.1', port: hostState().port, path: p, headers: hostHeaders() }, (res) => {
     let d = '';
     res.on('data', (c) => d += c);
     res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
@@ -55,7 +57,7 @@ const salvageRoom = (port, id) => new Promise((resolve) => {
   // salvage is a spectator — no equal-size wiggle SIGWINCHed into 23 running
   // claudes, no presence stamp, no seen-witness. Raw tail (above the
   // serialized ceiling) so the salvaged text is scrollback, not one screen.
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?room=${encodeURIComponent(id)}&name=salvage&source=monitor&replay=1572864&nudge=0&cols=200&rows=50`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?room=${encodeURIComponent(id)}&name=salvage&source=monitor&replay=1572864&nudge=0&cols=200&rows=50`, { headers: hostHeaders() });
   const timer = setTimeout(() => { try { ws.close(); } catch (e) {} resolve('timeout'); }, 20000);
   ws.on('message', (data) => {
     try {
@@ -278,7 +280,7 @@ const releaseLock = () => {
       const probeRoom = rooms.find((id) => id !== 'Solstice') || rooms[0];
       const nh = hostState();
       const result = await new Promise((resolve) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${nh.port}/ws?room=${encodeURIComponent(probeRoom)}&name=verify&cols=100&rows=30&replay=65536&nudge=0`);
+        const ws = new WebSocket(`ws://127.0.0.1:${nh.port}/ws?room=${encodeURIComponent(probeRoom)}&name=verify&cols=100&rows=30&replay=65536&nudge=0`, { headers: hostHeaders() });
         const timer = setTimeout(() => { try { ws.close(); } catch (e) {} resolve('timeout'); }, 15000);
         ws.on('message', (data) => {
           try {

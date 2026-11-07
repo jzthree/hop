@@ -18,6 +18,8 @@ const http = require('http');
 const { execSync, spawn } = require('child_process');
 
 const HOME = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
+const { HOST_TOKEN_HEADER, hostToken } = require(path.join(__dirname, '..', 'lib', 'host-token'));
+const hostHeaders = () => ({ [HOST_TOKEN_HEADER]: hostToken(HOME) });
 const LOG = path.join(HOME, 'logs', 'host-restart.log');
 fs.mkdirSync(path.dirname(LOG), { recursive: true });
 const log = (m) => {
@@ -29,7 +31,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hostState = () => { try { return JSON.parse(fs.readFileSync(path.join(HOME, '.hay-host-state'), 'utf8')); } catch (e) { return null; } };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return false; } };
 const hostGet = (port, p) => new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: p, timeout: 8000 }, (res) => {
+    const req = http.get({ host: '127.0.0.1', port, path: p, timeout: 8000, headers: hostHeaders() }, (res) => {
         let d = '';
         res.on('data', (c) => { d += c; });
         res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });

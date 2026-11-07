@@ -55,6 +55,11 @@ const FALLBACK_CWD = process.env.HAY_HOST_CWD || process.cwd();
 // a plain-shell session's last screen. Mirrors the daemon's HOP_HOME (~/.hop2).
 const HOP_HOME = process.env.HOP_HOME || path.join(os.homedir(), '.hop2');
 
+// The host answers only requests carrying hop's private key (lib/host-token.js):
+// 127.0.0.1 is reachable by every user of a shared machine, and by web pages.
+const { hostToken, requestHasHostToken } = require(path.join(__dirname, '..', 'lib', 'host-token'));
+const HOST_TOKEN = hostToken(HOP_HOME);
+
 // EPHEMERAL homes die with their daemon. Integration tests spawn a daemon in
 // a mkdtemp HOP_HOME, which spawns this host — and a test run killed
 // mid-flight (a timeout, a crash) leaked the host forever: 18 of them were
@@ -342,6 +347,13 @@ async function main() {
     }
     const server = http.createServer(async (req, res) => {
         const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+        // /health says only "up" (and the keeper's pid); everything else —
+        // listing, reading, typing, starting and ending terminals — needs the key.
+        if (reqUrl.pathname !== '/health' && !requestHasHostToken(req.headers, HOST_TOKEN)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+        }
         if (reqUrl.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
@@ -537,6 +549,11 @@ async function main() {
     server.on('upgrade', (req, socket, head) => {
         const wsUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
         if (wsUrl.pathname !== '/ws') {
+            socket.destroy();
+            return;
+        }
+        if (!requestHasHostToken(req.headers, HOST_TOKEN)) {
+            try { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); } catch (e) { /* gone */ }
             socket.destroy();
             return;
         }

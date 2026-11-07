@@ -3,6 +3,7 @@ import { dayLabel, pulseItemsFor, type Pulse, type PulseAction, type PulseFeed, 
 import { Prose, plainText } from "../utils/prose";
 import { useSavedScroll } from "../utils/savedScroll";
 import { menuIsOpen } from "./ContextMenu";
+import { SideHandle, SideScope, SideToggle, keyStartsInside } from "./SideColumn";
 
 // mybot's pulse as a place beside the sidebar: a day's reading, laid out
 // like a journal page — the title, the intro as its lede, what you may have
@@ -30,6 +31,14 @@ type Props = {
   session?: string | null;
   /** A session's Pulse tab: the tab names the page and the session. */
   inSession?: boolean;
+  /** In the column beside the session (see SideColumn). */
+  side?: boolean;
+  /** Between the page (or tab) and the column. */
+  onToggleSide?: () => void;
+  onResizeSide?: (w: number | null) => void;
+  /** In the column: the selected session, offered as the scope, and the way to switch. */
+  scopeLabel?: string | null;
+  onScope?: (all: boolean) => void;
   markSeen: () => void;
   onClose: () => void;
 };
@@ -48,7 +57,7 @@ const saveSkipped = (set: Set<string>) => {
   try { localStorage.setItem(SKIP_KEY, JSON.stringify([...set].slice(-SKIP_CAP))); } catch { /* per-browser only */ }
 };
 
-export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, inSession = false, markSeen, onClose }: Props) => {
+export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, inSession = false, side = false, onToggleSide, onResizeSide, scopeLabel, onScope, markSeen, onClose }: Props) => {
   // The day being read survives a refresh (this browser tab).
   const [dayIndex, setDayIndex] = useState(() => { try { return Number(sessionStorage.getItem("hop_pulse_day") || 0) || 0; } catch { return 0; } });
   useEffect(() => { try { sessionStorage.setItem("hop_pulse_day", String(dayIndex)); } catch { /* private window */ } }, [dayIndex]);
@@ -62,7 +71,7 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
   const colRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { panelRef.current?.focus(); }, []);
-  useSavedScroll(panelRef, `hop_pulse_scroll:${inSession ? "tab:" : ""}${session || ""}`, !!feed);
+  useSavedScroll(panelRef, `hop_pulse_scroll:${side ? "side:" : inSession ? "tab:" : ""}${session || ""}`, !!feed);
   // Today's pulse read whole counts as seen; one session's share doesn't.
   useEffect(() => { if (feed && !session) markSeen(); }, [feed, session, markSeen]);
   // A new day or engine opens at its top.
@@ -81,6 +90,7 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (menuIsOpen()) return;
+      if (side && !keyStartsInside(panelRef.current, e)) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); return; }
       const el = document.activeElement as HTMLElement | null;
       if (!panelRef.current?.contains(el) || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName || "") || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -89,7 +99,7 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, days.length]);
+  }, [onClose, days.length, side]);
 
   const copy = (key: string, text: string) => {
     navigator.clipboard?.writeText(text).then(() => {
@@ -213,18 +223,27 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
   const articles = pulse?.sections.filter((s) => s.kind === "article") || [];
 
   return (
-    <div className={"place-page pulse-page" + (inSession ? " in-session" : "")} role={inSession ? "tabpanel" : "region"} aria-label="Pulse" tabIndex={-1} ref={panelRef}>
+    <div className={"place-page pulse-page" + (inSession ? " in-session" : "") + (side ? " side" : "")} role={inSession ? "tabpanel" : side ? "complementary" : "region"} aria-label="Pulse" tabIndex={-1} ref={panelRef}>
+      {side && onResizeSide && <SideHandle label="Resize Pulse" onResize={onResizeSide} />}
+      {/* A tab has no head of its own (the tab names it): its way to the column floats at the top. */}
+      {inSession && onToggleSide && <div className="place-tab-acts"><SideToggle side={false} onToggle={onToggleSide} /></div>}
       {!inSession && <header className="place-head">
         <span className="place-title"><span className="place-sun" aria-hidden="true" />Pulse</span>
+        {side && scopeLabel && onScope && <SideScope label={scopeLabel} all={!sessionKey} onScope={onScope} />}
+        {side && <span className="place-spacer" />}
+        {side && onToggleSide && <SideToggle side onToggle={onToggleSide} />}
+        {side && <button type="button" className="views-close" aria-label="Close pulse" onClick={onClose}>×</button>}
+        {/* In the column the engine and the day are a line of their own. */}
+        {side && !sessionKey && (pulses.length > 1 || days.length > 1) && <span className="place-break" />}
         {!sessionKey && pulses.length > 1 && (
-          <span className="views-scope-toggle" role="tablist" aria-label="Engine">
+          <span className="views-scope-toggle place-engine" role="tablist" aria-label="Engine">
             {pulses.map((p) => (
               <button key={p.engine} type="button" role="tab" aria-selected={p.engine === pulse?.engine}
                       className={p.engine === pulse?.engine ? "on" : ""} onClick={() => chooseEngine(p.engine)}>{p.label}</button>
             ))}
           </span>
         )}
-        <span className="place-spacer" />
+        {!side && <span className="place-spacer" />}
         {!sessionKey && days.length > 1 && (
           <span className="place-nav">
             <button type="button" aria-label="Previous day" title="Previous day (←)" disabled={dayIndex >= days.length - 1}
@@ -236,7 +255,8 @@ export const PulsePage = ({ feed, existing, onFollowUp, sessions = [], session, 
                     onClick={() => setDayIndex((i) => Math.max(0, i - 1))}>›</button>
           </span>
         )}
-        <button type="button" className="views-close" aria-label="Close pulse" onClick={onClose}>×</button>
+        {!side && onToggleSide && <SideToggle side={false} onToggle={onToggleSide} />}
+        {!side && <button type="button" className="views-close" aria-label="Close pulse" onClick={onClose}>×</button>}
       </header>}
       <div className="place-col" ref={colRef}>
         {sessionKey ? (

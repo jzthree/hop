@@ -5,6 +5,7 @@ import { Prose } from "../utils/prose";
 import { useSavedScroll } from "../utils/savedScroll";
 type SessionInfo = { name: string; displayName?: string; internalName?: string };
 import { menuIsOpen } from "./ContextMenu";
+import { SideHandle, SideScope, SideToggle, keyStartsInside } from "./SideColumn";
 
 // The briefing as a place beside the sidebar: one edition at a time, read
 // like the front page of a lab notebook — the summary as its lede, then
@@ -25,6 +26,14 @@ type Props = {
   session?: string | null;
   /** A session's Briefing tab: the tab names the page and the session. */
   inSession?: boolean;
+  /** In the column beside the session (see SideColumn). */
+  side?: boolean;
+  /** Between the page (or tab) and the column. */
+  onToggleSide?: () => void;
+  onResizeSide?: (w: number | null) => void;
+  /** In the column: the selected session, offered as the scope, and the way to switch. */
+  scopeLabel?: string | null;
+  onScope?: (all: boolean) => void;
   onOpenSession: (key: string) => void;
   onReply?: (key: string, text: string) => Promise<boolean>;
   markSeen: (stamp?: string) => void;
@@ -71,7 +80,7 @@ const ago = (iso?: string): string => {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 };
 
-export const BriefingPage = ({ editions, read, sessions, session, inSession = false, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
+export const BriefingPage = ({ editions, read, sessions, session, inSession = false, side = false, onToggleSide, onResizeSide, scopeLabel, onScope, onOpenSession, onReply, markSeen, markRead, onClose }: Props) => {
   // The edition being read survives a refresh (this browser tab).
   const [index, setIndex] = useState(() => { try { return Number(sessionStorage.getItem("hop_brief_index") || 0) || 0; } catch { return 0; } });
   useEffect(() => { try { sessionStorage.setItem("hop_brief_index", String(index)); } catch { /* private window */ } }, [index]);
@@ -89,7 +98,7 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
   }
   useEffect(() => () => { witnessRef.current?.dispose(); witnessRef.current = null; }, []);
   useEffect(() => { panelRef.current?.focus(); }, []);
-  useSavedScroll(panelRef, `hop_brief_scroll:${inSession ? "tab:" : ""}${session || ""}`, editions.length > 0);
+  useSavedScroll(panelRef, `hop_brief_scroll:${side ? "side:" : inSession ? "tab:" : ""}${session || ""}`, editions.length > 0);
 
   const ed = editions[Math.min(index, Math.max(0, editions.length - 1))];
   const stamp = ed?.generated_at || "";
@@ -149,6 +158,7 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (menuIsOpen()) return;
+      if (side && !keyStartsInside(panelRef.current, e)) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); return; }
       const el = document.activeElement as HTMLElement | null;
       if (!panelRef.current?.contains(el) || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName || "") || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -157,7 +167,7 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, editions.length]);
+  }, [onClose, editions.length, side]);
 
   // What the story asks of you, answered in a click — or skipped. A story
   // with nothing to answer can still be skipped when it wants a decision.
@@ -271,10 +281,18 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
   };
 
   return (
-    <div className={"place-page briefing-page" + (inSession ? " in-session" : "")} role={inSession ? "tabpanel" : "region"} aria-label="Briefing" tabIndex={-1} ref={panelRef}>
+    <div className={"place-page briefing-page" + (inSession ? " in-session" : "") + (side ? " side" : "")} role={inSession ? "tabpanel" : side ? "complementary" : "region"} aria-label="Briefing" tabIndex={-1} ref={panelRef}>
+      {side && onResizeSide && <SideHandle label="Resize Briefing" onResize={onResizeSide} />}
+      {/* A tab has no head of its own (the tab names it): its way to the column floats at the top. */}
+      {inSession && onToggleSide && <div className="place-tab-acts"><SideToggle side={false} onToggle={onToggleSide} /></div>}
       {!inSession && <header className="place-head">
         <span className="place-title"><span className="place-spark" aria-hidden="true">✦</span>Briefing</span>
+        {side && scopeLabel && onScope && <SideScope label={scopeLabel} all={!sessionKey} onScope={onScope} />}
         <span className="place-spacer" />
+        {side && onToggleSide && <SideToggle side onToggle={onToggleSide} />}
+        {side && <button type="button" className="views-close" aria-label="Close briefing" onClick={onClose}>×</button>}
+        {/* In the column the edition picker is a line of its own. */}
+        {side && !sessionKey && editions.length > 1 && <span className="place-break" />}
         {!sessionKey && editions.length > 1 && (
           <span className="place-nav">
             <button type="button" aria-label="Earlier edition" title="Earlier (←)" disabled={index >= editions.length - 1}
@@ -286,7 +304,8 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
                     onClick={() => setIndex((i) => Math.max(0, i - 1))}>›</button>
           </span>
         )}
-        <button type="button" className="views-close" aria-label="Close briefing" onClick={onClose}>×</button>
+        {!side && onToggleSide && <SideToggle side={false} onToggle={onToggleSide} />}
+        {!side && <button type="button" className="views-close" aria-label="Close briefing" onClick={onClose}>×</button>}
       </header>}
       <div className="place-col">
         {!editions.length ? (

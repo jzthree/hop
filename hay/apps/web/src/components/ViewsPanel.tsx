@@ -1,6 +1,7 @@
 import React, { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { relativeTime } from "../utils/switcherModel";
 import { menuIsOpen } from "./ContextMenu";
+import { SideHandle, SideToggle, keyStartsInside } from "./SideColumn";
 
 // Views: the results an agent hands a human that a terminal cannot draw — a
 // plot, a PDF, a rendered write-up, a live dev server.
@@ -397,15 +398,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
       if (menuIsOpen()) return;
       // Side by side, the terminal beside the column is live and Esc is a
       // real key there (vim!): answer only keys that start inside Views.
-      if (asSide) {
-        const el = panelRef.current;
-        // A keydown dispatched on `window` has a non-Node target; jsdom
-        // throws on contains() for it.
-        const target = event.target instanceof Node ? event.target : null;
-        const inside = !!el && ((target && el.contains(target))
-          || (document.activeElement && el.contains(document.activeElement)));
-        if (!inside) return;
-      }
+      if (asSide && !keyStartsInside(panelRef.current, event)) return;
       // A box outside Views (the sidebar's search) keeps its keys: ⏎ there
       // picks a session, it does not open a card.
       const typing = document.activeElement as HTMLElement | null;
@@ -531,33 +524,8 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
     }).catch(() => { /* nothing claimed to be deleted */ });
   };
 
-  // Side by side: the column's left edge drags its width.
-  const onEdgeDown = (down: React.PointerEvent<HTMLDivElement>) => {
-    if (!onResizeSide) return;
-    down.preventDefault();
-    const el = down.currentTarget;
-    el.setPointerCapture(down.pointerId);
-    const move = (ev: PointerEvent) => onResizeSide(window.innerWidth - ev.clientX);
-    const up = () => {
-      el.removeEventListener("pointermove", move);
-      el.removeEventListener("pointerup", up);
-      el.removeEventListener("pointercancel", up);
-      document.body.classList.remove("rail-resizing");
-    };
-    document.body.classList.add("rail-resizing");
-    el.addEventListener("pointermove", move);
-    el.addEventListener("pointerup", up);
-    el.addEventListener("pointercancel", up);
-  };
-  const sideToggle = onToggleSide && (
-    <button type="button" className="views-act vg-layout" onClick={onToggleSide}
-            aria-label={asSide ? "Full page" : "Side by side with the session"}
-            title={asSide ? "Full page" : "Side by side with the session — the terminal makes room"}>
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        {asSide ? <path d="M4 4h16v16H4z" /> : <><path d="M4 4h16v16H4z" /><path d="M14 4v16" /></>}
-      </svg>
-    </button>
-  );
+  // Page ⇄ the column beside the session (see SideColumn).
+  const sideToggle = onToggleSide && <SideToggle side={asSide} onToggle={onToggleSide} />;
 
   const metaOf = (i: ViewItem) => i.kind === "server"
     ? "live server"
@@ -746,11 +714,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
       <div className={"views-panel gallery reading" + (asPage ? " page" : "") + (asPage && inSession ? " in-session" : "") + (asSide ? " side" : "") + (open ? " is-reading" : "")}
            role="dialog" aria-label="Published views"
            ref={panelRef} tabIndex={-1}>
-        {asSide && onResizeSide && (
-          <div className="views-side-handle" role="separator" aria-orientation="vertical" aria-label="Resize Views"
-               title="Drag to resize · double-click for the default width"
-               onPointerDown={onEdgeDown} onDoubleClick={() => onResizeSide(null)} />
-        )}
+        {asSide && onResizeSide && <SideHandle label="Resize Views" onResize={onResizeSide} />}
         {open ? reader : (<>
           <div className="views-head">
             <span className="views-badge">Views</span>

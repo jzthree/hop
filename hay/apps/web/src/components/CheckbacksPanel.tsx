@@ -5,6 +5,7 @@ import {
   nextOfTrigger, orderForAll, orderForSession, relative, timeOfDay, type Checkback, type CodexAutomation
 } from "../utils/checkbackText";
 import { menuIsOpen } from "./ContextMenu";
+import { SideHandle, SideScope, SideToggle, keyStartsInside } from "./SideColumn";
 
 // A session's CALENDAR: a week, day by day, with everything timed on it —
 // hop's check-backs and the Codex automations aimed at the same
@@ -29,8 +30,15 @@ type Props = {
   onChanged?: () => void;
   onOpenSession?: (internalName: string) => void;
   // "page": the Calendar place beside the sidebar, every session. "tab": a
-  // session's Calendar, under its header. Otherwise (no sidebar) the centred window.
-  placement?: "modal" | "tab" | "page";
+  // session's Calendar, under its header. "side": the column beside the
+  // session (see SideColumn). Otherwise (no sidebar) the centred window.
+  placement?: "modal" | "tab" | "page" | "side";
+  /** Between the page (or tab) and the column. */
+  onToggleSide?: () => void;
+  onResizeSide?: (w: number | null) => void;
+  /** In the column: the selected session, offered as the scope, and the way to switch. */
+  scopeLabel?: string | null;
+  onScope?: (all: boolean) => void;
 };
 
 // One entry on one day: at a time, or a band (at null) across the day.
@@ -44,12 +52,13 @@ type Entry =
 
 const every = (ms: number) => ms % 3_600_000 === 0 ? `every ${ms / 3_600_000}h` : `every ${Math.round(ms / 60_000)}m`;
 
-export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal" }: Props) => {
+export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOpenSession, placement = "modal", onToggleSide, onResizeSide, scopeLabel, onScope }: Props) => {
   const asTab = placement === "tab";
   const asPage = placement === "page";
+  const asSide = placement === "side";
   // A tab takes the keyboard once, as it opens (Esc goes back).
   const panelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { if (asTab || asPage) panelRef.current?.focus(); }, [asTab, asPage]);
+  useEffect(() => { if (asTab || asPage || asSide) panelRef.current?.focus(); }, [asTab, asPage, asSide]);
   const all = session === ALL_CHECKBACKS;
   const [items, setItems] = useState<Checkback[] | null>(null);
   const [automations, setAutomations] = useState<CodexAutomation[]>([]);
@@ -79,6 +88,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (menuIsOpen()) return;
+      if (asSide && !keyStartsInside(panelRef.current, e)) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (picked) setPicked(null); else onClose(); return; }
       // ← → a week back / on, t today — from inside the calendar only.
       if (!panelRef.current?.contains(document.activeElement) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -87,7 +97,7 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, picked]);
+  }, [onClose, picked, asSide]);
 
   const cancel = async (id: string) => {
     setBusy(id);
@@ -199,13 +209,20 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
 
   return (
     <>
-      {!asTab && !asPage && <div className="views-backdrop" onClick={onClose} />}
-      <div className={"views-panel checkbacks-panel" + (asTab ? " page in-session" : asPage ? " page" : "")} role={asTab ? "tabpanel" : asPage ? "region" : "dialog"}
+      {!asTab && !asPage && !asSide && <div className="views-backdrop" onClick={onClose} />}
+      <div className={"views-panel checkbacks-panel" + (asTab ? " page in-session" : asPage ? " page" : asSide ? " side" : "")} role={asTab ? "tabpanel" : asPage ? "region" : asSide ? "complementary" : "dialog"}
            aria-label={all ? "Calendar for every session" : `Calendar for ${sessionName}`} tabIndex={-1}
            ref={panelRef}>
+        {asSide && onResizeSide && <SideHandle label="Resize Calendar" onResize={onResizeSide} />}
         <div className="views-head">
           <span className="views-badge">Calendar</span>
-          {!asTab && !asPage && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
+          {!asTab && !asPage && !asSide && <span className="checkbacks-session">{all ? "all sessions" : sessionName}</span>}
+          {asSide && scopeLabel && onScope && <SideScope label={scopeLabel} all={all} onScope={onScope} />}
+          {asSide && <span className="views-head-spacer" />}
+          {asSide && onToggleSide && <SideToggle side onToggle={onToggleSide} />}
+          {asSide && <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>}
+          {/* In the column the week's controls are a line of their own. */}
+          {asSide && <span className="place-break" />}
           <span className="cal-nav">
             <button type="button" aria-label="Previous week" title="Previous week (←)" onClick={() => setWeekStart((w) => addDays(w, -7))}>‹</button>
             <button type="button" className="cal-today" disabled={weekStart === today} title="This week (t)" onClick={() => setWeekStart(today)}>Today</button>
@@ -216,8 +233,9 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
             <button type="button" role="tab" aria-selected={view === "week"} className={view === "week" ? "on" : ""} onClick={() => chooseView("week")}>Week</button>
             <button type="button" role="tab" aria-selected={view === "agenda"} className={view === "agenda" ? "on" : ""} onClick={() => chooseView("agenda")}>Agenda</button>
           </span>
-          <span className="views-head-spacer" />
-          <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>
+          {!asSide && <span className="views-head-spacer" />}
+          {!asSide && onToggleSide && <SideToggle side={false} onToggle={onToggleSide} />}
+          {!asSide && <button type="button" className="views-close" aria-label="Close" onClick={onClose}>×</button>}
         </div>
         {items === null ? (
           <p className="checkbacks-empty">Loading…</p>

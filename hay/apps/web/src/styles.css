@@ -6497,6 +6497,17 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 }
 .views-panel.checkbacks-panel.page:focus { outline: none; }
 .app.views-side .views-panel.checkbacks-panel.page.in-session { right: var(--views-w, 560px); }
+/* The calendar in the column: it scrolls, its week's controls take a line
+   of their own, and the week reads as a column of days, as on a phone. */
+.views-panel.checkbacks-panel.side { overflow: auto; padding-bottom: 20px; }
+.views-panel.checkbacks-panel.side .views-head { flex-wrap: wrap; row-gap: 8px; }
+.views-panel.checkbacks-panel.side .cal-nav { margin-left: 0; }
+.views-panel.checkbacks-panel.side .cal-body.picked { grid-template-columns: 1fr; }
+.views-panel.checkbacks-panel.side .cal-body.picked .cal-detail-pane { order: -1; position: static; }
+.views-panel.checkbacks-panel.side .cal-week { grid-template-columns: 1fr; }
+.views-panel.checkbacks-panel.side .cal-day { min-height: 0; }
+.views-panel.checkbacks-panel.side .cal-day + .cal-day { border-left: 0; border-top: 1px solid var(--card-line, var(--line)); }
+.views-panel.checkbacks-panel.side .cal-row { grid-template-columns: 96px minmax(0, 1fr); gap: 10px; }
 /* The calendar: a week of days like a lab notebook's spread — hairline
    columns, today marked with hop's violet, entries as small tags (hop's
    violet, Codex's cyan), a frequent repeat a soft band, the past faded. */
@@ -6657,6 +6668,29 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 .place-page.in-session { top: var(--topbar-h, 52px); }
 .app.views-side .place-page.in-session { right: var(--views-w, 560px); }
 .place-page.in-session .place-col { padding-top: 18px; }
+/* Briefing or Pulse in the column beside the session (Views' column; see
+   SideColumn): the same paper, narrower type, the head's pickers a line of
+   their own. */
+.place-page.side {
+  top: 0; right: 0; bottom: 0; left: auto; width: var(--views-w, 560px); z-index: 40;
+  border-left: 1px solid var(--card-line);
+}
+/* The page scrolls, and would carry an edge inside it away: the edge stays put. */
+.place-page.side .views-side-handle { position: fixed; left: auto; right: calc(var(--views-w, 560px) - 7px); }
+.place-page.side .place-head { flex-wrap: wrap; gap: 8px; row-gap: 8px; padding: 12px 14px 10px; }
+.place-page.side .place-title { font-size: 15px; }
+.place-page.side .place-col { padding: 18px 16px 60px; }
+.place-page.side .place-lede, .place-page.side .place-lede p { font-size: 17px; }
+.place-break { flex-basis: 100%; height: 0; }
+.place-page.side .place-nav select { min-width: 0; max-width: 100%; flex: 1 1 auto; }
+.place-page.side .place-nav { min-width: 0; max-width: 100%; }
+/* A tab has no head (the tab names it): its way into the column floats at the
+   top right and stays there as the page scrolls. */
+.place-tab-acts {
+  position: sticky; top: 0; z-index: 3; height: 0; display: flex; justify-content: flex-end;
+  padding: 0 14px; overflow: visible;
+}
+.place-tab-acts .views-act { margin-top: 10px; background: color-mix(in srgb, var(--wall-bg) 80%, transparent); }
 .place-head {
   position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px;
   padding: calc(env(safe-area-inset-top, 0px) + 14px) 28px 12px;

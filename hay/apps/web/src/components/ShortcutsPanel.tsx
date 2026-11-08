@@ -1,4 +1,6 @@
 import { useEffect } from "react";
+import { tips } from "../utils/tips";
+import { TipText } from "./TipCard";
 
 // The keyboard, taught as a day's routine rather than a reference table:
 // hop has many shortcuts, but a working day needs about six. They come
@@ -93,6 +95,13 @@ export const ShortcutsPanel = ({ isMac, onClose }: Props) => {
             <div key={r.keys} className="shortcuts-row"><kbd>{r.keys}</kbd><span>{r.what}</span></div>
           ))}
         </div>
+        <details className="shortcuts-more">
+          <summary>Small things worth knowing</summary>
+          {/* The tips the sessions overview shows one a day (utils/tips). */}
+          <ul className="shortcuts-tips">
+            {tips(isMac).map((t) => <li key={t.id}><TipText text={t.text} /></li>)}
+          </ul>
+        </details>
         <details className="shortcuts-more">
           <summary>Panes, clipboard and the rest</summary>
           <div className="shortcuts-grid">

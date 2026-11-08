@@ -42,7 +42,8 @@ import {
   insertAfter, describeAccount, type AgentHome, type AgentHomes, shortModelName,
   meaningfulTailIndices, shortRelativeTime, phoneAttentionLabel, fleetSummaryCompact } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
-import { isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
+import { IS_MAC, isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
+import { TipCard } from "./TipCard";
 import { chipWhen } from "../utils/checkbackText";
 import { currentWsBase, noteSocketClosed } from "../utils/localLink";
 import { watchLiveness } from "../utils/socketLiveness";
@@ -3862,6 +3863,8 @@ export const SessionSwitcher = ({
             } : undefined}
           />
         )}
+        {/* A tip a day: the small things nobody finds by looking. */}
+        {!searching && <TipCard isMac={IS_MAC} />}
         {model.mode === "filter" ? (
           // Matches keep their terminal previews: search results are preview
           // cards at the current zoom, same as the wall — the screen content

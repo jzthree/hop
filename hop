@@ -7093,10 +7093,14 @@ function pendingCheckbacksFor(internalName) {
 function queuedMessagesFor(internalName, now = Date.now()) {
     const out = [];
     for (const c of loadCheckbacks().items) {
-        if (!c.queued || c.session !== internalName) continue;
+        if (c.session !== internalName) continue;
+        // A check-back whose moment has come is waiting just as a queued
+        // message is (and says why when it is held up).
+        const firedCheckback = !c.queued && c.status === 'pending' && !!c.firedAt;
+        if (!c.queued && !firedCheckback) continue;
         if (c.status !== 'pending' && !(c.status === 'failed' && now - (c.failedAt || 0) < 6 * 3_600_000)) continue;
         out.push({
-            id: c.id, from: c.from || null, message: c.message, createdAt: c.createdAt,
+            id: c.id, from: firedCheckback ? 'a check-back' : (c.from || null), message: c.message, createdAt: c.createdAt,
             ...(c.lastError ? { note: c.lastError } : {}),
             ...(c.paused ? { paused: c.paused } : {}),
             ...(c.status === 'failed' ? { failed: true } : {}),
@@ -7250,23 +7254,27 @@ async function readRoomComposer(internalName) {
     } catch (e) { return null; }
 }
 const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+// Identity of text read back off a screen: whitespace is the app's wrapping
+// as much as the text's (Codex breaks a long path after a "/"), so it does
+// not count.
+const solid = (t) => String(t || '').replace(/\s+/g, '');
 const PLACEHOLDER_RE = /\[(?:Pasted text|Pasted Content|Image)[^\]]*\]/gi;
 // The box shows only what hop typed: the message itself, or the placeholder
 // an app shows for a long paste.
 function boxIsOnly(full, message) {
     if (full.collapsed && !squash(full.text.replace(PLACEHOLDER_RE, ''))) return true;
-    return squash(full.text) === squash(message);
+    return solid(full.text) === solid(message);
 }
 // The box still shows (the start of) the message.
 function boxStillHolds(full, message) {
     if (!full.found) return false;
     if (full.collapsed) return true;
-    const head = squash(message).slice(0, 40);
-    return !!head && squash(full.text).includes(head);
+    const head = solid(message).slice(0, 32);
+    return !!head && solid(full.text).includes(head);
 }
 // Someone typed on after the message landed: the box is the message plus more.
 function boxJoinedTyping(full, message) {
-    const box = squash(full.text), msg = squash(message);
+    const box = solid(full.text), msg = solid(message);
     return !full.collapsed && box.length > msg.length && box.startsWith(msg);
 }
 /**
@@ -7281,8 +7289,8 @@ async function clearOwnText(entry, internalName, message) {
         const r = await readRoomComposer(internalName);
         if (!r || !r.full.found) return false;
         if (r.state.isEmpty) return true;
-        const box = squash(r.full.text.replace(PLACEHOLDER_RE, ''));
-        if (box && !squash(message).includes(box) && !r.full.collapsed) return false;
+        const box = solid(r.full.text.replace(PLACEHOLDER_RE, ''));
+        if (box && !solid(message).includes(box) && !r.full.collapsed) return false;
         // One key per write, well apart: keys that arrive together can be read
         // by an app as one pasted string instead of keys.
         if (last !== null && last === r.full.text) {
@@ -7309,18 +7317,24 @@ async function deliverIntoAgent(cb, entry, phase) {
     try {
         const agent = readTurnInfo(cb.session)?.agent || entry.agent || null;
         const gated = agent === 'claude' || agent === 'codex';
+        let alreadyTyped = false;
         if (gated) {
             const a = await readRoomComposer(cb.session);
             if (a) {
                 // A turn just started (the phase had not caught up): wait it out.
                 if (a.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
                 if (!a.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
-                if (!a.state.isEmpty) return { ok: false, reason: 'waiting: the input box has text in it' };
-                // Empty a moment later too: nobody is mid-word.
+                // This very message, already sitting in the box typed and never
+                // sent (an earlier delivery, an agent's `hopa send` before it
+                // pressed Enter): send that rather than wait behind it forever.
+                if (!a.state.isEmpty && boxIsOnly(a.full, cb.message)) alreadyTyped = true;
+                else if (!a.state.isEmpty) return { ok: false, reason: 'waiting: the input box has text in it' };
+                // The same a moment later too: nobody is mid-word.
                 await sleepMs(1200);
                 const b = await readRoomComposer(cb.session);
                 if (b && b.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
-                if (b && (!b.state.found || !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
+                if (b && !b.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
+                if (b && (alreadyTyped ? !boxIsOnly(b.full, cb.message) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
             }
         }
         // Forced into a busy Codex, a check-back queues there (Tab); "send
@@ -7332,11 +7346,15 @@ async function deliverIntoAgent(cb, entry, phase) {
             // is, or the text and the Enter leave in one burst.
             try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
             await sleepMs(300);
-            sendTerminalInput(e2, cb.message);
-            // Codex folds keys within ~half a second of the text into a paste
-            // (measured: 400ms failed, 1s submitted).
-            await sleepMs(agent === 'codex' ? 1000 : 500);
-            if (gated) {
+            if (alreadyTyped) {
+                log(`[checkback] ${cb.id}: its text was already in the input box, unsent; sending it`, YELLOW);
+            } else {
+                sendTerminalInput(e2, cb.message);
+                // Codex folds keys within ~half a second of the text into a
+                // paste (measured: 400ms failed, 1s submitted).
+                await sleepMs(agent === 'codex' ? 1000 : 500);
+            }
+            if (gated && !alreadyTyped) {
                 const t = await readRoomComposer(cb.session);
                 if (t && t.full.found) {
                     if (t.state.isEmpty) return { ok: false, reason: "the message didn't reach the input box; trying again" };
@@ -15678,7 +15696,7 @@ happens until someone clicks it.
                 const reply = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
                 try {
                     const { id, text } = JSON.parse(body || '{}');
-                    const cb = loadCheckbacks().items.find((c) => c.id === id && c.queued && (c.status === 'pending' || c.status === 'failed'));
+                    const cb = loadCheckbacks().items.find((c) => c.id === id && (c.queued ? (c.status === 'pending' || c.status === 'failed') : (c.status === 'pending' && !!c.firedAt)));
                     if (!cb) return reply(404, { error: 'No such queued message' });
                     if (!canActorAccessSession(resolveActor(req), getEffectiveSessionConfig(cb.session))) return reply(403, { error: 'Agent access not permitted' });
                     if (deliveriesInFlight.has(cb.id)) return reply(409, { error: 'It is being typed right now' });
@@ -15742,7 +15760,7 @@ happens until someone clicks it.
                         const cleared = await clearOwnText(e2, target, text);
                         if (!cleared) {
                             const after = await readRoomComposer(target);
-                            if (after && after.full.found && squash(after.full.text) === squash(text)) {
+                            if (after && after.full.found && solid(after.full.text) === solid(text)) {
                                 // Nothing came out: nothing is queued either.
                                 cb.status = 'cancelled'; cb.cancelledAt = Date.now(); saveCheckbacks();
                                 return reply(409, { error: "Couldn't take the text out of the input box, so nothing was queued" });

@@ -1908,6 +1908,16 @@ test('a message for an agent is typed only into an empty input box, waits out a 
   await stamp('turn', Date.now() + 3000);
   await until(async () => (await got()).includes('later please'), 20000, 'the moved message to go');
 
+  // 6. The message itself already sits in the box, typed and never sent (an
+  //    older delivery, an agent's Enter-less send): hop sends that, once,
+  //    instead of waiting behind its own copy forever.
+  await typeIn('stranded copy');
+  await until(async () => (await box()) === 'stranded copy', 5000, 'the stranded copy');
+  const sixth = await send('stranded copy');
+  assert.equal(sixth.data.status, 'sent', JSON.stringify(sixth.data));
+  assert.equal((await got()).filter((l) => l === 'stranded copy').length, 1, 'sent once, not typed twice');
+  assert.equal(await box(), '');
+
   // Agents reach only sessions they may; a shell gets the line as typed.
   const denied = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: internal, text: 'x' }, agentHeaders);
   assert.equal(denied.status, 403);

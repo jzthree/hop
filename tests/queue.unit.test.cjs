@@ -79,3 +79,12 @@ test('a queued message waits for idle, says whose it is, and is not a plain chec
   const plain = checkbacks.normalizeCheckback({ session: 's_x', message: 'x', idle: true }, now);
   assert.equal(plain.queued, undefined);
 });
+
+test('a long path the app wrapped after a "/" reads back without a space in it', async (t) => {
+  const row1 = "Continue from /Users/me/Code/project/a_long_directory_name_for_run_2026/";
+  const row2 = 'junction_dynamic_loop/state.json. Keep the rest paused.';
+  const term = await screen(['• Done', '', '› ' + row1, '  ' + row2, '', '  model · ~'], [4, 3 + row2.length]);
+  if (!term) return t.skip('xterm-headless unavailable');
+  const full = composer.readComposerText(term.buffer.active, ROWS, COLS);
+  assert.equal(full.text, row1 + row2);
+});

@@ -45,10 +45,10 @@
 /* ── Dark theme ── */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #141417;
-  --bg-alt: #232327;
-  --ink: #e6e6e9;
-  --ink-muted: #93939b;
+  --bg: #131218;
+  --bg-alt: #201f26;
+  --ink: #e9e7ef;
+  --ink-muted: #9b99a7;
   --accent: #a78bfa;
   --accent-2: #c4b5fd;
   --accent-fg: #1d1d1f;
@@ -56,32 +56,32 @@
   --warn: #d29922;
   --err: #f85149;
   --calm: #9aa3b2; /* disconnect: calm slate, not alarm */
-  --line: #2c2c31;
-  --panel: #1d1d21;
+  --line: #2b2a32;
+  --panel: #1b1a21;
   --shadow: 0 1px 3px rgba(0,0,0,0.25), 0 10px 30px rgba(0,0,0,0.2);
-  --terminal-bg: #17181d;
-  --terminal-fg: #e6e6e9;
+  --terminal-bg: #131218;
+  --terminal-fg: #e9e7ef;
   --terminal-cursor: #a78bfa;
-  --btn-bg: #2a2a2e;
-  --topbar-bg: rgba(20,20,23,0.85);
-  --chip-bg: rgba(42,42,46,0.92);
+  --btn-bg: #26252d;
+  --topbar-bg: rgba(19,18,24,0.85);
+  --chip-bg: rgba(38,37,45,0.92);
   --fab-bg: rgba(80,85,95,0.3);
   --fab-border: rgba(255,255,255,0.08);
   --fab-highlight: rgba(255,255,255,0.06);
   --fab-color: rgba(255,255,255,0.72);
-  --keyboard-bg: #232327;
-  --keyboard-key-bg: #2e2e33;
-  --keyboard-key-color: #e6e6e9;
-  --keyboard-special-bg: #1c1c20;
+  --keyboard-bg: #201f26;
+  --keyboard-key-bg: #2b2a32;
+  --keyboard-key-color: #e9e7ef;
+  --keyboard-special-bg: #18171d;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #141417;
-    --bg-alt: #232327;
-    --ink: #e6e6e9;
-    --ink-muted: #93939b;
+    --bg: #131218;
+    --bg-alt: #201f26;
+    --ink: #e9e7ef;
+    --ink-muted: #9b99a7;
     --accent: #a78bfa;
     --accent-2: #c4b5fd;
     --accent-fg: #1d1d1f;
@@ -89,23 +89,23 @@
     --warn: #d29922;
     --err: #f85149;
     --calm: #9aa3b2; /* disconnect: calm slate, not alarm */
-    --line: #2c2c31;
-    --panel: #1d1d21;
+    --line: #2b2a32;
+    --panel: #1b1a21;
     --shadow: 0 1px 3px rgba(0,0,0,0.25), 0 10px 30px rgba(0,0,0,0.2);
-    --terminal-bg: #17181d;
-    --terminal-fg: #e6e6e9;
+    --terminal-bg: #131218;
+    --terminal-fg: #e9e7ef;
     --terminal-cursor: #a78bfa;
-    --btn-bg: #2a2a2e;
-    --topbar-bg: rgba(20,20,23,0.85);
-    --chip-bg: rgba(42,42,46,0.92);
+    --btn-bg: #26252d;
+    --topbar-bg: rgba(19,18,24,0.85);
+    --chip-bg: rgba(38,37,45,0.92);
     --fab-bg: rgba(80,85,95,0.3);
     --fab-border: rgba(255,255,255,0.08);
     --fab-highlight: rgba(255,255,255,0.06);
     --fab-color: rgba(255,255,255,0.72);
-    --keyboard-bg: #232327;
-    --keyboard-key-bg: #2e2e33;
-    --keyboard-key-color: #e6e6e9;
-    --keyboard-special-bg: #1c1c20;
+    --keyboard-bg: #201f26;
+    --keyboard-key-bg: #2b2a32;
+    --keyboard-key-color: #e9e7ef;
+    --keyboard-special-bg: #18171d;
   }
 }
 
@@ -5172,9 +5172,9 @@ body.pane-dragging { user-select: none; }
   --phone-live: #35d47a;
   --phone-working: #5aa7e0;
   --phone-glow: #a855f7;
-  --phone-pill: #000000;
-  --phone-raised: #161b22;
-  --phone-surface: #0d1117;
+  --phone-pill: #24232b;
+  --phone-raised: #1b1a21;
+  --phone-surface: #131218;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .switcher-phone {
@@ -5182,9 +5182,9 @@ body.pane-dragging { user-select: none; }
     --phone-live: #35d47a;
     --phone-working: #5aa7e0;
     --phone-glow: #a855f7;
-    --phone-pill: #000000;
-    --phone-raised: #161b22;
-    --phone-surface: #0d1117;
+    --phone-pill: #24232b;
+    --phone-raised: #1b1a21;
+    --phone-surface: #131218;
   }
 }
 
@@ -6104,13 +6104,13 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
   --settled: #0f9b8e;
 }
 :root[data-theme="dark"] {
-  --wall-bg: #111015; --card-bg: #1a1920; --card-line: rgba(255, 255, 255, 0.08);
+  --wall-bg: #131218; --card-bg: #1b1a21; --card-line: rgba(255, 255, 255, 0.08);
   --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); --card-shadow-hover: 0 10px 28px -12px rgba(0, 0, 0, 0.6);
   --working: #8b9cff; --settled: #3cc7b6;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --wall-bg: #111015; --card-bg: #1a1920; --card-line: rgba(255, 255, 255, 0.08);
+    --wall-bg: #131218; --card-bg: #1b1a21; --card-line: rgba(255, 255, 255, 0.08);
     --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); --card-shadow-hover: 0 10px 28px -12px rgba(0, 0, 0, 0.6);
     --working: #8b9cff; --settled: #3cc7b6;
   }
@@ -7058,3 +7058,42 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 .shortcuts-tips { margin: 0 0 10px; padding-left: 18px; display: grid; gap: 6px; font: 400 12.5px/1.45 var(--font-sans); color: var(--ink); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .tip-kind { color: #c4b5fd; } }
 :root[data-theme="dark"] .tip-kind { color: #c4b5fd; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Dark, refined. One family of darks — a charcoal with hop's violet in it —
+   for the page, the overview, cards and the terminal alike (the overview,
+   the session chrome and the terminal had been three different darks). News
+   keeps the spark's edge but loses most of the glow, which on a dark wall
+   lit up every unread card at once. Pictures in Views sit on a dark mat
+   instead of a white box (thumbnails are opaque JPEGs: nothing shows through).
+   ════════════════════════════════════════════════════════════════════════ */
+:root { --hop-spark-edge: var(--hop-spark); }
+:root[data-theme="dark"] {
+  --hop-spark-edge: linear-gradient(120deg, rgba(139, 92, 246, 0.8) 0%, rgba(99, 102, 241, 0.62) 45%, rgba(6, 182, 212, 0.7) 100%);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --hop-spark-edge: linear-gradient(120deg, rgba(139, 92, 246, 0.8) 0%, rgba(99, 102, 241, 0.62) 45%, rgba(6, 182, 212, 0.7) 100%);
+  }
+}
+.switcher-card.phase-done-unread,
+.switcher-card.needs-you {
+  background: linear-gradient(var(--card-bg), var(--card-bg)) padding-box, var(--hop-spark-edge) border-box;
+}
+:root[data-theme="dark"] .switcher-card.phase-done-unread { box-shadow: 0 6px 16px -12px rgba(99, 102, 241, 0.35); }
+:root[data-theme="dark"] .switcher-card.needs-you { box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.1), 0 8px 18px -12px rgba(6, 182, 212, 0.32); }
+:root[data-theme="dark"] .vg-thumb.image,
+:root[data-theme="dark"] .vg-thumb .views-thumb { background: #0e0d12; }
+:root[data-theme="dark"] .pdigest-reply:not(.sent) { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .switcher-card.phase-done-unread { box-shadow: 0 6px 16px -12px rgba(99, 102, 241, 0.35); }
+  :root:not([data-theme="light"]) .switcher-card.needs-you { box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.1), 0 8px 18px -12px rgba(6, 182, 212, 0.32); }
+  :root:not([data-theme="light"]) .vg-thumb.image,
+  :root:not([data-theme="light"]) .vg-thumb .views-thumb { background: #0e0d12; }
+  :root:not([data-theme="light"]) .pdigest-reply:not(.sent) { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07); }
+}
+
+/* The bar under a terminal: its buttons keep to one line; the folder path
+   gives way (it already ends in …). */
+.terminal-footer .footer-find-toggle, .terminal-footer .footer-reconnect { white-space: nowrap; flex-shrink: 0; }
+.terminal-footer > span:not(.footer-cwd):not(.footer-spacer) { white-space: nowrap; flex-shrink: 0; }

@@ -145,18 +145,21 @@ const createShareLink = (room: string) => {
 };
 
 const darkTerminalTheme = {
-  background: "#0d1117",
-  foreground: "#e6edf3",
-  cursor: "#60a5fa",
-  cursorAccent: "#0d1117",
-  selectionBackground: "#264f78",
-  selectionForeground: "#e6edf3",
+  // The page's own dark (styles.css --bg / --terminal-bg): a session reads as
+  // one surface, as it does in the light theme, instead of a blue-black box
+  // set into a grey page. Apps are told this background (OSC 11) and adapt.
+  background: "#131218",
+  foreground: "#e9e7ef",
+  cursor: "#a78bfa",
+  cursorAccent: "#131218",
+  selectionBackground: "#3d3566",
+  selectionForeground: "#f4f2fa",
   // ANSI palette: the VS Code Dark+ terminal colors. The previous set was
   // Tailwind pastels (red #f87171, green #4ade80 …) — pretty, but visibly
   // washed out next to a normal terminal, which is what made Claude Code
   // look duller in hop than in iTerm. These are saturated like a real
-  // terminal while staying readable on #0d1117.
-  black: "#0d1117",
+  // terminal while staying readable on the dark background.
+  black: "#131218",
   red: "#cd3131",
   green: "#0dbc79",
   yellow: "#e5e510",
@@ -205,7 +208,7 @@ const lightTerminalTheme = {
 // foreground color to meet this ratio against the background, which visibly
 // desaturates the mid-tones a TUI like Claude Code paints with — its output
 // looked washed out next to the same app in iTerm. Agent palettes assume a
-// dark background, so on our dark theme (#0d1117, close to that assumption)
+// dark background, so on our dark theme (#131218, close to that assumption)
 // no correction is needed and colors render faithfully. The light theme
 // still needs it, or dark-tuned near-white text lands on white.
 // Contrast floor: 2 on light (rescues dark-tuned near-white text without

@@ -34,7 +34,7 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         window.minSize = NSSize(width: 520, height: 400)
         window.tabbingMode = .disallowed
         window.backgroundColor = NSColor(name: nil) { a in
-            a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1) : NSColor(red: 0.97, green: 0.97, blue: 0.98, alpha: 1)
+            a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(red: 0.075, green: 0.071, blue: 0.094, alpha: 1) : NSColor(red: 0.97, green: 0.97, blue: 0.98, alpha: 1)
         }
         window.contentView = webView
         window.center()

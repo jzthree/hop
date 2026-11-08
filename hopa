@@ -62,7 +62,9 @@ const VERBS = {
   'term close':      { tool: 'hop_close_terminal', pos: ['terminal_id'] },
 
   'exec':            { tool: 'hopx_exec', pos: ['terminal_id', 'command...'] },
-  'send':            { tool: 'hopx_send_and_wait', pos: ['terminal_id', 'data...'] },
+  // Type AND submit, as the usage says — without press_enter the text sat
+  // in an agent's input box unsent. To an agent, it goes through hop's queue.
+  'send':            { tool: 'hopx_send_and_wait', pos: ['terminal_id', 'data...'], preset: { press_enter: true } },
   'turn':            { tool: 'hopx_agent_turn', pos: ['terminal_id?', 'message...'] },
   'spawn':           { tool: 'hopx_spawn_agent', pos: ['name?'], preset: { async: false }, alias: { task: 'initial_task', cmd: 'command' } },
   'scrollback':      { tool: 'hopx_capture_scrollback', pos: ['terminal_id'] },

@@ -46,7 +46,7 @@ import { isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
 import { chipWhen } from "../utils/checkbackText";
 import { currentWsBase, noteSocketClosed } from "../utils/localLink";
 import { watchLiveness } from "../utils/socketLiveness";
-import { sendLineToSession } from "../utils/quickReply";
+import { sendToSession } from "../utils/quickReply";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
 
@@ -3854,9 +3854,11 @@ export const SessionSwitcher = ({
             onOpen={handleTap}
             phone={phone}
             onReply={tileWsBase ? async (t, text) => {
-              const ok = await sendLineToSession(tileWsBase, sessionKey(t), text, { userName, cols: t.cols, rows: t.rows });
-              if (!ok) onNotice(`Couldn't send to ${t.displayName}`);
-              return ok;
+              // Through hop: now if the agent is free, else queued for when its turn ends.
+              const r = await sendToSession(sessionKey(t), text, "you (briefing)");
+              if (!r.status) onNotice(r.error || `Couldn't send to ${t.displayName}`);
+              else if (r.status === "queued") onNotice(`Queued for ${t.displayName}: it goes when the turn ends`);
+              return !!r.status;
             } : undefined}
           />
         )}

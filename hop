@@ -28,6 +28,7 @@ const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
 const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
+const composerLib = require('./lib/composer');
 const digestReads = require('./lib/digest-reads');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
@@ -5863,6 +5864,8 @@ async function attachTerminalApiClient(sessionName, displayName, opts = {}) {
 
 function sendTerminalInput(entry, data) {
     if (!entry || !data) return;
+    // Typing is use: the idle reaper must not close a terminal mid-delivery.
+    entry.lastTouchedAt = Date.now();
     entry.adapter.emit(JSON.stringify({ type: 'input', data }));
 }
 
@@ -7083,7 +7086,24 @@ function saveCheckbacks() {
     catch (e) { log(`[checkback] could not save: ${e?.message || e}`, YELLOW); }
 }
 function pendingCheckbacksFor(internalName) {
-    return loadCheckbacks().items.filter((c) => c.status === 'pending' && c.session === internalName).length;
+    return loadCheckbacks().items.filter((c) => c.status === 'pending' && !c.queued && c.session === internalName).length;
+}
+// The messages waiting for this session's turn to end (and any that would
+// not go, for a while), for the strip above its terminal.
+function queuedMessagesFor(internalName, now = Date.now()) {
+    const out = [];
+    for (const c of loadCheckbacks().items) {
+        if (!c.queued || c.session !== internalName) continue;
+        if (c.status !== 'pending' && !(c.status === 'failed' && now - (c.failedAt || 0) < 6 * 3_600_000)) continue;
+        out.push({
+            id: c.id, from: c.from || null, message: c.message, createdAt: c.createdAt,
+            ...(c.lastError ? { note: c.lastError } : {}),
+            ...(c.paused ? { paused: c.paused } : {}),
+            ...(c.status === 'failed' ? { failed: true } : {}),
+            ...(deliveriesInFlight.has(c.id) ? { sending: true } : {})
+        });
+    }
+    return out;
 }
 // When the soonest TIMED check-back on a session is due (ms), or null when
 // everything waiting is a condition (a job, a file, idle) with no clock time.
@@ -7168,12 +7188,10 @@ function runShellProbe(command, cwd) {
         } catch (e) { resolve(1); }
     });
 }
-// Type a message into a session and SUBMIT it the way a person does: the
-// text first, Enter on its own a beat later, and a second Enter if the
-// composer still holds the text. One write with the Enter glued to the
-// text was taken by Codex's composer as a paste — the message sat there
-// typed and never sent (the surf session, 2026-10-01). The MCP's
-// agent-turn path has always sent them as separate writes; this is that.
+// Typing into a session the way a person does: see deliverIntoAgent below.
+// One write with the Enter glued to the text was taken by Codex's composer
+// as a paste — the message sat there typed and never sent (the surf
+// session, 2026-10-01).
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 // Is the message still sitting in the composer (the `›` line) — typed, not sent?
 /**
@@ -7208,30 +7226,184 @@ async function composerStillHolds(internalName, message) {
         return holds;
     } catch (e) { if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] composer check failed: ${e?.message || e}`, DIM); return false; }
 }
-// `submitKey`: Enter by default. Codex treats Enter DURING a turn as a steer —
-// it interrupts the model to inject the message — and Tab as "queue it for
-// when this turn ends"; a forced check-back typed into a busy Codex queues.
-async function typeAndSubmit(entry, internalName, message, submitKey = '\r') {
-    // The attach returns before its socket is open; type only once it is,
-    // or the text and the Enter leave in one burst (see adapterBundle.ready).
-    const t0 = Date.now();
-    const dbg = (m) => { if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] +${Date.now() - t0}ms ${m}`, DIM); };
-    dbg(`typeAndSubmit: ready=${typeof entry?.adapter?.ready}`);
-    try { const r = await Promise.race([entry?.adapter?.ready || Promise.resolve('none'), sleepMs(4000).then(() => 'timeout')]); dbg(`ready → ${r}`); } catch (e) { /* type anyway */ }
-    await sleepMs(300);
-    dbg('typing text');
-    sendTerminalInput(entry, message);
-    // Codex folds keys that arrive within ~half a second of the text into a
-    // paste, Enter included (measured: 400ms failed, 1s submitted).
-    await sleepMs(1000);
-    dbg(submitKey === '\t' ? 'sending Tab (queue)' : 'sending Enter');
-    sendTerminalInput(entry, submitKey);
-    for (let attempt = 0; attempt < 2; attempt++) {
-        await sleepMs(1500);
-        if (!(await composerStillHolds(internalName, message))) return;
-        if (process.env.HOP_CHECKBACK_DEBUG) log(`[checkback] submit did not take (attempt ${attempt + 1}); sending it again`, DIM);
-        sendTerminalInput(entry, submitKey);
+// ---- Typing a message into an agent ---------------------------------------
+// The one way hop types a message into an agent's input box (a check-back, a
+// queued message, a briefing reply, another agent's `hopa send`):
+//  - only into an EMPTY box that stays empty a moment, so it never joins what
+//    the person is typing (a half-typed draft makes it wait, visibly);
+//  - the text, then the submit key on its own a beat later (Codex takes keys
+//    that arrive with the text as part of a paste);
+//  - then confirmed: the box must let go of the text. If it will not submit,
+//    hop takes its own text back out of the box — a message is never left
+//    there typed and unsent — and tries again later.
+// Claude and Codex only: their boxes are read off the screen (lib/composer.js);
+// anything else is typed the old way.
+async function readRoomComposer(internalName) {
+    try {
+        const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
+        const d = hostRes?.data;
+        if (!d || typeof d.data !== 'string') return null;
+        const r = await composerLib.readComposerFromSerialized(d.data, d.cols, d.rows);
+        // The same screen says whether a turn is in flight — fresher than the
+        // phase (whose screen check is cached for seconds).
+        return r ? { ...r, working: screenSaysWorking(stripAnsiForSearch(d.data)) } : null;
+    } catch (e) { return null; }
+}
+const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+const PLACEHOLDER_RE = /\[(?:Pasted text|Pasted Content|Image)[^\]]*\]/gi;
+// The box shows only what hop typed: the message itself, or the placeholder
+// an app shows for a long paste.
+function boxIsOnly(full, message) {
+    if (full.collapsed && !squash(full.text.replace(PLACEHOLDER_RE, ''))) return true;
+    return squash(full.text) === squash(message);
+}
+// The box still shows (the start of) the message.
+function boxStillHolds(full, message) {
+    if (!full.found) return false;
+    if (full.collapsed) return true;
+    const head = squash(message).slice(0, 40);
+    return !!head && squash(full.text).includes(head);
+}
+// Someone typed on after the message landed: the box is the message plus more.
+function boxJoinedTyping(full, message) {
+    const box = squash(full.text), msg = squash(message);
+    return !full.collapsed && box.length > msg.length && box.startsWith(msg);
+}
+/**
+ * Take hop's own text back out of the box — only while everything in it is
+ * hop's (never a character the person typed). End of line, kill the line, and
+ * one backspace per character where an app ignores the kill; re-read every
+ * round. True when the box is empty.
+ */
+async function clearOwnText(entry, internalName, message) {
+    let last = null;
+    for (let round = 0; round < 40; round++) {
+        const r = await readRoomComposer(internalName);
+        if (!r || !r.full.found) return false;
+        if (r.state.isEmpty) return true;
+        const box = squash(r.full.text.replace(PLACEHOLDER_RE, ''));
+        if (box && !squash(message).includes(box) && !r.full.collapsed) return false;
+        // One key per write, well apart: keys that arrive together can be read
+        // by an app as one pasted string instead of keys.
+        if (last !== null && last === r.full.text) {
+            for (let i = 0; i < Math.min(800, r.full.text.length + 4); i++) { sendTerminalInput(entry, '\x7f'); await sleepMs(30); }
+        } else {
+            sendTerminalInput(entry, '\x05');
+            await sleepMs(150);
+            sendTerminalInput(entry, '\x15');
+        }
+        last = r.full.text;
+        await sleepMs(250);
     }
+    return false;
+}
+const deliveriesInFlight = new Set();
+/**
+ * Type `cb.message` into the session's agent and submit it. Resolves
+ * { ok } or { ok: false, reason, mixed?, unsent?, quiet? } — the reason is
+ * what the person sees beside the queued message.
+ */
+async function deliverIntoAgent(cb, entry, phase) {
+    if (deliveriesInFlight.has(cb.id)) return { ok: false, quiet: true };
+    deliveriesInFlight.add(cb.id);
+    try {
+        const agent = readTurnInfo(cb.session)?.agent || entry.agent || null;
+        const gated = agent === 'claude' || agent === 'codex';
+        if (gated) {
+            const a = await readRoomComposer(cb.session);
+            if (a) {
+                // A turn just started (the phase had not caught up): wait it out.
+                if (a.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
+                if (!a.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
+                if (!a.state.isEmpty) return { ok: false, reason: 'waiting: the input box has text in it' };
+                // Empty a moment later too: nobody is mid-word.
+                await sleepMs(1200);
+                const b = await readRoomComposer(cb.session);
+                if (b && b.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
+                if (b && (!b.state.found || !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
+            }
+        }
+        // Forced into a busy Codex, a check-back queues there (Tab); "send
+        // now" means now (Enter, which steers).
+        const submitKey = phase === 'working' && agent === 'codex' && !cb.sendNow ? '\t' : '\r';
+        const e2 = await attachTerminalApiClient(cb.session, entry.displayName || cb.session, { actor: 'system', label: cb.queued ? 'queued' : 'checkback', typeOnly: true });
+        try {
+            // The attach returns before its socket is open; type only once it
+            // is, or the text and the Enter leave in one burst.
+            try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+            await sleepMs(300);
+            sendTerminalInput(e2, cb.message);
+            // Codex folds keys within ~half a second of the text into a paste
+            // (measured: 400ms failed, 1s submitted).
+            await sleepMs(agent === 'codex' ? 1000 : 500);
+            if (gated) {
+                const t = await readRoomComposer(cb.session);
+                if (t && t.full.found) {
+                    if (t.state.isEmpty) return { ok: false, reason: "the message didn't reach the input box; trying again" };
+                    if (boxJoinedTyping(t.full, cb.message)) {
+                        return { ok: false, mixed: true, reason: 'typing joined it in the input box, so it was not sent' };
+                    }
+                }
+            }
+            sendTerminalInput(e2, submitKey);
+            for (let attempt = 0; attempt < 3; attempt++) {
+                await sleepMs(1500);
+                const still = gated
+                    ? await (async () => { const r = await readRoomComposer(cb.session); return !!r && !r.state.isEmpty && boxStillHolds(r.full, cb.message); })()
+                    : await composerStillHolds(cb.session, cb.message);
+                if (!still) return { ok: true };
+                if (attempt < 2) sendTerminalInput(e2, submitKey);
+            }
+            // Never leave it typed and unsent.
+            const cleared = gated ? await clearOwnText(e2, cb.session, cb.message) : false;
+            return {
+                ok: false, unsent: true,
+                reason: cleared ? "it didn't submit, so hop took it back out of the input box; trying again" : "it didn't submit and is still in the input box"
+            };
+        } finally {
+            try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ }
+        }
+    } finally {
+        deliveriesInFlight.delete(cb.id);
+    }
+}
+// What a delivery attempt does to the record. False when nothing changed.
+function applyDelivery(cb, r, now, displayName) {
+    if (r.quiet) return false;
+    if (r.ok) {
+        Object.assign(cb, checkbacks.afterDelivery(cb, now));
+        delete cb.sendNow; delete cb.failures;
+        log(`[checkback] ${cb.id} → ${displayName}: ${JSON.stringify(cb.message.slice(0, 80))}${cb.status === 'pending' ? ' (recurs)' : ''}`, DIM);
+        return true;
+    }
+    if (cb.lastError === r.reason && !r.mixed && !r.unsent) return false;
+    cb.lastError = r.reason;
+    if (r.mixed) cb.paused = 'mixed';
+    if (r.unsent) {
+        cb.failures = (cb.failures || 0) + 1;
+        if (cb.failures >= 3) { cb.status = 'failed'; cb.failedAt = now; }
+    }
+    return true;
+}
+// One session's runtime entry and agent phase, for a delivery outside the sweep.
+async function sessionEntryAndPhase(internalName) {
+    const snap = await listAllSessionEntriesRuntimeFirst();
+    const entry = snap.entries.find((e) => e.internalName === internalName) || null;
+    if (!entry) return { entry: null, phase: undefined };
+    const phase = (await agentPhaseFieldsForAll([entry])).get(internalName)?.agentPhase ?? null;
+    return { entry, phase };
+}
+/** Try one queued message now (just queued, or "send now"). */
+async function attemptQueuedNow(cb) {
+    try {
+        const { entry, phase } = await sessionEntryAndPhase(cb.session);
+        if (!entry) return;
+        if (!checkbacks.mayDeliver(cb, { phase })) return;
+        const ready = await agentScreenReady(entry);
+        if (!ready.ok) { if (cb.lastError !== ready.reason) { cb.lastError = ready.reason; saveCheckbacks(); } return; }
+        const r = await deliverIntoAgent(cb, entry, phase);
+        if (applyDelivery(cb, r, Date.now(), entry.displayName || cb.session)) saveCheckbacks();
+    } catch (e) { /* the sweep tries again */ }
 }
 
 let checkbackSweepBusy = false;
@@ -7252,6 +7424,7 @@ async function runCheckbackSweep() {
         } catch (e) { /* host busy: timers and files still evaluate; idle waits */ }
         let dirty = false;
         for (const cb of pending) {
+            if (cb.paused) continue; // typing joined it: the person decides
             const entry = entryBy.get(cb.session);
             const phase = phaseBy.get(cb.session)?.agentPhase ?? (entry ? null : undefined);
             const ctx = { phase, idleSince: entry ? Number(entry.lastActivityAt) || 0 : 0 };
@@ -7271,7 +7444,11 @@ async function runCheckbackSweep() {
                     if (now - cb.firedAt > 86_400_000) { cb.status = 'cancelled'; cb.cancelledAt = now; cb.lastError = 'session not found'; dirty = true; }
                     continue;
                 }
-                if (!checkbacks.mayDeliver(cb, ctx)) continue; // mid-turn: next sweep
+                if (!checkbacks.mayDeliver(cb, ctx)) {
+                    // Mid-turn: next sweep. A queued message's old trouble is past.
+                    if (cb.queued && cb.lastError) { cb.lastError = null; dirty = true; }
+                    continue;
+                }
                 // Type only into a RUNNING agent. Attaching to a stopped
                 // session creates its room — as a bare shell — and the
                 // message then ran as shell commands ("zsh: command not
@@ -7283,14 +7460,8 @@ async function runCheckbackSweep() {
                     if (cb.lastError !== ready.reason) { cb.lastError = ready.reason; dirty = true; }
                     continue;
                 }
-                const e2 = await attachTerminalApiClient(cb.session, entry.displayName || cb.session, { actor: 'system', label: 'checkback', typeOnly: true });
-                // Forced into a Codex mid-turn: queue (Tab), never steer (Enter).
-                const queueIntoCodex = phase === 'working' && readTurnInfo(cb.session)?.agent === 'codex';
-                try { await typeAndSubmit(e2, cb.session, cb.message, queueIntoCodex ? '\t' : '\r'); }
-                finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
-                Object.assign(cb, checkbacks.afterDelivery(cb, now));
-                dirty = true;
-                log(`[checkback] ${cb.id} → ${entry.displayName || cb.session}: ${JSON.stringify(cb.message.slice(0, 80))}${cb.status === 'pending' ? ' (recurs)' : ''}`, DIM);
+                const r = await deliverIntoAgent(cb, entry, phase);
+                if (applyDelivery(cb, r, now, entry.displayName || cb.session)) dirty = true;
             } catch (e) {
                 cb.lastError = String(e?.message || e); dirty = true;
             }
@@ -13771,6 +13942,8 @@ happens until someone clicks it.
                 ...(phaseBySession.get(s.internalName) || { agentPhase: null, turnSeen: true, turnAt: null }),
                 // Scheduled check-backs waiting on this session (hop checkback).
                 checkbacks: pendingCheckbacksFor(s.internalName) || undefined,
+                // Messages waiting for its turn to end (the strip above the terminal).
+                queued: (() => { const q = queuedMessagesFor(s.internalName); return q.length ? q : undefined; })(),
                 checkbackNext: nextCheckbackAt(s.internalName) || undefined,
                 codexAutomations: codexAutomationsForSession(s.internalName).filter((a) => a.status === 'ACTIVE' && !codexAutomationPastDue(a)).length || undefined,
                 // How much the human uses it (decayed; the "Most used" layout).
@@ -15438,6 +15611,154 @@ happens until someone clicks it.
             });
             return;
         }
+        // Messages for an agent (lib/checkbacks.js `queued`): typed when its
+        // turn ends, shown above its terminal until then — never left waiting
+        // inside its input box. /api/sessions/send: now if the agent is idle,
+        // else queued (`mode`: "queue" always queues, "now" types even
+        // mid-turn); a plain shell just gets the line.
+        if (parsedUrl.pathname === '/api/sessions/send' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                const reply = (code, obj) => { if (res.headersSent) return; res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+                try {
+                    const input = JSON.parse(body || '{}');
+                    const target = resolveSessionInternalName(input.name, input.internalName);
+                    if (!target || !(hopSessionExists(target) || getEffectiveSessionConfig(target))) return reply(404, { error: 'Session not found' });
+                    const actor = resolveActor(req);
+                    if (!canActorAccessSession(actor, getEffectiveSessionConfig(target))) return reply(403, { error: 'Agent access not permitted' });
+                    const text = String(input.text || '').replace(/[\r\n]+$/, '');
+                    if (!text.trim()) return reply(400, { error: 'Nothing to send' });
+                    const { entry, phase } = await sessionEntryAndPhase(target);
+                    if (!entry || entry.live !== true) return reply(409, { error: 'The session is not running' });
+                    const agent = readTurnInfo(target)?.agent || entry.agent || null;
+                    // The MCP types into a shell itself (exec/stream tracking).
+                    if (!agent && input.agentOnly) return reply(200, { ok: true, status: 'not-agent' });
+                    if (!agent) {
+                        // A plain shell: the line, now.
+                        const e2 = await attachTerminalApiClient(target, entry.displayName || target, { actor: actor === 'agent' ? 'agent' : 'system', label: 'send', typeOnly: true });
+                        try {
+                            try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+                            await sleepMs(200);
+                            sendTerminalInput(e2, text);
+                            await sleepMs(300);
+                            sendTerminalInput(e2, '\r');
+                            await sleepMs(200);
+                        } finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
+                        return reply(200, { ok: true, status: 'sent' });
+                    }
+                    const now = Date.now();
+                    const cb = checkbacks.normalizeCheckback({
+                        session: target, message: text, idle: true, queued: true,
+                        from: input.from
+                            || (input.fromSession ? (getSessionDisplayName(String(input.fromSession)) || String(input.fromSession)) : null)
+                            || (actor === 'agent' ? 'an agent' : 'you'),
+                        force: input.mode === 'now',
+                        createdBy: actor === 'agent' ? 'agent' : 'user'
+                    }, now);
+                    if (input.mode === 'now') cb.sendNow = true;
+                    loadCheckbacks().items.push(cb);
+                    saveCheckbacks();
+                    log(`[queue] ${cb.id} for ${entry.displayName || target} from ${cb.from || '?'}${phase === 'working' ? ' (busy: queued)' : ''}`, DIM);
+                    if (input.mode !== 'queue') await attemptQueuedNow(cb);
+                    const sent = cb.status === 'delivered';
+                    reply(200, { ok: true, status: sent ? 'sent' : 'queued', id: cb.id, ...(sent ? {} : { reason: cb.lastError || 'sends when the turn ends' }) });
+                } catch (e) {
+                    reply(400, { error: e?.message || 'Invalid request' });
+                }
+            });
+            return;
+        }
+        // A queued message: send it now / change it / try a failed one again.
+        const queueOp = parsedUrl.pathname.match(/^\/api\/queue\/(now|edit|retry)$/);
+        if (queueOp && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                const reply = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+                try {
+                    const { id, text } = JSON.parse(body || '{}');
+                    const cb = loadCheckbacks().items.find((c) => c.id === id && c.queued && (c.status === 'pending' || c.status === 'failed'));
+                    if (!cb) return reply(404, { error: 'No such queued message' });
+                    if (!canActorAccessSession(resolveActor(req), getEffectiveSessionConfig(cb.session))) return reply(403, { error: 'Agent access not permitted' });
+                    if (deliveriesInFlight.has(cb.id)) return reply(409, { error: 'It is being typed right now' });
+                    const op = queueOp[1];
+                    if (op === 'edit') {
+                        const next = String(text || '').replace(/[\r\n]+$/, '').trim();
+                        if (!next) return reply(400, { error: 'Nothing to send' });
+                        if (next.length > 4000) return reply(400, { error: 'message too long (4000 chars max)' });
+                        cb.message = next;
+                        saveCheckbacks();
+                        return reply(200, { ok: true, status: cb.status === 'pending' ? 'queued' : cb.status });
+                    }
+                    // now / retry: back in line, cleared of the last trouble.
+                    cb.status = 'pending';
+                    delete cb.paused; delete cb.failures; delete cb.failedAt;
+                    cb.lastError = null;
+                    if (op === 'now') { cb.sendNow = true; cb.force = true; }
+                    saveCheckbacks();
+                    await attemptQueuedNow(cb);
+                    const sent = cb.status === 'delivered';
+                    reply(200, { ok: true, status: sent ? 'sent' : 'queued', ...(sent ? {} : { reason: cb.lastError || 'sends when the turn ends' }) });
+                } catch (e) {
+                    reply(400, { error: e?.message || 'Invalid request' });
+                }
+            });
+            return;
+        }
+        // "Send it when the agent is done" (⌘⌥⏎ in the web): what is typed in
+        // the agent's input box. Idle: submitted as Enter would. Busy Codex:
+        // its own queue (Tab). Busy Claude: taken out of the box into hop's
+        // queue, typed when the turn ends.
+        if (parsedUrl.pathname === '/api/sessions/queue-input' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                const reply = (code, obj) => { if (res.headersSent) return; res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+                try {
+                    const input = JSON.parse(body || '{}');
+                    const target = resolveSessionInternalName(input.name, input.internalName);
+                    if (!target) return reply(404, { error: 'Session not found' });
+                    if (!canActorAccessSession(resolveActor(req), getEffectiveSessionConfig(target))) return reply(403, { error: 'Agent access not permitted' });
+                    const { entry, phase } = await sessionEntryAndPhase(target);
+                    if (!entry || entry.live !== true) return reply(409, { error: 'The session is not running' });
+                    const agent = readTurnInfo(target)?.agent || entry.agent || null;
+                    if (agent !== 'claude' && agent !== 'codex') return reply(409, { error: 'Only a Claude or Codex session has an input box to queue from' });
+                    const r = await readRoomComposer(target);
+                    if (!r) return reply(503, { error: "Couldn't read the screen" });
+                    if (!r.state.found) return reply(409, { error: "Couldn't find the agent's input box on screen" });
+                    if (r.state.isEmpty) return reply(200, { ok: true, status: 'empty' });
+                    const e2 = await attachTerminalApiClient(target, entry.displayName || target, { actor: 'system', label: 'queue', typeOnly: true });
+                    try {
+                        try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+                        if (phase !== 'working') { sendTerminalInput(e2, '\r'); return reply(200, { ok: true, status: 'sent' }); }
+                        if (agent === 'codex') { sendTerminalInput(e2, '\t'); return reply(200, { ok: true, status: 'queued-in-agent' }); }
+                        if (r.full.collapsed) return reply(409, { error: "A pasted block or image can't be moved out of the input box. Press Enter to send it now, or wait for the turn to end." });
+                        const text = r.full.text;
+                        const now = Date.now();
+                        const cb = checkbacks.normalizeCheckback({ session: target, message: text, idle: true, queued: true, from: 'you', createdBy: 'user' }, now);
+                        loadCheckbacks().items.push(cb);
+                        saveCheckbacks();
+                        const cleared = await clearOwnText(e2, target, text);
+                        if (!cleared) {
+                            const after = await readRoomComposer(target);
+                            if (after && after.full.found && squash(after.full.text) === squash(text)) {
+                                // Nothing came out: nothing is queued either.
+                                cb.status = 'cancelled'; cb.cancelledAt = Date.now(); saveCheckbacks();
+                                return reply(409, { error: "Couldn't take the text out of the input box, so nothing was queued" });
+                            }
+                            log(`[queue] ${cb.id}: the input box was not fully cleared`, YELLOW);
+                            return reply(200, { ok: true, status: 'queued', id: cb.id, text, warning: 'Part of the text is still in the input box' });
+                        }
+                        log(`[queue] ${cb.id} for ${entry.displayName || target}: moved from the input box (busy)`, DIM);
+                        reply(200, { ok: true, status: 'queued', id: cb.id, text });
+                    } finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
+                } catch (e) {
+                    reply(400, { error: e?.message || 'Invalid request' });
+                }
+            });
+            return;
+        }
         if (parsedUrl.pathname === '/api/checkbacks/cancel' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -15448,7 +15769,7 @@ happens until someone clicks it.
                     const target = session ? resolveSessionInternalName(session, session) : null;
                     let n = 0;
                     for (const c of store.items) {
-                        if (c.status !== 'pending') continue;
+                        if (c.status !== 'pending' && !(c.queued && c.status === 'failed')) continue;
                         if ((id && c.id === id) || (!id && target && c.session === target)) { c.status = 'cancelled'; c.cancelledAt = Date.now(); n++; }
                     }
                     if (n) saveCheckbacks();
@@ -22623,6 +22944,10 @@ async function main() {
         // and the session is idle. 15s is finer than any trigger needs.
         setTimeout(runCheckbackSweep, 20000).unref?.();
         setInterval(runCheckbackSweep, 15000).unref?.();
+        // Queued messages: within seconds of the turn ending, not a sweep later.
+        setInterval(() => {
+            if (loadCheckbacks().items.some((c) => c.queued && c.status === 'pending' && !c.paused)) runCheckbackSweep();
+        }, 3000).unref?.();
     }
 
     if (DAEMON_FLAG) {

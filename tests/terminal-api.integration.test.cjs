@@ -1758,3 +1758,162 @@ test('the terminal host turns away every request that lacks hop\'s key', async (
   });
   assert.ok(!rooms.some((r) => r && r.id === 'keyless'), 'nothing was started without the key');
 });
+
+// ---- Messages for an agent: typed only into an empty box, never left unsent ----
+// A fake Claude: a transcript, a ──── rule, `❯ ` and what is typed, a rule,
+// a status line ("esc to interrupt" while BUSY exists). Enter submits what is
+// in the box (appending it to got.log) unless STUCK exists; Ctrl+U clears the
+// line; Backspace deletes. It writes its box to box.txt after every key.
+const FAKE_CLAUDE = `
+const fs = require('fs'); const path = require('path');
+const dir = process.argv[2];
+let box = ''; const log = []; let lastBusy = null;
+const busyNow = () => fs.existsSync(path.join(dir, 'BUSY'));
+process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.setEncoding('utf8');
+const draw = () => {
+  const cols = process.stdout.columns || 80;
+  const rule = '\\u2500'.repeat(Math.max(10, cols - 2));
+  const busy = busyNow(); lastBusy = busy;
+  const lines = box.split('\\n');
+  const shown = log.slice(-6);
+  let out = '\\x1b[2J\\x1b[H';
+  for (const l of shown) out += l + '\\r\\n';
+  out += '\\r\\n' + rule + '\\r\\n';
+  lines.forEach((l, i) => { out += (i === 0 ? '\\u276f ' : '  ') + l + '\\r\\n'; });
+  out += rule + '\\r\\n' + (busy ? '  * Working (esc to interrupt)' : '  >> bypass permissions on');
+  out += '\\x1b[' + (shown.length + 2 + lines.length) + ';' + (3 + lines[lines.length - 1].length) + 'H';
+  process.stdout.write(out);
+  fs.writeFileSync(path.join(dir, 'box.txt'), box);
+};
+// Key by key, as a terminal app reads them; a chunk of text with no keys
+// in it is a paste (Enter inside a paste is part of it, not a submit).
+process.stdin.on('data', (d) => {
+  const paste = d.length > 1 && !/[\\x00-\\x1f\\x7f]/.test(d.replace(/\\r$/, ''));
+  if (paste) { box += d.replace(/\\r/g, ''); draw(); return; }
+  for (let i = 0; i < d.length; i++) {
+    const c = d[i];
+    if (c === '\\x1b') { while (i + 1 < d.length && !/[A-Za-z~u]/.test(d[i + 1])) i++; i++; continue; }
+    if (c === '\\r') {
+      if (!fs.existsSync(path.join(dir, 'STUCK')) && box.trim()) {
+        fs.appendFileSync(path.join(dir, 'got.log'), box + '\\n'); log.push('* got: ' + box); box = '';
+      }
+    } else if (c === '\\x7f') box = box.slice(0, -1);
+    else if (c === '\\x15') { const j = box.lastIndexOf('\\n'); box = j < 0 ? '' : box.slice(0, j + 1); }
+    else if (c === '\\x05' || c === '\\t') { /* end / tab: nothing here */ }
+    else if (c >= ' ') box += c;
+  }
+  draw();
+});
+setInterval(() => { if (busyNow() !== lastBusy) draw(); }, 250);
+draw();
+`;
+
+test('a message for an agent is typed only into an empty input box, waits out a turn, and is never left there unsent', async () => {
+  const dir = path.join(tempDir, 'fake-claude');
+  await fs.mkdir(dir, { recursive: true });
+  const script = path.join(dir, 'fake-claude.js');
+  await fs.writeFile(script, FAKE_CLAUDE);
+  const got = async () => { try { return (await fs.readFile(path.join(dir, 'got.log'), 'utf8')).split('\n').filter(Boolean); } catch { return []; } };
+  const box = async () => { try { return await fs.readFile(path.join(dir, 'box.txt'), 'utf8'); } catch { return null; } };
+  const until = async (fn, ms, what) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await delay(250); }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+
+  const term = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', {
+    name: 'qfake', cwd: dir, startup: `node ${script} ${dir}`, autoStart: true
+  }, userHeaders);
+  assert.equal(term.status, 200);
+  assert.ok(term.data.id);
+  await until(async () => (await box()) === '', 15000, 'the fake agent to draw');
+  const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  const internal = list.data.sessions.find((s) => s.displayName === 'qfake').internalName;
+  // hop knows a Claude session by its hook's turn record.
+  const sessDir = path.join(hopHome, 'claude-sessions');
+  await fs.mkdir(sessDir, { recursive: true });
+  const stamp = async (kind, at) => fs.writeFile(path.join(sessDir, `${internal}.${kind}`), JSON.stringify({ sessionId: 'fake-conv', agent: 'claude', at: new Date(at).toISOString() }));
+  await stamp('turn', Date.now() - 60_000);
+  const typeIn = async (data) => {
+    const att = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals/attach', { name: 'qfake' }, userHeaders);
+    assert.equal(att.status, 200, JSON.stringify(att.data));
+    const w = await requestJson(state.port, state.sessionSecret, 'POST', `/api/terminals/${att.data.id}/write`, { data }, userHeaders);
+    assert.equal(w.status, 200, JSON.stringify(w.data));
+  };
+  const send = (text, extra = {}) => requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: internal, text, from: 'test', ...extra }, userHeaders);
+  const queued = async () => (await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions')).data.sessions.find((s) => s.internalName === internal)?.queued || [];
+
+  // 1. Free agent, empty box: typed and submitted, once.
+  const first = await send('hello agent');
+  assert.equal(first.status, 200, JSON.stringify(first.data));
+  assert.equal(first.data.status, 'sent');
+  assert.deepEqual(await got(), ['hello agent']);
+  assert.equal(await box(), '');
+
+  // 2. Someone's draft in the box: the message waits, and never joins it.
+  await typeIn('my draft');
+  await until(async () => (await box()) === 'my draft', 5000, 'the draft');
+  const second = await send('second message');
+  assert.equal(second.data.status, 'queued');
+  assert.match(second.data.reason, /input box has text/);
+  await delay(4000);
+  assert.equal(await box(), 'my draft', 'the draft is untouched');
+  assert.deepEqual(await got(), ['hello agent'], 'nothing submitted over the draft');
+  const q = await queued();
+  assert.equal(q.length, 1);
+  assert.equal(q[0].from, 'test');
+  // The draft goes away: the message follows within seconds.
+  await typeIn('\x15');
+  await until(async () => (await got()).includes('second message'), 20000, 'the queued message to go');
+  assert.deepEqual(await got(), ['hello agent', 'second message']);
+  await until(async () => (await queued()).length === 0, 8000, 'the queue to empty');
+
+  // 3. A busy agent: queued, then typed when its turn ends.
+  await fs.writeFile(path.join(dir, 'BUSY'), '1');
+  await stamp('prompt', Date.now());
+  await delay(600);
+  const third = await send('after your turn');
+  assert.equal(third.data.status, 'queued');
+  await delay(5000);
+  assert.deepEqual(await got(), ['hello agent', 'second message'], 'not typed mid-turn');
+  assert.equal(await box(), '', 'nothing waiting inside the box');
+  await fs.rm(path.join(dir, 'BUSY'));
+  await stamp('turn', Date.now() + 1000);
+  await until(async () => (await got()).includes('after your turn'), 20000, 'delivery after the turn');
+
+  // 4. Enter does nothing (a stuck box): hop takes its text back out — never
+  //    left typed and unsent — and tries again.
+  await fs.writeFile(path.join(dir, 'STUCK'), '1');
+  const fourth = await send('will not submit');
+  assert.equal(fourth.data.status, 'queued');
+  assert.match(fourth.data.reason, /took it back out/);
+  assert.equal(await box(), '', 'the box is empty again');
+  await fs.rm(path.join(dir, 'STUCK'));
+  await until(async () => (await got()).includes('will not submit'), 25000, 'the retry');
+  assert.equal((await got()).filter((l) => l === 'will not submit').length, 1, 'sent once');
+
+  // 5. ⌘⌥⏎ mid-turn: what is typed leaves the box for the queue, and goes
+  //    when the turn ends.
+  await fs.writeFile(path.join(dir, 'BUSY'), '1');
+  await stamp('prompt', Date.now() + 2000);
+  await typeIn('later please');
+  await until(async () => (await box()) === 'later please', 5000, 'the typed text');
+  await delay(2500);
+  const moved = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/queue-input', { internalName: internal }, userHeaders);
+  assert.equal(moved.status, 200, JSON.stringify(moved.data));
+  assert.equal(moved.data.status, 'queued');
+  assert.equal(moved.data.text, 'later please');
+  assert.equal(await box(), '', 'moved out of the box');
+  await fs.rm(path.join(dir, 'BUSY'));
+  await stamp('turn', Date.now() + 3000);
+  await until(async () => (await got()).includes('later please'), 20000, 'the moved message to go');
+
+  // Agents reach only sessions they may; a shell gets the line as typed.
+  const denied = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: internal, text: 'x' }, agentHeaders);
+  assert.equal(denied.status, 403);
+  const notAgent = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'qshell', cwd: tempDir }, userHeaders);
+  const shellInternal = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions')).data.sessions.find((s) => s.displayName === 'qshell').internalName;
+  const asAgentOnly = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: shellInternal, text: 'echo hi', agentOnly: true }, userHeaders);
+  assert.equal(asAgentOnly.data.status, 'not-agent');
+  assert.ok(notAgent.data.id);
+});

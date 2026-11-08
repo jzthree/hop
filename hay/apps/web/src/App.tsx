@@ -59,9 +59,10 @@ import { PulsePage } from "./components/PulsePage";
 import { UpdatePop, useUpdateInfo } from "./components/UpdateNotice";
 import { currentNames, renamer, threadFor, useBriefing } from "./utils/briefingFeed";
 import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
-import { sendLineToSession } from "./utils/quickReply";
+import { QueueCard, normalizeQueued, type QueuedMessage } from "./components/QueueCard";
+import { sendToSession } from "./utils/quickReply";
 import type { ViewsSummary } from "./utils/switcherModel";
-import { isAppCtrlEnter, isFullscreenChord } from "./utils/fullscreenChord";
+import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscreenChord";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
 import { watchLiveness } from "./utils/socketLiveness";
 
@@ -392,6 +393,8 @@ type SessionInfo = {
   // Scheduled check-backs waiting on this session (hop checkback).
   checkbacks?: number;
   checkbackNext?: number;
+  // Messages hop holds until the agent's turn ends (components/QueueCard).
+  queued?: QueuedMessage[];
   codexAutomations?: number;
   attentionReason?: string;
   attentionNote?: string;
@@ -850,6 +853,8 @@ const App = () => {
   const handleUserInputRef = useRef<((data: string) => void) | null>(null);
   const pushNoticeRef = useRef<((m: string) => void) | null>(null);
   const foregroundIsClaudeRef = useRef<(() => boolean) | null>(null);
+  // ⌘⌥⏎: what is typed in the agent's box goes when its turn ends.
+  const queueInputRef = useRef<() => void>(() => {});
   // Custom overlay scrollbar (native overlay bars can't be styled, and styled
   // webkit bars reserve layout width): a floating semi-transparent thumb.
   const termScrollbarRef = useRef<HTMLDivElement | null>(null);
@@ -2628,6 +2633,15 @@ const App = () => {
         }
         return false;
       }
+      // ⌘⌥⏎ (Ctrl+Alt+Enter off a Mac): send what is typed when the
+      // agent's turn ends — Codex's Tab, for Claude too (see queue-input).
+      if (isQueueChord(event)) {
+        if (event.type === 'keydown') {
+          event.preventDefault();
+          queueInputRef.current();
+        }
+        return false;
+      }
       if (isAppCtrlEnter(event) && (remoteKbdEnhancedRef.current || foregroundIsClaude())) {
         if (event.type === 'keydown') {
           event.preventDefault();
@@ -3594,6 +3608,8 @@ const App = () => {
           checkbacks: Number(s.checkbacks) > 0 ? Number(s.checkbacks) : undefined,
           checkbackNext: Number(s.checkbackNext) > 0 ? Number(s.checkbackNext) : undefined,
           codexAutomations: Number(s.codexAutomations) > 0 ? Number(s.codexAutomations) : undefined,
+          // Messages waiting for the turn to end: the card above the terminal.
+          queued: normalizeQueued(s.queued),
           interactionScore: Number(s.interactionScore) > 0 ? Number(s.interactionScore) : 0,
           cols: Number.isInteger(s.cols) ? s.cols : undefined,
           rows: Number.isInteger(s.rows) ? s.rows : undefined,
@@ -4803,19 +4819,65 @@ const App = () => {
     if (which === "views") { setPlace(null); setViewsOpen({ page: true }); return; }
     openPlace(which);
   };
-  // A briefing story's reply chip: the answer typed into its session.
-  const replyToSession = (key: string, text: string) => {
-    const info = sessions.find((x) => (x.internalName || x.name) === key);
-    return sendLineToSession(resolveTunnelWsUrl(), key, text, { userName: name, cols: info?.cols, rows: info?.rows });
+  // A briefing story's reply chip (or a pulse note): the answer typed into
+  // its session by hop — now if the agent is free, else held and typed when
+  // its turn ends, never left waiting in its input box.
+  const replyToSession = async (key: string, text: string, from = "you (briefing)"): Promise<boolean | "queued"> => {
+    const r = await sendToSession(key, text, from);
+    if (!r.status) { if (r.error) pushNotice(r.error); return false; }
+    void fetchSessions({ showLoading: false });
+    if (r.status === "queued") {
+      const info = sessions.find((x) => (x.internalName || x.name) === key);
+      pushNotice(`Queued for ${info?.displayName || key}: it goes when the turn ends`);
+      return "queued";
+    }
+    return true;
+  };
+  // The queue's own controls (QueueCard), and ⌘⌥⏎.
+  const queueOp = async (op: "now" | "edit" | "retry" | "cancel", id: string, text?: string) => {
+    const url = op === "cancel" ? "/api/checkbacks/cancel" : `/api/queue/${op}`;
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, text }) });
+      const data = await res.json().catch(() => ({})) as { status?: string; error?: string; reason?: string };
+      if (!res.ok) pushNotice(data.error || "That didn't work");
+      else if (op === "now" && data.status === "queued" && data.reason) pushNotice(`Not sent yet: ${data.reason}`);
+    } catch { pushNotice("That didn't work"); }
+    void fetchSessions({ showLoading: false });
+  };
+  const [queueHidden, setQueueHidden] = useState(false);
+  // Something new queued shows the card again.
+  const queuedCount = currentInfo?.queued?.length || 0;
+  const prevQueuedRef = useRef(0);
+  useEffect(() => {
+    if (queuedCount > prevQueuedRef.current) setQueueHidden(false);
+    prevQueuedRef.current = queuedCount;
+  }, [queuedCount, currentKey]);
+  queueInputRef.current = () => {
+    const room = session?.room;
+    if (!room) return;
+    void (async () => {
+      try {
+        const res = await fetch("/api/sessions/queue-input", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: room })
+        });
+        const data = await res.json().catch(() => ({})) as { status?: string; error?: string; warning?: string };
+        if (!res.ok) { pushNotice(data.error || "Couldn't queue it"); return; }
+        if (data.status === "empty") pushNotice("Nothing typed to send later");
+        else if (data.status === "queued-in-agent") pushNotice("Queued in Codex: it goes when this turn ends");
+        else if (data.status === "queued") { setQueueHidden(false); pushNotice(data.warning ? `Queued. ${data.warning}` : "Queued: it goes when this turn ends"); }
+        // "sent": the agent was free, so it went as Enter would send it.
+        void fetchSessions({ showLoading: false });
+      } catch { pushNotice("Couldn't queue it"); }
+    })();
   };
   // A pulse follow-up, as on the phone: the session that owns the item gets
   // a one-line note; else an earlier follow-up opens; else a new session in
   // the item's folder runs the command mybot prepared, and opens.
   const pulseFollowUp = async (a: PulseAction): Promise<boolean> => {
     if (a.targetInternalName && a.message && sessions.some((x) => (x.internalName || x.name) === a.targetInternalName)) {
-      const ok = await replyToSession(a.targetInternalName, a.message);
-      if (ok) pushNotice(`Sent to ${a.targetName || a.targetInternalName}`);
-      return ok;
+      const ok = await replyToSession(a.targetInternalName, a.message, "you (pulse)");
+      if (ok === true) pushNotice(`Sent to ${a.targetName || a.targetInternalName}`);
+      return !!ok;
     }
     const existing = sessions.find((x) => x.name === a.sessionName || x.displayName === a.sessionName);
     if (existing) { setPlace(null); goToSession(existing.internalName || existing.name); return true; }
@@ -5721,11 +5783,28 @@ const App = () => {
                       <button type="button" className="terminal-find-btn" onClick={closeSearch} aria-label="Close search">✕</button>
                     </div>
                   )}
+                  {!!currentInfo?.queued?.length && !queueHidden && (
+                    <QueueCard items={currentInfo.queued}
+                               agentLabel={currentInfo.agent === "codex" ? "Codex" : currentInfo.agent === "claude" ? "Claude" : "the agent"}
+                               onSendNow={(id) => queueOp("now", id)}
+                               onEdit={(id, text) => queueOp("edit", id, text)}
+                               onCancel={(id) => queueOp("cancel", id)}
+                               onRetry={(id) => queueOp("retry", id)}
+                               onCollapse={() => { setQueueHidden(true); focusTerminalSoon(); }} />
+                  )}
                 </div>
                 <div className="terminal-footer">
                   <span className="footer-chip">{sessionLabel || session.room}</span>
                   {liveCwd ? <span className="footer-cwd">{liveCwd}</span> : null}
                   <span className="footer-spacer" />
+                  {!!currentInfo?.queued?.length && (
+                    <button type="button" className={"footer-queue" + (currentInfo.queued.some((q) => q.failed || q.paused) ? " trouble" : "")}
+                            aria-pressed={!queueHidden}
+                            title={queueHidden ? "Show the queued messages" : "Hide the queued messages"}
+                            onClick={() => setQueueHidden((v) => !v)}>
+                      ⧗ {currentInfo.queued.length} queued
+                    </button>
+                  )}
                   {visibleStatus === "connected" ? (
                     <>
                       <button type="button" className="footer-find-toggle" aria-label="Find in terminal" onClick={openSearch}>

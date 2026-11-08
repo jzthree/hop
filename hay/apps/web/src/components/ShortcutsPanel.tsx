@@ -35,6 +35,7 @@ export const handyRows = (isMac: boolean): Row[] => {
     { keys: mod("F"), what: "find — in a terminal, or the session search on the wall" },
     { keys: mod("B"), what: "show / hide the sidebar" },
     { keys: mod("S", true), what: "a session's calendar — what is coming up, and back" },
+    { keys: isMac ? "⌘⌥⏎" : "Ctrl+Alt+⏎", what: "send what you typed when the agent's turn ends (Codex's Tab, for Claude too)" },
     { keys: mod("/"), what: "this guide" },
     { keys: "+ / −", what: "tile size on the wall" },
     { keys: isMac ? "⌘." : "Ctrl+.", what: "let go of a live tile" },

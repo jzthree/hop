@@ -35,7 +35,8 @@ type Props = {
   scopeLabel?: string | null;
   onScope?: (all: boolean) => void;
   onOpenSession: (key: string) => void;
-  onReply?: (key: string, text: string) => Promise<boolean>;
+  /** True once typed in; "queued" when the agent is busy and hop will type it when the turn ends. */
+  onReply?: (key: string, text: string) => Promise<boolean | "queued">;
   markSeen: (stamp?: string) => void;
   markRead: (edition: string, session: string) => void;
   onClose: () => void;
@@ -86,6 +87,8 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
   useEffect(() => { try { sessionStorage.setItem("hop_brief_index", String(index)); } catch { /* private window */ } }, [index]);
   const [sending, setSending] = useState<string | null>(null);
   const [sent, setSent] = useState<Set<string>>(new Set());
+  // Answers hop is holding until the agent's turn ends (shown ⧗, not ✓).
+  const [queued, setQueued] = useState<Set<string>>(new Set());
   const [allEarlier, setAllEarlier] = useState(false);
   const [skipped, setSkipped] = useState<Set<string>>(loadSkipped);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -132,6 +135,7 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
     setSending(null);
     if (ok) {
       setSent((prev) => new Set(prev).add(k));
+      if (ok === "queued") setQueued((prev) => new Set(prev).add(k));
       witnessRef.current?.acted(edition, item.session);
       markRead(edition, item.session);
     }
@@ -181,9 +185,10 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
           const k = edition + "|" + item.session + "|" + r;
           return onReply ? (
             <button key={r} type="button" className={"brief-reply" + (sent.has(k) ? " sent" : "")}
-                    disabled={!!sending || answered} title={`Type “${r}” into ${label(item.session)}`}
+                    disabled={!!sending || answered}
+                    title={queued.has(k) ? `Queued: hop types “${r}” into ${label(item.session)} when its turn ends` : `Type “${r}” into ${label(item.session)}`}
                     onClick={() => void reply(item, edition, r)}>
-              {sent.has(k) ? "✓ " : sending === k ? "… " : ""}{r}
+              {queued.has(k) ? "⧗ " : sent.has(k) ? "✓ " : sending === k ? "… " : ""}{r}
             </button>
           ) : <span key={r} className="brief-reply static">{r}</span>;
         })}

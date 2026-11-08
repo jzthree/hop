@@ -31,6 +31,8 @@ export type RailSession = {
   unread?: boolean;
   bellUnseen?: boolean;
   checkbacks?: number;
+  /** Messages hop holds until the agent's turn ends. */
+  queued?: Array<{ id: string }>;
   cwd?: string;
   agent?: "claude" | "codex" | "antigravity" | null;
   agentHome?: { dir: string; label: string; isDefault: boolean } | null;
@@ -388,6 +390,11 @@ export const SessionRail = ({ closed, onBringBack, onForgetClosed, sessions, fol
         {!!s.checkbacks && (
           <span className="rail-mark rail-sched" title={`${s.checkbacks} check-back${s.checkbacks === 1 ? "" : "s"} scheduled`}>
             <RailIcon name="scheduled" />{s.checkbacks}
+          </span>
+        )}
+        {!!s.queued?.length && (
+          <span className="rail-mark rail-queued" title={`${s.queued.length} message${s.queued.length === 1 ? "" : "s"} queued for when the turn ends`}>
+            ⧗{s.queued.length}
           </span>
         )}
         {/* News, not an error: a spark, never a warning sign. */}

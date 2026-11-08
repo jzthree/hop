@@ -16,3 +16,13 @@ export function isAppCtrlEnter(ev: Chord, mac = IS_MAC): boolean {
   return ev.key === "Enter" && ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey
     && !isFullscreenChord(ev, mac);
 }
+
+/**
+ * ⌘⌥⏎ (Ctrl+Alt+Enter off a Mac): send what is typed in the agent's box
+ * when its turn ends — what Tab is in Codex, for every agent. (⌘⇧⏎ zooms a
+ * pane; ⌥⏎ alone is a newline in Claude.)
+ */
+export function isQueueChord(ev: Chord, mac = IS_MAC): boolean {
+  if (ev.key !== "Enter" || !ev.altKey || ev.shiftKey) return false;
+  return mac ? ev.metaKey && !ev.ctrlKey : ev.ctrlKey && !ev.metaKey;
+}

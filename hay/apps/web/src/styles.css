@@ -6957,3 +6957,68 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 .passkey-nudge-no { border: 0; background: none; color: var(--ink-muted, var(--muted)); }
 .passkey-nudge-no:hover { color: var(--ink); background: none; transform: none; }
 @media (max-width: 560px) { .passkey-nudge { left: 12px; right: 12px; bottom: 12px; } }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Queued messages (components/QueueCard): what hop is holding for an agent
+   until its turn ends. A card at the terminal's top right — never over the
+   input box at the bottom, never taking rows from the terminal — in hop's
+   violet; trouble (would not go, or typing joined it) in amber.
+   ════════════════════════════════════════════════════════════════════════ */
+.queue-card {
+  position: absolute; top: 8px; right: 18px; z-index: 6;
+  width: min(380px, calc(100% - 36px)); max-height: 55%; overflow: auto;
+  background: var(--card-bg, var(--panel)); color: var(--ink);
+  border: 1px solid var(--card-line, var(--line)); border-left: 3px solid #7c3aed; border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(24, 18, 48, 0.18); padding: 8px 10px 6px;
+  font: 400 12.5px/1.4 var(--font-sans);
+}
+/* With the find bar up, the card sits below it. */
+.terminal-find ~ .queue-card { top: 52px; }
+.queue-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.queue-glyph { color: #7c3aed; font-size: 13px; }
+.queue-title { font: 600 12px/1.3 var(--font-sans); }
+.queue-spacer { flex: 1; }
+.queue-collapse {
+  border: 0; background: none; color: var(--ink-muted); cursor: pointer; font: 600 15px/1 var(--font-sans);
+  padding: 0 4px; border-radius: 5px; transform: none;
+}
+.queue-collapse:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); transform: none; }
+.queue-row { padding: 6px 0 4px; border-top: 1px solid var(--card-line, var(--line)); }
+.queue-row.sending { opacity: 0.6; }
+.queue-meta { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; }
+.queue-from { font: 600 11px/1.3 var(--font-mono); color: #7c3aed; }
+.queue-state { font-size: 11px; color: var(--ink-muted); }
+.queue-row.trouble .queue-state { color: #b45309; }
+.queue-text {
+  margin: 3px 0 4px; white-space: pre-wrap; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.queue-acts { display: flex; gap: 4px; flex-wrap: wrap; }
+.queue-btn {
+  border: 1px solid var(--card-line, var(--line)); background: var(--card-bg, var(--panel)); color: var(--ink);
+  border-radius: 6px; padding: 1px 8px; font: 600 11px/1.6 var(--font-sans); cursor: pointer; transform: none;
+}
+.queue-btn:hover:not(:disabled) { border-color: #7c3aed; color: #6d28d9; transform: none; }
+.queue-btn.primary { border-color: color-mix(in srgb, #7c3aed 55%, var(--card-line, var(--line))); }
+.queue-btn:disabled { opacity: 0.45; cursor: default; }
+.queue-edit textarea {
+  width: 100%; margin: 4px 0; padding: 5px 7px; border-radius: 6px; resize: vertical;
+  border: 1px solid var(--card-line, var(--line)); background: var(--bg, var(--panel)); color: var(--ink);
+  font: 400 12.5px/1.4 var(--font-sans);
+}
+.footer-queue {
+  font: 600 11px/1 var(--font-mono); color: #7c3aed; cursor: pointer; transform: none;
+  background: color-mix(in srgb, #7c3aed 10%, transparent); border: 1px solid color-mix(in srgb, #7c3aed 35%, transparent);
+  border-radius: 6px; padding: 3px 7px; margin-right: 6px; white-space: nowrap; flex-shrink: 0;
+}
+.footer-queue.trouble { color: #b45309; background: color-mix(in srgb, #f59e0b 12%, transparent); border-color: color-mix(in srgb, #f59e0b 40%, transparent); }
+.footer-queue:hover { transform: none; filter: brightness(1.05); }
+.rail-queued { color: #7c3aed; font: 600 11px/1 var(--font-sans); font-variant-numeric: tabular-nums; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .queue-from, :root:not([data-theme="light"]) .footer-queue,
+  :root:not([data-theme="light"]) .rail-queued, :root:not([data-theme="light"]) .queue-glyph { color: #c4b5fd; }
+  :root:not([data-theme="light"]) .queue-row.trouble .queue-state, :root:not([data-theme="light"]) .footer-queue.trouble { color: #fbbf24; }
+}
+:root[data-theme="dark"] .queue-from, :root[data-theme="dark"] .footer-queue,
+:root[data-theme="dark"] .rail-queued, :root[data-theme="dark"] .queue-glyph { color: #c4b5fd; }
+:root[data-theme="dark"] .queue-row.trouble .queue-state, :root[data-theme="dark"] .footer-queue.trouble { color: #fbbf24; }

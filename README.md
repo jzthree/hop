@@ -275,6 +275,17 @@ and survive daemon restarts; the wall shows ⏰ on a session that has one
 waiting. Agents get the same over MCP (`hop_checkback`, `hop_list_checkbacks`,
 `hop_cancel_checkback`) and are told to use it on themselves.
 
+### Send it when the agent is done (the queue)
+
+A message for an agent that is busy is held by hop, not typed into its input
+box to wait there: hop types it when the turn ends, into an empty box, and
+checks it went. While it waits, a card at the terminal's top right shows it:
+who it is from, Send now, Edit, Cancel. A briefing reply, another agent's
+`hopa send`, and your own **⌘⌥⏎** (Ctrl+Alt+⏎ off a Mac: Codex's Tab, for
+Claude too) all go this way. hop never types into a box that has your
+half-typed text in it, and if a message will not submit, hop takes it back
+out of the box rather than leave it there unsent.
+
 ### Render LaTeX math (`hop math`)
 
 Glance at a formula without leaving the terminal:

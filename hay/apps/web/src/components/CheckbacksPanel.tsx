@@ -78,7 +78,8 @@ export const CheckbacksPanel = ({ session, sessionName, onClose, onChanged, onOp
     fetch(all ? "/api/checkbacks" : `/api/checkbacks?session=${encodeURIComponent(session)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((d) => {
-        setItems(Array.isArray(d?.items) ? d.items : []);
+        // The queue (messages waiting for a turn to end) has its own card above the terminal.
+        setItems(Array.isArray(d?.items) ? d.items.filter((c: { queued?: boolean }) => !c.queued) : []);
         setAutomations(Array.isArray(d?.automations) ? d.automations : []);
         setFailed(false);
       })

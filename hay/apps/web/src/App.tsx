@@ -865,6 +865,7 @@ const App = () => {
   // Input held while a replace in the box is under way (null: none is).
   const boxEditQueueRef = useRef<string[] | null>(null);
   const boxClickRef = useRef<(press: MouseEvent) => void>(() => {});
+  const codexBoxPressRef = useRef<(press: MouseEvent) => boolean>(() => false);
   // Custom overlay scrollbar (native overlay bars can't be styled, and styled
   // webkit bars reserve layout width): a floating semi-transparent thumb.
   const termScrollbarRef = useRef<HTMLDivElement | null>(null);
@@ -1019,7 +1020,8 @@ const App = () => {
   const foregroundIsClaude = () => {
     const room = activeSessionRoomRef.current;
     if (room) {
-      const s = sessionsRef.current.find((x) => (x.internalName || x.name) === room);
+      const lc = room.toLowerCase();
+      const s = sessionsRef.current.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
       const proc = (s?.foregroundProcess || "").trim();
       if (proc === "claude" || /^\d+\.\d+\.\d+$/.test(proc)) return true;
     }
@@ -1031,7 +1033,11 @@ const App = () => {
   currentSessionAgentRef.current = () => {
     const room = activeSessionRoomRef.current;
     if (!room) return null;
-    const s = sessionsRef.current.find((x) => (x.internalName || x.name) === room);
+    // The room may be the session's display name (from the URL), not its
+    // internal one: matched on internal only, a session whose names differ
+    // (angler-codex / angler-codex-mechanistic) never read as Codex.
+    const lc = room.toLowerCase();
+    const s = sessionsRef.current.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
     return s?.agent || null;
   };
   const drawerOpenRef = useRef(drawerOpen);
@@ -1571,23 +1577,30 @@ const App = () => {
     });
   }
 
-  // ── The agent's input box (utils/inputBox), Claude only, where both are
-  // verified: a click moves its cursor; typing over a selection made inside
-  // the box replaces it.
+  // ── The agent's input box (utils/inputBox), verified against the real
+  // apps: a click moves the cursor (Claude and Codex); typing over a
+  // selection made inside the box replaces it (Claude, by hop — Codex does
+  // that itself, so presses in its box are left to it). Only while the app
+  // reads the mouse: to one that does not, a click's escape sequence could
+  // arrive as typed text.
+  // The APP's mouse mode, not xterm's: while a drag's selection stands,
+  // hop has switched tracking off locally (utils/dragSelect).
+  const boxEditable = () =>
+    !!termRef.current && remoteMouseReportingRef.current
+    && (foregroundIsClaude() || currentSessionAgentRef.current?.() === "codex");
   // A mouse report goes straight to the app — not through the typing path,
   // which would mark this window as typing.
   const sendMouseClick = (col: number, row: number) => {
-    const t = termRef.current as unknown as { _core?: { coreMouseService?: { activeEncoding?: string } } } | null;
-    if (!t || wsRef.current?.readyState !== WebSocket.OPEN) return;
-    const { press, release } = mouseClick(col, row, String(t._core?.coreMouseService?.activeEncoding || "SGR"));
+    if (!termRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    const { press, release } = mouseClick(col, row, remoteMouseSgrRef.current ? "SGR" : "DEFAULT");
     const passive = document.hasFocus() ? {} : { passive: true };
     sendMessage({ type: "input", data: press, ...passive });
     window.setTimeout(() => sendMessage({ type: "input", data: release, ...passive }), 30);
   };
-  // The selection, when it lies inside Claude's input box.
+  // The selection, when it lies inside the agent's input box.
   const boxSelection = () => {
     const t = termRef.current;
-    if (!t || !t.hasSelection() || !foregroundIsClaude()) return null;
+    if (!t || !t.hasSelection() || !boxEditable() || !foregroundIsClaude()) return null;
     const pos = t.getSelectionPosition();
     if (!pos) return null;
     const buf = t.buffer.active;
@@ -1641,8 +1654,21 @@ const App = () => {
     return true;
   };
   replaceBoxSelectionRef.current = replaceBoxSelection;
+  // A press inside Codex's input box: Codex selects there itself.
+  codexBoxPressRef.current = (press: MouseEvent) => {
+    if (foregroundIsClaude() || currentSessionAgentRef.current?.() !== "codex") return false;
+    const screen = containerRef.current?.querySelector(".xterm-screen") as HTMLElement | null;
+    const t = termRef.current;
+    if (!screen || !t) return false;
+    const cell = cellAtPoint(screen, containerRef.current?.querySelector(".xterm-rows") as HTMLElement | null, t.cols, t.rows, press.clientX, press.clientY);
+    if (!cell) return false;
+    const buf = t.buffer.active;
+    const box = inputBoxRows((r: number) => buf.getLine(r)?.translateToString(true), buf.baseY + buf.cursorY);
+    const row = buf.viewportY + cell.row;
+    return !!box && row >= box.start && row <= box.end;
+  };
   boxClickRef.current = (press: MouseEvent) => {
-    if (!foregroundIsClaude()) return;
+    if (!boxEditable()) return;
     const screen = containerRef.current?.querySelector(".xterm-screen") as HTMLElement | null;
     const t = termRef.current;
     if (!screen || !t) return;
@@ -1650,7 +1676,7 @@ const App = () => {
     if (cell) sendMouseClick(cell.col, cell.row);
   };
   const handleUserInput = (data: string) => {
-    // A replace in Claude's input box is under way: this follows it.
+    // A replace in the agent's input box is under way: this follows it.
     if (boxEditQueueRef.current) { boxEditQueueRef.current.push(data); return; }
     // Typing is "I am at the prompt": any earlier scroll-up turned
     // follow-mode OFF, so the line you just submitted (and everything the
@@ -2578,9 +2604,11 @@ const App = () => {
     (terminal as any).__dragSelectCleanup = installDragSelect(terminal as never,
       (containerRef.current.closest(".terminal-scroll") as HTMLElement | null) || containerRef.current, () =>
       foregroundIsClaudeRef.current?.() === true || currentSessionAgentRef.current?.() === "codex",
-      // A click that selected nothing goes to the app: Claude moves its cursor there.
-      (press) => boxClickRef.current(press));
-    // Pasting over a selection made inside Claude's input box replaces it too.
+      // A click that selected nothing goes to the app: Claude and Codex move their cursor there.
+      (press) => boxClickRef.current(press),
+      // Codex selects (and replaces) in its own input box: presses there are its.
+      (press) => codexBoxPressRef.current(press));
+    // Pasting over a selection made inside the agent's input box replaces it too.
     terminal.textarea?.addEventListener("paste", (ev: ClipboardEvent) => {
       const text = ev.clipboardData?.getData("text/plain");
       if (text && terminal.hasSelection() && replaceBoxSelectionRef.current(text, true)) {
@@ -2733,7 +2761,7 @@ const App = () => {
         }
         return false;
       }
-      // Typing over a selection made inside Claude's input box replaces it,
+      // Typing over a selection made inside the agent's input box replaces it,
       // as in any text field (utils/inputBox).
       if (event.type === 'keydown' && !event.isComposing && !event.metaKey && !event.ctrlKey
           && (event.key.length === 1 || event.key === 'Backspace' || event.key === 'Delete')

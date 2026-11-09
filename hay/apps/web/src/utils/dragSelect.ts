@@ -19,6 +19,11 @@
 // a press that ends without selecting anything, without moving, is handed
 // back to the app as a click (`onClick`, which the caller sends as a mouse
 // report in the app's own encoding).
+//
+// Codex selects text in its own input box with the mouse — a drag there,
+// then typing, replaces the selection, as in a text field. A press the
+// caller says the app takes (`appTakesPress`: in Codex, a press inside its
+// input box) is left alone, so the app gets the press, the drag and the release.
 
 export type TrackingTerminal = {
   modes: { mouseTrackingMode: string };
@@ -52,7 +57,8 @@ export const installDragSelect = (
   terminal: TrackingTerminal,
   element: HTMLElement,
   agentSurface: () => boolean,
-  onClick?: (press: MouseEvent) => void
+  onClick?: (press: MouseEvent) => void,
+  appTakesPress?: (press: MouseEvent) => boolean
 ): (() => void) => {
   let paused: { prev: string; sub: { dispose: () => void } | null } | null = null;
   // The selecting press under way: where it went down, for telling a click from a drag.
@@ -93,7 +99,8 @@ export const installDragSelect = (
     if (!m) return;
     let trackingMode = "none";
     try { trackingMode = terminal.modes.mouseTrackingMode; } catch { return; }
-    const local = shouldSelectLocally({ button: ev.button, metaKey: ev.metaKey, ctrlKey: ev.ctrlKey, trackingMode, agentSurface: agentSurface() });
+    const local = shouldSelectLocally({ button: ev.button, metaKey: ev.metaKey, ctrlKey: ev.ctrlKey, trackingMode, agentSurface: agentSurface() })
+      && !(appTakesPress?.(ev) ?? false);
     if (paused) {
       // Already paused for a standing selection: another selecting press
       // just replaces it; any other press hands the mouse back first.

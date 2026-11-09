@@ -119,3 +119,17 @@ describe("installDragSelect — a click that selected nothing goes to the app (C
     off(); el.remove();
   });
 });
+
+describe("installDragSelect — a press the app takes (Codex's own input box) is left to it", () => {
+  it("tracking stays on, so the press, the drag and the release reach the app", () => {
+    const t = fakeTerminal("drag", "DRAG");
+    const el = document.createElement("div"); document.body.appendChild(el);
+    const clicks: unknown[] = [];
+    const off = installDragSelect(t, el, () => true, (p) => clicks.push(p), () => true);
+    el.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true, clientX: 10, clientY: 10 }));
+    expect(t.mouse.activeProtocol).toBe("DRAG");
+    window.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true, clientX: 10, clientY: 10 }));
+    expect(clicks).toEqual([]);   // the app had the real click; nothing synthesized
+    off(); el.remove();
+  });
+});

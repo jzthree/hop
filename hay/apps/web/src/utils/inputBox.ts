@@ -1,5 +1,6 @@
 // The agent's input box on the terminal screen, for the two edits hop makes
-// there on the person's behalf (Claude only, where both are verified):
+// there on the person's behalf (Claude and Codex, both verified against the
+// real apps; only while the app reads the mouse):
 //
 //  - a single click moves the cursor: hop pauses the app's mouse tracking on
 //    every press so a drag can select (utils/dragSelect), which also kept a
@@ -10,8 +11,9 @@
 //    deletes as many characters as were selected, then types the key.
 //
 // Claude's box: `❯ ` and the text, continuation rows indented two spaces,
-// between two ──── rules. Its own wrapping drops the space it breaks at, and
-// a word too long for a row is cut at the right edge.
+// between two ──── rules; Codex's: `› ` and the same indent, ended by a blank
+// row. Their wrapping drops the space it breaks at, and a word too long for
+// a row is cut at the right edge.
 
 const RULE = /^\s*[─━]{8,}/;
 const PROMPT = /^\s*[❯›>](\s|$)/;

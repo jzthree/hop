@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clickTargetAfter, inputBoxRows, mouseClick, selectedCharCount, selectionInBox } from "../src/utils/inputBox";
+import { clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox } from "../src/utils/inputBox";
 
 // Claude's box: "❯" and a no-break space, continuation rows indented two
 // spaces, between two rules.
@@ -39,5 +39,14 @@ describe("the agent's input box on screen", () => {
   it("a click is written in the app's mouse encoding", () => {
     expect(mouseClick(8, 21, "SGR")).toEqual({ press: "\x1b[<0;9;22M", release: "\x1b[<0;9;22m" });
     expect(mouseClick(8, 21, "DEFAULT")).toEqual({ press: "\x1b[M" + " " + String.fromCharCode(41) + String.fromCharCode(54), release: "\x1b[M" + "#" + String.fromCharCode(41) + String.fromCharCode(54) });
+  });
+});
+
+describe("wide characters", () => {
+  it("are noticed, so a replace among them is left to ordinary typing", () => {
+    expect(hasWideChars("hello world")).toBe(false);
+    expect(hasWideChars("改成中文")).toBe(true);
+    expect(hasWideChars("ship it 🚀")).toBe(true);
+    expect(hasWideChars("café — ok")).toBe(false);
   });
 });

@@ -46,6 +46,14 @@ export const contentStart = (text: string, firstRow: boolean): number => {
   return Math.min(2, text.length);
 };
 
+/**
+ * Characters drawn two cells wide (CJK, emoji): the counts here are by cell
+ * and the text by character, so a row holding one would count wrong, and a
+ * replace there is left to ordinary typing.
+ */
+const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|[\u{1f300}-\u{1faff}]/u;
+export const hasWideChars = (text: string): boolean => WIDE.test(text);
+
 export type Selection = { startRow: number; startCol: number; endRow: number; endCol: number }; // buffer rows; endCol exclusive
 
 /** The selection lies inside the box's text (the prompt glyph and indents may be swept up; they are not counted). */

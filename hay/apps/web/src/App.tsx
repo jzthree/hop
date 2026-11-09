@@ -61,7 +61,7 @@ import { currentNames, renamer, threadFor, useBriefing } from "./utils/briefingF
 import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
 import { QueueCard, normalizeQueued, type QueuedMessage } from "./components/QueueCard";
 import { sendToSession } from "./utils/quickReply";
-import { clickTargetAfter, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
+import { clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscreenChord";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
@@ -1609,6 +1609,8 @@ const App = () => {
     // xterm's selection position: 0-based columns, absolute rows, end exclusive.
     const sel: Selection = { startRow: pos.start.y, startCol: pos.start.x, endRow: pos.end.y, endCol: pos.end.x };
     if (!box || !selectionInBox(sel, box)) return null;
+    // Wide characters (CJK, emoji) make cell counts and text disagree.
+    for (let r = box.start; r <= box.end; r++) if (hasWideChars(line(r) || "")) return null;
     const n = selectedCharCount(line, sel, box, t.cols);
     if (n <= 0) return null;
     return { t, buf, line, box, sel, n };

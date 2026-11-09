@@ -85,3 +85,37 @@ describe("installDragSelect — tracking pauses for the drag and stays paused wh
     off();
   });
 });
+
+describe("installDragSelect — a click that selected nothing goes to the app (Claude moves its cursor there)", () => {
+  const down = (el: HTMLElement, x: number, y: number) => el.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true, clientX: x, clientY: y }));
+  const up = (x: number, y: number) => window.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true, clientX: x, clientY: y }));
+  it("a still click is handed over, with where it went down", () => {
+    const t = fakeTerminal("drag", "DRAG");
+    const el = document.createElement("div"); document.body.appendChild(el);
+    const clicks: Array<{ x: number; y: number }> = [];
+    const off = installDragSelect(t, el, () => true, (p) => clicks.push({ x: p.clientX, y: p.clientY }));
+    down(el, 40, 20); up(41, 20);
+    expect(clicks).toEqual([{ x: 40, y: 20 }]);
+    expect(t.mouse.activeProtocol).toBe("DRAG");
+    off(); el.remove();
+  });
+  it("a drag is not (it moved, or it selected text)", () => {
+    const t = fakeTerminal("drag", "DRAG");
+    const el = document.createElement("div"); document.body.appendChild(el);
+    const clicks: unknown[] = [];
+    const off = installDragSelect(t, el, () => true, (p) => clicks.push(p));
+    down(el, 40, 20); up(90, 20);           // moved, selected nothing
+    down(el, 40, 20); t.selected = true; up(40, 20); // selected (a double-click's word)
+    expect(clicks).toEqual([]);
+    off(); el.remove();
+  });
+  it("nothing is handed over outside an agent surface", () => {
+    const t = fakeTerminal("drag", "DRAG");
+    const el = document.createElement("div"); document.body.appendChild(el);
+    const clicks: unknown[] = [];
+    const off = installDragSelect(t, el, () => false, (p) => clicks.push(p));
+    down(el, 40, 20); up(40, 20);
+    expect(clicks).toEqual([]);
+    off(); el.remove();
+  });
+});

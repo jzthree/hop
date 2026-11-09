@@ -7,13 +7,18 @@
 // nothing" was really "nothing was ever selected" — the drag went to Claude,
 // which does nothing with it.
 //
-// Neither agent uses clicks or drags, only the wheel. So while the pointer
-// is down for a plain left drag on an agent surface, tracking is switched
-// off LOCALLY (xterm's protocol state is local anyway — the app is never
-// told), the drag selects, and the protocol is put back on release. The
-// wheel still reaches the app between drags. Other TUIs (vim, htop, tmux
-// with the mouse on) keep their drags: the gate is the agent surface, not
-// the tracking mode.
+// Neither agent uses drags, only the wheel. So while the pointer is down for
+// a plain left drag on an agent surface, tracking is switched off LOCALLY
+// (xterm's protocol state is local anyway — the app is never told), the
+// drag selects, and the protocol is put back on release. The wheel still
+// reaches the app between drags. Other TUIs (vim, htop, tmux with the mouse
+// on) keep their drags: the gate is the agent surface, not the tracking mode.
+//
+// Claude does use a CLICK — it moves its input cursor there — and pausing on
+// every press swallowed single clicks (only a double-click got through). So
+// a press that ends without selecting anything, without moving, is handed
+// back to the app as a click (`onClick`, which the caller sends as a mouse
+// report in the app's own encoding).
 
 export type TrackingTerminal = {
   modes: { mouseTrackingMode: string };
@@ -46,9 +51,12 @@ export const shouldSelectLocally = (o: {
 export const installDragSelect = (
   terminal: TrackingTerminal,
   element: HTMLElement,
-  agentSurface: () => boolean
+  agentSurface: () => boolean,
+  onClick?: (press: MouseEvent) => void
 ): (() => void) => {
   let paused: { prev: string; sub: { dispose: () => void } | null } | null = null;
+  // The selecting press under way: where it went down, for telling a click from a drag.
+  let press: MouseEvent | null = null;
   const mouse = () => terminal._core?.coreMouseService;
   const resume = () => {
     if (!paused) return;
@@ -60,11 +68,18 @@ export const installDragSelect = (
     // switching tracking off during the pause is its own decision).
     try { if (m && m.activeProtocol === "NONE") m.activeProtocol = prev; } catch { /* gone */ }
   };
-  const onUp = () => {
+  const onUp = (ev: MouseEvent) => {
+    const down = press;
+    press = null;
     if (!paused) return;
     let has = false;
     try { has = terminal.hasSelection(); } catch { has = false; }
-    if (!has) { resume(); return; }
+    if (!has) {
+      resume();
+      // A click, not a drag: the app gets it.
+      if (down && onClick && ev.button === 0 && Math.hypot(ev.clientX - down.clientX, ev.clientY - down.clientY) < 4) onClick(down);
+      return;
+    }
     if (!paused.sub) {
       paused.sub = terminal.onSelectionChange(() => {
         let still = false;
@@ -83,9 +98,11 @@ export const installDragSelect = (
       // Already paused for a standing selection: another selecting press
       // just replaces it; any other press hands the mouse back first.
       if (!local) resume();
+      press = local ? ev : null;
       return;
     }
     if (!local) return;
+    press = ev;
     const prev = m.activeProtocol;
     try { m.activeProtocol = "NONE"; } catch { return; }
     paused = { prev, sub: null };

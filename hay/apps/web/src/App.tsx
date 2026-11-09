@@ -61,6 +61,7 @@ import { currentNames, renamer, threadFor, useBriefing } from "./utils/briefingF
 import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
 import { QueueCard, normalizeQueued, type QueuedMessage } from "./components/QueueCard";
 import { sendToSession } from "./utils/quickReply";
+import { clickTargetAfter, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscreenChord";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
@@ -858,6 +859,12 @@ const App = () => {
   const foregroundIsClaudeRef = useRef<(() => boolean) | null>(null);
   // ⌘⌥⏎: what is typed in the agent's box goes when its turn ends.
   const queueInputRef = useRef<() => void>(() => {});
+  // The input box's click and replace (utils/inputBox), reached from the
+  // terminal's long-lived handlers.
+  const replaceBoxSelectionRef = useRef<(text: string | null, paste?: boolean) => boolean>(() => false);
+  // Input held while a replace in the box is under way (null: none is).
+  const boxEditQueueRef = useRef<string[] | null>(null);
+  const boxClickRef = useRef<(press: MouseEvent) => void>(() => {});
   // Custom overlay scrollbar (native overlay bars can't be styled, and styled
   // webkit bars reserve layout width): a floating semi-transparent thumb.
   const termScrollbarRef = useRef<HTMLDivElement | null>(null);
@@ -1564,7 +1571,87 @@ const App = () => {
     });
   }
 
+  // ── The agent's input box (utils/inputBox), Claude only, where both are
+  // verified: a click moves its cursor; typing over a selection made inside
+  // the box replaces it.
+  // A mouse report goes straight to the app — not through the typing path,
+  // which would mark this window as typing.
+  const sendMouseClick = (col: number, row: number) => {
+    const t = termRef.current as unknown as { _core?: { coreMouseService?: { activeEncoding?: string } } } | null;
+    if (!t || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    const { press, release } = mouseClick(col, row, String(t._core?.coreMouseService?.activeEncoding || "SGR"));
+    const passive = document.hasFocus() ? {} : { passive: true };
+    sendMessage({ type: "input", data: press, ...passive });
+    window.setTimeout(() => sendMessage({ type: "input", data: release, ...passive }), 30);
+  };
+  // The selection, when it lies inside Claude's input box.
+  const boxSelection = () => {
+    const t = termRef.current;
+    if (!t || !t.hasSelection() || !foregroundIsClaude()) return null;
+    const pos = t.getSelectionPosition();
+    if (!pos) return null;
+    const buf = t.buffer.active;
+    const line = (r: number) => buf.getLine(r)?.translateToString(true);
+    const box = inputBoxRows(line, buf.baseY + buf.cursorY);
+    // xterm's selection position: 0-based columns, absolute rows, end exclusive.
+    const sel: Selection = { startRow: pos.start.y, startCol: pos.start.x, endRow: pos.end.y, endCol: pos.end.x };
+    if (!box || !selectionInBox(sel, box)) return null;
+    const n = selectedCharCount(line, sel, box, t.cols);
+    if (n <= 0) return null;
+    return { t, buf, line, box, sel, n };
+  };
+  // Replace the box's selection: click after it (Claude puts its cursor
+  // there), wait for the cursor to land — nothing is deleted if it does not —
+  // delete the selected characters, then type `text` (null: Backspace/Delete).
+  const replaceBoxSelection = (text: string | null, paste = false): boolean => {
+    const hit = boxSelection();
+    if (!hit) return false;
+    const { t, buf, line, box, sel, n } = hit;
+    const target = clickTargetAfter(line, sel, box);
+    const row = target.row - buf.viewportY;
+    if (row < 0 || row >= t.rows) return false;
+    t.clearSelection();
+    // Keys typed while this is under way wait, and follow it in order —
+    // sent at once they landed before the deletion, in the wrong place.
+    boxEditQueueRef.current = [];
+    const finish = (landed: boolean) => {
+      const held = boxEditQueueRef.current || [];
+      boxEditQueueRef.current = null;
+      if (landed) {
+        handleUserInput("\x7f".repeat(n));
+        if (text) {
+          if (paste) t.paste(text);
+          else handleUserInput(text);
+        }
+      } else {
+        pushNotice("Couldn't put the cursor at the selection, so nothing was replaced");
+      }
+      for (const d of held) handleUserInput(d);
+    };
+    sendMouseClick(target.col, row);
+    void (async () => {
+      const t0 = Date.now();
+      // Claude redraws its cursor after the click; that can take a moment.
+      while (Date.now() - t0 < 2500) {
+        if (buf.baseY + buf.cursorY === target.row && buf.cursorX === target.col) { finish(true); return; }
+        await new Promise((r) => window.setTimeout(r, 25));
+      }
+      finish(false);
+    })();
+    return true;
+  };
+  replaceBoxSelectionRef.current = replaceBoxSelection;
+  boxClickRef.current = (press: MouseEvent) => {
+    if (!foregroundIsClaude()) return;
+    const screen = containerRef.current?.querySelector(".xterm-screen") as HTMLElement | null;
+    const t = termRef.current;
+    if (!screen || !t) return;
+    const cell = cellAtPoint(screen, containerRef.current?.querySelector(".xterm-rows") as HTMLElement | null, t.cols, t.rows, press.clientX, press.clientY);
+    if (cell) sendMouseClick(cell.col, cell.row);
+  };
   const handleUserInput = (data: string) => {
+    // A replace in Claude's input box is under way: this follows it.
+    if (boxEditQueueRef.current) { boxEditQueueRef.current.push(data); return; }
     // Typing is "I am at the prompt": any earlier scroll-up turned
     // follow-mode OFF, so the line you just submitted (and everything the
     // app printed after it) stayed below the fold — the "I hit enter and
@@ -2490,7 +2577,17 @@ const App = () => {
     // off), and a capture listener only sees presses on its own subtree.
     (terminal as any).__dragSelectCleanup = installDragSelect(terminal as never,
       (containerRef.current.closest(".terminal-scroll") as HTMLElement | null) || containerRef.current, () =>
-      foregroundIsClaudeRef.current?.() === true || currentSessionAgentRef.current?.() === "codex");
+      foregroundIsClaudeRef.current?.() === true || currentSessionAgentRef.current?.() === "codex",
+      // A click that selected nothing goes to the app: Claude moves its cursor there.
+      (press) => boxClickRef.current(press));
+    // Pasting over a selection made inside Claude's input box replaces it too.
+    terminal.textarea?.addEventListener("paste", (ev: ClipboardEvent) => {
+      const text = ev.clipboardData?.getData("text/plain");
+      if (text && terminal.hasSelection() && replaceBoxSelectionRef.current(text, true)) {
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+      }
+    }, true);
 
     // GPU-accelerated rendering (same renderer VS Code uses). Must load after
     // open(). If WebGL isn't available (old GPU, blocklisted driver) the
@@ -2635,6 +2732,16 @@ const App = () => {
           setSwitcherOpen(true);
         }
         return false;
+      }
+      // Typing over a selection made inside Claude's input box replaces it,
+      // as in any text field (utils/inputBox).
+      if (event.type === 'keydown' && !event.isComposing && !event.metaKey && !event.ctrlKey
+          && (event.key.length === 1 || event.key === 'Backspace' || event.key === 'Delete')
+          && terminal.hasSelection()) {
+        if (replaceBoxSelectionRef.current(event.key.length === 1 ? event.key : null)) {
+          event.preventDefault();
+          return false;
+        }
       }
       // ⌘⌥⏎ (Ctrl+Alt+Enter off a Mac): send what is typed when the
       // agent's turn ends — Codex's Tab, for Claude too (see queue-input).

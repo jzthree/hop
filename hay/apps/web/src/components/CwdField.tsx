@@ -11,6 +11,12 @@ import type { KeyboardEvent } from "react";
 //
 // With nothing typed, the directories of recent sessions are offered first:
 // a new session usually joins a project that already has one.
+//
+// A folder that is not there says so, with a "Create folder" button beside
+// it: the session cannot start in a missing folder (the daemon refuses it;
+// before, it quietly started in home — and Codex then made itself a scratch
+// folder under ~/Documents/Codex). Creating stays a deliberate click, so a
+// typo never leaves a stray folder behind.
 
 type Entry = { name: string; path: string };
 
@@ -29,6 +35,40 @@ export const CwdField = ({ value, onChange, recent, id }: {
   const [source, setSource] = useState<"recent" | "fs">("fs");
   const seq = useRef(0);
   const timer = useRef<number | null>(null);
+  // Is the typed folder there? null: nothing typed, or not checked yet.
+  const [folder, setFolder] = useState<null | { shown: string; exists: boolean; isDirectory: boolean }>(null);
+  const [making, setMaking] = useState(false);
+  const [makeError, setMakeError] = useState<string | null>(null);
+  const checkSeq = useRef(0);
+  const checkTimer = useRef<number | null>(null);
+  const check = (q: string) => {
+    const mine = ++checkSeq.current;
+    if (!q.trim()) { setFolder(null); return; }
+    fetch(`/api/fs/folder?path=${encodeURIComponent(q)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { shown?: string; exists?: boolean; isDirectory?: boolean } | null) => {
+        if (mine !== checkSeq.current || !d || !d.shown) return;
+        setFolder({ shown: d.shown, exists: !!d.exists, isDirectory: !!d.isDirectory });
+      })
+      .catch(() => { /* the daemon will say so on Create */ });
+  };
+  useEffect(() => {
+    setMakeError(null);
+    if (checkTimer.current) window.clearTimeout(checkTimer.current);
+    checkTimer.current = window.setTimeout(() => check(value), 250);
+    return () => { if (checkTimer.current) window.clearTimeout(checkTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  const makeFolder = async () => {
+    setMaking(true);
+    setMakeError(null);
+    try {
+      const res = await fetch("/api/fs/folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: value }) });
+      const d = await res.json().catch(() => ({})) as { error?: string; shown?: string };
+      if (!res.ok) { setMakeError(d.error || "Couldn't create it"); return; }
+      check(value);
+    } catch { setMakeError("Couldn't create it"); } finally { setMaking(false); }
+  };
 
   const showRecent = () => {
     setSource("recent");
@@ -103,6 +143,18 @@ export const CwdField = ({ value, onChange, recent, id }: {
         onBlur={() => setOpen(false)}
         onKeyDown={onKey}
       />
+      {folder && !folder.exists && value.trim() && (
+        <div className="cwd-status missing" role="status">
+          <span>No folder at <code>{folder.shown}</code> yet</span>
+          <button type="button" className="cwd-make" disabled={making}
+                  // mousedown would blur the field first; a click is fine here.
+                  onClick={() => void makeFolder()}>{making ? "Creating…" : "Create folder"}</button>
+          {makeError && <span className="cwd-make-error">{makeError}</span>}
+        </div>
+      )}
+      {folder && folder.exists && !folder.isDirectory && (
+        <div className="cwd-status missing" role="status"><span><code>{folder.shown}</code> is a file, not a folder</span></div>
+      )}
       {open && items.length > 0 && (
         <div className="cwd-suggest" role="listbox" aria-label={source === "recent" ? "Recent directories" : "Directories"}>
           {source === "recent" && <div className="cwd-suggest-label">Recent</div>}

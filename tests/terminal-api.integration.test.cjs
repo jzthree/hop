@@ -1927,3 +1927,40 @@ test('a message for an agent is typed only into an empty input box, waits out a 
   assert.equal(asAgentOnly.data.status, 'not-agent');
   assert.ok(notAgent.data.id);
 });
+
+// A new session's folder must be there: a mistyped one used to start the
+// session in home (and Codex then made itself a folder under ~/Documents).
+test('a new session in a missing folder is refused, and the form can create the folder', async () => {
+  const missing = path.join(tempDir, 'not-yet', 'deeper');
+  const refused = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions', { name: 'FolderGate', type: 'terminal', cwd: missing }, userHeaders);
+  assert.equal(refused.status, 400);
+  assert.equal(refused.data.code, 'cwd-missing');
+  assert.match(refused.data.error, /No folder at/);
+  const list = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+  assert.ok(!list.data.sessions.some((s) => s.displayName === 'FolderGate'), 'nothing was created');
+
+  const asFile = path.join(tempDir, 'plain-file.txt');
+  await fs.writeFile(asFile, 'x');
+  const fileRefused = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions', { name: 'FolderGate', type: 'terminal', cwd: asFile }, userHeaders);
+  assert.equal(fileRefused.data.code, 'cwd-not-dir');
+
+  // The form's check, then its Create folder button.
+  const seen = await requestJson(state.port, state.sessionSecret, 'GET', `/api/fs/folder?path=${encodeURIComponent(missing)}`, null, userHeaders);
+  assert.equal(seen.data.exists, false);
+  const made = await requestJson(state.port, state.sessionSecret, 'POST', '/api/fs/folder', { path: missing }, userHeaders);
+  assert.equal(made.status, 200);
+  assert.equal(made.data.isDirectory, true);
+  const created = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions', { name: 'FolderGate', type: 'terminal', cwd: missing }, userHeaders);
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+
+  // Or in one step, when asked to.
+  const other = path.join(tempDir, 'made-on-create');
+  const both = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions', { name: 'FolderGate2', type: 'terminal', cwd: other, createCwd: true }, userHeaders);
+  assert.equal(both.status, 200, JSON.stringify(both.data));
+  assert.ok((await fs.stat(other)).isDirectory());
+
+  // An agent's terminal in a missing folder is refused too.
+  const agentRefused = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'FolderGateAgent', cwd: path.join(tempDir, 'nope') }, agentHeaders);
+  assert.equal(agentRefused.status, 400);
+  assert.equal(agentRefused.data.code, 'cwd-missing');
+});

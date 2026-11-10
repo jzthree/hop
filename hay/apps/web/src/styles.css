@@ -7097,3 +7097,24 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
    gives way (it already ends in …). */
 .terminal-footer .footer-find-toggle, .terminal-footer .footer-reconnect { white-space: nowrap; flex-shrink: 0; }
 .terminal-footer > span:not(.footer-cwd):not(.footer-spacer) { white-space: nowrap; flex-shrink: 0; }
+
+/* The create form's folder: missing, with the way to make it. */
+.cwd-status {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px;
+  font: 400 12px/1.4 var(--font-sans); color: var(--ink-muted);
+}
+.cwd-status code { font: 500 11.5px/1.3 var(--font-mono); color: var(--ink); }
+.cwd-status.missing > span:first-child::before { content: "○ "; color: #b45309; }
+.cwd-make {
+  border: 1px solid color-mix(in srgb, #7c3aed 45%, var(--card-line, var(--line))); background: var(--card-bg, var(--panel));
+  color: #6d28d9; border-radius: 6px; padding: 2px 9px; font: 600 11.5px/1.5 var(--font-sans); cursor: pointer; transform: none;
+}
+.cwd-make:hover:not(:disabled) { background: color-mix(in srgb, #7c3aed 10%, var(--card-bg, var(--panel))); transform: none; }
+.cwd-make:disabled { opacity: 0.6; cursor: default; }
+.cwd-make-error { color: #b91c1c; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .cwd-make { color: #c4b5fd; }
+  :root:not([data-theme="light"]) .cwd-make-error { color: #f87171; }
+}
+:root[data-theme="dark"] .cwd-make { color: #c4b5fd; }
+:root[data-theme="dark"] .cwd-make-error { color: #f87171; }

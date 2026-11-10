@@ -7086,6 +7086,34 @@ function saveCheckbacks() {
     try { writePrivateFile(CHECKBACKS_FILE, JSON.stringify(loadCheckbacks(), null, 1), 0o600); }
     catch (e) { log(`[checkback] could not save: ${e?.message || e}`, YELLOW); }
 }
+// A folder as typed in the create form (or sent by an agent): ~ is home,
+// a relative path is under home — what a shell in ~ would make of it, and
+// what /api/fs/complete already offers.
+function expandFolderInput(t) {
+    const s = String(t || '').trim();
+    if (!s) return undefined;
+    if (s === '~') return os.homedir();
+    if (s.startsWith('~/')) return path.join(os.homedir(), s.slice(2));
+    return path.isAbsolute(s) ? path.normalize(s) : path.join(os.homedir(), s);
+}
+const tildePath = (p) => (p === os.homedir() || p.startsWith(os.homedir() + '/')) ? '~' + p.slice(os.homedir().length) : p;
+// A new session's folder must exist: the terminal host falls back to home
+// for a missing one (right for a restored session whose folder vanished),
+// so a mistyped folder quietly started the session — and Codex, which then
+// makes itself a scratch folder under ~/Documents/Codex — somewhere nobody
+// chose. Null when fine; else the error to answer with.
+function newSessionFolderProblem(cwd, create) {
+    if (cwd === undefined) return null;
+    let st = null;
+    try { st = fs.statSync(cwd); } catch (e) { /* not there */ }
+    if (!st && create) {
+        try { fs.mkdirSync(cwd, { recursive: true }); st = fs.statSync(cwd); }
+        catch (e) { return { status: 400, error: `Couldn't create ${tildePath(cwd)}: ${e.code || e.message}`, code: 'cwd-create-failed' }; }
+    }
+    if (!st) return { status: 400, error: `No folder at ${tildePath(cwd)} — create it, or fix the path`, code: 'cwd-missing', cwd };
+    if (!st.isDirectory()) return { status: 400, error: `${tildePath(cwd)} is a file, not a folder`, code: 'cwd-not-dir', cwd };
+    return null;
+}
 function pendingCheckbacksFor(internalName) {
     return loadCheckbacks().items.filter((c) => c.status === 'pending' && !c.queued && c.session === internalName).length;
 }
@@ -14938,17 +14966,17 @@ happens until someone clicks it.
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo, startup, agentHome } = JSON.parse(body);
+                    let { name, type, port, cwd, folderId, startRuntime, workspace, workspaceName, attachedTo, startup, agentHome, createCwd } = JSON.parse(body);
                     // The web create form takes the directory as the user
                     // typed it, ~ included; the host only checks that the
                     // path exists, so an unexpanded ~ silently fell back to
                     // home. Expand it here, once, for every caller.
-                    if (typeof cwd === 'string') {
-                        const t = cwd.trim();
-                        cwd = t === '' ? undefined
-                            : t === '~' ? os.homedir()
-                            : t.startsWith('~/') ? path.join(os.homedir(), t.slice(2))
-                            : t;
+                    if (typeof cwd === 'string') cwd = expandFolderInput(cwd);
+                    const folderProblem = type === 'port' ? null : newSessionFolderProblem(cwd, createCwd === true);
+                    if (folderProblem) {
+                        res.writeHead(folderProblem.status, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: folderProblem.error, code: folderProblem.code, ...(folderProblem.cwd ? { cwd: tildePath(folderProblem.cwd) } : {}) }));
+                        return;
                     }
                     // A new session can boot straight into an app instead of a
                     // bare shell: the web New picker sends startup='claude' /
@@ -15296,6 +15324,39 @@ happens until someone clicks it.
         }
 
         // API: Restore saved sessions (recreate rooms + resume claude conversations)
+        // The create form's folder: is it there (GET), and make it (POST) —
+        // the "Create folder" button beside the path.
+        if (parsedUrl.pathname === '/api/fs/folder' && (req.method === 'GET' || req.method === 'POST')) {
+            const answer = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+            const look = (raw) => {
+                const resolved = expandFolderInput(raw);
+                if (!resolved) return { resolved: null, exists: false };
+                let st = null;
+                try { st = fs.statSync(resolved); } catch (e) { /* not there */ }
+                return { resolved, shown: tildePath(resolved), exists: !!st, isDirectory: !!st && st.isDirectory() };
+            };
+            if (req.method === 'GET') {
+                const sp = parsedUrl.searchParams || new URLSearchParams(parsedUrl.search || '');
+                answer(200, look(sp.get('path')));
+                return;
+            }
+            let body = '';
+            req.on('data', (c) => { body += c; if (body.length > 8192) req.destroy(); });
+            req.on('end', () => {
+                try {
+                    const { path: raw } = JSON.parse(body || '{}');
+                    const resolved = expandFolderInput(raw);
+                    if (!resolved) return answer(400, { error: 'No folder given' });
+                    const problem = newSessionFolderProblem(resolved, true);
+                    if (problem) return answer(problem.status, { error: problem.error, code: problem.code });
+                    log(`[fs] created folder ${tildePath(resolved)}`, DIM);
+                    answer(200, { ok: true, ...look(raw) });
+                } catch (e) {
+                    answer(400, { error: 'Invalid request' });
+                }
+            });
+            return;
+        }
         if (parsedUrl.pathname === '/api/fs/complete' && req.method === 'GET') {
             // Directory completion for the create form's working-directory
             // field. Directories only: the last segment of `q` is a prefix
@@ -15941,6 +16002,12 @@ happens until someone clicks it.
                     if (!SESSION_NAME_RE.test(displayName)) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'Invalid session name' }));
+                        return;
+                    }
+                    const termFolderProblem = cwd && path.isAbsolute(cwd) ? newSessionFolderProblem(cwd, payload.createCwd === true) : null;
+                    if (termFolderProblem) {
+                        res.writeHead(termFolderProblem.status, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: termFolderProblem.error, code: termFolderProblem.code }));
                         return;
                     }
                     if (cwd && !path.isAbsolute(cwd)) {

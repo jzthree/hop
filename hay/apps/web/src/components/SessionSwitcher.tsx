@@ -1857,6 +1857,8 @@ export const SessionSwitcher = ({
   useEffect(() => { if (!interactiveTiles) setFocusedKey(null); }, [interactiveTiles]);
   const [renameDraft, setRenameDraft] = useState("");
   const [creating, setCreating] = useState(false);
+  const creatingRef = useRef(false);
+  creatingRef.current = creating;
   const [createDraft, setCreateDraft] = useState("");
   useEffect(() => {
     if (createSignal <= 0) return;
@@ -2358,9 +2360,18 @@ export const SessionSwitcher = ({
 
   // Focus the filter on open (fine-pointer devices only — autofocus on mobile
   // would pop the system keyboard over the grid).
+  // Not when it opened to create a session (the sidebar's ✎): the name
+  // field already has the keyboard, and taking it 40ms later sent the rest
+  // of the name being typed into the search box — the create form seemed to
+  // fight you. Nor when any other text field has the keyboard.
   useEffect(() => {
     if (!open || !finePointer || covered) return;
-    const t = window.setTimeout(() => filterInputRef.current?.focus(), 40);
+    const t = window.setTimeout(() => {
+      const a = document.activeElement as HTMLElement | null;
+      const typing = !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA") && !a.classList.contains("xterm-helper-textarea") && a !== filterInputRef.current;
+      if (creatingRef.current || typing) return;
+      filterInputRef.current?.focus();
+    }, 40);
     return () => window.clearTimeout(t);
   }, [open, finePointer, covered]);
 
@@ -2964,15 +2975,15 @@ export const SessionSwitcher = ({
         }).catch(() => { /* filing is best-effort; the session exists */ });
         setCreateInFolder(null);
       }
-      // Stay on the wall. Creating used to jump straight to full screen —
-      // the exact accidental mode-entry the hotkey inversion removed from
-      // clicks. The new tile becomes current and goes live in place as soon
-      // as the session reports active.
-      // The id is minted server-side now; the display name is what the user
-      // typed. Keys ride on the id, labels on the name.
-      onFocusSession?.({ name: data.displayName || data.name, displayName: data.displayName || data.name, active: false, starting: true, internalName: data.internalName || data.name });
-      deliberateFocusRef.current = data.internalName || data.name;
-      setFocusedKey(data.internalName || data.name);
+      // Straight into the new session, as opening a tile does (in place from
+      // a session; its page from the overview; into the pane being filled).
+      // Creating used to stay on the wall with the new tile focused (July:
+      // full screen was being demoted), so the session ran unseen behind the
+      // overview — at the usual tile size a static preview — until you went
+      // and opened it: the "lag" after Create (Jian, 2026-11-10). It is
+      // connected in ~0.15s; you are in it at once.
+      // The id is minted server-side; the display name is what the user typed.
+      onSwitch({ name: data.displayName || data.name, displayName: data.displayName || data.name, active: true, starting: true, internalName: data.internalName || data.name } as SwitcherSession);
       onRefresh();
     } catch {
       onNotice("Failed to create session");

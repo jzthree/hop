@@ -15,7 +15,8 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     /// window is signed in and sees the same per-browser settings.
     static let dataStore = WKWebsiteDataStore.default()
 
-    init(url: URL, origin: URL, configuration: WKWebViewConfiguration? = nil, frameName: String = "HopMain", onClose: @escaping (WebWindowController) -> Void) {
+    init(url: URL, origin: URL, configuration: WKWebViewConfiguration? = nil, frameName: String = "HopMain",
+         seed: [String: String]? = nil, onClose: @escaping (WebWindowController) -> Void) {
         self.origin = origin
         let config = configuration ?? WebWindowController.makeConfiguration()
         webView = HopWebView(frame: .zero, configuration: config)
@@ -45,7 +46,32 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         webView.navigationDelegate = self
         webView.uiDelegate = self
         config.userContentController.add(self, name: "hop")
+        if let seed { seedSessionStorage(seed) }
         webView.load(URLRequest(url: url))
+    }
+
+    /// Give the page back the per-window state it kept when the app quit
+    /// (the open panel, the side column, the overview's filter and scroll —
+    /// hop keeps these in sessionStorage, which a quit empties). Set before
+    /// the page's own scripts run, once per window.
+    func seedSessionStorage(_ storage: [String: String]) {
+        guard !storage.isEmpty, let data = try? JSONSerialization.data(withJSONObject: storage),
+              let json = String(data: data, encoding: .utf8) else { return }
+        let source = "(function(){try{if(sessionStorage.getItem('__hopSeeded'))return;var d=\(json);for(var k in d)sessionStorage.setItem(k,d[k]);sessionStorage.setItem('__hopSeeded','1');}catch(e){}})();"
+        webView.configuration.userContentController.addUserScript(
+            WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    }
+
+    /// What this window would need to come back to: its page and its
+    /// per-window state. Nil for a page that is not hop's.
+    func snapshot(_ done: @escaping (SavedWindow?) -> Void) {
+        guard webView.url?.scheme?.hasPrefix("http") == true else { done(nil); return }
+        let js = "JSON.stringify({ path: location.pathname + location.search + location.hash, storage: Object.fromEntries(Object.keys(sessionStorage).filter(function (k) { return k !== '__hopSeeded'; }).map(function (k) { return [k, sessionStorage.getItem(k)]; })) })"
+        webView.evaluateJavaScript(js) { result, _ in
+            guard let s = result as? String, let d = s.data(using: .utf8),
+                  let w = try? JSONDecoder().decode(SavedWindow.self, from: d) else { done(nil); return }
+            done(w)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -245,4 +271,10 @@ final class HopWebView: WKWebView {
         }
         return super.draggingEntered(sender)
     }
+}
+
+/// One window as it was when the app quit (see AppDelegate's restore).
+struct SavedWindow: Codable {
+    let path: String
+    let storage: [String: String]
 }

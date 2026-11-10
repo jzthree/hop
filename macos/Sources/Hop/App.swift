@@ -26,6 +26,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    // MARK: - Coming back where you left off
+
+    /// Quitting (an update reopens the app) keeps every window's page and
+    /// its per-window state; the next launch puts them back. A second and a
+    /// half at most — a page that does not answer is not worth a stuck quit.
+    private static let restoreKey = "hopRestoreWindows"
+    private var restoreTaken = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let live = windows
+        guard !live.isEmpty else { return .terminateNow }
+        var saved = [Int: SavedWindow]()
+        var replied = false
+        let finish = {
+            guard !replied else { return }
+            replied = true
+            let list = (0..<live.count).compactMap { saved[$0] }
+            if !list.isEmpty, let data = try? JSONEncoder().encode(list) {
+                UserDefaults.standard.set(data, forKey: Self.restoreKey)
+            }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        let group = DispatchGroup()
+        for (i, w) in live.enumerated() {
+            group.enter()
+            w.snapshot { s in
+                if let s { saved[i] = s }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main, execute: finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: finish)
+        return .terminateLater
+    }
+
+    /// The windows saved at the last quit, once per launch.
+    private func takeRestore() -> [SavedWindow] {
+        guard !restoreTaken else { return [] }
+        restoreTaken = true
+        guard let data = UserDefaults.standard.data(forKey: Self.restoreKey),
+              let list = try? JSONDecoder().decode([SavedWindow].self, from: data) else { return [] }
+        UserDefaults.standard.removeObject(forKey: Self.restoreKey)
+        return list.filter { $0.path.hasPrefix("/") }
+    }
+
     // MARK: - Connecting
 
     /// Point the window at the chosen hop, signing in on the way for this Mac's.
@@ -140,6 +185,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func show(_ url: URL, reload: Bool = false) {
+        // The first time hop is shown after a launch: every window back on
+        // the page it had, with its state.
+        let restore = takeRestore()
+        if let first = restore.first, let target = URL(string: first.path, relativeTo: url)?.absoluteURL {
+            Log.note("restoring \(restore.count) window(s)")
+            let w = windows.first ?? openWindow(url: URL(string: "about:blank")!, configuration: nil)
+            w.retarget(origin: url)
+            w.seedSessionStorage(first.storage)
+            w.load(target)
+            w.showWindow(nil)
+            w.window?.makeKeyAndOrderFront(nil)
+            for extra in restore.dropFirst() {
+                if let t = URL(string: extra.path, relativeTo: url)?.absoluteURL {
+                    openWindow(url: t, configuration: nil, seed: extra.storage)
+                }
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         if let w = windows.first {
             // The window may have been made for a page of the app's own ("hop
             // is starting") before hop was there: hop's pages are its pages
@@ -163,10 +227,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    func openWindow(url: URL, configuration: WKWebViewConfiguration?) -> WebWindowController {
+    func openWindow(url: URL, configuration: WKWebViewConfiguration?, seed: [String: String]? = nil) -> WebWindowController {
         let origin = base ?? url
         let name = windows.isEmpty ? "HopMain" : "HopWindow\(windows.count)"
-        let w = WebWindowController(url: url, origin: origin, configuration: configuration, frameName: name) { [weak self] closed in
+        let w = WebWindowController(url: url, origin: origin, configuration: configuration, frameName: name, seed: seed) { [weak self] closed in
             self?.windows.removeAll { $0 === closed }
         }
         if !windows.isEmpty, let last = windows.last?.window {

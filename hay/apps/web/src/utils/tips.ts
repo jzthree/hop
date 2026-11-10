@@ -15,7 +15,8 @@ export const tips = (isMac: boolean): Tip[] => {
     { id: "catchup", text: `${mod("G")} jumps to the next session with news: a question for you first, then finished turns you haven't read.` },
     { id: "back", text: `${mod("E")} goes back to the session you were just in; press it again to return.` },
     { id: "switch", text: `${mod("K")}, then type part of a session's name (or what it's about) and ⏎. A name nobody has starts a new session.` },
-    { id: "drop", text: "Drop a file on a terminal: it uploads, and its path is typed into the session for the agent to use." },
+    { id: "drop", text: "Drop a file on a terminal: its path is typed into the session for the agent to use. A file on this machine is used where it is; from anywhere else it is uploaded first." },
+    { id: "menu", text: "The ⋯ in a session's header is its menu: fit, redraw, copy the screen, rename, fork, kill. Right-clicking a session in the sidebar opens the same menu." },
     { id: "newline", text: "Shift+⏎ starts a new line in Claude's input box instead of sending." },
     { id: "replies", text: "The reply buttons on a briefing story type your answer into that session, or queue it if the agent is busy. No need to open it." },
     { id: "view", text: "Agents can hand you plots, PDFs and write-ups with `hop view`; they land in Views, newest first." },
@@ -26,6 +27,7 @@ export const tips = (isMac: boolean): Tip[] => {
     { id: "port", text: "`hop port 5173` puts a dev server running in a session on hop's link, so you can open it from your phone." },
     { id: "mathcli", text: "`hop math '\\frac{a}{b}'` prints a formula in the terminal, for a quick look without leaving it." },
     { id: "sidebar", text: `${mod("B")} shows or hides the sidebar; drag its edge to resize it.` },
+    { id: "settings", text: `${mod(",")} opens Settings: theme, text size, notifications, and every browser and device signed in to hop.` },
     { id: "keys", text: `${mod("/")} lists every keyboard shortcut. Six of them cover a working day.` }
   ];
 };

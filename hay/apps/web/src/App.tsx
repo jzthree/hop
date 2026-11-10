@@ -56,7 +56,11 @@ import {
 import { ViewsPanel, hasUnseenViews, loadViewsSeen, syncViewsSeen } from "./components/ViewsPanel";
 import { BriefingPage } from "./components/BriefingPage";
 import { PulsePage } from "./components/PulsePage";
-import { UpdatePop, useUpdateInfo } from "./components/UpdateNotice";
+import { UpdatePop, useUpdateInfo, type UpdateInfo } from "./components/UpdateNotice";
+import { SettingsPage } from "./components/SettingsPage";
+import { ContextMenu, type MenuItem, type MenuRequest } from "./components/ContextMenu";
+import { sessionMenuItems, shortPath, type MenuSession, type SessionPlace } from "./components/sessionMenu";
+import type { AgentHomes } from "./utils/switcherModel";
 import { currentNames, renamer, threadFor, useBriefing } from "./utils/briefingFeed";
 import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
 import { QueueCard, normalizeQueued, type QueuedMessage } from "./components/QueueCard";
@@ -291,7 +295,7 @@ const UI_KEY = "hop_ui_v1";
 // of it (session null) or one session's share.
 type SideFeed = { kind: "briefing" | "pulse" | "calendar"; session: string | null };
 type SavedUi = {
-  place?: "briefing" | "pulse" | "calendar" | null;
+  place?: "briefing" | "pulse" | "calendar" | "settings" | null;
   views?: { session?: string; dock?: boolean; item?: string; page?: boolean; side?: boolean } | null;
   sideTab?: "calendar" | "briefing" | "pulse" | null; calendar?: string | null;
   sideFeed?: SideFeed | null;
@@ -621,8 +625,15 @@ const App = () => {
   // The sidebar's own places beyond Sessions and Views: the briefing (with
   // the session it is narrowed to) and mybot's pulse; and the update panel.
   const [closedSessions, setClosedSessions] = useState<ClosedSession[]>([]);
-  const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar">(() => savedUi().place ?? null);
+  const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar" | "settings">(() => savedUi().place ?? null);
   const [updateOpen, setUpdateOpen] = useState(false);
+  // An update opened from Settings › About (shown even when its notice was put off).
+  const [updateShown, setUpdateShown] = useState<UpdateInfo | null>(null);
+  // The session's own menu (the header's ⋯): the sidebar's right-click menu
+  // for it, led by what only an open terminal has.
+  const [sessionMenu, setSessionMenu] = useState<MenuRequest>(null);
+  const [agentHomes, setAgentHomes] = useState<AgentHomes>({ claude: [], codex: [] });
+  const toggleSettingsRef = useRef<() => void>(() => {});
   const briefing = useBriefing();
   const pulse = usePulse();
   const { update, dismiss: dismissUpdate } = useUpdateInfo();
@@ -699,10 +710,8 @@ const App = () => {
   // fetch already carries them.
   const [folders, setFolders] = useState<Array<{ id: string; name: string }>>([]);
   // Attention plumbing: tab-title alert for a bell in the attached session
-  // while the tab is hidden; inline editors for display name / rename / create.
+  // while the tab is hidden; inline editors for rename / create.
   const [titleAlert, setTitleAlert] = useState(false);
-  const [editingName, setEditingName] = useState(false);
-  const [nameDraft, setNameDraft] = useState("");
   const [renamingSession, setRenamingSession] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [creatingSession, setCreatingSession] = useState(false);
@@ -730,14 +739,10 @@ const App = () => {
     if (new URLSearchParams(window.location.search).get("view") === "wall") return true;
     return isMobileDevice() && !window.location.pathname.startsWith("/s/");
   });
-  const [sessionSwitchMode, setSessionSwitchMode] = useState<SessionSwitchMode>(() => {
-    const saved = localStorage.getItem("hay_session_switch_mode");
-    // Keep "page" as a legacy fallback while we validate instant mode end-to-end.
-    if (saved === "page") {
-      return "page";
-    }
-    return DEFAULT_SESSION_SWITCH_MODE;
-  });
+  // Switching in place ("instant") has long been the only way anyone used;
+  // the old page-load switch was a fallback while it was proven, and is no
+  // longer offered (a saved choice of it is let go).
+  const sessionSwitchMode: SessionSwitchMode = DEFAULT_SESSION_SWITCH_MODE;
 
   // The label is DERIVED, never copied: the room key is the session's
   // invariant id, which equals the display name only until the first rename.
@@ -835,8 +840,8 @@ const App = () => {
     }
   }, [themeMode]);
   useEffect(() => {
-    localStorage.setItem("hay_session_switch_mode", sessionSwitchMode);
-  }, [sessionSwitchMode]);
+    try { localStorage.removeItem("hay_session_switch_mode"); } catch { /* private window */ }
+  }, []);
 
   const typingActive = useRef(false);
   const noticeTimeout = useRef<number | null>(null);
@@ -4158,10 +4163,8 @@ const App = () => {
     setSession({ name: name.trim(), room: room.trim() });
   };
 
-  const submitName = (event: FormEvent) => {
-    event.preventDefault();
-    const next = nameDraft.trim();
-    setEditingName(false);
+  // Your name to the others watching (Settings › You).
+  const changeName = (next: string) => {
     if (!next || next === name) {
       return;
     }
@@ -4173,9 +4176,11 @@ const App = () => {
     pushNotice(`Display name set to ${next}`);
   };
 
-  const submitRename = async (event: FormEvent) => {
+  const submitRename = (event: FormEvent) => {
     event.preventDefault();
-    const next = renameDraft.trim();
+    void renameTo(renameDraft.trim());
+  };
+  const renameTo = async (next: string) => {
     const current = sessionLabel || session?.room || "";
     if (!next || next === current) {
       setRenamingSession(false);
@@ -4432,6 +4437,21 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The accounts a session can switch to (its menu's Account item).
+  useEffect(() => {
+    if (!isEmbeddedInHop()) return;
+    fetch("/api/agent-homes", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && Array.isArray(d.claude) && Array.isArray(d.codex)) setAgentHomes(d); })
+      .catch(() => { /* no accounts info: no account item */ });
+  }, []);
+  // The Mac app's hop › Settings… (⌘,) asks for the page.
+  useEffect(() => {
+    const w = window as { __hopOpenSettings?: () => void };
+    w.__hopOpenSettings = () => toggleSettingsRef.current();
+    return () => { delete w.__hopOpenSettings; };
+  }, []);
+
   // Hub mode (landing page with nothing live): keep the session grid fresh
   // while the switcher is the whole page.
   useEffect(() => {
@@ -4586,7 +4606,7 @@ const App = () => {
       // keyboard), committing on ⌘ release — no Shift needed for the reverse.
       if (key === "j") { grab(); hudStep(-1); return; }
       if (key === "l") { grab(); hudStep(1); return; }
-      if (key === ",") { grab(); setDrawerOpen((v) => !v); return; }
+      if (key === ",") { grab(); toggleSettingsRef.current(); return; }
       if (key === "e") {
         const leaves = leafIds(paneTreeRef.current).filter((id) => id !== "primary");
         const swapTarget = focusedPaneIdRef.current !== "primary"
@@ -4844,9 +4864,10 @@ const App = () => {
     sideUpRef.current = sideNow;
     if (toPageRef.current) { toPageRef.current = false; return; }
     if (!railDocked || !(wasUp || sideNow)) return;
-    const kind = place ?? sideTab;
+    const feedPlace = place === "settings" ? null : place;
+    const kind = feedPlace ?? sideTab;
     if (kind) {
-      setSideFeed({ kind, session: place ? null : (currentKey ?? null) });
+      setSideFeed({ kind, session: feedPlace ? null : (currentKey ?? null) });
       setPlace(null);
       setSideTab(null);
       if (viewsOpen) setViewsOpen(null);
@@ -4948,6 +4969,66 @@ const App = () => {
     if (place === which) return;
     if (viewsPage) setViewsOpen(null);
     setPlace(which);
+  };
+  // Settings: a place too (beside the sidebar), or the whole window where
+  // there is no sidebar — from anywhere, session or not. Again: closed.
+  const openSettings = () => {
+    setDrawerOpen(false);
+    setSessionMenu(null);
+    if (viewsPage) setViewsOpen(null);
+    setPlace("settings");
+  };
+  const closeSettings = () => {
+    setPlace(null);
+    if (session && !switcherOpen) focusTerminalSoon();
+  };
+  const toggleSettings = () => { if (place === "settings") closeSettings(); else openSettings(); };
+  toggleSettingsRef.current = toggleSettings;
+  // The session header's ⋯, under it: the sidebar's menu for this session.
+  const startRename = () => {
+    const current = sessionLabel || session?.room || "";
+    if (railDocked) { setRenameDraft(current); setRenamingSession(true); return; }
+    const next = window.prompt("Rename session", current)?.trim();
+    if (next) void renameTo(next);
+  };
+  const openSessionMenu = (el: HTMLElement) => {
+    if (!session) return;
+    const box = el.getBoundingClientRect();
+    const label = sessionLabel || session.room;
+    const target: MenuSession = currentInfo
+      ? (currentInfo as unknown as MenuSession)
+      : { name: session.room, displayName: label, internalName: currentKey || session.room };
+    const lead: MenuItem[] = [
+      { label: "Fit to this window", onSelect: () => claimSizeHere(true) },
+      { label: "Redraw screen", onSelect: () => redrawSessionRef.current() },
+      { label: "Find in terminal", hint: isMacPlatform ? "⌘F" : "Ctrl+F", onSelect: () => openSearch() },
+      { label: "Typing", items: [
+        { label: "Everyone can type", checked: collabMode, onSelect: () => { if (!collabMode) handleToggleCollab(); } },
+        { label: "One at a time", checked: !collabMode, onSelect: () => { if (collabMode) handleToggleCollab(); } },
+        ...(collabMode ? [] : [
+          { kind: "separator" } as MenuItem,
+          controllerId === clientId
+            ? { label: "Release control", onSelect: handleReleaseControl }
+            : { label: controllerName ? `Take control from ${controllerName}` : "Take control", onSelect: handleTakeControl }
+        ])
+      ] }
+    ];
+    setSessionMenu({
+      x: box.right, y: box.bottom + 6, title: label, subtitle: liveCwd ? shortPath(liveCwd) : undefined,
+      items: sessionMenuItems(target, {
+        ctx: { notice: pushNotice, refresh: () => { void fetchSessions({ showLoading: false }); } },
+        folders, homes: agentHomes,
+        isCurrent: () => true,
+        onOpen: () => {},
+        onStartRename: startRename,
+        onOpenPlace: railDocked ? (m: MenuSession, which: SessionPlace) => openSessionTab(m.internalName || m.name, which) : undefined,
+        lead,
+        copyFirst: [
+          { label: "Screen text", onSelect: () => { void copyToClipboard(getVisibleText(), "Visible text"); } },
+          { label: "All scrollback", onSelect: () => { void copyToClipboard(getBufferText(), "Full buffer"); } }
+        ]
+      })
+    });
   };
   // One session's Views, Briefing, Pulse or Calendar is one page: its tab,
   // under its header — from the terminal, a place, a tile's chip or a menu
@@ -5127,7 +5208,7 @@ const App = () => {
       onClick: () => setUpdateOpen((v) => !v) }] : []),
     { key: "keys", label: "Shortcuts", icon: <RailIcon name="keyboard" />, bottom: true, active: shortcutHelpOpen,
       onClick: () => setShortcutHelpOpen((v) => !v) },
-    ...(session ? [{ key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, onClick: () => { setSwitcherOpen(false); setDrawerOpen(true); } }] : [])
+    { key: "settings", label: "Settings", icon: <RailIcon name="settings" />, bottom: true, active: place === "settings", onClick: toggleSettings }
   ];
   // The calendar at some scope ("*": every session; a tile's chip: its own):
   // with the sidebar, the Calendar place narrowed to it; else the window.
@@ -5223,7 +5304,16 @@ const App = () => {
         {railDocked ? (<>
           {/* Docked: the sidebar carries the wordmark; this bar is the
               session's own header, Slack's channel name — and its tabs. */}
-          <div className="channel-name" title={sessionLabel}>{sessionLabel}</div>
+          {renamingSession && !drawerOpen ? (
+            <form className="channel-rename" onSubmit={submitRename}>
+              <input value={renameDraft} maxLength={64} autoFocus aria-label="New session name"
+                     onChange={(event) => setRenameDraft(event.target.value)}
+                     onBlur={() => setRenamingSession(false)}
+                     onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setRenamingSession(false); focusTerminalSoon(); } }} />
+            </form>
+          ) : (
+            <div className="channel-name" title={sessionLabel} onDoubleClick={startRename}>{sessionLabel}</div>
+          )}
           {sessionTabs && (
             <nav className="session-tabs" role="tablist" aria-label="Session">
               <button type="button" role="tab" aria-selected={!viewsPage && !schedTabNow && !feedTabNow}
@@ -5343,15 +5433,19 @@ const App = () => {
               })()}
             </button>
             )}
+            {/* The session's own menu — the sidebar's right-click menu for
+                it. How hop itself looks and behaves is Settings (⌘,). */}
             <button
               type="button"
-              className="topbar-sessions-btn"
-              aria-label="Session settings"
-              title="Session settings"
-              onClick={() => setDrawerOpen(true)}
+              className={"topbar-sessions-btn" + (sessionMenu ? " active" : "")}
+              aria-label="Session menu"
+              aria-haspopup="menu"
+              aria-expanded={!!sessionMenu}
+              title="This session: fit, redraw, copy, rename, fork, kill…"
+              onClick={(e) => { if (sessionMenu) setSessionMenu(null); else openSessionMenu(e.currentTarget); }}
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="5.5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="18.5" cy="12" r="1.7" fill="currentColor"/>
               </svg>
             </button>
             {/* Full screen is a tile zoomed in: zoom back out to the wall. */}
@@ -5413,6 +5507,7 @@ const App = () => {
             createName={createName}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
+            onOpenSettings={openSettings}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -5545,7 +5640,9 @@ const App = () => {
             {/* Session info */}
             <div className="room-info">
               <p className="room-label">Session</p>
-              {renamingSession ? (
+              {/* (Only while the sheet is open: the header renames in place
+                  otherwise, and two autofocused boxes fight for the keys.) */}
+              {renamingSession && drawerOpen ? (
                 <form className="inline-edit" onSubmit={submitRename}>
                   <input
                     value={renameDraft}
@@ -5628,14 +5725,9 @@ const App = () => {
                   Views
                   {unseenViewSessions > 0 && <span className="views-chip-dot" aria-label="New views" />}
                 </button>
-                {/* Mobile gets the in-app switcher; desktop keeps the manager page */}
-                {isMobile && isEmbeddedInHop() ? (
+                {isEmbeddedInHop() && (
                   <button type="button" className="quick-btn" onClick={() => { setDrawerOpen(false); setSwitcherOpen(true); }}>
                     Sessions
-                  </button>
-                ) : (
-                  <button type="button" className="quick-btn" onClick={() => { window.open('/sessions.html', '_blank'); }}>
-                    Manage
                   </button>
                 )}
                 <button type="button" className="quick-btn danger" onClick={handleKillSession}>
@@ -5649,46 +5741,25 @@ const App = () => {
               </div>
             </div>
 
-            {/* Input control: who is allowed to type */}
+            {/* The phone's session sheet: what you do to the session on
+                screen. How hop looks and behaves is Settings (below), the
+                same page the sidebar and ⌘, open everywhere else. */}
             <div className="drawer-group">
+              {isMobile && (
+                <div className="drawer-row">
+                  <label>Touch</label>
+                  <div className="view-mode-buttons">
+                    <button type="button" className={!selectionMode ? "active" : ""} onClick={() => setSelectionMode(false)}>Scroll</button>
+                    <button type="button" className={selectionMode ? "active" : ""} onClick={() => setSelectionMode(true)}>Select</button>
+                  </div>
+                </div>
+              )}
               <div className="drawer-row">
-                <label>Name</label>
-                {editingName ? (
-                  <form className="inline-edit" onSubmit={submitName}>
-                    <input
-                      value={nameDraft}
-                      onChange={(event) => setNameDraft(event.target.value)}
-                      maxLength={24}
-                      autoFocus
-                      aria-label="Display name"
-                    />
-                    <button type="submit">Save</button>
-                  </form>
-                ) : (
-                  <button
-                    type="button"
-                    className="name-edit-toggle"
-                    title="Change your display name"
-                    onClick={() => {
-                      setNameDraft(name);
-                      setEditingName(true);
-                    }}
-                  >
-                    {name} <span aria-hidden="true">✎</span>
-                  </button>
-                )}
-              </div>
-              <div className="drawer-row">
-                <label>Control</label>
-                <span className="control-state">
-                  {collabMode
-                    ? "Everyone can type"
-                    : controllerId === clientId
-                      ? "You have control"
-                      : controllerName
-                        ? `Locked by ${controllerName}`
-                        : "Locked"}
-                </span>
+                <label>Copy</label>
+                <div className="view-mode-buttons">
+                  <button type="button" onClick={() => copyToClipboard(getVisibleText(), "Visible text")}>Screen</button>
+                  <button type="button" onClick={() => copyToClipboard(getBufferText(), "Full buffer")}>All</button>
+                </div>
               </div>
               <div className="drawer-row">
                 <label>Redraw</label>
@@ -5716,15 +5787,18 @@ const App = () => {
                     className={!collabMode ? "active" : ""}
                     onClick={() => { if (collabMode) handleToggleCollab(); }}
                   >
-                    One user
+                    One at a time
                   </button>
                 </div>
               </div>
               {!collabMode && (
                 <div className="drawer-row">
+                  <span className="control-state">
+                    {controllerId === clientId ? "You have control" : controllerName ? `${controllerName} has control` : "Nobody has control"}
+                  </span>
                   {controllerId === clientId ? (
                     <button type="button" className="quick-btn" onClick={handleReleaseControl}>
-                      Release control
+                      Release
                     </button>
                   ) : (
                     <button type="button" className="quick-btn" onClick={handleTakeControl}>
@@ -5734,104 +5808,15 @@ const App = () => {
                 </div>
               )}
             </div>
-
-            {/* Display settings */}
-            <div className="drawer-group">
-              <div className="drawer-row">
-                <label>Theme</label>
-                <div className="view-mode-buttons">
-                  <button type="button" className={themeMode === "system" ? "active" : ""} onClick={() => setThemeMode("system")}>Auto</button>
-                  <button type="button" className={themeMode === "light" ? "active" : ""} onClick={() => setThemeMode("light")}>Light</button>
-                  <button type="button" className={themeMode === "dark" ? "active" : ""} onClick={() => setThemeMode("dark")}>Dark</button>
-                </div>
-              </div>
-              <div className="drawer-row">
-                <label>Font</label>
-                <div className="font-size-buttons">
-                  <button type="button" onClick={() => setFontSize((s) => Math.max(8, s - 1))}>−</button>
-                  <span>{fontSize}px</span>
-                  <button type="button" onClick={() => setFontSize((s) => Math.min(24, s + 1))}>+</button>
-                </div>
-              </div>
-              {isMobile && (
-                <div className="drawer-row">
-                  <label>Touch</label>
-                  <div className="view-mode-buttons">
-                    <button type="button" className={!selectionMode ? "active" : ""} onClick={() => setSelectionMode(false)}>Scroll</button>
-                    <button type="button" className={selectionMode ? "active" : ""} onClick={() => setSelectionMode(true)}>Select</button>
-                  </div>
-                </div>
-              )}
-              {/* Copy output — segmented, consistent with the rows above */}
-              <div className="drawer-row">
-                <label>Copy</label>
-                <div className="view-mode-buttons">
-                  <button type="button" onClick={() => copyToClipboard(getVisibleText(), "Visible text")}>Screen</button>
-                  <button type="button" onClick={() => copyToClipboard(getBufferText(), "Full buffer")}>All</button>
-                </div>
-              </div>
-            </div>
-
-            {/* Advanced settings — collapsed */}
-            <details className="drawer-details">
-              <summary>More settings</summary>
-              <div className="drawer-group">
-                {isEmbeddedInHop() && passkeysUsable() && (
-                  <div className="drawer-row">
-                    <label>Passkey</label>
-                    <button type="button" className="quick-btn" onClick={enrollPasskey}>
-                      Add Touch ID / passkey
-                    </button>
-                  </div>
-                )}
-                <div className="drawer-row">
-                  <label>View</label>
-                  <div className="view-mode-buttons">
-                    <button type="button" className={viewMode === "fit" ? "active" : ""} onClick={() => setViewMode("fit")}>Auto-fit</button>
-                    <button type="button" className={viewMode === "full" ? "active" : ""} onClick={() => setViewMode("full")}>Manual</button>
-                  </div>
-                </div>
-                <div className="drawer-row">
-                  <label>Switch</label>
-                  <div className="view-mode-buttons">
-                    <button type="button" className={sessionSwitchMode === "page" ? "active" : ""} onClick={() => setSessionSwitchMode("page")}>Page</button>
-                    <button type="button" className={sessionSwitchMode === "instant" ? "active" : ""} onClick={() => setSessionSwitchMode("instant")}>Instant</button>
-                  </div>
-                </div>
-                {notificationsSupported && (
-                  <div className="drawer-row">
-                    <label>Notify</label>
-                    <div className="view-mode-buttons">
-                      <button type="button" className={!notifyBells ? "active" : ""} onClick={() => handleNotifyToggle(false)}>Off</button>
-                      <button type="button" className={notifyBells ? "active" : ""} onClick={() => handleNotifyToggle(true)}>On</button>
-                    </div>
-                  </div>
-                )}
-                {isMobile && hapticsSupported && (
-                  <div className="drawer-row">
-                    <label>Haptics</label>
-                    <div className="view-mode-buttons">
-                      <button type="button" className={hapticsEnabled ? "active" : ""} onClick={() => setHapticsEnabled(true)}>On</button>
-                      <button type="button" className={!hapticsEnabled ? "active" : ""} onClick={() => setHapticsEnabled(false)}>Off</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </details>
             {notice && <p className="notice" role="status" aria-live="polite">{notice}</p>}
-            {/* Session switching lives in the ⌘K switcher on every device now —
-                the drawer is settings-only. */}
             <button
               type="button"
-              className="quick-btn drawer-sessions-btn"
-              onClick={() => {
-                setDrawerOpen(false);
-                setSwitcherOpen(true);
-              }}
+              className="quick-btn drawer-settings-btn"
+              onClick={() => { setDrawerOpen(false); openSettings(); }}
             >
-              Sessions{!isMobile && <kbd style={{ marginLeft: 8 }}>{isMacPlatform ? "⌘K" : "⌃⇧K"}</kbd>}
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+              Settings
             </button>
-            <p className="build-stamp">build {__BUILD_STAMP__}</p>
           </section>
           {(() => {
             // Primary terminal as a render-on-demand function: it must not be
@@ -6146,10 +6131,7 @@ const App = () => {
             createName={createName}
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
-            onOpenSettings={() => {
-              setSwitcherOpen(false);
-              setDrawerOpen(true);
-            }}
+            onOpenSettings={openSettings}
             onToggleKeyboard={
               isMobile
                 ? () => {
@@ -6279,7 +6261,8 @@ const App = () => {
           onPick={(next) => {
             // From a place or Views, a session in the sidebar is that
             // session on the same kind of tab.
-            if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
+            if (place === "settings") setPlace(null);
+            else if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
             if (viewsPage) { openSessionTab(next.internalName || next.name, "views"); return; }
             // Side by side, the column follows: switch, and show the new
             // session's results beside it.
@@ -6408,6 +6391,33 @@ const App = () => {
                            onOpenSession={goToSession} />
         );
       })()}
+      {place === "settings" && (
+        <SettingsPage
+          placement={railDocked ? "page" : "sheet"}
+          onClose={closeSettings}
+          isMac={isMacPlatform}
+          touch={isMobile}
+          themeMode={themeMode} onTheme={setThemeMode}
+          fontSize={fontSize} onFontSize={setFontSize}
+          viewMode={viewMode} onViewMode={setViewMode}
+          selectionMode={selectionMode} onSelectionMode={setSelectionMode}
+          haptics={hapticsEnabled} onHaptics={hapticsSupported ? setHapticsEnabled : undefined}
+          notify={notifyBells} onNotify={notificationsSupported ? handleNotifyToggle : undefined}
+          name={name} onName={changeName}
+          onAddPasskey={isEmbeddedInHop() && passkeysUsable() ? enrollPasskey : undefined}
+          native={!!(window as { hopNative?: unknown }).hopNative}
+          build={__BUILD_STAMP__}
+          onShowUpdate={(u) => setUpdateShown(u)}
+          onShowShortcuts={() => setShortcutHelpOpen(true)}
+          onNotice={pushNotice}
+        />
+      )}
+      <ContextMenu request={sessionMenu} onClose={() => setSessionMenu(null)} />
+      {updateShown && !(updateOpen && update) && (
+        <UpdatePop update={updateShown} onDismiss={() => { dismissUpdate(); setUpdateShown(null); }} onClose={() => setUpdateShown(null)}
+                   live={sessions.filter((x) => x.active && x.type !== "port").length}
+                   working={sessions.filter((x) => x.agentPhase === "working").length} />
+      )}
       {updateOpen && update && (
         <UpdatePop update={update} onDismiss={dismissUpdate} onClose={() => setUpdateOpen(false)}
                    live={sessions.filter((x) => x.active && x.type !== "port").length}

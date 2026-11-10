@@ -1,8 +1,8 @@
 // One tip a day on the sessions overview (utils/tips): a line under the
 // briefing and pulse, never in the way. Next shows another; × puts tips away
-// until tomorrow; "Turn off" for good (Settings is not needed for a line of
-// text). The rest live in the shortcuts panel. Per browser, by design.
-import { useState } from "react";
+// until tomorrow; "Turn off" for good, and Settings turns them back on. The
+// rest live in the shortcuts panel. Per browser, by design.
+import { useEffect, useState } from "react";
 import { localDay, tipFor, tips } from "../utils/tips";
 
 /** A tip's text: `backticked` spans are commands, set as code. */
@@ -16,10 +16,26 @@ const STEP_KEY = "hop_tip_step";
 
 const read = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
 const write = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* private window */ } };
+const CHANGED = "hop-tips-changed";
+
+export const tipsAreOff = () => read(OFF_KEY) === "1";
+/** Settings' switch: off for good, or back on (today's tip included). */
+export const setTipsOff = (off: boolean) => {
+  try {
+    if (off) localStorage.setItem(OFF_KEY, "1");
+    else { localStorage.removeItem(OFF_KEY); localStorage.removeItem(HIDDEN_KEY); }
+  } catch { /* private window */ }
+  window.dispatchEvent(new Event(CHANGED));
+};
 
 export const TipCard = ({ isMac, now = Date.now() }: { isMac: boolean; now?: number }) => {
   const day = localDay(now);
   const [hidden, setHidden] = useState(() => read(OFF_KEY) === "1" || read(HIDDEN_KEY) === String(day));
+  useEffect(() => {
+    const sync = () => setHidden(read(OFF_KEY) === "1" || read(HIDDEN_KEY) === String(day));
+    window.addEventListener(CHANGED, sync);
+    return () => window.removeEventListener(CHANGED, sync);
+  }, [day]);
   // Next, remembered for the day: a reload shows the tip you moved on to.
   const [step, setStep] = useState(() => {
     const saved = (read(STEP_KEY) || "").split(":");
@@ -34,7 +50,7 @@ export const TipCard = ({ isMac, now = Date.now() }: { isMac: boolean; now?: num
       <span className="tip-acts">
         <button type="button" className="tip-btn" title="Another tip"
                 onClick={() => { const next = step + 1; setStep(next); write(STEP_KEY, `${day}:${next}`); }}>Next</button>
-        <button type="button" className="tip-btn quiet" title="No more tips, ever (they are all in the shortcuts panel)"
+        <button type="button" className="tip-btn quiet" title="No more tips (Settings turns them back on; all of them are in the shortcuts panel)"
                 onClick={() => { write(OFF_KEY, "1"); setHidden(true); }}>Turn off</button>
         <button type="button" className="tip-close" aria-label="Hide tips until tomorrow" title="Hide until tomorrow"
                 onClick={() => { write(HIDDEN_KEY, String(day)); setHidden(true); }}>×</button>

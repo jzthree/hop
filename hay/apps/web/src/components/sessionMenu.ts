@@ -6,6 +6,8 @@ import { describeAccount } from "../utils/switcherModel";
 // The sidebar's right-click on a session: everything the wall's tile sheet
 // offers, in the same words (utils/sessionActions.ts does the work), plus what
 // a sidebar is for — the session's other views, a new tab, its path to copy.
+// The session header's ⋯ is the same menu, led by what only the terminal on
+// screen has (fit, redraw, find, who may type) and with its text to copy.
 
 export type MenuSession = actions.ActionTarget & {
   type?: "terminal" | "port";
@@ -29,6 +31,10 @@ export type SessionMenuDeps = {
   onStartRename: (s: MenuSession) => void;
   /** A session's other views; absent where they cannot open (no sidebar). */
   onOpenPlace?: (s: MenuSession, place: SessionPlace) => void;
+  /** First in the menu: the open terminal's own actions. */
+  lead?: MenuItem[];
+  /** First in Copy: the open terminal's text. */
+  copyFirst?: MenuItem[];
 };
 
 /** "~/Code/hop" from a home-rooted path. */
@@ -49,7 +55,7 @@ export const newFolderThen = async (ctx: actions.ActionContext, then?: (f: { id:
 };
 
 export const sessionMenuItems = (s: MenuSession, d: SessionMenuDeps): MenuItem[] => {
-  const { ctx, folders, homes, isCurrent, onOpen, onStartRename, onOpenPlace } = d;
+  const { ctx, folders, homes, isCurrent, onOpen, onStartRename, onOpenPlace, lead, copyFirst } = d;
   const terminal = s.type !== "port";
   const name = s.displayName || s.name;
   const current = s.folderId || null;
@@ -57,6 +63,7 @@ export const sessionMenuItems = (s: MenuSession, d: SessionMenuDeps): MenuItem[]
   const accounts = s.agent === "claude" || s.agent === "codex" ? homes[s.agent] || [] : [];
   const sep: MenuItem = { kind: "separator" };
   const items: MenuItem[] = [];
+  if (lead?.length) items.push(...lead, sep);
   if (!isCurrent(s)) items.push({ label: "Open full screen", onSelect: () => onOpen(s) });
   items.push({ label: "Open in new tab", onSelect: () => { window.open(linkTo(s), "_blank", "noopener"); } });
   if (onOpenPlace && terminal) {
@@ -76,6 +83,7 @@ export const sessionMenuItems = (s: MenuSession, d: SessionMenuDeps): MenuItem[]
     { label: "New folder…", onSelect: () => { void newFolderThen(ctx, (f) => file(f.id, f.name)); } }
   ] });
   items.push({ label: "Copy", items: [
+    ...(copyFirst?.length ? [...copyFirst, sep] : []),
     { label: "Name", onSelect: () => copyText(ctx, "the name", name) },
     ...(s.cwd ? [{ label: "Folder path", onSelect: () => copyText(ctx, "the path", s.cwd!) }] : []),
     { label: "Link", onSelect: () => copyText(ctx, "the link", linkTo(s)) },

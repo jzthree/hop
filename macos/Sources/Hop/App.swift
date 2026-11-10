@@ -296,6 +296,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// hop › Settings… (⌘,): the web page's own Settings (the same as its ⌘,).
+    @objc func openSettings(_ sender: Any?) {
+        guard let w = keyWindowController() else { return }
+        w.webView.evaluateJavaScript("window.__hopOpenSettings && window.__hopOpenSettings()", completionHandler: nil)
+    }
+
     @objc func zoomIn(_ sender: Any?) { keyWindowController()?.webView.pageZoom += 0.1 }
     @objc func zoomOut(_ sender: Any?) { if let v = keyWindowController()?.webView { v.pageZoom = max(0.5, v.pageZoom - 0.1) } }
     @objc func zoomReset(_ sender: Any?) { keyWindowController()?.webView.pageZoom = 1 }
@@ -325,6 +331,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let openAtLogin = item("Open at Login", #selector(toggleOpenAtLogin(_:)), target: self)
         main.addItem(submenu("hop", [
             item("About hop", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            .separator(),
+            item("Settings…", #selector(openSettings(_:)), ",", target: self),
             .separator(),
             submenu("Connect to", [
                 item("This Mac", #selector(connectLocal(_:)), target: self),

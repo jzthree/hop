@@ -152,8 +152,8 @@ type Props = {
   createSignal?: number;
   // …with this name filled in (a search that matched nothing).
   createName?: string;
-  // The page theme, switchable straight from the wall: the settings drawer
-  // lives in the full-screen view, and the hub (no session open) has none.
+  // The page theme, a click away on the wall's header (as on the sidebar);
+  // everything else about how hop looks is Settings (onOpenSettings).
   themeMode?: "system" | "light" | "dark";
   onThemeChange?: (mode: "system" | "light" | "dark") => void;
   onToggleKeyboard?: () => void;
@@ -3489,14 +3489,12 @@ export const SessionSwitcher = ({
                 {onFind && menuItem("Find in terminal", onFind, { icon: "search" })}
                 {onToggleKeyboard && menuItem("Keyboard", onToggleKeyboard, { icon: "keyboard" })}
               </div>
-              {(onThemeChange && themeMode) || onOpenSettings ? (
+              {/* Theme, text size, notifications, sign-in: one page. */}
+              {onOpenSettings && (
                 <div className="phone-menu-section">
-                  {onThemeChange && themeMode && (["system", "light", "dark"] as const).map((m) =>
-                    menuItem(m === "system" ? "Auto theme" : m === "light" ? "Light" : "Dark", () => onThemeChange(m),
-                             { checked: themeMode === m, icon: m === "light" ? "sun" : m === "dark" ? "moon" : "auto" }))}
-                  {onOpenSettings && menuItem("Settings", onOpenSettings, { icon: "gear" })}
+                  {menuItem("Settings", onOpenSettings, { icon: "gear" })}
                 </div>
-              ) : null}
+              )}
             </div>
           </>
         )}

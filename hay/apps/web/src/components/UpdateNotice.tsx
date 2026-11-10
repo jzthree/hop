@@ -18,7 +18,7 @@ export type KeeperStatus = {
   terminals: number;
   startedAt: number | null;
 };
-type UpdateInfo = {
+export type UpdateInfo = {
   current: string;
   latest: string | null;
   updateAvailable: boolean;

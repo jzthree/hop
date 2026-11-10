@@ -29,6 +29,7 @@ const agentHomesLib = require('./lib/agent-homes');
 const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const composerLib = require('./lib/composer');
+const fileLocate = require('./lib/file-locate');
 const digestReads = require('./lib/digest-reads');
 const { rotateAuditFile, sweepStaleAuditDirs } = require('./lib/audit-rotation');
 const {
@@ -14684,6 +14685,30 @@ happens until someone clicks it.
         // handed a path the shell (or the agent reading it) can actually
         // open. Staging — never the session's cwd — so a drop can't clobber
         // a working file or dirty a repo.
+        // Files dropped on a terminal, found where they already are on this
+        // machine (lib/file-locate.js): their paths, so nothing is copied. A
+        // null is a file to upload as before (not here, or not found once).
+        if (parsedUrl.pathname === '/api/files/locate' && req.method === 'POST') {
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; if (body.length > 64 * 1024) req.destroy(); });
+            req.on('end', async () => {
+                try {
+                    const input = JSON.parse(body || '{}');
+                    const files = Array.isArray(input.files) ? input.files.slice(0, 50) : [];
+                    const internalName = input.name ? resolveSessionInternalName(String(input.name), String(input.name)) : null;
+                    const cfg = internalName ? getEffectiveSessionConfig(internalName) : null;
+                    const cwd = cfg && typeof cfg.cwd === 'string' ? cfg.cwd : null;
+                    const paths = [];
+                    for (const f of files) paths.push(await fileLocate.locateDropped(f || {}, { cwd }));
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ paths }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request' }));
+                }
+            });
+            return;
+        }
         if (parsedUrl.pathname === '/api/sessions/upload' && req.method === 'POST') {
             const internalName = resolveSessionInternalName(parsedUrl.query.name, parsedUrl.query.internalName);
             // resolveSessionInternalName INVENTS a name for anything it does

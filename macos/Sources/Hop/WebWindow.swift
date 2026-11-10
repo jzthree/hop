@@ -18,7 +18,7 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     init(url: URL, origin: URL, configuration: WKWebViewConfiguration? = nil, frameName: String = "HopMain", onClose: @escaping (WebWindowController) -> Void) {
         self.origin = origin
         let config = configuration ?? WebWindowController.makeConfiguration()
-        webView = WKWebView(frame: .zero, configuration: config)
+        webView = HopWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = true
         // Safari's Web Inspector can attach (Develop menu), as in a browser.
@@ -225,4 +225,24 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 /// A line in the app's log (Console.app, or stderr when run from a terminal).
 enum Log {
     static func note(_ line: String) { FileHandle.standardError.write(Data("[hop] \(line)\n".utf8)) }
+}
+
+/// The web view, plus the one thing a page cannot do: know where a dragged
+/// file is. Browsers never tell a page a dropped file's path, so hop copied
+/// every dropped file up to the host — slow enough to feel frozen. As files
+/// are dragged over the window their real paths are handed to the page
+/// (window.__hopDragPaths), before its own drop event; the page passes them
+/// to the daemon, which checks each is there (same name and size) and pastes
+/// that path instead of copying the file.
+final class HopWebView: WKWebView {
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                         options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let paths = urls.filter { $0.isFileURL }.map { $0.path }
+        if !paths.isEmpty, let data = try? JSONSerialization.data(withJSONObject: paths),
+           let json = String(data: data, encoding: .utf8) {
+            evaluateJavaScript("window.__hopDragPaths = \(json);", completionHandler: nil)
+        }
+        return super.draggingEntered(sender)
+    }
 }

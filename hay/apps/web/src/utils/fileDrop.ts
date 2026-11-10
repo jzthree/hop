@@ -1,7 +1,9 @@
 // Drag-and-drop helpers. Browsers deliberately never expose a dropped file's
-// real filesystem path — so hop uploads the BYTES to the host instead and
-// pastes the path the file landed on. The path hint below survives as the
-// fallback for when that upload cannot happen (old daemon, offline).
+// real filesystem path. When hop runs on the machine the file is on, the
+// daemon finds it by name, size and modified time (or the Mac app hands over
+// the real path) and its own path is pasted — nothing copied. Otherwise hop
+// uploads the BYTES to the host and pastes the path the file landed on. The
+// path hint below survives as the fallback for when neither can happen.
 
 /** Quote a path for a shell only when it needs it. A bare path stays bare —
  *  most drops land somewhere boring, and gratuitous quotes read as noise in

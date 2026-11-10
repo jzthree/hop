@@ -1517,9 +1517,39 @@ const App = () => {
     const room = activeSessionRoomRef.current;
     if (!room) return;
     setUploading({ done: 0, total: files.length });
-    const landed: string[] = [];
+    // Where hop runs on the machine the files are on, pass their own paths:
+    // the daemon finds each one (the Mac app hands over the real path; a
+    // browser only knows name, size and modified time). Only what is not
+    // found is uploaded — copying is what made a drop feel frozen.
+    const native = (window as { __hopDragPaths?: string[] }).__hopDragPaths;
+    (window as { __hopDragPaths?: string[] }).__hopDragPaths = undefined;
+    let located: Array<string | null> = files.map(() => null);
     try {
-      for (const file of files) {
+      const res = await fetch("/api/files/locate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: room,
+          files: files.map((f) => ({
+            name: f.name, size: f.size, lastModified: f.lastModified,
+            path: native?.find((p) => p.split("/").pop() === f.name)
+          }))
+        })
+      });
+      if (res.ok) {
+        const d = await res.json().catch(() => null) as { paths?: Array<string | null> } | null;
+        if (Array.isArray(d?.paths) && d!.paths.length === files.length) located = d!.paths;
+      }
+    } catch { /* an older daemon, or none reachable: upload */ }
+    const landed: string[] = [];
+    let uploaded = 0;
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (located[i]) {
+          landed.push(String(located[i]));
+          setUploading((u) => (u ? { ...u, done: u.done + 1 } : u));
+          continue;
+        }
         const res = await fetch(
           `/api/sessions/upload?name=${encodeURIComponent(room)}&filename=${encodeURIComponent(file.name)}`,
           { method: "POST", body: file }
@@ -1532,14 +1562,14 @@ const App = () => {
           return;
         }
         const data = await res.json();
-        if (data?.path) landed.push(String(data.path));
+        if (data?.path) { landed.push(String(data.path)); uploaded += 1; }
         setUploading((u) => (u ? { ...u, done: u.done + 1 } : u));
       }
       if (landed.length > 0) {
         termRef.current?.paste(pasteableUploadPaths(landed));
-        pushNotice(landed.length === 1
-          ? `Uploaded to ${landed[0]}`
-          : `Uploaded ${landed.length} files — paths pasted`);
+        if (uploaded > 0) {
+          pushNotice(landed.length === 1 ? `Uploaded to ${landed[0]}` : `${uploaded} of ${landed.length} uploaded; paths pasted`);
+        }
       }
     } catch {
       pushNotice(originalPathHint(platformString));
@@ -5882,8 +5912,8 @@ const App = () => {
                     <div className="terminal-drop-overlay" aria-hidden="true">
                       <span>
                         {uploading
-                          ? `Uploading ${uploading.total > 1 ? `${uploading.done + 1} of ${uploading.total}` : "file"}…`
-                          : "Drop to upload — the path pastes into this session"}
+                          ? (uploading.total > 1 ? `Adding ${uploading.done + 1} of ${uploading.total}…` : "Adding the file…")
+                          : "Drop: its path is pasted into this session (copied over only if it is on another machine)"}
                       </span>
                     </div>
                   )}

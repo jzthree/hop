@@ -5953,10 +5953,22 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 /* Docked, the session's bar is its header: the session's name, set like
    the notebook's specimen labels' bigger sibling. */
 .topbar.channel { padding: 10px 20px; gap: 16px; }
+.channel-title { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 0 1 auto; }
 .channel-name {
   font: 700 15px/1.2 var(--font-mono); letter-spacing: -0.01em; min-width: 0; flex: 0 1 auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  -webkit-user-select: text; user-select: text; cursor: text;
 }
+/* Copy the name: quiet until the header is hovered (or it is focused). */
+.channel-copy {
+  flex: none; border: 0; background: none; cursor: pointer; color: var(--ink-muted);
+  font: 400 13px/1 var(--font-sans); padding: 4px 5px; border-radius: 5px;
+  opacity: 0; transition: opacity 0.12s ease;
+}
+.topbar:hover .channel-copy, .channel-copy:focus-visible, .channel-copy.done { opacity: 1; }
+.channel-copy:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink); }
+.channel-copy.done { color: #16a34a; }
+@media (hover: none) { .channel-copy { opacity: 1; } }
 .topbar-rail-btn { display: inline-flex; align-items: center; justify-content: center; padding-left: 8px; padding-right: 8px; }
 /* The phone bar's name is the rail's door. */
 .phone-term-title {

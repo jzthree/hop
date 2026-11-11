@@ -1347,6 +1347,16 @@ const App = () => {
     if (!isMobile) termRef.current?.focus();
   };
 
+  // The session's name, copied from its header (⧉): a ✓ for a moment says so.
+  const [titleCopied, setTitleCopied] = useState(false);
+  const copyTitle = () => {
+    const name = sessionLabelRef.current || "";
+    if (!name) return;
+    navigator.clipboard?.writeText(name).then(() => {
+      setTitleCopied(true);
+      window.setTimeout(() => setTitleCopied(false), 1400);
+    }).catch(() => pushNotice("Copy failed"));
+  };
   const copyToClipboard = async (text: string, label: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -5389,7 +5399,14 @@ const App = () => {
                      onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setRenamingSession(false); focusTerminalSoon(); } }} />
             </form>
           ) : (
-            <div className="channel-name" title={sessionLabel} onDoubleClick={startRename}>{sessionLabel}</div>
+            // The name selects like text, and copies in one click (⧉ beside
+            // it); a double-click still renames.
+            <div className="channel-title">
+              <div className="channel-name" title={sessionLabel} onDoubleClick={startRename}>{sessionLabel}</div>
+              <button type="button" className={"channel-copy" + (titleCopied ? " done" : "")}
+                      aria-label={titleCopied ? "Copied" : "Copy session name"} title={titleCopied ? "Copied" : "Copy name"}
+                      onClick={copyTitle}>{titleCopied ? "✓" : "⧉"}</button>
+            </div>
           )}
           {sessionTabs && (
             <nav className="session-tabs" role="tablist" aria-label="Session">

@@ -29,6 +29,7 @@ const agentHomesLib = require('./lib/agent-homes');
 const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const messages = require('./lib/messages');
+const sessionFiles = require('./lib/session-files');
 const composerLib = require('./lib/composer');
 const fileLocate = require('./lib/file-locate');
 const digestReads = require('./lib/digest-reads');
@@ -2884,6 +2885,292 @@ function findViewThumbTool() {
     viewThumbTool = process.platform === 'darwin' && has('sips') ? 'sips' : has('magick') ? 'magick' : has('convert') ? 'convert' : null;
     return viewThumbTool;
 }
+// --- Files from a session (lib/session-files.js) ---
+// What a session's agent wrote or named in its replies, read from its own
+// conversation record: the Views shelf below what it published. Read
+// incrementally (a session's record only grows), from its last 16 MB.
+const SESSION_FILES_TAIL_BYTES = 16 * 1024 * 1024;
+const SESSION_FILES_MAX = 200;
+const sessionFilesCache = new Map();    // internalName -> { file, offset, tool, state, entries }
+const sessionFilesOnScreen = new Map(); // internalName -> Map(path -> entry): opened from its terminal
+const sessionFileIds = new Map();       // internalName -> Map(id -> path), from the last listing
+function sessionFileId(p) { return crypto.createHash('sha1').update(p).digest('hex').slice(0, 16); }
+function sessionFileEntries(internalName) {
+    const cfg = getEffectiveSessionConfig(internalName) || {};
+    const rt = getRuntimeSessionMetadata(internalName) || {};
+    let file = null;
+    try { file = resolveSessionTranscriptPathForSearch(internalName, { foregroundProcess: rt.foregroundProcess, cwd: rt.cwd || cfg.cwd }); } catch (e) { file = null; }
+    let c = sessionFilesCache.get(internalName);
+    let st = null;
+    if (file) { try { st = fs.statSync(file); } catch (e) { st = null; } }
+    if (file && st) {
+        if (!c || c.file !== file || st.size < c.offset || st.size - c.offset > SESSION_FILES_TAIL_BYTES) {
+            const offset = Math.max(0, st.size - SESSION_FILES_TAIL_BYTES);
+            c = { file, offset, skipFirst: offset > 0, tool: trajectoryExtract.detectTool(file), state: { cwd: rt.cwd || cfg.cwd || null }, entries: new Map() };
+            sessionFilesCache.set(internalName, c);
+        }
+        if (st.size > c.offset) {
+            const len = st.size - c.offset;
+            const buf = Buffer.alloc(len);
+            const fd = fs.openSync(file, 'r');
+            try { fs.readSync(fd, buf, 0, len, c.offset); } finally { fs.closeSync(fd); }
+            // Whole lines only: the rest is read when it is finished.
+            const lastNl = buf.lastIndexOf(0x0a);
+            if (lastNl >= 0) {
+                c.offset += lastNl + 1;
+                const lines = buf.subarray(0, lastNl).toString('utf8').split('\n');
+                if (c.skipFirst) { lines.shift(); c.skipFirst = false; }
+                sessionFiles.collect(sessionFiles.refsFromLines(lines, c.tool, c.state), { home: os.homedir(), into: c.entries });
+            }
+        }
+    }
+    const merged = new Map(c && c.file === file ? c.entries : []);
+    for (const [k, v] of sessionFilesOnScreen.get(internalName) || []) {
+        const cur = merged.get(k);
+        if (!cur || (v.at || 0) > (cur.at || 0)) merged.set(k, cur ? { ...cur, at: v.at } : v);
+    }
+    return merged;
+}
+// The originals already published as views of this session (`source`).
+function publishedViewSources(internalName) {
+    return new Set(Object.values(readViewMeta(internalName)).map((m) => m && m.source).filter(Boolean));
+}
+function sessionFileItem(internalName, e, st) {
+    const id = sessionFileId(e.path);
+    return {
+        id, name: path.basename(e.path), file: e.path, how: e.how,
+        where: e.path.startsWith(os.homedir() + '/') ? `~${e.path.slice(os.homedir().length)}` : e.path,
+        at: e.at || Math.floor(st.mtimeMs), mtime: Math.floor(st.mtimeMs / 1000), bytes: st.size,
+        path: `/sessionfile/${encodeURIComponent(internalName)}/${id}/inline`
+    };
+}
+function sessionFilesList(internalName) {
+    const published = publishedViewSources(internalName);
+    const items = [];
+    for (const e of sessionFileEntries(internalName).values()) {
+        if (published.has(e.path)) continue;
+        let st;
+        try { st = fs.statSync(e.path); } catch (err) { continue; }
+        if (!st.isFile()) continue;
+        items.push(sessionFileItem(internalName, e, st));
+    }
+    items.sort((a, b) => b.at - a.at);
+    const out = items.slice(0, SESSION_FILES_MAX);
+    sessionFileIds.set(internalName, new Map(out.map((i) => [i.id, i.file])));
+    return out;
+}
+// A listed file by its id, still there and still showable — or null. Only
+// what the listing found is ever served: this is not a way to read any path.
+function sessionFileById(internalName, id) {
+    let p = sessionFileIds.get(internalName)?.get(id);
+    if (!p) { sessionFilesList(internalName); p = sessionFileIds.get(internalName)?.get(id); }
+    if (!p || !sessionFiles.allowedPath(p, os.homedir())) return null;
+    try { return fs.statSync(p).isFile() ? p : null; } catch (e) { return null; }
+}
+// Copy a found file into the session's views, captioned, remembering where
+// it came from (so the shelf stops offering it).
+function pinSessionFile(internalName, src, title) {
+    const dest = path.join(VIEWS_DIR, internalName);
+    fs.mkdirSync(dest, { recursive: true });
+    const meta = readViewMeta(internalName);
+    let name = path.basename(src);
+    if (fs.existsSync(path.join(dest, name)) && meta[name]?.source !== src) {
+        // Another file is published under this name: keep both.
+        const ext = path.extname(name), base = name.slice(0, name.length - ext.length);
+        let i = 2;
+        while (fs.existsSync(path.join(dest, `${base}-${i}${ext}`))) i += 1;
+        name = `${base}-${i}${ext}`;
+    }
+    fs.copyFileSync(src, path.join(dest, name));
+    meta[name] = { ...(meta[name] || {}), ...(title ? { title: String(title).slice(0, 200) } : {}), source: src };
+    writeViewMeta(internalName, meta);
+    rebuildViewManifest();
+    return name;
+}
+
+// A page an agent wrote often links to hop by its PUBLIC address — a
+// redirect to https://hop.example.org/s/<server>/, say. Read inside hop at
+// another address (the Mac app's 127.0.0.1, a LAN name), that is another
+// site: the frame is signed out there and shows the sign-in page, where a
+// passkey cannot work. So hop's own addresses in a page it serves become
+// paths on whichever address is reading it.
+function ownAddressesRelative(html, hosts) {
+    let out = String(html);
+    for (const h of hosts || []) {
+        if (!h || !out.toLowerCase().includes(h)) continue;
+        const esc = h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(new RegExp(`(?:https?:)?//${esc}(?=[/?#"'\\s<>]|$)/?`, 'gi'), '/');
+    }
+    return out;
+}
+// hop's own addresses, as a page might name them: the public one, the
+// tunnel's, and the one this request came in on.
+function ownAddresses(req) {
+    const set = new Set();
+    const add = (h) => { const v = String(h || '').trim().toLowerCase(); if (v) set.add(v); };
+    add(getCanonicalHost());
+    add(getDomainConfig()?.hostname);
+    add(req?.headers?.host);
+    return [...set];
+}
+
+/**
+ * Answer a request for a file a viewer reads: a small thumbnail, the raw
+ * bytes as an attachment, a rendered page (Markdown, tables, notebooks), or
+ * the file itself with Range support. The Views route serves `hop view`
+ * copies with it; the session-files route serves an agent's originals.
+ * o: { thumb, rawDownload, wantDownload, inlineUrl (thumb fallback),
+ *      fileName, caption, theme, sandbox }. `sandbox`: a page or SVG runs
+ *      in an opaque origin (CSP sandbox), so a file nobody vetted cannot act
+ *      as hop's signed-in page.
+ */
+function serveViewerFile(req, res, target, o = {}) {
+    const viewExt = path.extname(target).toLowerCase();
+    const wantDownload = o.wantDownload === true;
+    const sandboxed = (type) => (o.sandbox && /^(text\/html|image\/svg\+xml)/.test(String(type || ''))
+        ? { 'Content-Security-Policy': 'sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads' }
+        : {});
+    // /thumb: a small JPEG for the Views list. The list used to load
+    // every image whole as its own thumbnail — 39 MB through the
+    // tunnel to draw one screen of rows, with the view you picked
+    // queued behind it.
+    if (o.thumb) {
+        viewThumbnail(target, (thumb) => {
+            if (!thumb) {
+                res.writeHead(302, { Location: o.inlineUrl });
+                res.end();
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': fs.statSync(thumb).size, 'Cache-Control': 'private, max-age=86400' });
+            if (req.method === 'HEAD') { res.end(); return; }
+            fs.createReadStream(thumb).pipe(res);
+        });
+        return;
+    }
+    // ?download=1 — the FILE, not the page: the bytes the agent
+    // published, under their real name, as an attachment. Rendered
+    // kinds (md/csv/json) come back raw here, not as the HTML the
+    // viewer shows (Jian: "I should be able to download a hop view
+    // item from the UI, right?").
+    if (o.rawDownload) {
+        const rawTypes = { '.md': 'text/markdown; charset=utf-8', '.markdown': 'text/markdown; charset=utf-8',
+                           '.csv': 'text/csv; charset=utf-8', '.tsv': 'text/tab-separated-values; charset=utf-8',
+                           '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8',
+                           '.ipynb': 'application/x-ipynb+json; charset=utf-8' };
+        const dlName = path.basename(target).replace(/["\r\n]/g, '_');
+        res.writeHead(200, {
+            'Content-Type': rawTypes[viewExt] || STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream',
+            'Content-Length': fs.statSync(target).size,
+            'Content-Disposition': `attachment; filename="${dlName}"; filename*=UTF-8''${encodeURIComponent(dlName)}`,
+            'Cache-Control': 'no-store'
+        });
+        if (req.method === 'HEAD') { res.end(); return; }
+        fs.createReadStream(target).pipe(res);
+        return;
+    }
+    // Markdown is rendered, not dumped: an agent's write-up is a
+    // RESULT, and handing over a wall of raw asterisks is the "just
+    // text" outcome this feature exists to avoid. The stored file
+    // stays the markdown the agent wrote.
+    if (VIEW_RENDERED.has(viewExt) && !wantDownload) {
+        const file = o.fileName || path.basename(target);
+        const caption = o.caption || file;
+        const raw = fs.readFileSync(target, 'utf8');
+        // The embedding client knows its theme; the OS doesn't. An
+        // explicit ?theme= wins; absent, prefers-color-scheme decides.
+        const viewTheme = o.theme === 'light' ? 'light'
+            : o.theme === 'dark' ? 'dark' : null;
+        let html;
+        if (viewExt === '.ipynb') {
+            try { html = renderNotebook(JSON.parse(raw), caption, file, null); }
+            catch (e) { html = renderMarkdown(`# ${caption}\n\nThis notebook could not be read: ${e.message}`, caption, viewTheme); }
+        } else if (viewExt === '.csv') html = renderDelimited(raw, caption, ',', viewTheme);
+        else if (viewExt === '.tsv') html = renderDelimited(raw, caption, '\t', viewTheme);
+        else if (viewExt === '.json') {
+            // Pretty-printed in a code block: a minified blob is
+            // machine output, and the human opened this to read it.
+            let pretty = raw;
+            try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (e) { }
+            html = renderMarkdown(`# ${caption}\n\n\`\`\`json\n${pretty}\n\`\`\``, caption, viewTheme);
+        } else html = renderMarkdown(raw, caption, viewTheme);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...sandboxed('text/html') });
+        res.end(html);
+        return;
+    }
+    // Streamed, with Range support. iOS media playback (AVPlayer, and
+    // the player inside WKWebView) opens a video by asking for
+    // `Range: bytes=0-1` and refuses to play at all when the answer
+    // is a 200 with the whole body — which is exactly what
+    // readFileSync produced, and why published .mp4 views spun
+    // forever on the phone. Range also means a 30 MB video no longer
+    // has to fit in the daemon's heap per request.
+    const viewType = STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream';
+    const viewSize = fs.statSync(target).size;
+    // A page naming hop by another of its addresses: rewritten (see
+    // ownAddressesRelative), whole — pages are not ranged.
+    if ((viewExt === '.html' || viewExt === '.htm') && !wantDownload && o.ownHosts && viewSize <= 32 * 1024 * 1024) {
+        const raw = fs.readFileSync(target);
+        const lower = raw.toString('latin1').toLowerCase();
+        if (o.ownHosts.some((h) => lower.includes(h))) {
+            const body = Buffer.from(ownAddressesRelative(raw.toString('utf8'), o.ownHosts), 'utf8');
+            res.writeHead(200, {
+                ...sandboxed(viewType),
+                'Content-Type': viewType,
+                'Content-Length': body.length,
+                'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`
+            });
+            res.end(req.method === 'HEAD' ? undefined : body);
+            return;
+        }
+    }
+    const rangeHeader = String(req.headers.range || '');
+    const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+    if (rangeMatch && (rangeMatch[1] || rangeMatch[2])) {
+        let start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : NaN;
+        let end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : NaN;
+        if (Number.isNaN(start)) {           // suffix form: bytes=-N
+            start = Math.max(0, viewSize - end);
+            end = viewSize - 1;
+        } else if (Number.isNaN(end) || end >= viewSize) {
+            end = viewSize - 1;
+        }
+        if (start > end || start >= viewSize) {
+            res.writeHead(416, { 'Content-Range': `bytes */${viewSize}` });
+            res.end();
+            return;
+        }
+        res.writeHead(206, {
+            ...sandboxed(viewType),
+            'Content-Type': viewType,
+            'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`,
+            'Content-Length': end - start + 1,
+            'Content-Range': `bytes ${start}-${end}/${viewSize}`,
+            'Accept-Ranges': 'bytes'
+        });
+        if (req.method === 'HEAD') { res.end(); return; }
+        fs.createReadStream(target, { start, end }).pipe(res);
+        return;
+    }
+    // RFC 6266: an ASCII fallback plus the UTF-8 form for names with
+    // anything else in them.
+    const downloadName = path.basename(target);
+    const asciiName = downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+    // Inline still names the file: a type the browser can't show
+    // (pptx, zip, octet-stream) is saved anyway, and without a name it
+    // took the URL's last segment — every such download read "inline".
+    const disposition = { 'Content-Disposition': `${wantDownload ? 'attachment' : 'inline'}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}` };
+    res.writeHead(200, {
+        ...disposition,
+        ...sandboxed(viewType),
+        'Content-Type': viewType,
+        'Content-Length': viewSize,
+        'Accept-Ranges': 'bytes'
+    });
+    if (req.method === 'HEAD') { res.end(); return; }
+    fs.createReadStream(target).pipe(res);
+    return;
+}
+
 function viewThumbnail(file, done) {
     const ext = path.extname(file).toLowerCase();
     const tool = VIEW_THUMB_EXTS.has(ext) ? findViewThumbTool() : null;
@@ -13434,6 +13721,24 @@ happens until someone clicks it.
                                 const code = Array.from(inputs).map(i => i.value).join('');
                                 hidden.value = code;
                             });
+                            // Opened inside another page — a view in hop's Views that
+                            // led to another of hop's addresses — signing in cannot
+                            // work: the browser refuses passkeys there, and a sign-in
+                            // would not reach the page around it. Say so, and open
+                            // this page whole instead.
+                            if (window.top !== window.self) {
+                                form.style.display = 'none';
+                                // (Removed, not hidden: the passkey check would show it again.)
+                                pkRow.remove();
+                                const head = document.querySelector('.box h2');
+                                if (head) head.textContent = 'Signed out in this frame';
+                                const note = document.createElement('div');
+                                note.id = 'framedNote';
+                                note.innerHTML = '<p style="color:#52525b; margin:0 0 1.2rem; font-size:0.95rem; line-height:1.5;">This page opened inside another page, where hop can’t sign you in.</p>'
+                                    + '<button type="button" id="openWhole" style="background:#7c3aed;">Open it in its own tab</button>';
+                                form.parentNode.insertBefore(note, form);
+                                document.getElementById('openWhole').addEventListener('click', () => window.open(location.href, '_blank', 'noopener'));
+                            }
                         </script>
                     </body>
                 </html>
@@ -13586,126 +13891,16 @@ happens until someone clicks it.
                 });
                 return;
             }
-            // /thumb: a small JPEG for the Views list. The list used to load
-            // every image whole as its own thumbnail — 39 MB through the
-            // tunnel to draw one screen of rows, with the view you picked
-            // queued behind it.
-            if (viewMatch[3] === '/thumb') {
-                viewThumbnail(target, (thumb) => {
-                    if (!thumb) {
-                        res.writeHead(302, { Location: `/view/${viewMatch[1]}/${viewMatch[2]}/inline` });
-                        res.end();
-                        return;
-                    }
-                    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': fs.statSync(thumb).size, 'Cache-Control': 'private, max-age=86400' });
-                    if (req.method === 'HEAD') { res.end(); return; }
-                    fs.createReadStream(thumb).pipe(res);
-                });
-                return;
-            }
-            // ?download=1 — the FILE, not the page: the bytes the agent
-            // published, under their real name, as an attachment. Rendered
-            // kinds (md/csv/json) come back raw here, not as the HTML the
-            // viewer shows (Jian: "I should be able to download a hop view
-            // item from the UI, right?").
-            if (parsedUrl.query.download === '1') {
-                const rawTypes = { '.md': 'text/markdown; charset=utf-8', '.markdown': 'text/markdown; charset=utf-8',
-                                   '.csv': 'text/csv; charset=utf-8', '.tsv': 'text/tab-separated-values; charset=utf-8',
-                                   '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8',
-                                   '.ipynb': 'application/x-ipynb+json; charset=utf-8' };
-                const dlName = path.basename(target).replace(/["\r\n]/g, '_');
-                res.writeHead(200, {
-                    'Content-Type': rawTypes[viewExt] || STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream',
-                    'Content-Length': fs.statSync(target).size,
-                    'Content-Disposition': `attachment; filename="${dlName}"; filename*=UTF-8''${encodeURIComponent(dlName)}`,
-                    'Cache-Control': 'no-store'
-                });
-                if (req.method === 'HEAD') { res.end(); return; }
-                fs.createReadStream(target).pipe(res);
-                return;
-            }
-            // Markdown is rendered, not dumped: an agent's write-up is a
-            // RESULT, and handing over a wall of raw asterisks is the "just
-            // text" outcome this feature exists to avoid. The stored file
-            // stays the markdown the agent wrote.
-            if (VIEW_RENDERED.has(viewExt) && !wantDownload) {
-                const sess = decodeURIComponent(viewMatch[1]);
-                const file = decodeURIComponent(viewMatch[2]);
-                const caption = readViewMeta(sess)[file]?.title || file;
-                const raw = fs.readFileSync(target, 'utf8');
-                // The embedding client knows its theme; the OS doesn't. An
-                // explicit ?theme= wins; absent, prefers-color-scheme decides.
-                const viewTheme = parsedUrl.query.theme === 'light' ? 'light'
-                    : parsedUrl.query.theme === 'dark' ? 'dark' : null;
-                let html;
-                if (viewExt === '.ipynb') {
-                    try { html = renderNotebook(JSON.parse(raw), caption, file, null); }
-                    catch (e) { html = renderMarkdown(`# ${caption}\n\nThis notebook could not be read: ${e.message}`, caption, viewTheme); }
-                } else if (viewExt === '.csv') html = renderDelimited(raw, caption, ',', viewTheme);
-                else if (viewExt === '.tsv') html = renderDelimited(raw, caption, '\t', viewTheme);
-                else if (viewExt === '.json') {
-                    // Pretty-printed in a code block: a minified blob is
-                    // machine output, and the human opened this to read it.
-                    let pretty = raw;
-                    try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (e) { }
-                    html = renderMarkdown(`# ${caption}\n\n\`\`\`json\n${pretty}\n\`\`\``, caption, viewTheme);
-                } else html = renderMarkdown(raw, caption, viewTheme);
-                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(html);
-                return;
-            }
-            // Streamed, with Range support. iOS media playback (AVPlayer, and
-            // the player inside WKWebView) opens a video by asking for
-            // `Range: bytes=0-1` and refuses to play at all when the answer
-            // is a 200 with the whole body — which is exactly what
-            // readFileSync produced, and why published .mp4 views spun
-            // forever on the phone. Range also means a 30 MB video no longer
-            // has to fit in the daemon's heap per request.
-            const viewType = STATIC_CONTENT_TYPES[viewExt] || 'application/octet-stream';
-            const viewSize = fs.statSync(target).size;
-            const rangeHeader = String(req.headers.range || '');
-            const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
-            if (rangeMatch && (rangeMatch[1] || rangeMatch[2])) {
-                let start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : NaN;
-                let end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : NaN;
-                if (Number.isNaN(start)) {           // suffix form: bytes=-N
-                    start = Math.max(0, viewSize - end);
-                    end = viewSize - 1;
-                } else if (Number.isNaN(end) || end >= viewSize) {
-                    end = viewSize - 1;
-                }
-                if (start > end || start >= viewSize) {
-                    res.writeHead(416, { 'Content-Range': `bytes */${viewSize}` });
-                    res.end();
-                    return;
-                }
-                res.writeHead(206, {
-                    'Content-Type': viewType,
-                    'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`,
-                    'Content-Length': end - start + 1,
-                    'Content-Range': `bytes ${start}-${end}/${viewSize}`,
-                    'Accept-Ranges': 'bytes'
-                });
-                if (req.method === 'HEAD') { res.end(); return; }
-                fs.createReadStream(target, { start, end }).pipe(res);
-                return;
-            }
-            // RFC 6266: an ASCII fallback plus the UTF-8 form for names with
-            // anything else in them.
-            const downloadName = path.basename(target);
-            const asciiName = downloadName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-            // Inline still names the file: a type the browser can't show
-            // (pptx, zip, octet-stream) is saved anyway, and without a name it
-            // took the URL's last segment — every such download read "inline".
-            const disposition = { 'Content-Disposition': `${wantDownload ? 'attachment' : 'inline'}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}` };
-            res.writeHead(200, {
-                ...disposition,
-                'Content-Type': viewType,
-                'Content-Length': viewSize,
-                'Accept-Ranges': 'bytes'
+            serveViewerFile(req, res, target, {
+                thumb: viewMatch[3] === '/thumb',
+                rawDownload: parsedUrl.query.download === '1',
+                wantDownload,
+                inlineUrl: `/view/${viewMatch[1]}/${viewMatch[2]}/inline`,
+                fileName: decodeURIComponent(viewMatch[2]),
+                caption: readViewMeta(decodeURIComponent(viewMatch[1]))[decodeURIComponent(viewMatch[2])]?.title,
+                theme: parsedUrl.query.theme,
+                ownHosts: ownAddresses(req)
             });
-            if (req.method === 'HEAD') { res.end(); return; }
-            fs.createReadStream(target).pipe(res);
             return;
         }
         // The index. /assets/view/manifest.json is the URL every SHIPPED iOS
@@ -13769,6 +13964,33 @@ happens until someone clicks it.
             } catch (e) {
                 respond(500, { ok: false, error: e.message });
             }
+            return;
+        }
+        // ---- Files from a session: the Views shelf (lib/session-files.js) ----
+        // An agent's ORIGINALS, read in place — only those its own record
+        // shows it writing or naming, found by the listing's id, never an
+        // arbitrary path. Pages and SVGs run sandboxed: nobody vetted them.
+        const sessionFileMatch = (req.method === 'GET' || req.method === 'HEAD')
+            && parsedUrl.pathname.match(/^\/sessionfile\/([^/]+)\/([0-9a-f]{16})(\/inline|\/download|\/thumb)?$/);
+        if (sessionFileMatch) {
+            const sess = decodeURIComponent(sessionFileMatch[1]);
+            const config = SESSION_NAME_RE.test(sess) ? getEffectiveSessionConfig(sess) : null;
+            const target = config && canActorAccessSession(resolveActor(req), config) ? sessionFileById(sess, sessionFileMatch[2]) : null;
+            if (!target) {
+                res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+                res.end('This file is not one of the session\'s.');
+                return;
+            }
+            serveViewerFile(req, res, target, {
+                thumb: sessionFileMatch[3] === '/thumb',
+                rawDownload: parsedUrl.query.download === '1' || sessionFileMatch[3] === '/download',
+                wantDownload: sessionFileMatch[3] === '/download',
+                inlineUrl: `/sessionfile/${sessionFileMatch[1]}/${sessionFileMatch[2]}/inline`,
+                fileName: path.basename(target),
+                theme: parsedUrl.query.theme,
+                sandbox: true,
+                ownHosts: ownAddresses(req)
+            });
             return;
         }
         if (req.method === 'GET' && parsedUrl.pathname.startsWith('/assets/view/')) {
@@ -15746,6 +15968,60 @@ happens until someone clicks it.
         // API: which Views results have been seen — per session, the newest
         // mtime anyone looked at, shared by every browser, the Mac app and
         // the phone (it was per browser: a new one called everything new).
+        // Files from a session (the Views shelf): list them; pin one as a
+        // view; or find one a person clicked in the terminal.
+        if (parsedUrl.pathname === '/api/sessions/files' && req.method === 'GET') {
+            const name = String(parsedUrl.query.name || '');
+            const target = name ? resolveSessionInternalName(name, name) : null;
+            const config = target ? getEffectiveSessionConfig(target) : null;
+            res.setHeader('Content-Type', 'application/json');
+            if (!config) { res.writeHead(404); res.end(JSON.stringify({ error: 'Session not found' })); return; }
+            if (!canActorAccessSession(resolveActor(req), config)) { res.writeHead(403); res.end(JSON.stringify({ error: 'Agent access not permitted' })); return; }
+            let items = [];
+            try { items = sessionFilesList(target); } catch (e) { log(`[files] ${target}: ${e.message}`, YELLOW); }
+            res.writeHead(200, { 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ session: target, items }));
+            return;
+        }
+        if ((parsedUrl.pathname === '/api/sessions/files/pin' || parsedUrl.pathname === '/api/sessions/files/resolve') && req.method === 'POST') {
+            const body = await readRequestJson(req);
+            const reply = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+            const name = String(body?.name || '');
+            const target = name ? resolveSessionInternalName(name, name) : null;
+            const config = target ? getEffectiveSessionConfig(target) : null;
+            if (!config) return reply(404, { error: 'Session not found' });
+            if (!canActorAccessSession(resolveActor(req), config)) return reply(403, { error: 'Agent access not permitted' });
+            if (parsedUrl.pathname.endsWith('/pin')) {
+                const src = sessionFileById(target, String(body?.id || ''));
+                if (!src) return reply(404, { error: 'That file is gone, or not one of the session\'s' });
+                try {
+                    const view = pinSessionFile(target, src, body?.title);
+                    return reply(200, { ok: true, view, path: `/view/${encodeURIComponent(target)}/${encodeURIComponent(view)}/inline` });
+                } catch (e) { return reply(500, { error: e.message }); }
+            }
+            // resolve: a path as printed in the terminal, relative to where
+            // the session's agent (else its shell) works.
+            const raw = String(body?.path || '').trim();
+            if (!raw) return reply(400, { error: 'No path' });
+            let cwd = sessionFilesCache.get(target)?.state?.cwd || null;
+            if (!cwd) { try { cwd = (await sessionEntryAndPhase(target)).entry?.cwd || null; } catch (e) { cwd = null; } }
+            const abs = sessionFiles.resolveRef(raw, cwd || config.cwd, os.homedir());
+            if (!abs || !sessionFiles.allowedPath(abs, os.homedir())) return reply(400, { error: 'hop opens figures, PDFs, pages, Markdown, tables, notebooks and videos — not hidden or system files' });
+            let st;
+            try { st = fs.statSync(abs); } catch (e) { st = null; }
+            if (!st || !st.isFile()) return reply(404, { error: `No file at ${abs.startsWith(os.homedir() + '/') ? '~' + abs.slice(os.homedir().length) : abs}` });
+            // Published already: open the view.
+            const meta = readViewMeta(target);
+            const viewName = Object.keys(meta).find((k) => meta[k]?.source === abs && fs.existsSync(path.join(VIEWS_DIR, target, k)));
+            if (viewName) return reply(200, { ok: true, view: viewName, session: target });
+            if (!sessionFilesOnScreen.has(target)) sessionFilesOnScreen.set(target, new Map());
+            const onScreen = sessionFilesOnScreen.get(target);
+            onScreen.set(abs, { path: abs, how: onScreen.get(abs)?.how || 'mentioned', at: Date.now() });
+            // A bounded set: the oldest clicks go first.
+            while (onScreen.size > SESSION_FILES_MAX) onScreen.delete(onScreen.keys().next().value);
+            const item = sessionFilesList(target).find((i) => i.file === abs);
+            return item ? reply(200, { ok: true, session: target, item }) : reply(404, { error: 'Not found' });
+        }
         if (parsedUrl.pathname === '/api/views/seen' && (req.method === 'GET' || req.method === 'POST')) {
             const file = path.join(HOME_DIR, 'views-seen.json');
             let seen = {};
@@ -21093,6 +21369,10 @@ async function main() {
             // ("the before/after plots"), and repeating it per file reads
             // worse than sharing it.
             if (title) meta[name] = { ...(meta[name] || {}), title };
+            // Where it came from: the Views shelf of a session's files stops
+            // offering what is already published.
+            if (file !== '-') meta[name] = { ...(meta[name] || {}), source: path.resolve(file) };
+            else if (meta[name]?.source) { const { source, ...rest } = meta[name]; meta[name] = rest; }
             published.push(name);
             const viewUrl = `${state.url}/view/${encodeURIComponent(session)}/${encodeURIComponent(name)}/inline`;
             console.log(`View: ${viewUrl}`);

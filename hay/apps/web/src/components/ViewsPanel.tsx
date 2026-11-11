@@ -46,10 +46,21 @@ type ViewItem = {
   mtime?: number;
   // "server" is a LIVE proxied localhost server (`hop port`), not a stored
   // file; "link" points at another app (a Nebula notebook) at `target`.
-  kind?: "file" | "server" | "link";
+  kind?: "file" | "server" | "link" | "found";
   app?: string;
   target?: string;
+  // A FOUND file (the shelf below the published ones): one the session's
+  // agent wrote or named, read in place. `id` is hop's handle on it, `file`
+  // where it lives (`where`, home-shortened), `at` when the agent made or
+  // named it (ms).
+  id?: string;
+  file?: string;
+  where?: string;
+  how?: "wrote" | "mentioned";
+  at?: number;
 };
+
+type FoundFile = { id: string; name: string; file: string; where?: string; how: "wrote" | "mentioned"; at: number; mtime: number; bytes: number; path: string };
 
 type Props = {
   // Scope to one session — set when opened from that session's own affordance.
@@ -64,6 +75,8 @@ type Props = {
   onResizeSide?: (width: number | null) => void;
   // Open straight on this result (its file name within `session`).
   item?: string;
+  // …or on one of the session's found files (its id).
+  found?: string;
   // Scoped as a page (a session picked in the sidebar): go into it.
   onOpenSession?: (session: string) => void;
   // As a page, the sidebar's selection is the scope: this clears it.
@@ -235,16 +248,20 @@ export const nebulaRelayUrl = (target?: string): string | null => {
   } catch { return null; }
 };
 
-export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSession, onClearSession, inSession = false, onToggleSide, onResizeSide, onClose }: Props) => {
-  const [saved] = useState(() => (item ? {} : loadSavedViews(session)));
+export const ViewsPanel = ({ session, item, found: foundId, sessions = [], placement, onOpenSession, onClearSession, inSession = false, onToggleSide, onResizeSide, onClose }: Props) => {
+  const [saved] = useState(() => (item || foundId ? {} : loadSavedViews(session)));
   const [items, setItems] = useState<ViewItem[] | null>(null);
+  // The session's found files (null: not asked — every session's Views, or
+  // still loading).
+  const [found, setFound] = useState<ViewItem[] | null>(null);
+  const [pinning, setPinning] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   // The result being read; null is the gallery.
   const [open, setOpen] = useState<ViewItem | null>(null);
   // The notebook being run live (its path), rather than read.
   const [liveNotebook, setLiveNotebook] = useState<string | null>(null);
   // Opened straight on a result: Esc closes rather than "going back".
-  const [direct, setDirect] = useState(!!item);
+  const [direct, setDirect] = useState(!!item || !!foundId);
   const [showAll, setShowAll] = useState(!!saved.showAll);
   const [filter, setFilter] = useState<ViewFilter>(saved.filter || "all");
   const [query, setQuery] = useState(saved.query || "");
@@ -301,16 +318,36 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
     return hit ? (hit.displayName || hit.name) : internalName;
   };
 
+  const loadViews = () => fetch("/api/views", { cache: "no-store", credentials: "same-origin" })
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+    .then((d: { items?: ViewItem[] }) => (Array.isArray(d?.items) ? d.items : []));
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/views", { cache: "no-store", credentials: "same-origin" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: { items?: ViewItem[] }) => {
-        if (!cancelled) setItems(Array.isArray(d?.items) ? d.items : []);
-      })
+    loadViews()
+      .then((list) => { if (!cancelled) setItems(list); })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // One session's Views also shelve the files its agent wrote or named but
+  // never published — read in place, no badge, one click to pin.
+  const loadFound = (scope: string) => fetch(`/api/sessions/files?name=${encodeURIComponent(scope)}`, { cache: "no-store", credentials: "same-origin" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d: { items?: FoundFile[] } | null) => (Array.isArray(d?.items) ? d!.items : [])
+      .filter((f) => f && f.id && f.file && f.path)
+      .map((f): ViewItem => ({
+        session: scope, name: f.name, path: f.path, bytes: f.bytes, mtime: f.mtime,
+        kind: "found", id: f.id, file: f.file, where: f.where, how: f.how, at: f.at
+      })))
+    .catch(() => [] as ViewItem[]);
+  useEffect(() => {
+    if (!effectiveScope) { setFound(null); return; }
+    let cancelled = false;
+    void loadFound(effectiveScope).then((list) => { if (!cancelled) setFound(list); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveScope]);
 
   // Take focus once so the keyboard works at once (Esc, arrows): the page
   // and the modal sit over a terminal that had it.
@@ -324,18 +361,26 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
   }, [items, effectiveScope]);
 
   const counts = useMemo(() => {
-    const c: Record<ViewFilter, number> = { all: scoped.length, figures: 0, docs: 0, pages: 0, live: 0 };
-    for (const i of scoped) c[filterOf(i)] += 1;
+    const all = [...scoped, ...(found || [])];
+    const c: Record<ViewFilter, number> = { all: all.length, figures: 0, docs: 0, pages: 0, live: 0 };
+    for (const i of all) c[filterOf(i)] += 1;
     return c;
-  }, [scoped]);
+  }, [scoped, found]);
 
-  const shown = useMemo(() => {
+  const matches = (i: ViewItem) => {
     const q = query.trim().toLowerCase();
-    return scoped.filter((i) => (filter === "all" || filterOf(i) === filter)
+    return (filter === "all" || filterOf(i) === filter)
       && (!q || (i.title || "").toLowerCase().includes(q) || i.name.toLowerCase().includes(q)
-        || label(i.session).toLowerCase().includes(q)));
+        || (i.file || "").toLowerCase().includes(q) || label(i.session).toLowerCase().includes(q));
+  };
+  const shown = useMemo(() => scoped.filter(matches),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scoped, filter, query, sessions]);
+    [scoped, filter, query, sessions]);
+  const foundShown = useMemo(() => (found || []).filter(matches),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [found, filter, query, sessions]);
+  // What the keyboard and ‹ › walk: the published, then the shelf.
+  const navList = useMemo(() => [...shown, ...foundShown], [shown, foundShown]);
 
   const days = useMemo(() => {
     const out: Array<{ day: string; rows: ViewItem[] }> = [];
@@ -365,19 +410,35 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
     if (asked) setOpen(asked);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
+  // The same for a found file, when the shelf lands.
+  useEffect(() => {
+    if (!found || open) return;
+    if (foundId) {
+      const asked = found.find((r) => r.id === foundId);
+      if (asked) setOpen(asked);
+      return;
+    }
+    if (saved.open) {
+      const was = found.find((r) => r.path === saved.open);
+      if (was) { saved.open = null; setOpen(was); }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [found]);
   // A result that disappears (deleted, filtered away) closes the reader.
   useEffect(() => {
-    if (open && items && !items.some((r) => r.path === open.path)) setOpen(null);
-  }, [items, open]);
+    if (!open) return;
+    const pool = open.kind === "found" ? found : items;
+    if (pool && !pool.some((r) => r.path === open.path)) setOpen(null);
+  }, [items, found, open]);
 
-  const at = open ? shown.findIndex((r) => r.path === open.path) : -1;
+  const at = open ? navList.findIndex((r) => r.path === open.path) : -1;
   const step = (dir: 1 | -1) => {
-    if (!shown.length) return;
-    const next = at < 0 ? 0 : Math.min(shown.length - 1, Math.max(0, at + dir));
-    setOpen(shown[next]);
+    if (!navList.length) return;
+    const next = at < 0 ? 0 : Math.min(navList.length - 1, Math.max(0, at + dir));
+    setOpen(navList[next]);
   };
   const backToGallery = () => {
-    if (open) setSel(Math.max(0, shown.findIndex((r) => r.path === open.path)));
+    if (open) setSel(Math.max(0, navList.findIndex((r) => r.path === open.path)));
     setOpen(null);
     setDirect(false);
     window.setTimeout(() => panelRef.current?.focus(), 0);
@@ -420,7 +481,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
         return;
       }
       if (event.key === "/" && !inSearch) { event.preventDefault(); searchRef.current?.focus(); return; }
-      if (!shown.length) return;
+      if (!navList.length) return;
       const horiz = event.key === "ArrowLeft" || event.key === "ArrowRight";
       if (inSearch && horiz && query) return; // ← → edit the query
       const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1
@@ -429,20 +490,20 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
         event.preventDefault();
         event.stopPropagation();
         if (inSearch) searchRef.current?.blur();
-        setSel((i) => Math.max(0, Math.min(shown.length - 1, i + delta)));
+        setSel((i) => Math.max(0, Math.min(navList.length - 1, i + delta)));
         return;
       }
       if (event.key === "Enter") {
         event.preventDefault();
         event.stopPropagation();
-        const pick = shown[Math.min(sel, shown.length - 1)];
+        const pick = navList[Math.min(sel, navList.length - 1)];
         if (pick) { setOpen(pick); setDirect(false); }
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onClose, open, shown, direct, query, sel, asSide]);
+  }, [onClose, open, navList, direct, query, sel, asSide]);
 
   // Keep the keyboard's card on screen.
   useEffect(() => {
@@ -529,16 +590,36 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
 
   const metaOf = (i: ViewItem) => i.kind === "server"
     ? "live server"
-    : [label(i.session), relativeTime((i.mtime || 0) * 1000, now)].filter(Boolean).join(" · ");
+    : i.kind === "found"
+      ? [i.how === "wrote" ? "wrote" : "named", relativeTime(i.at || (i.mtime || 0) * 1000, now)].filter(Boolean).join(" · ")
+      : [label(i.session), relativeTime((i.mtime || 0) * 1000, now)].filter(Boolean).join(" · ");
+
+  // A found file becomes a view: copied into the session's Views (its
+  // original stays where the agent left it), and read there from now on.
+  const pinFound = (i: ViewItem) => {
+    if (!i.id || !effectiveScope || pinning) return;
+    setPinning(i.id);
+    fetch("/api/sessions/files/pin", {
+      method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: effectiveScope, id: i.id })
+    }).then((r) => (r.ok ? r.json() : null)).then(async (d: { path?: string } | null) => {
+      if (!d?.path) return;
+      const [views, shelf] = await Promise.all([loadViews().catch(() => null), loadFound(effectiveScope)]);
+      if (views) setItems(views);
+      setFound(shelf);
+      const pinned = views?.find((v) => v.path === d.path);
+      if (pinned && open?.path === i.path) setOpen(pinned);
+    }).catch(() => { /* still on the shelf */ }).finally(() => setPinning(null));
+  };
 
   // ── The gallery ──
   const card = (i: ViewItem, index: number) => (
     <a key={i.path}
-       className={"vg-card" + (index === sel ? " kbd" : "") + (isFresh(i) ? " fresh" : "")}
+       className={"vg-card" + (index === sel ? " kbd" : "") + (i.kind !== "found" && isFresh(i) ? " fresh" : "") + (i.kind === "found" ? " found" : "")}
        href={hrefFor(i)} target="_blank" rel="noopener"
        onClick={(e) => onCardClick(e, i)}
        onMouseEnter={() => setSel(index)}
-       title={i.title || i.name}>
+       title={i.where || i.file || i.title || i.name}>
       <span className={"vg-thumb" + (isImage(i.name) && i.kind !== "server" ? " image" : ` doc ${filterOf(i)}`)}>
         {isImage(i.name) && i.kind !== "server"
           // A small server-made thumbnail: the plots scannable at a glance
@@ -549,7 +630,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
               <span className="vg-doc-title" aria-hidden="true">{i.title || i.name}</span>
               <span className="vg-doc-rule" aria-hidden="true" />
             </>)}
-        {isFresh(i) && <span className="views-dot" aria-label="New" />}
+        {i.kind !== "found" && isFresh(i) && <span className="views-dot" aria-label="New" />}
       </span>
       <span className="vg-caption">
         <span className="views-title">{i.title || i.name}</span>
@@ -559,29 +640,43 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
   );
 
   let index = 0;
+  const shelfHas = (found?.length || 0) > 0;
   const gallery = (
     <div className="vg-scroll">
       {failed ? (
         <p className="views-empty">Couldn't reach the view index.</p>
       ) : !items ? (
         <p className="views-empty">Loading…</p>
-      ) : scoped.length === 0 ? (
-        <div className="views-empty views-empty-page">
-          <p>Nothing published yet{effectiveScope ? " by this session" : ""}. Agents
-          hand over results a terminal can't draw — plots, PDFs, rendered
-          write-ups, live dev servers — and they land here, by day.</p>
-          <pre className="views-empty-cmds">{"hop view --title \"ROC curve\" plot.png\nhop port 5173"}</pre>
-        </div>
-      ) : shown.length === 0 ? (
-        <p className="views-empty">Nothing here matches{query ? ` “${query.trim()}”` : ""}.</p>
       ) : (
         <div ref={gridRef}>
-          {days.map((d) => (
+          {scoped.length === 0 ? (
+            shelfHas ? (
+              <p className="views-empty">Nothing published by this session yet.</p>
+            ) : (
+              <div className="views-empty views-empty-page">
+                <p>Nothing published yet{effectiveScope ? " by this session" : ""}. Agents
+                hand over results a terminal can't draw — plots, PDFs, rendered
+                write-ups, live dev servers — and they land here, by day.</p>
+                <pre className="views-empty-cmds">{"hop view --title \"ROC curve\" plot.png\nhop port 5173"}</pre>
+              </div>
+            )
+          ) : shown.length === 0 && foundShown.length === 0 ? (
+            <p className="views-empty">Nothing here matches{query ? ` “${query.trim()}”` : ""}.</p>
+          ) : days.map((d) => (
             <section key={d.day} className="vg-day">
               <h4 className="vg-day-head">{d.day}<span className="vg-day-count">{d.rows.length}</span></h4>
               <div className="vg-grid">{d.rows.map((r) => card(r, index++))}</div>
             </section>
           ))}
+          {foundShown.length > 0 && (
+            // Not published: files the agent wrote or named, read where they
+            // are. Quiet — no "new" dots, no badge — and one click from a view.
+            <section className="vg-day vg-shelf" aria-label="Files from this session">
+              <h4 className="vg-day-head">Files from this session<span className="vg-day-count">{foundShown.length}</span></h4>
+              <p className="vg-shelf-note">Written or named by the agent, not published. Pin one to keep it in Views.</p>
+              <div className="vg-grid">{foundShown.map((r) => card(r, index++))}</div>
+            </section>
+          )}
         </div>
       )}
     </div>
@@ -656,16 +751,16 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
                 aria-label={direct ? "Close" : "Back to all views"} title={direct ? "Close (Esc)" : "All views (Esc)"}>
           {direct ? "×" : "←"}
         </button>
-        <span className="views-nav-title" title={open.title || open.name}>
+        <span className="views-nav-title" title={open.file || open.title || open.name}>
           {open.title || open.name}
-          <span className="views-nav-meta">{[metaOf(open), formatBytes(open.bytes)].filter(Boolean).join(" · ")}</span>
+          <span className="views-nav-meta">{[metaOf(open), open.where, formatBytes(open.bytes)].filter(Boolean).join(" · ")}</span>
         </span>
         <span className="views-head-spacer" />
         <button type="button" className="views-act" aria-label="Previous view" title="Previous (←)"
                 disabled={at <= 0} onClick={() => step(-1)}>‹</button>
-        <span className="views-nav-pos">{at < 0 ? "–" : at + 1} / {shown.length}</span>
+        <span className="views-nav-pos">{at < 0 ? "–" : at + 1} / {navList.length}</span>
         <button type="button" className="views-act" aria-label="Next view" title="Next (→)"
-                disabled={at < 0 || at >= shown.length - 1} onClick={() => step(1)}>›</button>
+                disabled={at < 0 || at >= navList.length - 1} onClick={() => step(1)}>›</button>
         <span className="views-nav-acts">
           {sideToggle}
           {open.kind !== "server" && open.kind !== "link" && (
@@ -676,7 +771,12 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
                   onClick={() => window.open(hrefFor(open), "_blank", "noopener")}>↗</button>
           <button type="button" className="views-act" title={copied === open.path ? "Copied" : "Copy link"} aria-label="Copy link"
                   onClick={() => copyLink(open)}>{copied === open.path ? "✓" : "⧉"}</button>
-          {open.kind !== "server" && (
+          {open.kind === "found" && (
+            <button type="button" className="views-act views-pin" disabled={pinning === open.id}
+                    title="Pin as a view: keep it in this session's Views" aria-label="Pin as a view"
+                    onClick={() => pinFound(open)}>{pinning === open.id ? "…" : "Pin"}</button>
+          )}
+          {open.kind !== "server" && open.kind !== "found" && (
             <button type="button" className={"views-act danger" + (armedDelete === open.path ? " armed" : "")}
                     title={armedDelete === open.path ? "Click again to delete" : "Delete"}
                     aria-label={armedDelete === open.path ? "Click again to delete" : "Delete"}
@@ -688,10 +788,10 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
         </span>
       </div>
       <div className="views-preview">{page}</div>
-      {shown.length > 1 && (
+      {navList.length > 1 && (
         // The neighbours, in the order ← → walks: where you are in the set.
         <div className="vg-strip" role="list" aria-label="Other views">
-          {shown.map((r) => (
+          {navList.map((r) => (
             <button key={r.path} type="button" role="listitem"
                     className={"vg-strip-item" + (r.path === open.path ? " on" : "")}
                     ref={r.path === open.path ? (el) => el?.scrollIntoView?.({ block: "nearest", inline: "center" }) : undefined}
@@ -718,7 +818,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
         {open ? reader : (<>
           <div className="views-head">
             <span className="views-badge">Views</span>
-            <span className="vg-count">{counts.all}</span>
+            <span className="vg-count">{scoped.length}</span>
             {session && asPage && onClearSession && !inSession && (
               // The sidebar's selection, shown here; × lets it go.
               <span className="views-scope-chip">
@@ -755,7 +855,7 @@ export const ViewsPanel = ({ session, item, sessions = [], placement, onOpenSess
             )}
             <button type="button" className="views-close" aria-label="Close views" onClick={onClose}>×</button>
           </div>
-          {scoped.length > 0 && (
+          {(scoped.length > 0 || shelfHas) && (
             <div className="vg-bar">
               <div className="vg-filters" role="tablist" aria-label="Kind">
                 {FILTERS.filter(([f]) => f === "all" || counts[f] > 0).map(([f, name]) => (

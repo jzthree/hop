@@ -18,6 +18,7 @@ import { tabTitle } from "./utils/tabTitle";
 import { remoteAppOwnsScreen } from "./utils/echoGuard";
 import { urlAtCell, cellAtPoint, oscUrlAtCell } from "./utils/urlAtCell";
 import { enableMathHover } from "./utils/mathLinkProvider";
+import { enablePathLinks } from "./utils/pathLinks";
 import { getMathTip } from "./utils/mathTooltip";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
 import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
@@ -861,6 +862,7 @@ const App = () => {
   // Late-bound hooks for the voice controller (created before these exist).
   const handleUserInputRef = useRef<((data: string) => void) | null>(null);
   const pushNoticeRef = useRef<((m: string) => void) | null>(null);
+  const openPathRef = useRef<(p: string) => Promise<void>>(async () => {});
   const foregroundIsClaudeRef = useRef<(() => boolean) | null>(null);
   // ⌘⌥⏎: what is typed in the agent's box goes when its turn ends.
   const queueInputRef = useRef<() => void>(() => {});
@@ -939,7 +941,7 @@ const App = () => {
   // one session (picked in the sidebar while in Views).
   // `side`: opened in the column because the column was up (Views' own
   // choice of page or column is viewsSide).
-  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string; page?: boolean; side?: boolean } | null>(() => savedUi().views ?? null);
+  const [viewsOpen, setViewsOpen] = useState<{ session?: string; dock?: boolean; item?: string; found?: string; page?: boolean; side?: boolean } | null>(() => savedUi().views ?? null);
   // A link clicked in a terminal: this hop's `hop view` links open in the
   // Views reader beside the session; ⌘/Ctrl-click (and every other link)
   // opens a tab. window.open stays inside the click, for popup blockers.
@@ -1182,6 +1184,23 @@ const App = () => {
   };
 
   pushNoticeRef.current = pushNotice;
+  // A path clicked in the terminal: hop finds the file where the session
+  // works and the reader opens on it (a view, if it was published).
+  openPathRef.current = async (p: string) => {
+    const room = activeSessionRoomRef.current;
+    if (!room) return;
+    try {
+      const r = await fetch("/api/sessions/files/resolve", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: room, path: p })
+      });
+      const d = await r.json().catch(() => ({})) as { session?: string; view?: string; item?: { id: string }; error?: string };
+      if (d.view) setViewsOpen({ session: d.session || room, item: d.view });
+      else if (d.item?.id) setViewsOpen({ session: d.session || room, found: d.item.id });
+      else pushNotice(d.error || "Couldn't open that file");
+    } catch {
+      pushNotice("Couldn't reach hop");
+    }
+  };
   const showToast = (message: string, durationMs = 2000) => {
     setToast(message);
     if (toastTimeout.current) {
@@ -2663,6 +2682,8 @@ const App = () => {
     // KaTeX, a click pins it. What `hop math` could only approximate in
     // Unicode, the browser around the terminal draws properly.
     enableMathHover(terminal, getMathTip());
+    // File paths an agent prints open in the Views reader, read in place.
+    enablePathLinks(terminal, (p) => { void openPathRef.current(p); });
     // `hop view` deliveries become small inline cards where they printed;
     // Open lands in the Views reader on that item.
     (terminal as any).__viewBlocksCleanup = enableViewBlocks(terminal as never, (b) => setViewsOpen({ session: b.session, item: b.name }));
@@ -6480,8 +6501,8 @@ const App = () => {
                    working={sessions.filter((x) => x.agentPhase === "working").length} />
       )}
       {viewsOpen && (
-        <ViewsPanel key={viewsOpen.item ? `${viewsOpen.session}/${viewsOpen.item}` : "views"}
-                    session={viewsOpen.session} item={viewsOpen.item} sessions={sessions}
+        <ViewsPanel key={viewsOpen.item || viewsOpen.found ? `${viewsOpen.session}/${viewsOpen.item || viewsOpen.found}` : "views"}
+                    session={viewsOpen.session} item={viewsOpen.item} found={viewsOpen.found} sessions={sessions}
                     // Docked sidebar: Views is a place beside it, like the
                     // wall; elsewhere the centred window.
                     placement={!railDocked ? "modal" : viewsSideNow ? "side" : "page"}

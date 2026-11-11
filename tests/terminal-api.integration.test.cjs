@@ -2123,6 +2123,128 @@ test('hop send: a message from another session says who sent it, and the answer 
   assert.match(missing.out, /Session not found/);
 });
 
+// Files from a session — the Views shelf: what its agent wrote or named in
+// its replies, from its own record; read in place (a page sandboxed), never
+// any path asked for; pinned into Views; opened from a path in its terminal.
+test('files from a session: listed from its record, read in place, pinned as a view, opened from its terminal', async () => {
+  const proj = path.join(tempDir, 'filesproj');
+  await fs.mkdir(path.join(proj, 'results'), { recursive: true });
+  await fs.mkdir(path.join(proj, '.hidden'), { recursive: true });
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a5b2f0b10000000049454e44ae426082', 'hex');
+  await fs.writeFile(path.join(proj, 'results', 'loss.png'), PNG);
+  await fs.writeFile(path.join(proj, 'results', 'other.png'), PNG);
+  await fs.writeFile(path.join(proj, 'report.html'), '<!doctype html><script>document.title="ran"</script><p>report</p>');
+  await fs.writeFile(path.join(proj, 'notes.md'), '# Notes\n\nfine');
+  await fs.writeFile(path.join(proj, '.hidden', 'x.md'), 'secret');
+  await fs.writeFile(path.join(proj, 'main.py'), 'print(1)');
+
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'filesprobe', cwd: proj }, userHeaders);
+  assert.equal(create.status, 200, JSON.stringify(create.data));
+  const internal = create.data.sessionName;
+  const sessionId = '44444444-5555-6666-7777-888888888888';
+  const configDir = path.join(tempDir, 'claude-cfg-files');
+  const pdir = path.join(configDir, 'projects', proj.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(pdir, { recursive: true });
+  const tfile = path.join(pdir, `${sessionId}.jsonl`);
+  const said = (text, extra = []) => JSON.stringify({ type: 'assistant', cwd: proj, timestamp: new Date().toISOString(), message: { content: [...extra, { type: 'text', text }] } }) + '\n';
+  await fs.writeFile(tfile,
+    said('Writing the report.', [{ type: 'tool_use', name: 'Write', input: { file_path: path.join(proj, 'report.html') } }])
+    + JSON.stringify({ type: 'user', cwd: proj, message: { content: [{ type: 'tool_result', content: 'ls: results/other.png' }] } }) + '\n'
+    + said('The plot is at results/loss.png; notes in notes.md. Not shown: .hidden/x.md, main.py, gone.png.'));
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.json`), JSON.stringify({ sessionId, cwd: proj, configDir, launchCmd: 'claude', updatedAt: new Date().toISOString() }), { mode: 0o600 });
+
+  const list = async () => (await requestJson(state.port, state.sessionSecret, 'GET', `/api/sessions/files?name=${internal}`, null, userHeaders)).data.items;
+  const raw = (p, actor = 'user') => new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: state.port, path: p, headers: { Authorization: `Bearer ${state.sessionSecret}`, 'X-Hop-Actor': actor } }, (res) => {
+      let body = ''; res.on('data', (c) => body += c); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    }).on('error', reject);
+  });
+
+  // 1. What the agent wrote, and named in its replies — not tool output,
+  //    not hidden, code or missing files.
+  let items = await list();
+  assert.deepEqual(items.map((i) => [i.name, i.how]).sort(), [['loss.png', 'mentioned'], ['notes.md', 'mentioned'], ['report.html', 'wrote']]);
+  const byName = (n) => items.find((i) => i.name === n);
+  assert.equal(byName('loss.png').file, path.join(proj, 'results', 'loss.png'));
+
+  // 2. Read in place: a page sandboxed (it is nobody's vetted file), an
+  //    image as itself, Markdown rendered; nothing but listed files.
+  const page = await raw(byName('report.html').path);
+  assert.equal(page.status, 200);
+  assert.match(page.headers['content-security-policy'] || '', /^sandbox /);
+  assert.doesNotMatch(page.headers['content-security-policy'], /allow-same-origin/);
+  const img = await raw(byName('loss.png').path);
+  assert.equal(img.status, 200);
+  assert.equal(img.headers['content-type'], 'image/png');
+  assert.equal(img.headers['content-security-policy'], undefined);
+  const md = await raw(byName('notes.md').path);
+  assert.match(md.headers['content-type'], /text\/html/);
+  assert.match(md.body, /<h1[^>]*>Notes<\/h1>/);
+  assert.equal((await raw(`/sessionfile/${internal}/0000000000000000/inline`)).status, 404);
+  // An agent reaches only the sessions it may (this one it may not).
+  assert.equal((await raw(byName('notes.md').path, 'agent')).status, 404);
+  assert.equal((await raw(`/sessionfile/${internal}/${byName('loss.png').id}/download`)).headers['content-disposition'].startsWith('attachment'), true);
+
+  // 3. Pinned: a view of the session, captioned, and off the shelf.
+  const pin = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/files/pin', { name: internal, id: byName('loss.png').id, title: 'Loss curve' }, userHeaders);
+  assert.equal(pin.status, 200, JSON.stringify(pin.data));
+  assert.equal(pin.data.view, 'loss.png');
+  const views = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/views')).data.items.filter((v) => v.session === internal);
+  assert.deepEqual(views.map((v) => [v.name, v.title]), [['loss.png', 'Loss curve']]);
+  items = await list();
+  assert.equal(items.some((i) => i.name === 'loss.png'), false);
+
+  // 4. A path clicked in its terminal: found where the agent works; a
+  //    published one opens its view; hidden or missing ones are refused.
+  const resolve = (p) => requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/files/resolve', { name: internal, path: p }, userHeaders);
+  const other = await resolve('results/other.png');
+  assert.equal(other.status, 200, JSON.stringify(other.data));
+  assert.equal(other.data.item.name, 'other.png');
+  assert.ok((await list()).some((i) => i.name === 'other.png'), 'and it joins the shelf');
+  assert.equal((await resolve('results/loss.png')).data.view, 'loss.png');
+  assert.equal((await resolve('.hidden/x.md')).status, 400);
+  assert.equal((await resolve('main.py')).status, 400);
+  assert.equal((await resolve('nope.png')).status, 404);
+
+  // 5. A new turn naming a new file: on the next look.
+  await fs.writeFile(path.join(proj, 'results', 'new.png'), PNG);
+  await fs.appendFile(tfile, said('Added results/new.png.'));
+  assert.ok((await list()).some((i) => i.name === 'new.png'));
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+});
+
+// A view that links to hop by another of its addresses (an agent's redirect
+// to the public https://hop…/s/<server>/) used to open, inside the Mac app's
+// 127.0.0.1 frame, on a signed-out sign-in page whose passkey button did
+// nothing. hop's own addresses now become paths on the one reading it, and
+// a sign-in page inside a frame says so and offers its own tab.
+test('a view naming hop by another address stays signed in; a framed sign-in page says so', async () => {
+  const sess = 'addrprobe';
+  await fs.mkdir(path.join(hopHome, 'views', sess), { recursive: true });
+  const self = `127.0.0.1:${state.port}`;
+  await fs.writeFile(path.join(hopHome, 'views', sess, 'go.html'),
+    `<meta http-equiv="refresh" content="0;url=http://${self}/s/briefing/"><a href="https://elsewhere.example/s/x/">out</a>`);
+  const got = await new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: state.port, path: `/view/${sess}/go.html/inline`, headers: { Authorization: `Bearer ${state.sessionSecret}` } }, (res) => {
+      let body = ''; res.on('data', (c) => body += c); res.on('end', () => resolve({ status: res.statusCode, body, length: Number(res.headers['content-length']) }));
+    }).on('error', reject);
+  });
+  assert.equal(got.status, 200);
+  assert.match(got.body, /content="0;url=\/s\/briefing\/"/);
+  assert.match(got.body, /href="https:\/\/elsewhere\.example\/s\/x\/"/, 'other sites are left alone');
+  assert.equal(got.length, Buffer.byteLength(got.body));
+  await fs.rm(path.join(hopHome, 'views', sess), { recursive: true, force: true });
+
+  const signin = await new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: state.port, path: '/', headers: { Accept: 'text/html' } }, (res) => {
+      let body = ''; res.on('data', (c) => body += c); res.on('end', () => resolve(body));
+    }).on('error', reject);
+  });
+  assert.match(signin, /window\.top !== window\.self/);
+  assert.match(signin, /Open it in its own tab/);
+});
+
 // A new session's folder must be there: a mistyped one used to start the
 // session in home (and Codex then made itself a folder under ~/Documents).
 test('a new session in a missing folder is refused, and the form can create the folder', async () => {

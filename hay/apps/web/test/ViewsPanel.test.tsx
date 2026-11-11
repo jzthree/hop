@@ -344,3 +344,69 @@ describe("switcher views affordances", () => {
     expect(screen.queryByLabelText("New views")).toBeNull();
   });
 });
+
+// The shelf: files a session's agent wrote or named but never published —
+// read in place, quiet (no "new" dots), and one click from being a view.
+describe("ViewsPanel › Files from this session", () => {
+  const found = [
+    { id: "aaaaaaaaaaaaaaaa", name: "loss.png", file: "/Users/x/Code/p/results/loss.png", where: "~/Code/p/results/loss.png", how: "wrote", at: Date.now() - 60_000, mtime: 1786303000, bytes: 2048, path: "/sessionfile/Orion/aaaaaaaaaaaaaaaa/inline" },
+    { id: "bbbbbbbbbbbbbbbb", name: "notes.md", file: "/Users/x/Code/p/notes.md", where: "~/Code/p/notes.md", how: "mentioned", at: Date.now() - 3_600_000, mtime: 1786300000, bytes: 300, path: "/sessionfile/Orion/bbbbbbbbbbbbbbbb/inline" }
+  ];
+  const routed = (views: unknown[], shelf: unknown[], calls: Array<{ url: string; body?: unknown }> = []) => vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    if (url.startsWith("/api/sessions/files/pin")) return { ok: true, json: async () => ({ ok: true, view: "loss.png", path: "/view/Orion/loss.png/inline" }) };
+    if (url.startsWith("/api/sessions/files")) return { ok: true, json: async () => ({ items: shelf }) };
+    return { ok: true, json: async () => ({ items: views }) };
+  });
+
+  it("shelves them below the published, set apart and never marked new", async () => {
+    const calls: Array<{ url: string }> = [];
+    vi.stubGlobal("fetch", routed(items, found, calls));
+    render(<ViewsPanel session="Orion" sessions={[{ name: "Orion", internalName: "Orion" }]} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText("Files from this session")).toBeTruthy());
+    expect(calls.some((c) => c.url === "/api/sessions/files?name=Orion")).toBe(true);
+    const shelf = screen.getByLabelText("Files from this session");
+    const cards = shelf.querySelectorAll(".vg-card");
+    expect(cards.length).toBe(2);
+    expect(cards[0].className).toContain("found");
+    expect(cards[0].className).not.toContain("fresh");
+    expect(shelf.querySelector(".views-dot")).toBeNull();
+    expect((cards[0] as HTMLElement).getAttribute("title")).toBe("~/Code/p/results/loss.png");
+    expect(cards[0].querySelector("img")!.getAttribute("src")).toBe("/sessionfile/Orion/aaaaaaaaaaaaaaaa/thumb");
+    expect(cards[0].textContent).toMatch(/wrote/);
+    expect(cards[1].textContent).toMatch(/named/);
+    // The head counts what is published; the shelf counts itself.
+    expect(document.querySelector(".vg-count")!.textContent).toBe("2");
+  });
+
+  it("every session's Views has no shelf (it is one session's)", async () => {
+    const calls: Array<{ url: string }> = [];
+    vi.stubGlobal("fetch", routed(items, found, calls));
+    render(<ViewsPanel onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(3));
+    expect(calls.some((c) => c.url.startsWith("/api/sessions/files"))).toBe(false);
+  });
+
+  it("a found file reads in the reader, ‹ › walk on from the published into the shelf, and Pin makes it a view", async () => {
+    const calls: Array<{ url: string; body?: unknown }> = [];
+    vi.stubGlobal("fetch", routed(items.filter((i) => i.session === "Orion"), found, calls));
+    render(<ViewsPanel session="Orion" sessions={[{ name: "Orion", internalName: "Orion" }]} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText("Files from this session")).toBeTruthy());
+    fireEvent.click(screen.getByLabelText("Files from this session").querySelector("a")!);
+    expect((document.querySelector(".views-media img") as HTMLImageElement).getAttribute("src")).toBe("/sessionfile/Orion/aaaaaaaaaaaaaaaa/inline");
+    expect(document.querySelector(".views-nav-pos")!.textContent).toBe("3 / 4");
+    expect(document.querySelector(".views-nav-meta")!.textContent).toMatch(/~\/Code\/p\/results\/loss\.png/);
+    // Not a published copy: no delete — Pin instead.
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Pin as a view" }));
+    await waitFor(() => expect(calls.find((c) => c.url === "/api/sessions/files/pin")?.body).toEqual({ name: "Orion", id: "aaaaaaaaaaaaaaaa" }));
+  });
+
+  it("opens straight on a found file (a path clicked in the terminal)", async () => {
+    vi.stubGlobal("fetch", routed(items, found));
+    render(<ViewsPanel session="Orion" found="bbbbbbbbbbbbbbbb" sessions={[{ name: "Orion", internalName: "Orion" }]} onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelector("iframe.views-frame")).toBeTruthy());
+    expect(document.querySelector("iframe.views-frame")!.getAttribute("src")).toMatch(/^\/sessionfile\/Orion\/bbbbbbbbbbbbbbbb\/inline\?theme=/);
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  });
+});

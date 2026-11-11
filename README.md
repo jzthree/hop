@@ -352,6 +352,17 @@ in the session's Views list, so it is worth writing properly. Published files
 are grouped **by session**: a result belongs to the conversation that
 produced it.
 
+**Files from this session.** Agents forget `hop view`. Below what a session
+published, its Views also shelve the files its agent *wrote* (Claude's
+Write/Edit, Codex's patches, Antigravity's file tools) or *named* in its
+replies — figures, PDFs, pages, Markdown, tables, notebooks, videos — read
+from the agent's own conversation record, not the screen. They are read in
+place (nothing is copied), quietly (no badge, no "new"), and **Pin** makes one
+a real view. Hidden folders, dependencies and system paths are never shown,
+pages run sandboxed, and only files the record names are served. A file path
+printed in the terminal is a link too: click it to open the file in the
+reader.
+
 For something live rather than a file, `hop port 5173` proxies a local web
 server through the same auth (WebSocket-safe, so dev-server hot reload
 works), attached to the current session — `--standalone` makes it a room of

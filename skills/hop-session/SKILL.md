@@ -104,6 +104,12 @@ Re-running after updating the file re-publishes under the same link.
 `hop view --list` shows what this session has published; `hop view --rm
 <name>` unpublishes.
 
+Files you write or name in a reply also appear, unannounced, on a "Files
+from this session" shelf in your Views, and file paths you print are
+clickable. That is a safety net, not a handover: a result the human should
+look at still gets `hop view --title …`, which titles it, files it and tells
+them.
+
 ## Showing a running web server (dev server, local app)
 
 When you start something that serves HTTP — a dev server, a quick API, a

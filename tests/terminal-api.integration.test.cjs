@@ -2121,6 +2121,42 @@ test('hop send: a message from another session says who sent it, and the answer 
   const missing = await hop(['send', 'no-such-session', 'hi'], cliEnv(A, false));
   assert.notEqual(missing.code, 0);
   assert.match(missing.out, /Session not found/);
+
+  // 7. A fork remembers another session's name. The sender is the session
+  //    the command RUNS in, by its terminal: a wrong inherited HOP_SESSION
+  //    does not change it, and --from cannot claim another.
+  await stamp(B, 'claude', 'turn', Date.now() + 2000);
+  const forkDir = path.join(tempDir, 'msg-fork');
+  await fs.mkdir(forkDir, { recursive: true });
+  const shell = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'msgfork', cwd: forkDir, autoStart: true }, userHeaders);
+  assert.equal(shell.status, 200, JSON.stringify(shell.data));
+  await delay(1500);
+  // A stand-in for the agent there: its own process in the session (macOS
+  // hides a login shell's environment, an agent's it does not), running hop
+  // with the HOP_SESSION of the session it was forked from.
+  const agentJs = path.join(forkDir, 'agent.js');
+  await fs.writeFile(agentJs, `
+const { spawnSync } = require('child_process'); const fs = require('fs');
+const [out, stale, hopBin, ...args] = process.argv.slice(2);
+const env = { ...process.env, HOP_SESSION: stale }; delete env.CLAUDECODE; delete env.CLAUDE_CODE_SESSION_ID;
+const r = spawnSync(process.execPath, [hopBin, ...args], { env, encoding: 'utf8' });
+fs.writeFileSync(out, r.stdout + r.stderr + '\\nexit=' + r.status + '\\n');
+`);
+  const inFork = async (args, tag) => {
+    const out = path.join(forkDir, `${tag}.out`);
+    const line = `${process.execPath} ${agentJs} ${out} ${A} ${path.join(__dirname, '..', 'hop')} ${args}\r`;
+    const w = await requestJson(state.port, state.sessionSecret, 'POST', `/api/terminals/${shell.data.id}/write`, { data: line }, userHeaders);
+    assert.equal(w.status, 200, JSON.stringify(w.data));
+    return until(async () => { try { const t = (await fs.readFile(out, 'utf8')).replace(/\x1b\[[0-9;]*m/g, ''); return /exit=\d+/.test(t) ? t : null; } catch { return null; } }, 40000, `${tag} to finish`);
+  };
+  const claimed = await inFork(`send msgbeta --from msgalpha 'as someone else'`, 'claimed');
+  assert.match(claimed, /This terminal is session "msgfork", not "msgalpha"/);
+  assert.match(claimed, /exit=1/);
+  const honest = await inFork(`send msgbeta 'from the fork'`, 'honest');
+  assert.match(honest, /exit=0/, honest);
+  await until(async () => (await got(bDir)).some((l) => l.endsWith('from the fork')), 25000, 'the fork\'s message');
+  assert.match((await got(bDir)).find((l) => l.endsWith('from the fork')), /^\[hop message from session "msgfork"\./);
+  assert.equal((await got(bDir)).some((l) => l.includes('as someone else')), false);
 });
 
 // Files from a session — the Views shelf: what its agent wrote or named in

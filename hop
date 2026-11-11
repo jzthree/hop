@@ -26,7 +26,7 @@ const nebulaRelay = require('./lib/nebula-relay');
 const notebookView = require('./lib/notebook-view');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
-const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
+const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const messages = require('./lib/messages');
 const sessionFiles = require('./lib/session-files');
@@ -10141,16 +10141,26 @@ function readProcForIdentity(pid) {
             let command = '';
             try { command = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').replace(/\0/g, ' ').trim(); } catch (e) { /* gone */ }
             let session = null;
-            try { const env = fs.readFileSync(`/proc/${pid}/environ`).toString('utf8'); const m = /(?:^|\0)HOP_SESSION=([A-Za-z0-9_-]+)/.exec(env); session = m ? m[1] : null; } catch (e) { /* not ours */ }
-            return { ppid, command, session };
+            let keeperSock = null;
+            try {
+                const env = fs.readFileSync(`/proc/${pid}/environ`).toString('utf8');
+                const m = /(?:^|\0)HOP_SESSION=([A-Za-z0-9_-]+)/.exec(env); session = m ? m[1] : null;
+                const k = /(?:^|\0)HOP_PTY_KEEPER_SOCK=([^\0]+)/.exec(env); keeperSock = k ? k[1] : null;
+            } catch (e) { /* not ours */ }
+            return { ppid, command, session, keeperSock };
         }
         const line = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }).trim();
         if (!line) return null;
         const m = /^\s*(\d+)\s+(.*)$/s.exec(line);
         if (!m) return null;
         let session = null;
-        try { session = sessionFromEnvLine(execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }), m[2]); } catch (e) { /* no env access */ }
-        return { ppid: Number(m[1]) || 0, command: m[2], session };
+        let keeperSock = null;
+        try {
+            const envLine = execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 });
+            session = sessionFromEnvLine(envLine, m[2]);
+            if (isPtyKeeper(m[2])) keeperSock = envFromLine(envLine, m[2], 'HOP_PTY_KEEPER_SOCK');
+        } catch (e) { /* no env access */ }
+        return { ppid: Number(m[1]) || 0, command: m[2], session, keeperSock };
     } catch (e) { return null; }
 }
 function callerSession() {
@@ -10160,6 +10170,7 @@ function callerSession() {
         pid: process.pid,
         hostPid: host && Number.isInteger(host.pid) ? host.pid : null,
         envSession: process.env.HOP_SESSION || null,
+        keeperSock: process.env.HOP_PTY_KEEPER_SOCK || path.join(HOME_DIR, 'pty-keeper.sock'),
         readProc: readProcForIdentity
     });
     if (process.env.HOP_IDENTITY_DEBUG) {
@@ -21009,7 +21020,23 @@ async function main() {
         if (!to || !text || argv.includes('--help') || argv.includes('-h')) { usage(); process.exit(to && text ? 0 : 1); }
         const state = isServerRunning();
         if (!state) { log('Hop is not running.', YELLOW); process.exit(1); }
-        const me = fromArg ? { ok: true, session: fromArg } : callerSession();
+        // The sender is the session this command runs in, by its terminal —
+        // never what the agent believes its name is. A fork remembers the
+        // conversation it was forked from, name and all; hop knows better.
+        // --from only says what hop cannot tell (a shared agent daemon, a
+        // shell outside hop), and never contradicts the terminal.
+        const here = callerSession();
+        let me = here;
+        if (fromArg) {
+            const list = await fetchSessionList(state).catch(() => null);
+            const hit = (list?.sessions || []).find((x) => x.internalName === fromArg || x.displayName === fromArg || x.name === fromArg);
+            if (here.ok && here.via === 'ancestry' && (!hit || hit.internalName !== here.session)) {
+                const mine = (list?.sessions || []).find((x) => x.internalName === here.session);
+                log(`This terminal is session "${mine?.displayName || here.session}", not "${fromArg}": hop sends as the session a command runs in. Drop --from.`, RED);
+                process.exit(1);
+            }
+            me = { ok: true, session: hit?.internalName || fromArg };
+        }
         if (!me.ok && me.reason === 'shared-daemon') { log(me.note, YELLOW); log('Say who is sending: --from <session>', DIM); process.exit(1); }
         const r = await callLocalApi(state, '/api/sessions/send', 'POST', { name: to, text, agentOnly: true, fromSession: me.ok ? me.session : undefined });
         const d = r?.data || {};

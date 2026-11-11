@@ -77,3 +77,31 @@ test('a multiplexer is the program that runs, not a mention in some argument lis
   assert.equal(isMultiplexer('/opt/homebrew/bin/codex --no-daemon resume 01a0'), false);
   assert.equal(isMultiplexer('/bin/zsh -c "echo codex app-server is a string"'), false);
 });
+
+// Terminals live in the pty-keeper now: the shells are ITS children, and the
+// keeper that counts is this hop's — by the socket in its environment.
+test('a shell under this hop\'s pty-keeper is the session, whatever was inherited', () => {
+  const SOCK = '/home/x/.hop2/pty-keeper.sock';
+  const procs = {
+    900: { ppid: 800, command: 'node hop send', session: 's_forkedfrom' },
+    800: { ppid: 700, command: 'claude --resume abc', session: 's_fork' },
+    700: { ppid: 600, command: '/bin/zsh -l', session: null },
+    600: { ppid: 1, command: '/usr/bin/node /x/scripts/pty-keeper.js', keeperSock: SOCK }
+  };
+  const r = resolveCallerSession({ pid: 900, hostPid: 555, envSession: 's_forkedfrom', keeperSock: SOCK, readProc: (p) => procs[p] || null });
+  assert.equal(r.ok, true);
+  assert.equal(r.via, 'ancestry');
+  assert.equal(r.session, 's_fork');
+  assert.match(r.note, /HOP_SESSION says "s_forkedfrom" but this process lives in session "s_fork"/);
+});
+
+test('another hop home\'s keeper is not this one: the environment is all there is', () => {
+  const procs = {
+    900: { ppid: 700, command: 'node hop send', session: 's_test' },
+    700: { ppid: 600, command: '/bin/zsh -l', session: 's_real' },
+    600: { ppid: 1, command: 'node /x/scripts/pty-keeper.js', keeperSock: '/home/x/.hop2/pty-keeper.sock' }
+  };
+  const r = resolveCallerSession({ pid: 900, hostPid: 555, envSession: 's_test', keeperSock: '/tmp/test-home/pty-keeper.sock', readProc: (p) => procs[p] || null });
+  assert.equal(r.via, 'env');
+  assert.equal(r.session, 's_test');
+});

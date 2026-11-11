@@ -2,7 +2,7 @@
 'use strict';
 
 const fs = require('fs');
-const { resolveCallerSession: resolveCallerSessionLib, sessionFromEnvLine: sessionFromEnvLineLib } = require(require('path').join(__dirname, '..', 'lib', 'session-identity'));
+const { resolveCallerSession: resolveCallerSessionLib, sessionFromEnvLine: sessionFromEnvLineLib, envFromLine: envFromLineLib, isPtyKeeper: isPtyKeeperLib } = require(require('path').join(__dirname, '..', 'lib', 'session-identity'));
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -2865,26 +2865,41 @@ function readProcForIdentity(pid) {
       const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
       const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
       let command = ''; try { command = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').replace(/\0/g, ' ').trim(); } catch { /* gone */ }
-      let session = null; try { const env = fs.readFileSync(`/proc/${pid}/environ`).toString('utf8'); const mm = /(?:^|\0)HOP_SESSION=([A-Za-z0-9_-]+)/.exec(env); session = mm ? mm[1] : null; } catch { /* not ours */ }
-      return { ppid: Number(after[1]) || 0, command, session };
+      let session = null, keeperSock = null;
+      try {
+        const env = fs.readFileSync(`/proc/${pid}/environ`).toString('utf8');
+        const mm = /(?:^|\0)HOP_SESSION=([A-Za-z0-9_-]+)/.exec(env); session = mm ? mm[1] : null;
+        const kk = /(?:^|\0)HOP_PTY_KEEPER_SOCK=([^\0]+)/.exec(env); keeperSock = kk ? kk[1] : null;
+      } catch { /* not ours */ }
+      return { ppid: Number(after[1]) || 0, command, session, keeperSock };
     }
     const line = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }).trim();
     const mm = /^\s*(\d+)\s+(.*)$/s.exec(line);
     if (!mm) return null;
     let session = null;
-    try { session = sessionFromEnvLineLib(execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }), mm[2]); } catch { /* no env access */ }
-    return { ppid: Number(mm[1]) || 0, command: mm[2], session };
+    let keeperSock = null;
+    try {
+      const envLine = execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 });
+      session = sessionFromEnvLineLib(envLine, mm[2]);
+      if (isPtyKeeperLib(mm[2])) keeperSock = envFromLineLib(envLine, mm[2], 'HOP_PTY_KEEPER_SOCK');
+    } catch { /* no env access */ }
+    return { ppid: Number(mm[1]) || 0, command: mm[2], session, keeperSock };
   } catch { return null; }
 }
 function callerSession() {
   if (callerSessionMemo) return callerSessionMemo;
   let hostPid = null;
+  const hopHome = process.env.HOP_HOME || require('path').join(require('os').homedir(), '.hop2');
   try {
-    const fs = require('fs'); const os = require('os'); const path = require('path');
-    const st = JSON.parse(fs.readFileSync(path.join(process.env.HOP_HOME || path.join(os.homedir(), '.hop2'), '.hay-host-state'), 'utf8'));
+    const fs = require('fs'); const path = require('path');
+    const st = JSON.parse(fs.readFileSync(path.join(hopHome, '.hay-host-state'), 'utf8'));
     hostPid = Number.isInteger(st.pid) ? st.pid : null;
   } catch { /* no host state: env is all there is */ }
-  callerSessionMemo = resolveCallerSessionLib({ pid: process.pid, hostPid, envSession: process.env.HOP_SESSION || null, readProc: readProcForIdentity });
+  callerSessionMemo = resolveCallerSessionLib({
+    pid: process.pid, hostPid, envSession: process.env.HOP_SESSION || null,
+    keeperSock: process.env.HOP_PTY_KEEPER_SOCK || require('path').join(hopHome, 'pty-keeper.sock'),
+    readProc: readProcForIdentity
+  });
   return callerSessionMemo;
 }
 

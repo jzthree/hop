@@ -212,6 +212,11 @@ thank-yous, which would just bounce back and forth. A line ending "It reads
 your reply here" means the sender is reading this turn: answer in it, and
 don't `hop send` as well.
 
+Don't introduce yourself by name: hop's line already names your session, by
+the terminal the command ran in. If this conversation was forked or continued
+from another session, the name you remember is that session's, not yours
+(`hop whoami` says yours).
+
 Write each message so it stands alone: the other agent knows nothing of your
 conversation. A session nobody allowed agents into refuses agent messages
 (`hop who` marks it "closed to agents") — you may still answer anyone who

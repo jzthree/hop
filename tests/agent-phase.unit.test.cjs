@@ -60,5 +60,10 @@ test('screenSaysWorking reads both TUIs\' in-flight line', () => {
   assert.equal(screenSaysWorking('⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 1 agent'), true);
   assert.equal(screenSaysWorking('• Working (12s • esc to interrupt)'), true);
   assert.equal(screenSaysWorking('› Ask Codex to do anything\n  ? for shortcuts'), false);
+  // Antigravity: its spinner line, recorded live; its idle box is not working.
+  assert.equal(screenSaysWorking('> Count from 1 to 40\n⣾  Loading...\n▸ Now reply (alt+m to send immediately)'), true);
+  assert.equal(screenSaysWorking('  ⣽ Thinking... (4s)'), true);
+  assert.equal(screenSaysWorking('> \n────\n? for shortcuts      Gemini 4 Carbon · medium'), false);
+  assert.equal(screenSaysWorking('see ⣾ in the docs'), false);
   assert.equal(screenSaysWorking(''), false);
 });

@@ -470,6 +470,9 @@ export const shortModelName = (model?: string | null): string | null => {
   if (claude) return claude[1];
   const gptNamed = /^gpt-[\d.]+-([a-z][a-z-]*)$/.exec(m);
   if (gptNamed) return gptNamed[1];
+  // Antigravity's: "Gemini 4 Carbon (Medium)" (as agy names it) or gemini-4-carbon → "carbon".
+  const gemini = /^gemini[- ][\d.]+[- ]([a-z]+)/.exec(m);
+  if (gemini) return gemini[1];
   return m.replace(/^claude-/, "");
 };
 

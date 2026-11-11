@@ -69,3 +69,12 @@ test('a rewritten (shorter) file starts over', (t) => {
   c.refresh(file);
   assert.equal(c.text(file).text, 'after');
 });
+
+test('an Antigravity step log: requests (unwrapped) and replies are conversation; tool-output steps are not', () => {
+    const lines = [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: 'x', content: '<USER_REQUEST>\nfind the flaky test\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: x.\n</ADDITIONAL_METADATA>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: 'x', input_tokens: 1, content: 'It is "test_io" racing.' },
+        { step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: 'x', content: 'tool output, not conversation' }
+    ].map((e) => JSON.stringify(e)).join('\n');
+    assert.deepEqual(extractText(lines), ['find the flaky test', 'It is "test_io" racing.']);
+});

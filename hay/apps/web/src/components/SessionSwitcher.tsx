@@ -2836,7 +2836,7 @@ export const SessionSwitcher = ({
   const switchAccount = (s: SwitcherSession, home: AgentHome) => { setSheet(null); return actions.switchAccount(actionCtx, s, home); };
   const handOffToApp = (s: SwitcherSession, app: "codex" | "claude") => { setSheet(null); return actions.handOffToApp(actionCtx, s, app); };
   const takeFromCodexApp = (s: SwitcherSession) => { setSheet(null); return actions.takeFromCodexApp(actionCtx, s); };
-  const forkSession = async (s: SwitcherSession, target?: "claude" | "codex") => {
+  const forkSession = async (s: SwitcherSession, target?: actions.AgentTarget) => {
     setSheet(null);
     const made = await actions.forkSession(actionCtx, s, target);
     // The new session belongs beside its source: the daemon files it in
@@ -4185,10 +4185,10 @@ export const SessionSwitcher = ({
                     context-heavy history. Offered for every terminal — the
                     daemon knows what a restored session runs better than the
                     process name here. */}
-                {sheetSession.type !== "port" && (["claude", "codex"] as const).map((target) => (
+                {sheetSession.type !== "port" && actions.AGENT_TARGETS.map((target) => (
                   <button key={target} type="button" onClick={() => { void forkSession(sheetSession, target); }}>
                     {appLabel(sheetSession) === target ? "Continue in fresh " : "Continue in "}
-                    {target === "codex" ? "Codex" : "Claude"}…
+                    {actions.agentName(target)}…
                   </button>
                 ))}
                 {(appLabel(sheetSession) === "codex" || appLabel(sheetSession) === "claude") && (

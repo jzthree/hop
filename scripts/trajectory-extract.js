@@ -1,9 +1,12 @@
 'use strict';
-// Turn a Claude Code or Codex transcript into a readable handoff document.
+// Turn a Claude Code, Codex or Antigravity transcript into a readable handoff
+// document.
 //
 // This is how a conversation crosses tools. A Claude transcript is a JSONL
-// of API messages; a Codex rollout is a JSONL of events; neither tool can
-// resume the other's. What CAN cross is the conversation itself — every user
+// of API messages; a Codex rollout is a JSONL of events; an Antigravity
+// (agy) conversation keeps a JSONL of steps beside its database
+// (~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/); none of
+// the three can resume another's. What CAN cross is the conversation itself — every user
 // turn, the assistant's reply, and a one-line summary of each action taken —
 // written as markdown the receiving agent reads before its first turn. That
 // is context sharing, not replay: tool results are not carried, and the
@@ -103,6 +106,50 @@ async function readClaudeTurns(file) {
     return turns;
 }
 
+/**
+ * An Antigravity conversation's steps → the same shape. A USER_INPUT step
+ * from the user (source USER_EXPLICIT) opens a turn; its text is the
+ * <USER_REQUEST> agy wraps it in (the rest is agy's own metadata: the time,
+ * settings changes). The model's PLANNER_RESPONSE steps carry its words
+ * (content) and its tool calls; GENERIC steps are tool output, not carried.
+ */
+async function readAntigravityTurns(file) {
+    const turns = [];
+    let current = null;
+    await eachJsonLine(file, (entry) => {
+        const ts = String(entry.created_at || '').slice(0, 19);
+        if (entry.type === 'USER_INPUT' && /^USER/.test(String(entry.source || ''))) {
+            const raw = String(entry.content || '');
+            const m = /<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/.exec(raw);
+            const text = (m ? m[1] : raw).trim();
+            if (!text || NOISE_PREFIXES.some((p) => text.startsWith(p))) return;
+            current = { text, ts, assistant: '', assistantTs: '', tools: [] };
+            turns.push(current);
+            return;
+        }
+        if (entry.type !== 'PLANNER_RESPONSE' || !current) return;
+        if (typeof entry.content === 'string' && entry.content.trim()) {
+            current.assistant = current.assistant ? `${current.assistant}\n${entry.content}` : entry.content;
+            current.assistantTs = ts;
+        }
+        for (const call of Array.isArray(entry.tool_calls) ? entry.tool_calls : []) {
+            if (call && typeof call === 'object') current.tools.push(summarizeAgyToolCall(call));
+        }
+    });
+    return turns;
+}
+
+/** One agy tool call in a line: its command, else the file it touched, else its first arguments. */
+function summarizeAgyToolCall(call) {
+    const name = String(call.name || '?');
+    const args = (call.args && typeof call.args === 'object') ? call.args : {};
+    const cmd = args.CommandLine || args.Command || args.command;
+    if (cmd) return `[${name}] ${String(cmd).slice(0, 120)}`;
+    const file = args.AbsolutePath || args.TargetFile || args.Path || args.FilePath || args.path;
+    if (file) return `[${name}] ${String(file).slice(0, 160)}`;
+    return summarizeToolCall({ name, input: args });
+}
+
 /** Codex rollout → same shape (no tool summaries: rollouts do not carry them). */
 async function readCodexTurns(file) {
     const turns = [];
@@ -141,8 +188,24 @@ async function readCodexTurns(file) {
 
 function detectTool(file) {
     if (/[\\/]\.codex[\\/]/.test(file)) return 'codex';
+    if (/[\\/]\.gemini[\\/]antigravity/.test(file)) return 'antigravity';
     if (/[\\/]\.gemini[\\/]/.test(file)) return 'gemini';
     return 'claude';
+}
+
+/**
+ * An Antigravity conversation's transcript: the one its hook recorded, else
+ * the conversation's own logs under agy's data directory. The _full file
+ * keeps every field whole; the plain one truncates long tool output.
+ */
+function antigravityTranscript(conversationId, { recorded, dataDir } = {}) {
+    const candidates = [];
+    if (recorded) candidates.push(String(recorded).replace(/transcript\.jsonl$/, 'transcript_full.jsonl'), String(recorded));
+    if (conversationId && /^[A-Za-z0-9-]{8,}$/.test(conversationId)) {
+        const logs = path.join(dataDir || path.join(require('os').homedir(), '.gemini', 'antigravity-cli'), 'brain', conversationId, '.system_generated', 'logs');
+        candidates.push(path.join(logs, 'transcript_full.jsonl'), path.join(logs, 'transcript.jsonl'));
+    }
+    return candidates.find((f) => { try { return fs.statSync(f).isFile(); } catch { return false; } }) || null;
 }
 
 /** The working directory the transcript was recorded in, from its first entry that says. */
@@ -191,13 +254,15 @@ function codexThreadSegments(file) {
     return found.includes(file) ? found : [file];
 }
 
-async function extractConversation(file, { maxChars = 800000, tool } = {}) {
+async function extractConversation(file, { maxChars = 800000, tool, cwd: knownCwd } = {}) {
     const kind = tool || detectTool(file);
     if (kind === 'gemini') throw new Error('Gemini transcripts are not supported for handoff');
     let turns;
     if (kind === 'codex') {
         turns = [];
         for (const f of codexThreadSegments(file)) turns.push(...await readCodexTurns(f));
+    } else if (kind === 'antigravity') {
+        turns = await readAntigravityTurns(file);
     } else {
         turns = await readClaudeTurns(file);
     }
@@ -212,7 +277,8 @@ async function extractConversation(file, { maxChars = 800000, tool } = {}) {
     }
     selected.reverse();
     const kept = selected.filter((t) => !NOISE_PREFIXES.some((p) => t.text.trim().startsWith(p)));
-    const cwd = await readTranscriptCwd(file);
+    // (agy's steps do not say where they ran: the caller knows.)
+    const cwd = knownCwd || await readTranscriptCwd(file);
     const lines = [
         '# Conversation Extract',
         `# Source tool: ${kind}`,
@@ -239,19 +305,20 @@ async function extractConversation(file, { maxChars = 800000, tool } = {}) {
 }
 
 /** The instruction the receiving agent starts with. */
+const TOOL_NAMES = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity' };
 function handoffPrompt(extractPath, bytes, sourceTool) {
     const kb = Math.max(1, Math.round(bytes / 1024));
     return `Read the ENTIRE file ${extractPath} (${kb}KB) from start to finish — do not stop at the first chunk. `
-        + `It contains a previous ${sourceTool} conversation. After reading all of it, summarize what we were working on and ask me what to do next.`;
+        + `It contains a previous ${TOOL_NAMES[sourceTool] || sourceTool} conversation. After reading all of it, summarize what we were working on and ask me what to do next.`;
 }
 
-module.exports = { extractConversation, readClaudeTurns, readCodexTurns, summarizeToolCall, detectTool, codexRolloutId, handoffPrompt };
+module.exports = { extractConversation, readClaudeTurns, readCodexTurns, readAntigravityTurns, antigravityTranscript, summarizeToolCall, detectTool, codexRolloutId, handoffPrompt };
 
 if (require.main === module) {
     const argv = process.argv.slice(2);
     const file = argv.find((a) => !a.startsWith('-'));
     if (!file) {
-        console.error('Usage: node scripts/trajectory-extract.js <transcript.jsonl> [--max-chars N] [--tool claude|codex]');
+        console.error('Usage: node scripts/trajectory-extract.js <transcript.jsonl> [--max-chars N] [--tool claude|codex|antigravity]');
         process.exit(1);
     }
     const flag = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };

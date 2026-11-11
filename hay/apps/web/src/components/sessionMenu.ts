@@ -92,8 +92,8 @@ export const sessionMenuItems = (s: MenuSession, d: SessionMenuDeps): MenuItem[]
   items.push(sep);
   items.push({ label: "Fork session", onSelect: () => { void actions.forkSession(ctx, s); } });
   if (terminal) {
-    items.push({ label: "Continue in", items: (["claude", "codex"] as const).map((target): MenuItem => ({
-      label: `${s.agent === target ? "Fresh " : ""}${target === "codex" ? "Codex" : "Claude"}…`,
+    items.push({ label: "Continue in", items: actions.AGENT_TARGETS.map((target): MenuItem => ({
+      label: `${s.agent === target ? "Fresh " : ""}${actions.agentName(target)}…`,
       onSelect: () => { void actions.forkSession(ctx, s, target); }
     })) });
     // The desktop apps hop can hand a conversation to: Claude's and Codex's.

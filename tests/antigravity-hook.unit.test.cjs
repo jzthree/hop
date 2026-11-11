@@ -50,3 +50,30 @@ test('outside a hop session it records nothing and still answers agy', () => {
     assert.strictEqual(fs.existsSync(path.join(home, 'claude-sessions', '.agy')), false);
     assert.strictEqual(execFileSync(process.execPath, [SCRIPT, 'SessionStart'], { input: 'not json', encoding: 'utf8', env: { ...process.env, HOP_HOME: home, HOP_SESSION: 's_x' } }), '{}');
 });
+
+// agy's step log, as it writes it: the model's words are the content of a
+// PLANNER_RESPONSE step; GENERIC steps (tool output) come after them.
+test('a finished turn carries agy\'s last words, read from its step log', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agyhook-'));
+    const id = 'c1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    const transcript = path.join(home, 'transcript.jsonl');
+    fs.writeFileSync(transcript, [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nwhy?\n</USER_REQUEST>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', tool_calls: [{ name: 'read_file', args: { Path: '/w/a' } }] },
+        { step_index: 2, source: 'MODEL', type: 'GENERIC', content: 'tool output, not words' },
+        { step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Because the cache   is cold.' }
+    ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    run(home, 'Stop', { conversationId: id, fullyIdle: true, transcriptPath: transcript });
+    assert.strictEqual(read(home, 'turn').lastMessage, 'Because the cache is cold.');
+});
+
+test('the record names the model, and follows a /model switch', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agyhook-'));
+    const id = 'd1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    run(home, 'SessionStart', { conversationId: id, workspacePaths: ['/w'], modelName: 'gemini-4-carbon' });
+    assert.strictEqual(read(home, 'agy').model, 'gemini-4-carbon');
+    run(home, 'PreInvocation', { conversationId: id, invocationNum: 0, modelName: 'gemini-4-pro' });
+    const rec = read(home, 'agy');
+    assert.strictEqual(rec.model, 'gemini-4-pro');
+    assert.strictEqual(rec.cwd, '/w', 'the rest of the record is kept');
+});

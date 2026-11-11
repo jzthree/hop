@@ -5193,7 +5193,7 @@ function buildSessionEntries(haySessions, opts = {}) {
             createdAt: config?.createdAt,
             createdBy: config?.createdBy || 'user',
             agentPermitted: config?.agentPermitted === true,
-            ...sessionAgentFields(s.name, config),
+            ...sessionAgentFields(s.name, config, s.foregroundProcess),
             localCliCount,
             hasLocalCli: clientSummary.hasLocalCli || localCliCount > 0 || s.hasLocalCli === true,
             ...getSessionSeenInfo(s.name)
@@ -6159,7 +6159,18 @@ function readTurnInfo(internalName) {
 // Its hook (scripts/antigravity-hook.js) files the conversation in
 // <session>.agy — not .json, which every Claude path reads as a Claude
 // conversation — and its turns in the shared .turn/.prompt, tagged.
-const AGY_DATA_DIR = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+// agy keeps everything under ~/.gemini (HOP_GEMINI_HOME in tests, which
+// must never touch the real one: its hooks, its conversations).
+const GEMINI_HOME = process.env.HOP_GEMINI_HOME || path.join(os.homedir(), '.gemini');
+const AGY_DATA_DIR = path.join(GEMINI_HOME, 'antigravity-cli');
+// The agy hop launches (resume, fork, Continue in). HOP_AGY_BIN names a
+// stand-in in tests: a session's login shell puts ~/.local/bin (the real
+// agy) ahead of the test's PATH, and the real agent must never run there.
+const AGY_BIN = process.env.HOP_AGY_BIN || 'agy';
+// The same for the CLIs a fork or a Continue-in starts.
+const AGENT_BIN = { claude: process.env.HOP_CLAUDE_BIN || 'claude', codex: process.env.HOP_CODEX_BIN || 'codex', antigravity: AGY_BIN };
+// The agent CLIs a conversation can be continued in (/api/sessions/fork).
+const FORK_TARGETS = ['claude', 'codex', 'antigravity'];
 function readAgyRecord(internalName) {
     if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
     try {
@@ -6202,14 +6213,14 @@ function agyRestorePlan(rec, cwd) {
         return { command: null, cwd, warning: `recorded Antigravity conversation ${rec.sessionId.slice(0, 8)}… is not on this host — opening a plain shell instead` };
     }
     const flags = agyResumeFlags(rec.launchCmd);
-    return { command: ['agy', '--conversation', `'${rec.sessionId}'`, ...flags].join(' '), cwd, agent: 'antigravity' };
+    return { command: [AGY_BIN, '--conversation', `'${rec.sessionId}'`, ...flags].join(' '), cwd, agent: 'antigravity' };
 }
 
 // ---- antigravity-hook install/remove (~/.gemini/config/hooks.json) --------
 const AGY_HOOK_SCRIPT = path.join(__dirname, 'scripts', 'antigravity-hook.js');
 const AGY_HOOK_EVENTS = ['SessionStart', 'PreInvocation', 'Stop'];
 const AGY_HOOK_NAME = 'hop';
-function getAgyHooksPath() { return path.join(os.homedir(), '.gemini', 'config', 'hooks.json'); }
+function getAgyHooksPath() { return path.join(GEMINI_HOME, 'config', 'hooks.json'); }
 function readAgyHooks() {
     const p = getAgyHooksPath();
     try { return { path: p, data: JSON.parse(fs.readFileSync(p, 'utf8')) || {} }; }
@@ -6365,6 +6376,33 @@ function lastModelIn(fd, from, to) {
     }
     return last;
 }
+// agy notes a model change in the user step that follows it: "The user
+// changed setting `Model Selection` from X to Gemini 4 Carbon (Medium)."
+const AGY_MODEL_RE = /setting `Model Selection` from .*? to (.+?)\.\s/g;
+function agyTranscriptModel(file) {
+    let st;
+    try { st = fs.statSync(file); } catch (e) { return null; }
+    const hit = agentModelCache.get(file);
+    if (hit && hit.size === st.size) return hit.model;
+    let model = null;
+    let fd = null;
+    try {
+        fd = fs.openSync(file, 'r');
+        const scan = (from, to) => {
+            const buf = Buffer.alloc(Math.max(0, to - from));
+            fs.readSync(fd, buf, 0, buf.length, from);
+            let m, last = null;
+            const text = buf.toString('utf8').replace(/\\n/g, '\n');
+            AGY_MODEL_RE.lastIndex = 0;
+            while ((m = AGY_MODEL_RE.exec(text))) last = m[1].trim();
+            return last;
+        };
+        model = scan(Math.max(0, st.size - 4 * 1024 * 1024), st.size) || scan(0, Math.min(st.size, 512 * 1024));
+    } catch (e) { /* unknown */ }
+    finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) { } }
+    agentModelCache.set(file, { size: st.size, model });
+    return model;
+}
 function tailModel(file) {
     let st;
     try { st = fs.statSync(file); } catch (e) { return null; }
@@ -6408,6 +6446,15 @@ function sessionAgentModel(internalName, agent) {
             }
             return file ? tailModel(file) : null;
         }
+        if (agent === 'antigravity') {
+            // What its hooks last said (every hook payload names the model),
+            // else the model its transcript says it was switched to.
+            const rec = readAgyRecord(internalName);
+            if (!rec) return null;
+            if (rec.model && rec.model !== 'auto') return rec.model;
+            const file = trajectoryExtract.antigravityTranscript(rec.sessionId, { recorded: rec.transcriptPath, dataDir: AGY_DATA_DIR });
+            return (file && agyTranscriptModel(file)) || rec.model || null;
+        }
         if (agent === 'codex') {
             const turn = readTurnInfo(internalName);
             if (!turn || !turn.sessionId) return null;
@@ -6422,8 +6469,8 @@ function sessionAgentModel(internalName, agent) {
     return null;
 }
 /** The list's agent fields for one session: the tool, the account it runs as, the model. */
-function sessionAgentFields(internalName, config) {
-    const agent = sessionAgentKind(internalName);
+function sessionAgentFields(internalName, config, foregroundProcess) {
+    const agent = sessionAgentKind(internalName, foregroundProcess);
     return {
         agent,
         agentHome: agent ? sessionAgentHome(internalName, agent, config) : null,
@@ -6431,8 +6478,12 @@ function sessionAgentFields(internalName, config) {
     };
 }
 
-function sessionAgentKind(internalName) {
+function sessionAgentKind(internalName, foregroundProcess = getRuntimeSessionMetadata(internalName)?.foregroundProcess) {
     if (agyRecordIsCurrent(internalName)) return 'antigravity';
+    // agy files its conversation only with the first prompt (its SessionStart
+    // fires then), so a freshly started agy is known by its process until
+    // that record lands — in time for a message queued into its first turn.
+    if (/^agy$/.test(String(foregroundProcess || '').trim())) return 'antigravity';
     if (readClaudeSessionRecord(internalName)?.sessionId) return 'claude';
     const turn = readTurnInfo(internalName);
     return turn ? turn.agent : null;
@@ -7271,12 +7322,18 @@ async function composerStillHolds(internalName, message) {
 //    there typed and unsent — and tries again later.
 // Claude and Codex only: their boxes are read off the screen (lib/composer.js);
 // anything else is typed the old way.
-async function readRoomComposer(internalName) {
+// The agents whose input box hop can read, and so type into safely (only an
+// empty one), verify, and take its own text back out of.
+const BOX_AGENTS = new Set(['claude', 'codex', 'antigravity']);
+async function readRoomComposer(internalName, agent = sessionAgentKind(internalName)) {
     try {
         const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
         const d = hostRes?.data;
         if (!d || typeof d.data !== 'string') return null;
-        const r = await composerLib.readComposerFromSerialized(d.data, d.cols, d.rows);
+        // agy parks its cursor ON the last character typed (one cell left of
+        // where the next goes) and shows no ghost suggestions: the rule that
+        // text from the cursor on is a suggestion would drop a real letter.
+        const r = await composerLib.readComposerFromSerialized(d.data, d.cols, d.rows, { cursorGhost: agent !== 'antigravity' });
         // The same screen says whether a turn is in flight — fresher than the
         // phase (whose screen check is cached for seconds).
         return r ? { ...r, working: screenSaysWorking(stripAnsiForSearch(d.data)) } : null;
@@ -7344,11 +7401,13 @@ async function deliverIntoAgent(cb, entry, phase) {
     if (deliveriesInFlight.has(cb.id)) return { ok: false, quiet: true };
     deliveriesInFlight.add(cb.id);
     try {
-        const agent = readTurnInfo(cb.session)?.agent || entry.agent || null;
-        const gated = agent === 'claude' || agent === 'codex';
+        // (A session's .turn is shared by every agent it has run; agy, by its
+        // own record or its process, is what runs there now.)
+        const agent = (entry.agent === 'antigravity' ? entry.agent : null) || readTurnInfo(cb.session)?.agent || entry.agent || null;
+        const gated = BOX_AGENTS.has(agent);
         let alreadyTyped = false;
         if (gated) {
-            const a = await readRoomComposer(cb.session);
+            const a = await readRoomComposer(cb.session, agent);
             if (a) {
                 // A turn just started (the phase had not caught up): wait it out.
                 if (a.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
@@ -7360,7 +7419,7 @@ async function deliverIntoAgent(cb, entry, phase) {
                 else if (!a.state.isEmpty) return { ok: false, reason: 'waiting: the input box has text in it' };
                 // The same a moment later too: nobody is mid-word.
                 await sleepMs(1200);
-                const b = await readRoomComposer(cb.session);
+                const b = await readRoomComposer(cb.session, agent);
                 if (b && b.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
                 if (b && !b.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
                 if (b && (alreadyTyped ? !boxIsOnly(b.full, cb.message) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
@@ -7384,7 +7443,7 @@ async function deliverIntoAgent(cb, entry, phase) {
                 await sleepMs(agent === 'codex' ? 1000 : 500);
             }
             if (gated && !alreadyTyped) {
-                const t = await readRoomComposer(cb.session);
+                const t = await readRoomComposer(cb.session, agent);
                 if (t && t.full.found) {
                     if (t.state.isEmpty) return { ok: false, reason: "the message didn't reach the input box; trying again" };
                     if (boxJoinedTyping(t.full, cb.message)) {
@@ -7396,7 +7455,7 @@ async function deliverIntoAgent(cb, entry, phase) {
             for (let attempt = 0; attempt < 3; attempt++) {
                 await sleepMs(1500);
                 const still = gated
-                    ? await (async () => { const r = await readRoomComposer(cb.session); return !!r && !r.state.isEmpty && boxStillHolds(r.full, cb.message); })()
+                    ? await (async () => { const r = await readRoomComposer(cb.session, agent); return !!r && !r.state.isEmpty && boxStillHolds(r.full, cb.message); })()
                     : await composerStillHolds(cb.session, cb.message);
                 if (!still) return { ok: true };
                 if (attempt < 2) sendTerminalInput(e2, submitKey);
@@ -7710,6 +7769,15 @@ function cachedCodexRolloutById(id) {
 }
 
 function resolveSessionTranscriptPathForSearch(internalName, sessionEntry) {
+    const agy = agyRecordIsCurrent(internalName);
+    if (agy) {
+        // The plain log: tool output in it is cut short, which is all a
+        // search of the conversation needs.
+        const file = trajectoryExtract.antigravityTranscript(agy.sessionId, { recorded: agy.transcriptPath, dataDir: AGY_DATA_DIR });
+        const plain = file && file.replace(/transcript_full\.jsonl$/, 'transcript.jsonl');
+        if (plain && fs.existsSync(plain)) return plain;
+        if (file) return file;
+    }
     const claudePath = resolveClaudeTranscriptPath(readClaudeSessionRecord(internalName));
     if (claudePath) return claudePath;
     // A Codex session's own conversation, by the id its turns are filed
@@ -7931,7 +7999,7 @@ function restorePlanForSession(entry) {
                     warning: `recorded codex conversation ${String(turn.sessionId).slice(0, 8)}… has no rollout on this host — opening a plain shell instead`
                 };
             }
-            return { command: `codex resume '${rootId.replace(/'/g, `'\\''`)}'`, cwd, agent: 'codex' };
+            return { command: `${AGENT_BIN.codex} resume '${rootId.replace(/'/g, `'\\''`)}'`, cwd, agent: 'codex' };
         }
     }
     // No SessionStart record, but the turn counter may still name this room's
@@ -8814,8 +8882,20 @@ function getCodexConfigRoots() {
     }
 }
 
+// Antigravity's agy reads skills from its global customization root,
+// ~/.gemini/config/skills/<name>/SKILL.md (alongside its hooks.json and
+// mcp_config.json) — there only when agy is set up on this machine.
+function getAgyConfigRoots() {
+    const root = path.join(GEMINI_HOME, 'config');
+    try {
+        return fs.statSync(root).isDirectory() ? [root] : [];
+    } catch (e) {
+        return [];
+    }
+}
+
 function getAgentSkillRoots() {
-    return Array.from(new Set([...getClaudeConfigRoots(), ...getCodexConfigRoots()]));
+    return Array.from(new Set([...getClaudeConfigRoots(), ...getCodexConfigRoots(), ...getAgyConfigRoots()]));
 }
 
 // ---- hop-session skill install/remove (<config-root>/skills/hop-session/) --
@@ -10593,6 +10673,8 @@ function taglineGitBranch(cwd) {
 // screen scrolls. The user's OWN prompts state intent directly and change
 // far more slowly, which is what makes a tagline durable.
 function taglineUserPrompts(internalName) {
+    const agy = agyRecordIsCurrent(internalName);
+    if (agy) return agyUserPrompts(agy);
     try {
         const tPath = resolveClaudeTranscriptPath(readClaudeSessionRecord(internalName));
         if (!tPath) return [];
@@ -10614,6 +10696,35 @@ function taglineUserPrompts(internalName) {
             const clean = String(text || '').replace(/\s+/g, ' ').trim();
             if (!clean || clean.length < 12 || clean.length > 400) continue;
             if (/^(<|\[Request interrupted|caveat:)/i.test(clean)) continue;
+            out.push(clean.slice(0, 240));
+        }
+        return out.length > 8 ? [...out.slice(0, 4), ...out.slice(-4)] : out;
+    } catch (e) {
+        return [];
+    }
+}
+
+/** An agy conversation's requests (the text inside agy's <USER_REQUEST>), as taglineUserPrompts gives Claude's. */
+function agyUserPrompts(rec) {
+    try {
+        const file = trajectoryExtract.antigravityTranscript(rec.sessionId, { recorded: rec.transcriptPath, dataDir: AGY_DATA_DIR });
+        if (!file) return [];
+        const stat = fs.statSync(file);
+        const readLen = Math.min(stat.size, 2 * 1024 * 1024);
+        const fd = fs.openSync(file, 'r');
+        const buf = Buffer.alloc(readLen);
+        fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
+        fs.closeSync(fd);
+        const out = [];
+        for (const line of buf.toString('utf8').split('\n')) {
+            if (!line.includes('"type":"USER_INPUT"')) continue;
+            let j;
+            try { j = JSON.parse(line); } catch (e) { continue; }
+            if (!/^USER/.test(String(j.source || ''))) continue;
+            const raw = String(j.content || '');
+            const m = /<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/.exec(raw);
+            const clean = (m ? m[1] : raw).replace(/\s+/g, ' ').trim();
+            if (!clean || clean.length < 12 || clean.length > 400 || /^</.test(clean)) continue;
             out.push(clean.slice(0, 240));
         }
         return out.length > 8 ? [...out.slice(0, 4), ...out.slice(-4)] : out;
@@ -14093,7 +14204,10 @@ happens until someone clicks it.
                     // rather than sending the fork to live among the
                     // transcripts (the Accessibility-fork incident).
                     const plausibleCwd = (c) => c && !/[\\/]\.claude[^\\/]*[\\/]projects([\\/]|$)/.test(String(c));
-                    const cwd = [rec?.cwd, meta?.cwd, config.cwd].find(plausibleCwd) || undefined;
+                    // An Antigravity conversation, when agy is what last ran
+                    // here (its record is newer than any claude one).
+                    const agyRec = agyRecordIsCurrent(source);
+                    const cwd = [agyRec?.cwd, rec?.cwd, meta?.cwd, config.cwd].find(plausibleCwd) || undefined;
 
                     // What the source is running: a claude conversation (the
                     // SessionStart record), codex (its Stop hook's turn file
@@ -14110,11 +14224,12 @@ happens until someone clicks it.
                     const runsCodex = !!codexId || !!codexAppId
                         || /codex/i.test(String(config.foregroundProcess || ''))
                         || /codex/i.test(String(getRuntimeSessionMetadata(source)?.foregroundProcess || ''));
-                    const sourceKind = rec ? 'claude' : runsCodex ? 'codex' : 'shell';
-                    const wantTarget = typeof target === 'string' && target.trim() ? target.trim().toLowerCase() : null;
-                    if (wantTarget && wantTarget !== 'claude' && wantTarget !== 'codex') {
+                    const sourceKind = agyRec ? 'antigravity' : rec ? 'claude' : runsCodex ? 'codex' : 'shell';
+                    const asked = typeof target === 'string' && target.trim() ? target.trim().toLowerCase() : null;
+                    const wantTarget = asked === 'agy' ? 'antigravity' : asked;
+                    if (wantTarget && !FORK_TARGETS.includes(wantTarget)) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: `Unknown fork target "${wantTarget}" — claude or codex` }));
+                        res.end(JSON.stringify({ error: `Unknown fork target "${wantTarget}" — ${FORK_TARGETS.join(', ')}` }));
                         return;
                     }
                     // Crossing tools is a HANDOFF, not a fork: neither tool can
@@ -14125,10 +14240,16 @@ happens until someone clicks it.
                     // unless `condense` asks for the handoff anyway: a fresh
                     // session of the SAME agent that starts from the condensed
                     // trajectory instead of the full, context-heavy history.
-                    const handoff = !!wantTarget && (wantTarget !== sourceKind || condense === true);
+                    //
+                    // agy cannot fork a conversation (nor safely resume one
+                    // twice), so its plain fork is the handoff too: a fresh
+                    // agy that starts from the whole conversation.
+                    const handoff = (!!wantTarget && (wantTarget !== sourceKind || condense === true))
+                        || (!wantTarget && sourceKind === 'antigravity');
+                    const receiver = wantTarget || sourceKind;
                     if (handoff && sourceKind === 'shell') {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: 'This session has no claude or codex conversation to hand off' }));
+                        res.end(JSON.stringify({ error: 'This session has no claude, codex or antigravity conversation to hand off' }));
                         return;
                     }
                     const codexRollout = sourceKind === 'codex'
@@ -14139,7 +14260,7 @@ happens until someone clicks it.
                         : null;
 
                     const sourceDisplay = getSessionDisplayName(source) || source;
-                    const suffix = !handoff ? '-fork' : wantTarget === sourceKind ? '-cont' : '-' + wantTarget;
+                    const suffix = !handoff || !wantTarget ? '-fork' : wantTarget === sourceKind ? '-cont' : '-' + wantTarget;
                     // The fork's name is also its internal name, so it must be
                     // a valid one even when the source's display name is not.
                     const forkBase = SESSION_NAME_RE.test(sourceDisplay) ? sourceDisplay : sessionNameFromText(sourceDisplay);
@@ -14161,7 +14282,9 @@ happens until someone clicks it.
                     let extract = null;
                     const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
                     if (handoff) {
-                        const transcript = sourceKind === 'claude' ? resolveClaudeTranscriptPath(rec) : codexRollout;
+                        const transcript = sourceKind === 'claude' ? resolveClaudeTranscriptPath(rec)
+                            : sourceKind === 'antigravity' ? trajectoryExtract.antigravityTranscript(agyRec.sessionId, { recorded: agyRec.transcriptPath, dataDir: AGY_DATA_DIR })
+                            : codexRollout;
                         if (!transcript) {
                             res.writeHead(404, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ error: `No ${sourceKind} transcript found for ${sourceDisplay} to hand off` }));
@@ -14170,8 +14293,8 @@ happens until someone clicks it.
                         // Budget by what the RECEIVER can hold: Codex's context is
                         // a fraction of Claude's, and a document it cannot finish
                         // reading is worse than a shorter one it can.
-                        const maxChars = wantTarget === 'codex' ? 400000 : 800000;
-                        const result = await trajectoryExtract.extractConversation(transcript, { tool: sourceKind, maxChars });
+                        const maxChars = receiver === 'codex' ? 400000 : 800000;
+                        const result = await trajectoryExtract.extractConversation(transcript, { tool: sourceKind, maxChars, cwd: sourceKind === 'antigravity' ? (agyRec.cwd || cwd) : undefined });
                         // Staged where uploads for the new session live: the
                         // one per-session directory that already exists for
                         // "a file this session is meant to read".
@@ -14182,21 +14305,29 @@ happens until someone clicks it.
                         writePrivateFile(extractPath, result.text);
                         const bytes = Buffer.byteLength(result.text);
                         const prompt = trajectoryExtract.handoffPrompt(extractPath, bytes, sourceKind);
-                        // A claude source keeps its own launch (config dir,
-                        // model, flags) when the receiver is claude too.
-                        const launcher = wantTarget === 'claude' && rec ? (rebuildClaudeLaunch(rec.launchCmd) || 'claude') : wantTarget;
-                        command = `${launcher} ${shq(prompt)}`;
+                        // A source keeps its own launch (config dir, model,
+                        // flags) when the receiver is the same tool. agy takes
+                        // its first prompt with -i (interactive, not --print).
+                        if (receiver === 'antigravity') {
+                            const flags = sourceKind === 'antigravity' ? agyResumeFlags(agyRec.launchCmd) : [];
+                            // Restore, recover and working/done need hop's hooks in agy's config.
+                            try { installAgyHook(); } catch (e) { /* the fork still starts */ }
+                            command = [AGY_BIN, ...flags, '-i', shq(prompt)].join(' ');
+                        } else {
+                            const launcher = receiver === 'claude' && rec ? (rebuildClaudeLaunch(rec.launchCmd) || AGENT_BIN.claude) : AGENT_BIN[receiver];
+                            command = `${launcher} ${shq(prompt)}`;
+                        }
                         kind = 'handoff';
                         extract = { path: extractPath, bytes, turns: result.turns, totalTurns: result.totalTurns };
                     } else if (rec) {
-                        const base = rebuildClaudeLaunch(rec.launchCmd) || 'claude';
+                        const base = rebuildClaudeLaunch(rec.launchCmd) || AGENT_BIN.claude;
                         command = base + ' --resume ' + rec.sessionId + ' --fork-session';
                         kind = 'claude';
                     } else if (runsCodex) {
                         // By id — the hook's, else the rollout's — and the
                         // picker only when neither is known.
                         const rolloutId = codexId || (codexRollout ? await trajectoryExtract.codexRolloutId(codexRollout) : null);
-                        command = rolloutId ? `codex resume ${shq(rolloutId)}` : 'codex resume';
+                        command = rolloutId ? `${AGENT_BIN.codex} resume ${shq(rolloutId)}` : `${AGENT_BIN.codex} resume`;
                         kind = 'codex';
                     }
                     log(`[fork] ${sourceDisplay} (${sourceKind}) → ${forkName}: ${kind}${command ? ` — ${command.slice(0, 80)}` : ' (shell)'}`, DIM);
@@ -14246,10 +14377,10 @@ happens until someone clicks it.
                         createdBy,
                         folderId: folderId || undefined,
                         forkedFrom: source,
-                        ...(handoff ? { handoffFrom: sourceKind, handoffTo: wantTarget } : {})
+                        ...(handoff ? { handoffFrom: sourceKind, handoffTo: receiver } : {})
                     });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, name: forkName, internalName: forkInternal, kind, target: handoff ? wantTarget : sourceKind, extract }));
+                    res.end(JSON.stringify({ ok: true, name: forkName, internalName: forkInternal, kind, target: receiver, extract }));
                 } catch (e) {
                     log(`[fork] failed: ${e?.message || e}`, RED);
                     res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -15826,9 +15957,9 @@ happens until someone clicks it.
                     if (!canActorAccessSession(resolveActor(req), getEffectiveSessionConfig(target))) return reply(403, { error: 'Agent access not permitted' });
                     const { entry, phase } = await sessionEntryAndPhase(target);
                     if (!entry || entry.live !== true) return reply(409, { error: 'The session is not running' });
-                    const agent = readTurnInfo(target)?.agent || entry.agent || null;
-                    if (agent !== 'claude' && agent !== 'codex') return reply(409, { error: 'Only a Claude or Codex session has an input box to queue from' });
-                    const r = await readRoomComposer(target);
+                    const agent = (entry.agent === 'antigravity' ? entry.agent : null) || readTurnInfo(target)?.agent || entry.agent || null;
+                    if (!BOX_AGENTS.has(agent)) return reply(409, { error: 'Only a Claude, Codex or Antigravity session has an input box to queue from' });
+                    const r = await readRoomComposer(target, agent);
                     if (!r) return reply(503, { error: "Couldn't read the screen" });
                     if (!r.state.found) return reply(409, { error: "Couldn't find the agent's input box on screen" });
                     if (r.state.isEmpty) return reply(200, { ok: true, status: 'empty' });
@@ -15845,7 +15976,7 @@ happens until someone clicks it.
                         saveCheckbacks();
                         const cleared = await clearOwnText(e2, target, text);
                         if (!cleared) {
-                            const after = await readRoomComposer(target);
+                            const after = await readRoomComposer(target, agent);
                             if (after && after.full.found && solid(after.full.text) === solid(text)) {
                                 // Nothing came out: nothing is queued either.
                                 cb.status = 'cancelled'; cb.cancelledAt = Date.now(); saveCheckbacks();
@@ -19060,7 +19191,7 @@ const HELP_SECTIONS = [
         `hop antigravity-hook install  Same for the Antigravity CLI (agy): restore, recover, working / done`,
         `hop claude-hook status|remove   Check or remove the hook`,
         `hop checkback ...          Type a message into a session later: --in 30m, --at 15:00, --every 2h, --when-idle, --when-file, --when-cmd`,
-        `hop agent-skill install   Install Hop orchestration instructions for Claude and Codex`,
+        `hop agent-skill install   Install Hop orchestration instructions for Claude, Codex and Antigravity`,
         `hop agent-skill status|remove   Check or remove the skills`,
         `hop claude-skill ...      Backward-compatible Claude-only alias`,
     ] },
@@ -20293,7 +20424,7 @@ async function main() {
         process.exit(0);
     }
 
-    // `agent-skill` installs Hop's bundled instructions for Claude and Codex.
+    // `agent-skill` installs Hop's bundled instructions for Claude, Codex and Antigravity.
     // Keep `claude-skill` as the narrower backward-compatible command.
     if (process.argv[2] === 'agent-skill' || process.argv[2] === 'claude-skill') {
         const agentWide = process.argv[2] === 'agent-skill';
@@ -21134,7 +21265,7 @@ async function main() {
                 log(`Spawned agents are capped at ${BOLD}${value}${RESET}; requests above it are clamped.`, GREEN);
             } else {
                 log(`Agent permission ceiling: ${BOLD}${cfg.agent_permission_ceiling || 'bypassPermissions (default)'}${RESET}`, RESET);
-                log(`  Applies to hopx_spawn_agent / hopa spawn (Claude --permission-mode; Codex loses the approval bypass below the top).`, DIM);
+                log(`  Applies to hopx_spawn_agent / hopa spawn (Claude --permission-mode; Codex loses the approval bypass below the top; Antigravity runs --mode auto below it).`, DIM);
                 log(`Change with: ${CYAN}hop config agent-ceiling <mode|clear>${RESET}`, DIM);
             }
             process.exit(0);

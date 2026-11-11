@@ -556,6 +556,8 @@ describe("Most used layout", () => {
 describe("shortModelName", () => {
   it("names models the way people say them", () => {
     expect(shortModelName("claude-opus-5-5")).toBe("opus");
+    expect(shortModelName("Gemini 4 Carbon (Medium)")).toBe("carbon");
+    expect(shortModelName("gemini-4-carbon")).toBe("carbon");
     expect(shortModelName("claude-fable-5-1")).toBe("fable");
     expect(shortModelName("claude-opus-5")).toBe("opus");
     expect(shortModelName("claude-haiku-4-5-20251001")).toBe("haiku");

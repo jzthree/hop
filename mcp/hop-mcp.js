@@ -137,7 +137,9 @@ function detectAgentStartupBlocker(text) {
       message: 'The agent CLI is waiting at a self-update prompt.'
     };
   }
-  if (/do you trust the contents of this directory|workspace trust/i.test(value)) {
+  // Claude asks about "this directory", Antigravity's agy about "this project"
+  // (no agy flag skips it: the manager decides).
+  if (/do you trust the contents of this (?:directory|project)|workspace trust/i.test(value)) {
     return {
       kind: 'workspace_trust_required',
       message: 'The agent CLI is waiting for workspace trust confirmation.'
@@ -807,6 +809,64 @@ function firstTrajectoryText(parts, n) {
 // Flatten one transcript message's content (string OR block array) into the bits
 // a compact turn record needs, without holding the raw blocks. Distinguishes text
 // from tool_use (names) from tool_result (size + error) from thinking/image.
+// ── Antigravity (agy) conversations ─────────────────────────────────────
+// agy keeps a JSONL step log per conversation under its data directory
+// (~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/), filed for a
+// hop session by its hook in claude-sessions/<session>.agy. The trajectory
+// reader speaks Claude's message shape, so each step is read as one: a user
+// request (the text agy wraps in <USER_REQUEST>), the model's words and tool
+// calls, a tool's output.
+function geminiHome() {
+  return process.env.HOP_GEMINI_HOME || path.join(os.homedir(), '.gemini');
+}
+function readAgyHookRecord(internalName) {
+  if (!internalName || !/^[A-Za-z0-9_.-]+$/.test(internalName)) return null;
+  try {
+    const rec = JSON.parse(fs.readFileSync(path.join(resolveHomeDir(), 'claude-sessions', `${internalName}.agy`), 'utf8'));
+    return rec && typeof rec.sessionId === 'string' && /^[A-Za-z0-9-]{8,}$/.test(rec.sessionId) ? rec : null;
+  } catch { return null; }
+}
+/** agy's record, when agy (not claude) started the session's current conversation. */
+function currentAgyRecord(internalName) {
+  const agy = readAgyHookRecord(internalName);
+  if (!agy) return null;
+  try {
+    const claude = JSON.parse(fs.readFileSync(path.join(resolveHomeDir(), 'claude-sessions', `${internalName}.json`), 'utf8'));
+    if (claude && Date.parse(claude.updatedAt || 0) > Date.parse(agy.updatedAt || 0)) return null;
+  } catch { /* no claude record */ }
+  return agy;
+}
+function agyTranscriptPath(rec) {
+  const candidates = [];
+  if (typeof rec.transcriptPath === 'string' && rec.transcriptPath) candidates.push(rec.transcriptPath);
+  const logs = path.join(geminiHome(), 'antigravity-cli', 'brain', rec.sessionId, '.system_generated', 'logs');
+  candidates.push(path.join(logs, 'transcript.jsonl'), path.join(logs, 'transcript_full.jsonl'));
+  return candidates.find((f) => { try { return fs.statSync(f).isFile(); } catch { return false; } }) || null;
+}
+function agyStepAsMessage(step, model) {
+  if (!step || typeof step !== 'object') return null;
+  const timestamp = typeof step.created_at === 'string' ? step.created_at : undefined;
+  if (step.type === 'USER_INPUT' && /^USER/.test(String(step.source || ''))) {
+    const raw = String(step.content || '');
+    const m = /<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/.exec(raw);
+    return { type: 'user', timestamp, message: { role: 'user', content: (m ? m[1] : raw).trim() } };
+  }
+  if (step.type === 'PLANNER_RESPONSE') {
+    const content = [];
+    if (typeof step.thinking === 'string' && step.thinking) content.push({ type: 'thinking', thinking: step.thinking });
+    if (typeof step.content === 'string' && step.content) content.push({ type: 'text', text: step.content });
+    for (const call of Array.isArray(step.tool_calls) ? step.tool_calls : []) {
+      if (call && typeof call.name === 'string') content.push({ type: 'tool_use', name: call.name, input: call.args || {} });
+    }
+    const usage = Number.isInteger(step.output_tokens) ? { output_tokens: step.output_tokens } : undefined;
+    return { type: 'assistant', timestamp, message: { role: 'assistant', content, ...(model ? { model } : {}), ...(usage ? { usage } : {}) } };
+  }
+  if (step.type === 'GENERIC') {
+    return { type: 'user', timestamp, message: { role: 'user', content: [{ type: 'tool_result', content: String(step.content || '') }] } };
+  }
+  return null;
+}
+
 function summarizeMessageContent(message, includeThinking) {
   const out = { textParts: [], toolNames: [], toolResults: 0, toolResultBytes: 0, isError: false, hasImage: false };
   if (!message || typeof message !== 'object') return out;
@@ -4874,14 +4934,17 @@ class HopMCPServer {
   // hook will then bump the turn counter, making the counter the authoritative
   // agent_done signal — the quiet-screen heuristic alone must not declare a
   // turn finished (thinking models pause with an idle-looking screen).
+  // (Claude's record is <session>.json; Antigravity's hook files <session>.agy,
+  // and its Stop hook bumps the same turn counter.)
   hasClaudeHookRecord(internalName) {
     if (!internalName || !/^[A-Za-z0-9_.-]+$/.test(internalName)) return false;
-    try {
-      fs.accessSync(path.join(resolveHomeDir(), 'claude-sessions', `${internalName}.json`));
-      return true;
-    } catch {
-      return false;
+    for (const ext of ['json', 'agy']) {
+      try {
+        fs.accessSync(path.join(resolveHomeDir(), 'claude-sessions', `${internalName}.${ext}`));
+        return true;
+      } catch { /* next */ }
     }
+    return false;
   }
 
   // Resolve a hop session name to its Claude transcript file. Seam: returns a
@@ -4934,6 +4997,15 @@ class HopMCPServer {
         error: `Agent access not permitted for "${name}". Enable with hop_set_agent_permission(name="${name}", allowed=true) or run 'hop session permit ${name}'.`,
         denied: true
       };
+    }
+
+    // An Antigravity conversation: its own step log, never a Claude
+    // transcript that happens to share the folder.
+    const agy = currentAgyRecord(internalName);
+    if (agy) {
+      const file = agyTranscriptPath(agy);
+      if (!file) return { error: `No Antigravity transcript found for session "${name}" (conversation ${agy.sessionId}).` };
+      return { kind: 'local', tool: 'antigravity', path: file, sessionId: agy.sessionId, cwd: agy.cwd || cwd, internalName, fallback: false, postMortem, model: agy.model || null };
     }
 
     let sessionId = null;
@@ -5072,6 +5144,10 @@ class HopMCPServer {
       let obj;
       try { obj = JSON.parse(line); } catch { parseErrors += 1; continue; }
       if (!obj || typeof obj !== 'object') { parseErrors += 1; continue; }
+      if (source.tool === 'antigravity') {
+        obj = agyStepAsMessage(obj, source.model);
+        if (!obj) continue;
+      }
 
       const ltype = typeof obj.type === 'string' ? obj.type : 'unknown';
       counts[ltype] = (counts[ltype] || 0) + 1;
@@ -5983,7 +6059,7 @@ class HopMCPServer {
       }
       command = presetCommands[preset];
       if (!command) {
-        return { content: [{ type: 'text', text: `Error: unknown agent preset "${preset}". Use claude, codex, gemini, or custom with command=...` }], isError: true };
+        return { content: [{ type: 'text', text: `Error: unknown agent preset "${preset}". Use claude, codex, antigravity, gemini, or custom with command=...` }], isError: true };
       }
       // Claude's account-dependent default can open a post-submit usage-credit
       // chooser instead of running the task; pinning a stable alias avoids
@@ -6124,7 +6200,7 @@ class HopMCPServer {
     // line) up to a bounded window, then give it a beat to settle so the first
     // keystroke isn't racing a final repaint. Plain shells (agent="custom")
     // have no composer and keep the idle-only signal.
-    const TUI_PRESETS = new Set(['claude', 'codex', 'gemini']);
+    const TUI_PRESETS = new Set(['claude', 'codex', 'gemini', 'antigravity']);
     let composerReady = null;
     if (ready && TUI_PRESETS.has(preset)) {
       const composerDeadline = Date.now() + Math.min(readyTimeoutMs, 20000);
@@ -6200,7 +6276,7 @@ class HopMCPServer {
         until_regex: automaticContract ? automaticContract.regex : undefined,
         match_target: automaticContract ? 'screen' : undefined,
         until_reply_regex: completionRegex,
-        transcript_settle_ms: preset === 'claude' || preset === 'codex'
+        transcript_settle_ms: preset === 'claude' || preset === 'codex' || preset === 'antigravity'
           ? DEFAULT_AGENT_TRANSCRIPT_SETTLE_MS
           : 0,
         max_wait_ms: args.max_wait_ms
@@ -7845,6 +7921,7 @@ if (require.main === module) {
     encodeClaudeProjectDir,
     detectAgentStartupBlocker,
     extractCodexFinalReply,
-    summarizeMessageContent
+    summarizeMessageContent,
+    agyStepAsMessage
   };
 }

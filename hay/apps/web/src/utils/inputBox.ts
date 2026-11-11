@@ -14,6 +14,12 @@
 // between two ──── rules; Codex's: `› ` and the same indent, ended by a blank
 // row. Their wrapping drops the space it breaks at, and a word too long for
 // a row is cut at the right edge.
+//
+// Antigravity's agy draws the same box (`> `, rules) but never reads the
+// mouse, so hop moves its cursor with arrow keys instead of a click (verified
+// against agy 1.5: one character per arrow, across wrapped rows). agy parks
+// its cursor ON the last character typed: the insertion point is one cell to
+// the right of where the terminal shows the cursor.
 
 const RULE = /^\s*[─━]{8,}/;
 const PROMPT = /^\s*[❯›>](\s|$)/;
@@ -84,6 +90,23 @@ export const clickTargetAfter = (line: (row: number) => string | undefined, sel:
   const lo = contentStart(t, sel.endRow === box.start);
   return { row: sel.endRow, col: Math.max(lo, Math.min(sel.endCol, t.length)) };
 };
+
+/**
+ * A cell's place in the box's text: characters from its start, row breaks
+ * counted as selectedCharCount counts them. Past a row's end is its end.
+ */
+export const boxIndexAt = (line: (row: number) => string | undefined, box: BoxRows, row: number, col: number, cols: number): number => {
+  let n = 0;
+  for (let r = box.start; r < row; r++) {
+    const t = line(r) ?? "";
+    n += Math.max(0, t.length - contentStart(t, r === box.start)) + (t.length >= cols - 1 ? 0 : 1);
+  }
+  const t = line(row) ?? "";
+  return n + Math.max(0, Math.min(col, t.length) - contentStart(t, row === box.start));
+};
+
+/** The arrow keys that move a cursor `delta` characters (right when positive). */
+export const arrowWalk = (delta: number): string => (delta > 0 ? "\x1b[C" : "\x1b[D").repeat(Math.abs(delta));
 
 /** A left click at a viewport cell, in the mouse encoding the app asked for. */
 export const mouseClick = (col: number, row: number, encoding: string): { press: string; release: string } => {

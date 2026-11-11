@@ -65,12 +65,28 @@ function recordSession(dir, hopSession, payload) {
     configDir: null,
     launchCmd: agyLaunchCmd(),
     transcriptPath: typeof payload.transcriptPath === "string" ? payload.transcriptPath : null,
+    // The model hop shows beside the session (every hook payload names it).
+    model: modelOf(payload),
     updatedAt: new Date().toISOString()
   }));
 }
 
-// The agent's last words, best effort, from the transcript's tail. Its
-// format is not documented, so any line with model/assistant text will do.
+const modelOf = (payload) => (typeof payload.modelName === "string" && payload.modelName ? payload.modelName.slice(0, 80) : null);
+
+/** A /model switch mid-conversation: the record follows it (the rest of the record kept). */
+function noteModel(dir, hopSession, payload) {
+  const model = modelOf(payload);
+  if (!model) return;
+  const file = path.join(dir, `${hopSession}.agy`);
+  const rec = readJson(file);
+  if (!rec || rec.sessionId !== payload.conversationId || rec.model === model) return;
+  writeDurable(file, JSON.stringify({ ...rec, model }));
+}
+
+// The agent's last words, from the transcript's tail: agy's step log puts the
+// model's words in the content of a PLANNER_RESPONSE step (tool output is a
+// GENERIC step). Anything else that looks like a model/assistant message is
+// taken too, in case the format moves.
 function lastMessage(payload) {
   const tp = typeof payload.transcriptPath === "string" ? payload.transcriptPath : "";
   if (!tp) return "";
@@ -88,6 +104,11 @@ function lastMessage(payload) {
     for (let i = lines.length - 1; i >= 0; i--) {
       let rec;
       try { rec = JSON.parse(lines[i]); } catch { continue; }
+      if (rec && rec.type === "PLANNER_RESPONSE") {
+        const said = typeof rec.content === "string" ? rec.content.replace(/\s+/g, " ").trim() : "";
+        if (said) return said.slice(0, 600);
+        continue;
+      }
       const role = String(rec?.role || rec?.type || rec?.message?.role || rec?.source || "").toLowerCase();
       if (!/model|assistant|agent/.test(role)) continue;
       const text = textOf(rec.message ?? rec.content ?? rec.text ?? rec.parts ?? "").replace(/\s+/g, " ").trim();
@@ -139,6 +160,7 @@ function main(event, raw, env = process.env) {
     // the first call also files the record when none names this conversation.
     const rec = readJson(path.join(dir, `${hopSession}.agy`));
     if (!rec || rec.sessionId !== payload.conversationId) recordSession(dir, hopSession, payload);
+    else noteModel(dir, hopSession, payload);
   } else if (event === "Stop") {
     // Done only when agy says it is fully idle (not between sub-steps).
     if (payload.fullyIdle !== false) bumpTurn(dir, hopSession, payload);

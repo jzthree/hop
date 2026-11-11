@@ -65,7 +65,7 @@ import { currentNames, renamer, threadFor, useBriefing } from "./utils/briefingF
 import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
 import { QueueCard, normalizeQueued, type QueuedMessage } from "./components/QueueCard";
 import { sendToSession } from "./utils/quickReply";
-import { clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
+import { arrowWalk, boxIndexAt, clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscreenChord";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
@@ -871,6 +871,7 @@ const App = () => {
   const boxEditQueueRef = useRef<string[] | null>(null);
   const boxClickRef = useRef<(press: MouseEvent) => void>(() => {});
   const codexBoxPressRef = useRef<(press: MouseEvent) => boolean>(() => false);
+  const agyBoxClickRef = useRef<(press: MouseEvent) => void>(() => {});
   // Custom overlay scrollbar (native overlay bars can't be styled, and styled
   // webkit bars reserve layout width): a floating semi-transparent thumb.
   const termScrollbarRef = useRef<HTMLDivElement | null>(null);
@@ -1623,6 +1624,19 @@ const App = () => {
   const boxEditable = () =>
     !!termRef.current && remoteMouseReportingRef.current
     && (foregroundIsClaude() || currentSessionAgentRef.current?.() === "codex");
+  // Antigravity's box: the same edits, made with arrow keys (agy never reads
+  // the mouse, so a drag already selects natively). Its insertion point is
+  // one cell right of the cursor it shows (utils/inputBox).
+  const agyBox = () =>
+    !!termRef.current && !remoteMouseReportingRef.current && currentSessionAgentRef.current?.() === "antigravity";
+  const sendKeysRaw = (data: string) => {
+    if (!data || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    sendMessage({ type: "input", data });
+  };
+  const agyCursorIndex = (t: Terminal, box: { start: number; end: number }, line: (r: number) => string | undefined) => {
+    const buf = t.buffer.active;
+    return boxIndexAt(line, box, buf.baseY + buf.cursorY, buf.cursorX + 1, t.cols);
+  };
   // A mouse report goes straight to the app — not through the typing path,
   // which would mark this window as typing.
   const sendMouseClick = (col: number, row: number) => {
@@ -1635,7 +1649,7 @@ const App = () => {
   // The selection, when it lies inside the agent's input box.
   const boxSelection = () => {
     const t = termRef.current;
-    if (!t || !t.hasSelection() || !boxEditable() || !foregroundIsClaude()) return null;
+    if (!t || !t.hasSelection() || !((boxEditable() && foregroundIsClaude()) || agyBox())) return null;
     const pos = t.getSelectionPosition();
     if (!pos) return null;
     const buf = t.buffer.active;
@@ -1660,6 +1674,8 @@ const App = () => {
     const target = clickTargetAfter(line, sel, box);
     const row = target.row - buf.viewportY;
     if (row < 0 || row >= t.rows) return false;
+    const agy = agyBox();
+    const want = agy ? boxIndexAt(line, box, target.row, target.col, t.cols) : -1;
     t.clearSelection();
     // Keys typed while this is under way wait, and follow it in order —
     // sent at once they landed before the deletion, in the wrong place.
@@ -1678,12 +1694,14 @@ const App = () => {
       }
       for (const d of held) handleUserInput(d);
     };
-    sendMouseClick(target.col, row);
+    if (agy) sendKeysRaw(arrowWalk(want - agyCursorIndex(t, box, line)));
+    else sendMouseClick(target.col, row);
     void (async () => {
       const t0 = Date.now();
       // Claude redraws its cursor after the click; that can take a moment.
       while (Date.now() - t0 < 2500) {
-        if (buf.baseY + buf.cursorY === target.row && buf.cursorX === target.col) { finish(true); return; }
+        if (agy ? agyCursorIndex(t, box, line) === want
+          : buf.baseY + buf.cursorY === target.row && buf.cursorX === target.col) { finish(true); return; }
         await new Promise((r) => window.setTimeout(r, 25));
       }
       finish(false);
@@ -1703,6 +1721,22 @@ const App = () => {
     const box = inputBoxRows((r: number) => buf.getLine(r)?.translateToString(true), buf.baseY + buf.cursorY);
     const row = buf.viewportY + cell.row;
     return !!box && row >= box.start && row <= box.end;
+  };
+  // A click inside Antigravity's box: its cursor walked there.
+  agyBoxClickRef.current = (press: MouseEvent) => {
+    const t = termRef.current;
+    if (!t || !agyBox() || t.hasSelection()) return;
+    const screen = containerRef.current?.querySelector(".xterm-screen") as HTMLElement | null;
+    if (!screen) return;
+    const cell = cellAtPoint(screen, containerRef.current?.querySelector(".xterm-rows") as HTMLElement | null, t.cols, t.rows, press.clientX, press.clientY);
+    if (!cell) return;
+    const buf = t.buffer.active;
+    const line = (r: number) => buf.getLine(r)?.translateToString(true);
+    const box = inputBoxRows(line, buf.baseY + buf.cursorY);
+    const row = buf.viewportY + cell.row;
+    if (!box || row < box.start || row > box.end) return;
+    for (let r = box.start; r <= box.end; r++) if (hasWideChars(line(r) || "")) return;
+    sendKeysRaw(arrowWalk(boxIndexAt(line, box, row, cell.col, t.cols) - agyCursorIndex(t, box, line)));
   };
   boxClickRef.current = (press: MouseEvent) => {
     if (!boxEditable()) return;
@@ -2645,6 +2679,22 @@ const App = () => {
       (press) => boxClickRef.current(press),
       // Codex selects (and replaces) in its own input box: presses there are its.
       (press) => codexBoxPressRef.current(press));
+    // Antigravity never reads the mouse: xterm selects natively, and a plain
+    // click inside its input box moves its cursor there (by arrow keys).
+    {
+      const host = (containerRef.current.closest(".terminal-scroll") as HTMLElement | null) || containerRef.current;
+      let down: MouseEvent | null = null;
+      const onDown = (e: MouseEvent) => { down = e.button === 0 && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.detail === 1 ? e : null; };
+      const onUp = (e: MouseEvent) => {
+        const d = down;
+        down = null;
+        if (!d || Math.hypot(e.clientX - d.clientX, e.clientY - d.clientY) >= 4) return;
+        window.setTimeout(() => agyBoxClickRef.current(d), 0);
+      };
+      host.addEventListener("mousedown", onDown, true);
+      host.addEventListener("mouseup", onUp, true);
+      (terminal as any).__agyClickCleanup = () => { host.removeEventListener("mousedown", onDown, true); host.removeEventListener("mouseup", onUp, true); };
+    }
     // Pasting over a selection made inside the agent's input box replaces it too.
     terminal.textarea?.addEventListener("paste", (ev: ClipboardEvent) => {
       const text = ev.clipboardData?.getData("text/plain");
@@ -2837,8 +2887,10 @@ const App = () => {
       // 2026 builds) no longer advertises the protocol at boot, so waiting
       // for the enable never fires. A plain shell renders raw CSI-u as junk
       // text, hence the gate stays.
+      // Antigravity reads CSI-u Shift+Enter as a newline too, without
+      // advertising the protocol (verified, agy 1.5).
       if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
-          && (remoteKbdEnhancedRef.current || foregroundIsClaude())) {
+          && (remoteKbdEnhancedRef.current || foregroundIsClaude() || currentSessionAgentRef.current?.() === "antigravity")) {
         if (event.type === 'keydown') {
           event.preventDefault();
           handleUserInput('\x1b[13;2u');
@@ -3579,6 +3631,10 @@ const App = () => {
         if ((terminal as any).__viewBlocksCleanup) {
           (terminal as any).__viewBlocksCleanup();
           (terminal as any).__viewBlocksCleanup = null;
+        }
+        if ((terminal as any).__agyClickCleanup) {
+          (terminal as any).__agyClickCleanup();
+          (terminal as any).__agyClickCleanup = null;
         }
         if ((terminal as any).__dragSelectCleanup) {
           (terminal as any).__dragSelectCleanup();
@@ -5940,7 +5996,7 @@ const App = () => {
                   )}
                   {!!currentInfo?.queued?.length && !queueHidden && (
                     <QueueCard items={currentInfo.queued}
-                               agentLabel={currentInfo.agent === "codex" ? "Codex" : currentInfo.agent === "claude" ? "Claude" : "the agent"}
+                               agentLabel={currentInfo.agent === "codex" ? "Codex" : currentInfo.agent === "claude" ? "Claude" : currentInfo.agent === "antigravity" ? "Antigravity" : "the agent"}
                                onSendNow={(id) => queueOp("now", id)}
                                onEdit={(id, text) => queueOp("edit", id, text)}
                                onCancel={(id) => queueOp("cancel", id)}

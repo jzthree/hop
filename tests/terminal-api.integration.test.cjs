@@ -202,6 +202,8 @@ async function startDaemon() {
   // the real binary must never start inside a test harness.
   await fs.writeFile(path.join(binDir, 'claude'),
     '#!/usr/bin/env bash\necho "stub claude: $@"\n', { mode: 0o755 });
+  await fs.writeFile(path.join(binDir, 'codex'),
+    '#!/usr/bin/env bash\necho "stub codex: $@"\n', { mode: 0o755 });
 
   daemonEnv = {
     ...process.env,
@@ -210,6 +212,14 @@ async function startDaemon() {
     HOP_NO_UPDATE_CHECK: '1',
     // Never the real ~/.codex: tests plant their own rollouts here.
     CODEX_HOME: path.join(tempDir, 'codex_home'),
+    // …nor the real ~/.gemini (agy's hooks and conversations), nor the real
+    // agy: a session's login shell finds ~/.local/bin/agy before binDir.
+    HOP_GEMINI_HOME: path.join(tempDir, 'gemini_home'),
+    HOP_AGY_BIN: path.join(binDir, 'agy'),
+    // A session's login shell puts the real claude and codex first on PATH
+    // too: forks and Continue-in launch these stand-ins by full path.
+    HOP_CLAUDE_BIN: path.join(binDir, 'claude'),
+    HOP_CODEX_BIN: path.join(binDir, 'codex'),
     PATH: `${binDir}:${process.env.PATH || ''}`,
     CLOUDFLARED_LOG: cloudflaredLog
   };
@@ -1236,6 +1246,91 @@ test('a Codex-app session hands off to claude before its first turn in hop', asy
   for (const name of [internal, handoff.data.internalName]) {
     await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete',
       { name, internalName: name });
+  }
+});
+
+
+// Antigravity (agy) is a full party to Continue-in: its conversation (the
+// step log under ~/.gemini/antigravity-cli/brain/<id>/) hands off to claude
+// or codex, a claude conversation hands off to a fresh agy (agy -i, hop's
+// hooks put in agy's config), and agy's own Fork — it has no native one —
+// is a fresh agy that starts from the whole conversation.
+test('antigravity conversations continue in any CLI, and any continue in antigravity', async () => {
+  const geminiHome = daemonEnv.HOP_GEMINI_HOME;
+  const argvFile = path.join(tempDir, 'fake-agy-argv.txt');
+  await fs.writeFile(daemonEnv.HOP_AGY_BIN, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\nsleep 30\n`, { mode: 0o755 });
+
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'agysrc', cwd: tempDir }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const conv = '0a0b0c0d-1111-2222-3333-444455556666';
+  const logs = path.join(geminiHome, 'antigravity-cli', 'brain', conv, '.system_generated', 'logs');
+  await fs.mkdir(logs, { recursive: true });
+  await fs.writeFile(path.join(logs, 'transcript_full.jsonl'), [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-11T01:00:00Z', content: '<USER_REQUEST>\nprofile the loader\n</USER_REQUEST>' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-11T01:00:09Z', content: 'Decoding dominates: 70% of the time.' }
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  await fs.mkdir(path.join(hopHome, 'claude-sessions'), { recursive: true });
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.agy`), JSON.stringify({
+    sessionId: conv, agent: 'antigravity', cwd: tempDir, launchCmd: 'agy --model gemini-x --dangerously-skip-permissions',
+    transcriptPath: path.join(logs, 'transcript.jsonl'), updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  // agy → claude: the step log becomes the document claude reads first.
+  const toClaude = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', { internalName: internal, target: 'claude' });
+  assert.equal(toClaude.status, 200, JSON.stringify(toClaude.data));
+  assert.equal(toClaude.data.kind, 'handoff');
+  assert.equal(toClaude.data.target, 'claude');
+  assert.match(toClaude.data.name, /^agysrc-claude\d*$/);
+  const extract = await fs.readFile(toClaude.data.extract.path, 'utf8');
+  assert.match(extract, /# Source tool: antigravity/);
+  assert.match(extract, /profile the loader[\s\S]*Decoding dominates/);
+
+  // agy's Fork: a fresh agy from the whole conversation, its launch flags kept.
+  const fork = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', { internalName: internal });
+  assert.equal(fork.status, 200, JSON.stringify(fork.data));
+  assert.equal(fork.data.kind, 'handoff');
+  assert.equal(fork.data.target, 'antigravity');
+  assert.match(fork.data.name, /^agysrc-fork\d*$/);
+  let argv = '';
+  for (let i = 0; i < 40 && !argv; i++) { await delay(150); argv = await fs.readFile(argvFile, 'utf8').catch(() => ''); }
+  assert.match(argv, /^--model\ngemini-x\n--dangerously-skip-permissions\n-i\nRead the ENTIRE file /, `agy -i with the source's flags, got ${JSON.stringify(argv)}`);
+  assert.ok(argv.includes(fork.data.extract.path), 'the prompt names the extract');
+  assert.match(argv, /previous Antigravity conversation/);
+  // hop's hooks are now in (the test's) agy config, so the fork is restorable.
+  const hooks = JSON.parse(await fs.readFile(path.join(geminiHome, 'config', 'hooks.json'), 'utf8'));
+  assert.ok(hooks.hop && Array.isArray(hooks.hop.Stop), 'hop hooks installed for agy');
+
+  // claude → agy ("agy" is accepted for antigravity).
+  await fs.rm(argvFile, { force: true });
+  const claudeSrc = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'claude2agy', cwd: tempDir }, agentHeaders);
+  const claudeInternal = claudeSrc.data.sessionName;
+  const sessionId = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff';
+  const configDir = path.join(tempDir, 'claude-cfg-agy');
+  const projectDir = path.join(configDir, 'projects', tempDir.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(path.join(projectDir, `${sessionId}.jsonl`), [
+    { type: 'user', timestamp: '2026-11-10T10:00:00Z', message: { role: 'user', content: 'shard the eval set' } },
+    { type: 'assistant', timestamp: '2026-11-10T10:00:05Z', message: { content: [{ type: 'text', text: 'Eight shards by chromosome.' }] } }
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  await fs.writeFile(path.join(hopHome, 'claude-sessions', `${claudeInternal}.json`), JSON.stringify({
+    sessionId, cwd: tempDir, configDir, launchCmd: 'claude', updatedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+  const toAgy = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', { internalName: claudeInternal, target: 'agy' });
+  assert.equal(toAgy.status, 200, JSON.stringify(toAgy.data));
+  assert.equal(toAgy.data.target, 'antigravity');
+  assert.match(toAgy.data.name, /^claude2agy-antigravity\d*$/);
+  argv = '';
+  for (let i = 0; i < 40 && !argv; i++) { await delay(150); argv = await fs.readFile(argvFile, 'utf8').catch(() => ''); }
+  assert.match(argv, /^-i\nRead the ENTIRE file [\s\S]*previous Claude Code conversation/, `plain agy -i, got ${JSON.stringify(argv)}`);
+  assert.match(await fs.readFile(toAgy.data.extract.path, 'utf8'), /shard the eval set/);
+
+  const bad = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', { internalName: internal, target: 'cursor' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.data.error, /claude, codex, antigravity/);
+
+  for (const name of [internal, toClaude.data.internalName, fork.data.internalName, claudeInternal, toAgy.data.internalName]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name, internalName: name });
   }
 });
 

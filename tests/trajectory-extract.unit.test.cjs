@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { extractConversation, codexRolloutId, handoffPrompt } = require('../scripts/trajectory-extract.js');
+const { extractConversation, codexRolloutId, handoffPrompt, antigravityTranscript, detectTool } = require('../scripts/trajectory-extract.js');
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'hop-extract-'));
 const jsonl = (file, entries) => fs.writeFileSync(file, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
@@ -97,5 +97,50 @@ test('codex thread split across segment files is read whole, oldest first', asyn
 test('handoff prompt names the file, its size, and the source tool', () => {
     const p = handoffPrompt('/x/handoff.md', 5 * 1024, 'claude');
     assert.match(p, /Read the ENTIRE file \/x\/handoff\.md \(5KB\)/);
-    assert.match(p, /previous claude conversation/);
+    assert.match(p, /previous Claude Code conversation/);
+    assert.match(handoffPrompt('/x/h.md', 1024, 'antigravity'), /previous Antigravity conversation/);
+});
+
+// agy's step log, as it writes it: the request wrapped in its own metadata,
+// the model's words and tool calls in planner steps, tool output in GENERIC.
+const agySteps = [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-11T01:00:00Z',
+      content: '<USER_REQUEST>\nwhy is the test flaky?\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: x.\n</ADDITIONAL_METADATA>' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-11T01:00:02Z', thinking: 'hmm',
+      tool_calls: [{ name: 'read_file', args: { Path: '/w/test.js' } }, { name: 'run_command', args: { CommandLine: 'npm test -- --repeat 20' } }] },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: '2026-11-11T01:00:03Z', content: 'file contents… never carried' },
+    { step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-11T01:00:09Z', content: 'A race on the port.' },
+    { step_index: 4, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-11T01:05:00Z', content: '<USER_REQUEST>\nfix it\n</USER_REQUEST>' },
+    { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-11T01:05:30Z', content: 'Fixed: each run takes a free port.' }
+];
+
+test('antigravity steps: requests unwrapped, replies and tool calls paired, tool output left out', async () => {
+    const dir = tmp();
+    const logs = path.join(dir, '.gemini', 'antigravity-cli', 'brain', 'conv-1234-abcd', '.system_generated', 'logs');
+    fs.mkdirSync(logs, { recursive: true });
+    const file = path.join(logs, 'transcript_full.jsonl');
+    jsonl(file, agySteps);
+    assert.equal(detectTool(file), 'antigravity');
+    const r = await extractConversation(file, { cwd: '/w' });
+    assert.equal(r.tool, 'antigravity');
+    assert.equal(r.totalTurns, 2);
+    assert.match(r.text, /# Working directory: \/w/);
+    assert.match(r.text, /## User \[2026-11-11T01:00:00\]\nwhy is the test flaky\?\n/);
+    assert.match(r.text, /\[read_file\] \/w\/test\.js/);
+    assert.match(r.text, /\[run_command\] npm test -- --repeat 20/);
+    assert.match(r.text, /## Assistant\nA race on the port\./);
+    assert.match(r.text, /## User \[2026-11-11T01:05:00\]\nfix it\n[\s\S]*Fixed: each run takes a free port\./);
+    assert.ok(!r.text.includes('ADDITIONAL_METADATA') && !r.text.includes('never carried') && !r.text.includes('hmm'));
+});
+
+test('antigravity transcript: found by conversation id, the full log preferred, the recorded path first', () => {
+    const dir = tmp();
+    const logs = path.join(dir, 'brain', 'conv-1234-abcd', '.system_generated', 'logs');
+    fs.mkdirSync(logs, { recursive: true });
+    jsonl(path.join(logs, 'transcript.jsonl'), agySteps);
+    assert.equal(antigravityTranscript('conv-1234-abcd', { dataDir: dir }), path.join(logs, 'transcript.jsonl'));
+    jsonl(path.join(logs, 'transcript_full.jsonl'), agySteps);
+    assert.equal(antigravityTranscript('conv-1234-abcd', { dataDir: dir }), path.join(logs, 'transcript_full.jsonl'));
+    assert.equal(antigravityTranscript('conv-1234-abcd', { dataDir: dir, recorded: path.join(logs, 'transcript.jsonl') }), path.join(logs, 'transcript_full.jsonl'));
+    assert.equal(antigravityTranscript('nope-0000-0000', { dataDir: dir }), null);
 });

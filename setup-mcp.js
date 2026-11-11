@@ -18,7 +18,10 @@ const CONFIG_PATHS = {
   gemini: path.join(HOME, '.gemini', 'settings.json'),
   codex: path.join(HOME, '.codex', 'config.toml'),
   vscodeWorkspace: path.join(process.cwd(), '.vscode', 'mcp.json'),
-  antigravity: path.join(HOME, '.gemini', 'antigravity', 'mcp_config.json')
+  antigravity: path.join(HOME, '.gemini', 'antigravity', 'mcp_config.json'),
+  // The Antigravity CLI (agy) reads its global MCP servers here, not from
+  // the desktop app's file above (agy's own docs).
+  antigravityCli: path.join(process.env.HOP_GEMINI_HOME || path.join(HOME, '.gemini'), 'config', 'mcp_config.json')
 };
 
 // Prefer the resilient `hop-mcp` bin when it is on PATH (global npm install);
@@ -164,8 +167,14 @@ function detectTools() {
     };
   }
 
+  if (hasAntigravityCli) {
+    tools.antigravityCli = {
+      name: 'Antigravity CLI (agy)',
+      configPath: CONFIG_PATHS.antigravityCli
+    };
+  }
+
   if (
-    hasAntigravityCli ||
     fs.existsSync(CONFIG_PATHS.antigravity) ||
     fs.existsSync(path.dirname(CONFIG_PATHS.antigravity))
   ) {
@@ -385,7 +394,8 @@ async function main() {
     gemini: configureGemini,
     codex: configureCodex,
     vscodeWorkspace: configureVSCodeWorkspace,
-    antigravity: configureAntigravity
+    antigravity: configureAntigravity,
+    antigravityCli: configureAntigravity
   };
 
   const plan = {};

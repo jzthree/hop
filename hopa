@@ -112,7 +112,7 @@ const USAGE = `hopa — agent-facing hop CLI (terminal orchestration; no admin v
   hopa spawn [name] --agent claude [--task "..."] [--cwd P]
   hopa scrollback <term>              capture full scrollback
   hopa wait-any <term1> <term2> ...   wait for whichever finishes first
-  hopa trajectory <session>           read a claude session's conversation
+  hopa trajectory <session>           read a session's conversation (claude or antigravity)
 
   hopa ws ls|new|show|save|load|rm    workspaces
   hopa permit <session> | block <session>   allow/deny agent access

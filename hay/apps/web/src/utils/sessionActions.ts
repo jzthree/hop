@@ -19,9 +19,14 @@ const labelOf = (s: ActionTarget) => s.displayName || s.name;
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
   fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
 
+/** The agent CLIs a conversation can be continued in, in menu order. */
+export const AGENT_TARGETS = ["claude", "codex", "antigravity"] as const;
+export type AgentTarget = typeof AGENT_TARGETS[number];
+export const agentName = (a: AgentTarget) => (a === "codex" ? "Codex" : a === "antigravity" ? "Antigravity" : "Claude");
+
 /** Fork (same tool) or hand off (target names a tool). The result says what came of it; null on failure. */
-export const forkSession = async ({ notice, refresh }: ActionContext, s: ActionTarget, target?: "claude" | "codex") => {
-  notice(target ? `Condensing for ${target === "codex" ? "Codex" : "Claude"}…` : "Forking…");
+export const forkSession = async ({ notice, refresh }: ActionContext, s: ActionTarget, target?: AgentTarget) => {
+  notice(target ? `Condensing for ${agentName(target)}…` : "Forking…");
   try {
     const res = await post("/api/sessions/fork", { internalName: keyOf(s), ...(target ? { target, condense: true } : {}) });
     const data = await res.json().catch(() => ({} as { error?: string; name?: string; internalName?: string; kind?: string; extract?: { turns?: number; bytes?: number } }));

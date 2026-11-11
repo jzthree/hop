@@ -239,6 +239,8 @@ const DEFAULT_AGENT_TRANSCRIPT_SETTLE_POLL_MS = 100;
 const {
   COMPOSER_BORDER_CHARS, COMPOSER_TOP_CORNER_CHARS, COMPOSER_BOTTOM_CORNER_CHARS, COMPOSER_PROMPT_CHARS, readComposer
 } = require('../lib/composer');
+// Messages between sessions: presence and the sender line (shared with the daemon).
+const { presence: sessionPresence } = require('../lib/messages');
 const HOPX_UI_BUSY_LINE_PATTERNS = [
   /\besc to (?:interrupt|cancel|stop)\b/i,
   /\bctrl\+c to (?:interrupt|cancel|stop)\b/i,
@@ -3122,8 +3124,20 @@ class HopMCPServer {
       },
       {
         name: 'hop_list_sessions',
-        description: 'List Hop sessions and metadata.',
+        description: 'List Hop sessions and metadata. Each carries `presence`, for messaging (hop_send_message): free (an agent between turns), busy (mid-turn: a message waits for the turn to end), needs-user (waiting on its person), shell (no agent), offline.',
         inputSchema: { type: 'object', properties: {} }
+      },
+      {
+        name: 'hop_send_message',
+        description: 'Message the agent in another hop session, like an instant message: hop types it into that agent\'s input box now if it is free, else holds it and types it when its turn ends — never into the middle of a turn or over someone\'s typing. The agent sees which session sent it (this one) and how to answer; its answer, if any, arrives in YOUR input later as a message from it — end your turn rather than wait for it. hop_list_sessions shows who is free. To drive a worker and read its reply synchronously, use hopx_send_and_wait instead.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            to: { type: 'string', description: 'The session to message (display name or id).' },
+            text: { type: 'string', description: 'The message: write it so it stands on its own — the other agent knows nothing of your conversation.' }
+          },
+          required: ['to', 'text']
+        }
       },
       {
         name: 'hop_checkback',
@@ -3720,8 +3734,31 @@ class HopMCPServer {
     this.ensureConnection();
 
     switch (name) {
-      case 'hop_list_sessions':
-        return this.wrapApiResult(await this.callApi('GET', '/api/sessions'), { endpoint: '/api/sessions' });
+      case 'hop_list_sessions': {
+        const listed = await this.callApi('GET', '/api/sessions');
+        if (!this.isApiFailurePayload(listed) && Array.isArray(listed?.sessions)) {
+          for (const s of listed.sessions) if (s && typeof s === 'object') s.presence = sessionPresence(s);
+        }
+        return this.wrapApiResult(listed, { endpoint: '/api/sessions' });
+      }
+      case 'hop_send_message': {
+        const a = args || {};
+        if (!a.to || !String(a.text || '').trim()) return this.wrapApiResult({ error: 'Give `to` (a session) and `text`.' }, { endpoint: '/api/sessions/send' });
+        const who = callerSession();
+        const res = await this.callApi('POST', '/api/sessions/send', {
+          name: String(a.to), text: String(a.text), agentOnly: true,
+          fromSession: who.ok ? who.session : undefined
+        });
+        if (!this.isApiFailurePayload(res) && res.status === 'not-agent') {
+          return this.wrapApiResult({ error: `${a.to} runs no agent (a plain shell): nothing sent. To run a command there, use hop_write_terminal.` }, { endpoint: '/api/sessions/send' });
+        }
+        if (!this.isApiFailurePayload(res)) {
+          res.note = res.status === 'sent'
+            ? `Delivered to ${a.to}. Its answer, if any, arrives in your input as a message from it.`
+            : `${a.to} is busy: hop types it when its turn ends (${res.reason || 'queued'}).`;
+        }
+        return this.wrapApiResult(res, { endpoint: '/api/sessions/send' });
+      }
       case 'hop_checkback': {
         const a = args || {};
         const who = callerSession();
@@ -3732,7 +3769,9 @@ class HopMCPServer {
           in: a.in, at: a.at, every: a.every, until: a.until,
           idle: a.when_idle === true || undefined, idleFor: a.idle_for,
           file: a.when_file, changed: a.changed === true || undefined,
-          cmd: a.when_cmd, cwd: process.cwd()
+          cmd: a.when_cmd, cwd: process.cwd(),
+          // For another session: it is told which one scheduled it.
+          fromSession: who.ok ? who.session : undefined
         };
         return this.wrapApiResult(await this.callApi('POST', '/api/checkbacks', body), { endpoint: '/api/checkbacks' });
       }
@@ -7022,7 +7061,10 @@ class HopMCPServer {
     const me = callerSession();
     const res = await this.callApi('POST', '/api/sessions/send', {
       internalName: entry.sessionName, text: data, agentOnly: true,
-      fromSession: me && me.ok ? me.session : undefined
+      fromSession: me && me.ok ? me.session : undefined,
+      // The caller reads the reply off this turn: the agent there need not
+      // send one back as well.
+      replyHere: shouldWait === true
     });
     if (this.isApiFailurePayload(res)) return { errorResponse: this.wrapApiResult(res, { endpoint: '/api/sessions/send' }) };
     if (res.status === 'not-agent') return { handled: false };

@@ -2023,6 +2023,106 @@ test('a message for an agent is typed only into an empty input box, waits out a 
   assert.ok(notAgent.data.id);
 });
 
+// Sessions message each other like people on a messenger: `hop send` from
+// one agent's session reaches another's agent marked with who sent it and
+// how to answer; the answer comes back the same way, even where agents may
+// not otherwise go; two agents can't trade messages without end.
+test('hop send: a message from another session says who sent it, and the answer finds its way back', async () => {
+  const { execFile } = require('node:child_process');
+  const mk = async (name) => {
+    const dir = path.join(tempDir, `msg-${name}`);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'fake.js'), FAKE_CLAUDE);
+    const term = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name, cwd: dir, startup: `node ${path.join(dir, 'fake.js')} ${dir}`, autoStart: true }, userHeaders);
+    assert.equal(term.status, 200, JSON.stringify(term.data));
+    // Wide enough that a sender line plus message is one row of the box.
+    await requestJson(state.port, state.sessionSecret, 'POST', `/api/terminals/${term.data.id}/resize`, { cols: 400, rows: 30 }, userHeaders);
+    return dir;
+  };
+  const got = async (dir) => { try { return (await fs.readFile(path.join(dir, 'got.log'), 'utf8')).split('\n').filter(Boolean); } catch { return []; } };
+  const until = async (fn, ms, what) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await delay(250); }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+  const aDir = await mk('msgalpha');
+  const bDir = await mk('msgbeta');
+  await until(async () => { try { return (await fs.readFile(path.join(bDir, 'box.txt'), 'utf8')) === '' && (await fs.readFile(path.join(aDir, 'box.txt'), 'utf8')) === ''; } catch { return false; } }, 15000, 'both fake agents to draw');
+  const sessions = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions')).data.sessions;
+  const A = sessions.find((s) => s.displayName === 'msgalpha').internalName;
+  const B = sessions.find((s) => s.displayName === 'msgbeta').internalName;
+  const sessDir = path.join(hopHome, 'claude-sessions');
+  await fs.mkdir(sessDir, { recursive: true });
+  const stamp = (internal, agent, kind = 'turn', at = Date.now() - 60_000) => fs.writeFile(path.join(sessDir, `${internal}.${kind}`), JSON.stringify({ sessionId: `conv-${internal}`, agent, at: new Date(at).toISOString() }));
+  // (Both draw Claude's input box; the sender's kind is named either way.)
+  await stamp(A, 'claude');
+  await stamp(B, 'claude');
+
+  const cliEnv = (session, asAgent) => {
+    const env = { ...daemonEnv, HOP_SESSION: session };
+    delete env.CLAUDECODE; delete env.CLAUDE_CODE_SESSION_ID;
+    if (asAgent) env.CLAUDECODE = '1';
+    return env;
+  };
+  const hop = (args, env) => new Promise((resolve) => execFile(process.execPath, [path.join(__dirname, '..', 'hop'), ...args],
+    { env, timeout: 60000 }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, out: (stdout + stderr).replace(/\x1b\[[0-9;]*m/g, '') })));
+
+  // Who is there: both agents, free.
+  const who = await hop(['who', '--json'], cliEnv(A, false));
+  assert.equal(who.code, 0, who.out);
+  const rows = JSON.parse(who.out);
+  assert.deepEqual(rows.filter((r) => /^msg(alpha|beta)$/.test(r.name)).map((r) => [r.name, r.presence, r.you]).sort(), [['msgalpha', 'free', true], ['msgbeta', 'free', false]]);
+
+  // 1. alpha messages beta: beta's agent hears who wrote and how to answer.
+  const sent = await hop(['send', 'msgbeta', 'Please', 'report', 'the', 'loss'], cliEnv(A, false));
+  assert.equal(sent.code, 0, sent.out);
+  assert.match(sent.out, /Sent to msgbeta/);
+  assert.deepEqual(await got(bDir), ['[hop message from session "msgalpha" (a Claude agent, not your user). To answer, if an answer is needed: hop send msgalpha "<your reply>"] Please report the loss']);
+
+  // 2. beta's agent answers. Agents were never allowed into alpha — but
+  //    alpha wrote to beta, so beta may answer it.
+  const closed = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: B, text: 'unasked', agentOnly: true }, agentHeaders);
+  assert.equal(closed.status, 403);
+  assert.match(closed.data.error, /msgbeta doesn't take messages from agents.*Enable agent access/);
+  const answer = await hop(['send', 'msgalpha', 'Loss is 0.31 and falling'], cliEnv(B, true));
+  assert.equal(answer.code, 0, answer.out);
+  await until(async () => (await got(aDir)).length === 1, 15000, 'the answer to reach alpha');
+  assert.deepEqual(await got(aDir), ['[hop message from session "msgbeta" (a Claude agent, not your user). To answer, if an answer is needed: hop send msgbeta "<your reply>"] Loss is 0.31 and falling']);
+  const queuedFrom = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/checkbacks')).data.items.filter((c) => c.session === A);
+  assert.equal(queuedFrom[0].from, 'msgbeta', 'the queue card says whose it is');
+  assert.equal(queuedFrom[0].message, 'Loss is 0.31 and falling', 'stored as written');
+
+  // 3. A sender reading the reply off the turn (the MCP's send-and-wait) says so.
+  const waiting = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: B, text: 'status?', agentOnly: true, fromSession: A, replyHere: true }, userHeaders);
+  assert.equal(waiting.data.status, 'sent', JSON.stringify(waiting.data));
+  assert.equal((await got(bDir))[1], '[hop message from session "msgalpha" (a Claude agent, not your user). It reads your reply here.] status?');
+
+  // 4. The person's own message (the web, the phone) is typed as written.
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: B, text: 'from me', from: 'you' }, userHeaders);
+  assert.equal((await got(bDir))[2], 'from me');
+
+  // 5. Two agents can't trade messages without end: held while beta is busy,
+  //    the pair's next one past the limit is refused, with what to do.
+  await fs.writeFile(path.join(bDir, 'BUSY'), '1');
+  await stamp(B, 'claude', 'prompt', Date.now());
+  let refused = null;
+  for (let i = 0; i < 20 && !refused; i++) {
+    const r = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: B, text: `ping ${i}`, agentOnly: true, fromSession: A, mode: 'queue' }, userHeaders);
+    if (r.status === 429) refused = r;
+    else assert.equal(r.data.status, 'queued', JSON.stringify(r.data));
+  }
+  assert.ok(refused, 'refused before 20');
+  assert.match(refused.data.error, /msgalpha and msgbeta have sent each other \d+ messages in 10 minutes\. Stop here and tell your user/);
+  const cancel = await requestJson(state.port, state.sessionSecret, 'POST', '/api/checkbacks/cancel', { session: B }, userHeaders);
+  assert.ok(cancel.data.cancelled >= 1, JSON.stringify(cancel.data));
+  await fs.rm(path.join(bDir, 'BUSY'));
+
+  // 6. Nobody to message: a missing session, a plain shell.
+  const missing = await hop(['send', 'no-such-session', 'hi'], cliEnv(A, false));
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.out, /Session not found/);
+});
+
 // A new session's folder must be there: a mistyped one used to start the
 // session in home (and Codex then made itself a folder under ~/Documents).
 test('a new session in a missing folder is refused, and the form can create the folder', async () => {

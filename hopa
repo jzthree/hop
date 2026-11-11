@@ -66,6 +66,9 @@ const VERBS = {
   // in an agent's input box unsent. To an agent, it goes through hop's queue.
   'send':            { tool: 'hopx_send_and_wait', pos: ['terminal_id', 'data...'], preset: { press_enter: true } },
   'turn':            { tool: 'hopx_agent_turn', pos: ['terminal_id?', 'message...'] },
+  // An instant message to another session's agent (it is told who sent it
+  // and answers with its own message) — not a terminal to drive.
+  'message':         { tool: 'hop_send_message', pos: ['to', 'text...'] },
   'spawn':           { tool: 'hopx_spawn_agent', pos: ['name?'], preset: { async: false }, alias: { task: 'initial_task', cmd: 'command' } },
   'scrollback':      { tool: 'hopx_capture_scrollback', pos: ['terminal_id'] },
   'ledger':          { tool: 'hopx_task_ledger', pos: [] },
@@ -109,6 +112,7 @@ const USAGE = `hopa — agent-facing hop CLI (terminal orchestration; no admin v
   hopa exec <term> -- <command...>    run a shell command, wait, return output
   hopa send <term> <text...>          type + submit + wait for the reply
   hopa turn <term> <message...>       full agent turn (verified submit + wait)
+  hopa message <session> <text...>    message another session's agent; it answers with its own message
   hopa spawn [name] --agent claude [--task "..."] [--cwd P]
   hopa scrollback <term>              capture full scrollback
   hopa wait-any <term1> <term2> ...   wait for whichever finishes first

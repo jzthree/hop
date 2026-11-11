@@ -28,6 +28,7 @@ const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
 const { resolveCallerSession, sessionFromEnvLine } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
+const messages = require('./lib/messages');
 const composerLib = require('./lib/composer');
 const fileLocate = require('./lib/file-locate');
 const digestReads = require('./lib/digest-reads');
@@ -7392,8 +7393,15 @@ async function clearOwnText(entry, internalName, message) {
     return false;
 }
 const deliveriesInFlight = new Set();
+// Who a message is from, for the line typed before it (lib/messages.js): a
+// session, or an agent with none (outside hop). The person: nobody.
+function senderFields(fromSession, actor) {
+    if (fromSession) return { fromSession, fromName: getSessionDisplayName(fromSession) || fromSession, fromAgent: sessionAgentKind(fromSession) };
+    return actor === 'agent' ? { fromOutside: true } : {};
+}
 /**
- * Type `cb.message` into the session's agent and submit it. Resolves
+ * Type the message (`messages.typedText`: with its sender's line when
+ * another session sent it) into the session's agent and submit it. Resolves
  * { ok } or { ok: false, reason, mixed?, unsent?, quiet? } — the reason is
  * what the person sees beside the queued message.
  */
@@ -7405,6 +7413,8 @@ async function deliverIntoAgent(cb, entry, phase) {
         // own record or its process, is what runs there now.)
         const agent = (entry.agent === 'antigravity' ? entry.agent : null) || readTurnInfo(cb.session)?.agent || entry.agent || null;
         const gated = BOX_AGENTS.has(agent);
+        // A shell gets its command as written; an agent hears who sent it.
+        const typed = gated ? messages.typedText(cb) : cb.message;
         let alreadyTyped = false;
         if (gated) {
             const a = await readRoomComposer(cb.session, agent);
@@ -7415,14 +7425,14 @@ async function deliverIntoAgent(cb, entry, phase) {
                 // This very message, already sitting in the box typed and never
                 // sent (an earlier delivery, an agent's `hopa send` before it
                 // pressed Enter): send that rather than wait behind it forever.
-                if (!a.state.isEmpty && boxIsOnly(a.full, cb.message)) alreadyTyped = true;
+                if (!a.state.isEmpty && boxIsOnly(a.full, typed)) alreadyTyped = true;
                 else if (!a.state.isEmpty) return { ok: false, reason: 'waiting: the input box has text in it' };
                 // The same a moment later too: nobody is mid-word.
                 await sleepMs(1200);
                 const b = await readRoomComposer(cb.session, agent);
                 if (b && b.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
                 if (b && !b.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
-                if (b && (alreadyTyped ? !boxIsOnly(b.full, cb.message) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
+                if (b && (alreadyTyped ? !boxIsOnly(b.full, typed) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
             }
         }
         // Forced into a busy Codex, a check-back queues there (Tab); "send
@@ -7437,7 +7447,7 @@ async function deliverIntoAgent(cb, entry, phase) {
             if (alreadyTyped) {
                 log(`[checkback] ${cb.id}: its text was already in the input box, unsent; sending it`, YELLOW);
             } else {
-                sendTerminalInput(e2, cb.message);
+                sendTerminalInput(e2, typed);
                 // Codex folds keys within ~half a second of the text into a
                 // paste (measured: 400ms failed, 1s submitted).
                 await sleepMs(agent === 'codex' ? 1000 : 500);
@@ -7446,7 +7456,7 @@ async function deliverIntoAgent(cb, entry, phase) {
                 const t = await readRoomComposer(cb.session, agent);
                 if (t && t.full.found) {
                     if (t.state.isEmpty) return { ok: false, reason: "the message didn't reach the input box; trying again" };
-                    if (boxJoinedTyping(t.full, cb.message)) {
+                    if (boxJoinedTyping(t.full, typed)) {
                         return { ok: false, mixed: true, reason: 'typing joined it in the input box, so it was not sent' };
                     }
                 }
@@ -7455,13 +7465,13 @@ async function deliverIntoAgent(cb, entry, phase) {
             for (let attempt = 0; attempt < 3; attempt++) {
                 await sleepMs(1500);
                 const still = gated
-                    ? await (async () => { const r = await readRoomComposer(cb.session, agent); return !!r && !r.state.isEmpty && boxStillHolds(r.full, cb.message); })()
-                    : await composerStillHolds(cb.session, cb.message);
+                    ? await (async () => { const r = await readRoomComposer(cb.session, agent); return !!r && !r.state.isEmpty && boxStillHolds(r.full, typed); })()
+                    : await composerStillHolds(cb.session, typed);
                 if (!still) return { ok: true };
                 if (attempt < 2) sendTerminalInput(e2, submitKey);
             }
             // Never leave it typed and unsent.
-            const cleared = gated ? await clearOwnText(e2, cb.session, cb.message) : false;
+            const cleared = gated ? await clearOwnText(e2, cb.session, typed) : false;
             return {
                 ok: false, unsent: true,
                 reason: cleared ? "it didn't submit, so hop took it back out of the input box; trying again" : "it didn't submit and is still in the input box"
@@ -10693,7 +10703,8 @@ function taglineUserPrompts(internalName) {
             const text = typeof c === 'string'
                 ? c
                 : Array.isArray(c) ? c.filter((p) => p?.type === 'text').map((p) => p.text).join(' ') : '';
-            const clean = String(text || '').replace(/\s+/g, ' ').trim();
+            // (Another session's message: what it asks, without hop's sender line.)
+            const clean = messages.stripEnvelope(String(text || '').replace(/\s+/g, ' ').trim());
             if (!clean || clean.length < 12 || clean.length > 400) continue;
             if (/^(<|\[Request interrupted|caveat:)/i.test(clean)) continue;
             out.push(clean.slice(0, 240));
@@ -10723,7 +10734,7 @@ function agyUserPrompts(rec) {
             if (!/^USER/.test(String(j.source || ''))) continue;
             const raw = String(j.content || '');
             const m = /<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/.exec(raw);
-            const clean = (m ? m[1] : raw).replace(/\s+/g, ' ').trim();
+            const clean = messages.stripEnvelope((m ? m[1] : raw).replace(/\s+/g, ' ').trim());
             if (!clean || clean.length < 12 || clean.length > 400 || /^</.test(clean)) continue;
             out.push(clean.slice(0, 240));
         }
@@ -15826,10 +15837,15 @@ happens until someone clicks it.
                         return;
                     }
                     const now = Date.now();
+                    const actor = resolveActor(req);
+                    const fromSession = input.fromSession ? resolveSessionInternalName(String(input.fromSession), String(input.fromSession)) : null;
                     const cb = checkbacks.normalizeCheckback({
                         ...input,
                         session: target,
-                        createdBy: resolveActor(req) === 'agent' ? 'agent' : 'user',
+                        // A reminder an agent sets itself, or one for another session.
+                        fromOutside: undefined, replyHere: undefined,
+                        ...(fromSession ? senderFields(fromSession, actor) : {}),
+                        createdBy: actor === 'agent' ? 'agent' : 'user',
                         // A file watched for CHANGE starts from its current mtime.
                         baselineMtime: input.file && input.changed ? (() => { try { return fs.statSync(String(input.file)).mtimeMs; } catch (e) { return null; } })() : undefined
                     }, now);
@@ -15861,7 +15877,21 @@ happens until someone clicks it.
                     const target = resolveSessionInternalName(input.name, input.internalName);
                     if (!target || !(hopSessionExists(target) || getEffectiveSessionConfig(target))) return reply(404, { error: 'Session not found' });
                     const actor = resolveActor(req);
-                    if (!canActorAccessSession(actor, getEffectiveSessionConfig(target))) return reply(403, { error: 'Agent access not permitted' });
+                    // The sending session, when one says it is sending (an agent's
+                    // `hop send`, the MCP): named in the text the recipient sees.
+                    const fromSession = input.fromSession ? resolveSessionInternalName(String(input.fromSession), String(input.fromSession)) : null;
+                    if (input.fromSession && !(fromSession && (hopSessionExists(fromSession) || getEffectiveSessionConfig(fromSession)))) return reply(404, { error: `No session "${input.fromSession}" to send from` });
+                    const store = loadCheckbacks();
+                    const now = Date.now();
+                    // Anyone who wrote to you may be answered, even where agents
+                    // may not otherwise go.
+                    const answering = !!fromSession && messages.mayAnswer(store.items, fromSession, target, now);
+                    if (!answering && !canActorAccessSession(actor, getEffectiveSessionConfig(target))) {
+                        return reply(403, { error: `${getSessionDisplayName(target) || target} doesn't take messages from agents. Its person can allow it: Enable agent access in the session's menu.` });
+                    }
+                    if (fromSession && fromSession !== target && messages.pairTraffic(store.items, fromSession, target, now) >= messages.PAIR_MAX) {
+                        return reply(429, { error: `${getSessionDisplayName(fromSession) || fromSession} and ${getSessionDisplayName(target) || target} have sent each other ${messages.PAIR_MAX} messages in ${Math.round(messages.PAIR_WINDOW_MS / 60_000)} minutes. Stop here and tell your user; hop sends no more between them for now.` });
+                    }
                     const text = String(input.text || '').replace(/[\r\n]+$/, '');
                     if (!text.trim()) return reply(400, { error: 'Nothing to send' });
                     const { entry, phase } = await sessionEntryAndPhase(target);
@@ -15882,17 +15912,18 @@ happens until someone clicks it.
                         } finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
                         return reply(200, { ok: true, status: 'sent' });
                     }
-                    const now = Date.now();
                     const cb = checkbacks.normalizeCheckback({
                         session: target, message: text, idle: true, queued: true,
                         from: input.from
-                            || (input.fromSession ? (getSessionDisplayName(String(input.fromSession)) || String(input.fromSession)) : null)
+                            || (fromSession ? (getSessionDisplayName(fromSession) || fromSession) : null)
                             || (actor === 'agent' ? 'an agent' : 'you'),
+                        ...senderFields(fromSession, actor),
+                        replyHere: input.replyHere === true,
                         force: input.mode === 'now',
                         createdBy: actor === 'agent' ? 'agent' : 'user'
                     }, now);
                     if (input.mode === 'now') cb.sendNow = true;
-                    loadCheckbacks().items.push(cb);
+                    store.items.push(cb);
                     saveCheckbacks();
                     log(`[queue] ${cb.id} for ${entry.displayName || target} from ${cb.from || '?'}${phase === 'working' ? ' (busy: queued)' : ''}`, DIM);
                     if (input.mode !== 'queue') await attemptQueuedNow(cb);
@@ -19190,6 +19221,8 @@ const HELP_SECTIONS = [
         `hop claude-hook install   Enable full restore (adds a Claude SessionStart hook)`,
         `hop antigravity-hook install  Same for the Antigravity CLI (agy): restore, recover, working / done`,
         `hop claude-hook status|remove   Check or remove the hook`,
+        `hop send <session> "msg"   Message another session's agent: now if it is free, else when its turn ends`,
+        `hop who [--all]            The sessions there are to message, and whether each is free or busy`,
         `hop checkback ...          Type a message into a session later: --in 30m, --at 15:00, --every 2h, --when-idle, --when-file, --when-cmd`,
         `hop agent-skill install   Install Hop orchestration instructions for Claude, Codex and Antigravity`,
         `hop agent-skill status|remove   Check or remove the skills`,
@@ -20681,6 +20714,75 @@ async function main() {
         process.exit(0);
     }
 
+    // hop send — message the agent in another session, the way one person
+    // messages another: typed now if it is free, else held and typed when its
+    // turn ends. Sent from inside a session, the text the other agent sees
+    // says which session wrote and how to answer (lib/messages.js).
+    if (process.argv[2] === 'send') {
+        const argv = process.argv.slice(3);
+        const usage = () => {
+            log('Usage: hop send <session> "<message>"    [--from <session>]', YELLOW);
+            log('Messages the agent in another session: typed now if it is free, else when its turn ends.', DIM);
+            log('From inside a session it says which one sent it and how to answer. hop who: who is free.', DIM);
+        };
+        const fromIdx = argv.indexOf('--from');
+        const fromArg = fromIdx !== -1 ? argv[fromIdx + 1] : null;
+        const positional = argv.filter((a, i) => !(fromIdx !== -1 && (i === fromIdx || i === fromIdx + 1)));
+        const to = positional[0];
+        const text = positional.slice(1).join(' ').trim();
+        if (!to || !text || argv.includes('--help') || argv.includes('-h')) { usage(); process.exit(to && text ? 0 : 1); }
+        const state = isServerRunning();
+        if (!state) { log('Hop is not running.', YELLOW); process.exit(1); }
+        const me = fromArg ? { ok: true, session: fromArg } : callerSession();
+        if (!me.ok && me.reason === 'shared-daemon') { log(me.note, YELLOW); log('Say who is sending: --from <session>', DIM); process.exit(1); }
+        const r = await callLocalApi(state, '/api/sessions/send', 'POST', { name: to, text, agentOnly: true, fromSession: me.ok ? me.session : undefined });
+        const d = r?.data || {};
+        if (d.status === 'sent') { log(`Sent to ${to}.`, GREEN); process.exit(0); }
+        if (d.status === 'queued') {
+            log(`Queued for ${to}: hop types it when ${/input box/.test(d.reason || '') ? 'its input box is clear' : 'its turn ends'} (${d.id}).`, GREEN);
+            process.exit(0);
+        }
+        if (d.status === 'not-agent') { log(`${to} runs no agent (a plain shell): nothing sent.`, YELLOW); process.exit(1); }
+        log(d.error || `Could not send (HTTP ${r?.status})`, RED);
+        process.exit(1);
+    }
+
+    // hop who — the sessions there are to message, and whether each is free:
+    // an IM's contact list, from what hop already knows of every agent.
+    if (process.argv[2] === 'who') {
+        const all = process.argv.includes('--all') || process.argv.includes('-a');
+        const asJson = process.argv.includes('--json');
+        const state = isServerRunning();
+        if (!state) { log('Hop is not running.', YELLOW); process.exit(1); }
+        const res = await fetchSessionList(state);
+        const me = callerSession();
+        const asAgent = process.env.CLAUDECODE === '1' || !!process.env.CLAUDE_CODE_SESSION_ID;
+        const order = { free: 0, busy: 1, 'needs-user': 2, shell: 3, offline: 4 };
+        const home = os.homedir();
+        const rows = (res?.sessions || [])
+            .filter((s) => s.type !== 'port')
+            .map((s) => ({
+                name: s.displayName || s.name, internalName: s.internalName,
+                presence: messages.presence(s), agent: s.agent || null, model: s.agentModel || null,
+                cwd: s.liveCwd || s.cwd || null, you: me.ok && me.session === s.internalName,
+                agentsMayMessage: s.agentPermitted === true
+            }))
+            .filter((r) => all || r.presence === 'free' || r.presence === 'busy' || r.presence === 'needs-user')
+            .sort((a, b) => order[a.presence] - order[b.presence] || String(a.name).localeCompare(String(b.name)));
+        if (asJson) { console.log(JSON.stringify(rows, null, 2)); process.exit(0); }
+        if (!rows.length) { log(all ? 'No sessions.' : 'No agents running. (hop who --all lists every session.)', DIM); process.exit(0); }
+        const label = { free: `${GREEN}● free      ${RESET}`, busy: `${YELLOW}◐ busy      ${RESET}`, 'needs-user': `${MAGENTA}! needs user${RESET}`, shell: `${DIM}○ shell     ${RESET}`, offline: `${DIM}○ offline   ${RESET}` };
+        const width = Math.min(28, Math.max(...rows.map((r) => String(r.name).length)));
+        for (const r of rows) {
+            const where = r.cwd ? (r.cwd === home ? '~' : r.cwd.startsWith(`${home}/`) ? `~${r.cwd.slice(home.length)}` : r.cwd) : '';
+            const what = [messages.AGENT_NAMES[r.agent], where].filter(Boolean).join(' · ');
+            const notes = [r.you ? 'you' : '', asAgent && !r.you && !r.agentsMayMessage && r.agent ? 'closed to agents' : ''].filter(Boolean).join(', ');
+            log(`  ${label[r.presence]}  ${BOLD}${String(r.name).padEnd(width)}${RESET}  ${DIM}${what}${RESET}${notes ? `  ${CYAN}(${notes})${RESET}` : ''}`, RESET);
+        }
+        log(`\nMessage one: ${CYAN}hop send <name> "<message>"${RESET}  ${DIM}(busy: typed when its turn ends)${RESET}`, DIM);
+        process.exit(0);
+    }
+
     // hop checkback — have hop type a message into a session later, on a
     // trigger (a time, a period, idle, a file, a command). For humans, and
     // for agents that promise to "check back in 30 minutes" and don't.
@@ -20730,7 +20832,9 @@ async function main() {
             every: flagValue('--every') || undefined, until: flagValue('--until') || undefined,
             idle: has('--when-idle') || undefined, idleFor: flagValue('--idle-for') || undefined,
             file: flagValue('--when-file') || undefined, changed: has('--changed') || undefined,
-            cmd: flagValue('--when-cmd') || undefined, cwd: process.cwd()
+            cmd: flagValue('--when-cmd') || undefined, cwd: process.cwd(),
+            // For another session: it is told which one scheduled it.
+            fromSession: callerSession().ok ? callerSession().session : undefined
         };
         const r = await callLocalApi(state, '/api/checkbacks', 'POST', body);
         if (!r?.data?.ok) { log(r?.data?.error || 'Could not schedule', RED); usage(); process.exit(1); }

@@ -286,6 +286,29 @@ Claude too) all go this way. hop never types into a box that has your
 half-typed text in it, and if a message will not submit, hop takes it back
 out of the box rather than leave it there unsent.
 
+### Sessions message each other (`hop send`, `hop who`)
+
+The queue makes hop a messenger between agents. `hop who` is the contact
+list: every agent, and whether it is free, busy, or waiting on you. `hop
+send` messages one, from inside another session:
+
+```bash
+hop who                     # ● free  surf   Codex · ~/Code/surf …
+hop send surf "The AF results are in results/af.csv: rerun your eval on them"
+```
+
+The agent there sees who wrote and how to answer, on a line before the text:
+`[hop message from session "angler" (a Claude agent, not your user). To
+answer, if an answer is needed: hop send angler "<your reply>"]`. Its answer
+comes back the same way, as a new message in the sender's input. It is told
+the message is from a colleague, not from you, to weigh it accordingly. An
+agent may message only sessions you let agents into (Enable agent access, or
+`hop config agent-access permit`), but may always answer a session that
+wrote to it. Two sessions that trade a dozen messages in ten minutes are
+stopped and told to come to you. Agents get the same over MCP
+(`hop_send_message`; `hop_list_sessions` carries each session's `presence`)
+and `hopa message`.
+
 ### Render LaTeX math (`hop math`)
 
 Glance at a formula without leaving the terminal:

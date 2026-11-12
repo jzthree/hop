@@ -203,3 +203,54 @@ test('a submitted prompt is noted as the start of a turn, and a headless helper\
   runHook(home, 'beta', { hook_event_name: 'UserPromptSubmit', session_id: 'child-1' }, { CLAUDE_CODE_SESSION_ID: 'parent-1' });
   assert.equal(fs.existsSync(path.join(home, 'claude-sessions', 'beta.prompt')), false);
 });
+
+// Answers: hop keeps a person's question with the reply — so the hook says
+// where each of the turn's prompts came from (Claude's transcript knows),
+// and keeps the prompts just before the last one.
+test('a turn\'s end says where its prompts came from: the person, a scheduled run, a peer, a notice', () => {
+  const home = freshHome();
+  const dir = path.join(home, 'claude-sessions');
+  const tp = path.join(home, 'transcript.jsonl');
+  const at = (ms) => new Date(Date.now() + ms).toISOString();
+  const user = (ms, text, extra) => JSON.stringify({ type: 'user', timestamp: at(ms), promptId: `p${ms}`, message: { role: 'user', content: text }, ...extra }) + '\n';
+  const said = (ms, text) => JSON.stringify({ type: 'assistant', timestamp: at(ms), message: { content: [{ type: 'text', text }] } }) + '\n';
+  const tool = (ms) => JSON.stringify({ type: 'user', timestamp: at(ms), message: { content: [{ type: 'tool_result', content: 'ok' }] } }) + '\n';
+  const stop = () => runHook(home, 'alpha', { hook_event_name: 'Stop', session_id: 'sess-1', transcript_path: tp });
+  const origins = () => JSON.parse(fs.readFileSync(path.join(dir, 'alpha.answer'), 'utf8')).origins;
+
+  // 1. A /loop run: scheduled; its companion (the skill text) is not a prompt.
+  fs.writeFileSync(tp, user(-60000, '<command-name>/loop</command-name>', { wakeupSource: 'loop_wakeup', scheduledTaskId: 'x1' })
+    + user(-60000, '# /loop — schedule', { isMeta: true, turnCompanion: true, wakeupSource: 'loop_wakeup' })
+    + tool(-50000) + said(-40000, 'All jobs healthy.'));
+  // The previous turn ended long before.
+  fs.writeFileSync(path.join(dir, 'alpha.turn'), JSON.stringify({ count: 3, at: at(-3600000) }));
+  stop();
+  assert.deepEqual(origins(), ['scheduled']);
+  // 2. The next turn: the person asks, a subagent's notice lands mid-turn.
+  fs.appendFileSync(tp, user(1000, 'why is the loss flat?', { origin: { kind: 'human' }, turnOrigin: 'human' })
+    + tool(2000) + user(3000, '<task-notification>', { origin: { kind: 'task-notification' } })
+    + user(3500, 'Another Claude session sent a message:', { isMeta: true, origin: { kind: 'peer' } }) + said(4000, 'Because…'));
+  fs.writeFileSync(path.join(dir, 'alpha.turn'), JSON.stringify({ count: 4, at: at(500) }));
+  stop();
+  assert.deepEqual(origins().sort(), ['human', 'peer', 'task-notification']);
+  // 3. A question the person interrupted is not the next turn's.
+  fs.appendFileSync(tp, user(6000, 'and the val loss?', { origin: { kind: 'human' } })
+    + JSON.stringify({ type: 'user', timestamp: at(7000), message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } }) + '\n'
+    + user(8000, '<command-name>/loop</command-name>', { turnOrigin: 'scheduled', scheduledTaskId: 'x2' }) + said(9000, 'Healthy.'));
+  fs.writeFileSync(path.join(dir, 'alpha.turn'), JSON.stringify({ count: 5, at: at(5000) }));
+  stop();
+  assert.deepEqual(origins(), ['scheduled']);
+  // 4. No transcript: nothing said, the text decides.
+  runHook(home, 'beta', { hook_event_name: 'Stop', session_id: 'sess-2' });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'beta.answer'), 'utf8')).origins, undefined);
+});
+
+test('a prompt keeps the ones just before it, so a burst hides nothing', () => {
+  const home = freshHome();
+  const prompt = (text) => { runHook(home, 'alpha', { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt: text }); return JSON.parse(fs.readFileSync(path.join(home, 'claude-sessions', 'alpha.prompt'), 'utf8')); };
+  prompt('why is the loss flat?');
+  prompt('<task-notification>a</task-notification>');
+  const rec = prompt('<task-notification>b</task-notification>');
+  assert.equal(rec.text, '<task-notification>b</task-notification>');
+  assert.deepEqual(rec.earlier.map((e) => e.text), ['why is the loss flat?', '<task-notification>a</task-notification>']);
+});

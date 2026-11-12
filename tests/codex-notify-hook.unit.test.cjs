@@ -98,3 +98,11 @@ test('under the shared daemon a thread no record names is filed nowhere', () => 
   assert.equal(daemon.status, 0, String(daemon.stderr));
   assert.equal(turn(home, 'starter'), null, 'no record is invented for the daemon session');
 });
+
+test('the answer is kept with the turn\'s own question: the last message handed over', () => {
+  const home = freshHome();
+  run(home, 'alpha', { type: 'agent-turn-complete', 'thread-id': 'thread-A', 'turn-id': 't1', 'input-messages': ['an earlier message', 'what was the final AUC?'], 'last-assistant-message': '0.812' });
+  const a = JSON.parse(fs.readFileSync(path.join(home, 'claude-sessions', 'alpha.answer'), 'utf8'));
+  assert.equal(a.question, 'what was the final AUC?');
+  assert.equal(a.text, '0.812');
+});

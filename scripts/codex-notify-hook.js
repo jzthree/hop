@@ -191,7 +191,9 @@ function bumpTurn(payload) {
     const said = typeof payload?.["last-assistant-message"] === "string" ? payload["last-assistant-message"].trim().slice(0, 64 * 1024) : "";
     durable(path.join(dir, `${hopSession}.answer`), JSON.stringify({
       sessionId: rootId, agent: "codex", count: count + 1, at: new Date().toISOString(), text: said,
-      ...(inputs.length ? { question: inputs.join("\n\n").slice(0, 4000) } : {})
+      // The turn's own: the last of them (Codex may hand over the thread's
+      // earlier messages with it).
+      ...(inputs.length ? { question: inputs[inputs.length - 1].slice(0, 4000) } : {})
     }));
   } catch { /* never disrupt codex */ }
 }

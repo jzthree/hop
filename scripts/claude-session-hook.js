@@ -211,12 +211,60 @@ function lastAssistantMessage(payload, { full = false } = {}) {
   return "";
 }
 
+// Where this turn's prompts came from, as Claude's transcript says: a
+// person ("human" — hop's own deliveries are typed, so they count here too;
+// hop tells those apart), a scheduled run ("scheduled": /loop, a cron), a
+// peer agent ("peer"), a task notice ("task-notification"), a coordinator,
+// an auto-continuation after a usage limit… The turn is
+// the prompts since the last turn ended (or the person's last interrupt).
+// null when the transcript says nothing (an older Claude, no transcript).
+function turnOrigins(payload, sinceMs) {
+  const tp = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
+  if (!tp) return null;
+  try {
+    const fd = fs.openSync(tp, "r");
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, 4 * 1024 * 1024);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    const lines = buf.toString("utf8").split("\n");
+    const kinds = new Set();
+    let bounded = len === size;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"type":"user"')) continue;
+      let rec;
+      try { rec = JSON.parse(lines[i]); } catch { continue; }
+      if (!rec || rec.type !== "user" || !rec.message) continue;
+      const t = Date.parse(rec.timestamp);
+      if (Number.isFinite(sinceMs) && Number.isFinite(t) && t < sinceMs) { bounded = true; break; }
+      const content = rec.message.content;
+      if (Array.isArray(content) && content.some((c) => c && c.type === "tool_result")) continue;
+      const text = typeof content === "string" ? content
+        : (Array.isArray(content) ? content.filter((c) => c && c.type === "text").map((c) => c.text).join("") : "");
+      // An interrupt ends what came before: a question the person stopped
+      // is not this turn's.
+      if (/^\[Request interrupted by user/.test(text)) { bounded = true; break; }
+      if (!rec.promptId || rec.turnCompanion) continue;
+      if (rec.scheduledTaskId || rec.wakeupSource) kinds.add("scheduled");
+      else if (rec.origin && typeof rec.origin.kind === "string") kinds.add(rec.origin.kind);
+      else if (typeof rec.turnOrigin === "string") kinds.add(rec.turnOrigin);
+      else kinds.add("unknown");
+    }
+    // A turn longer than what was read: its first prompt is out of sight.
+    if (!bounded && kinds.size) kinds.add("unknown");
+    return kinds.size ? [...kinds] : null;
+  } catch { return null; }
+}
+
 function bumpTurn(dir, hopSession, payload) {
   const file = path.join(dir, `${hopSession}.turn`);
   let count = 0;
+  let prevAt = NaN;
   try {
     const prev = JSON.parse(fs.readFileSync(file, "utf8"));
     if (prev && Number.isInteger(prev.count) && prev.count >= 0) count = prev.count;
+    if (prev && typeof prev.at === "string") prevAt = Date.parse(prev.at);
   } catch { /* missing/corrupt -> start at 0 */ }
   const lastMessage = lastAssistantMessage(payload);
   const record = JSON.stringify({
@@ -235,11 +283,13 @@ function bumpTurn(dir, hopSession, payload) {
   // every session list reads.
   try {
     const text = lastAssistantMessage(payload, { full: true });
+    const origins = turnOrigins(payload, prevAt);
     writeDurable(path.join(dir, `${hopSession}.answer`), JSON.stringify({
       sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
       count: count + 1,
       at: new Date().toISOString(),
-      text
+      text,
+      ...(origins ? { origins } : {})
     }));
   } catch { /* ignore */ }
 }
@@ -250,11 +300,24 @@ function bumpTurn(dir, hopSession, payload) {
 // keeps colouring it through a long silent think. Overwritten each prompt.
 function notePrompt(dir, hopSession, payload) {
   const file = path.join(dir, `${hopSession}.prompt`);
+  const now = Date.now();
+  // The prompts just before this one, too: a burst (a question, then a
+  // task notice a second later) must not hide the question from hop,
+  // which looks every few seconds.
+  let earlier = [];
+  try {
+    const prev = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (prev && typeof prev.text === "string") {
+      earlier = [...(Array.isArray(prev.earlier) ? prev.earlier : []), { at: prev.at, text: prev.text.slice(0, 2000) }]
+        .filter((x) => x && typeof x.text === "string" && now - Date.parse(x.at) <= 60_000).slice(-3);
+    }
+  } catch { /* none yet */ }
   const record = JSON.stringify({
     sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
-    at: new Date().toISOString(),
+    at: new Date(now).toISOString(),
     // What was asked: hop tells its person's questions from a driver's.
-    ...(typeof payload.prompt === "string" && payload.prompt.trim() ? { text: payload.prompt.slice(0, 4000) } : {})
+    ...(typeof payload.prompt === "string" && payload.prompt.trim() ? { text: payload.prompt.slice(0, 4000) } : {}),
+    ...(earlier.length ? { earlier } : {})
   });
   try { writeDurable(file, record); } catch { /* ignore */ }
 }

@@ -2246,7 +2246,7 @@ fs.writeFileSync(out, r.stdout + r.stderr + '\\nexit=' + r.status + '\\n');
 // the end of that turn (from the hooks' .prompt and .answer), kept unread
 // until read. What hop or an agent typed, and the agent app's own turns,
 // are not the person's questions.
-test('answers: the person\'s question and its reply are kept until read; typed and internal prompts are not', async () => {
+test('answers: the person\'s question and its reply are kept until read; typed, internal and scheduled prompts are not', async () => {
   const S = (method, p, body, h = userHeaders) => requestJson(state.port, state.sessionSecret, method, p, body, h);
   const term = await S('POST', '/api/terminals', { name: 'answerprobe', cwd: tempDir });
   assert.equal(term.status, 200, JSON.stringify(term.data));
@@ -2303,6 +2303,38 @@ test('answers: the person\'s question and its reply are kept until read; typed a
     assert.equal(await unread(), 0);
     assert.equal((await S('GET', '/api/answers', null, agentHeaders)).status, 403);
     assert.equal((await S('POST', '/api/answers/read', { all: true }, agentHeaders)).status, 403);
+
+    // 6. What runs on its own is not a question: a /loop run (its agent
+    //    rewrites the prompt each time), a turn Claude says a schedule
+    //    started, a hop message as Claude receives it (pasted).
+    const kept = async () => (await list()).map((a) => a.question);
+    await delay(3500);
+    await turn('/loop Shepherd the fleet. STATE 03:02: all healthy', 'Healthy.');
+    await delay(3500);
+    await turn('check the queue on node 06 and report back', 'Queue is empty.', { origins: ['scheduled'] });
+    await delay(3500);
+    await turn('\n\n<pasted_content id="81a8">\n[hop message from session "surf" (a Claude agent, not your user).] rerun\n</pasted_content id="81a8">\n', 'Rerunning.', { origins: ['human'] });
+    // 7. The person's question holds through its turn: a task notice
+    //    landing in the same turn does not take its place…
+    await delay(3500);
+    const asked = Date.now();
+    await fs.writeFile(path.join(dir, `${internal}.prompt`), JSON.stringify({ sessionId: 'conv', at: new Date(asked).toISOString(), text: 'is the GPU idle?' }));
+    await delay(3500);
+    await fs.writeFile(path.join(dir, `${internal}.prompt`), JSON.stringify({ sessionId: 'conv', at: new Date(asked + 4000).toISOString(), text: '<task-notification>\n<task-id>b9</task-id>' }));
+    await delay(3500);
+    n++;
+    await fs.writeFile(path.join(dir, `${internal}.answer`), JSON.stringify({ sessionId: 'conv', count: n, at: new Date(asked + 9000).toISOString(), text: 'Yes: 0%.', origins: ['human', 'task-notification'] }));
+    await until(async () => (await kept()).includes('is the GPU idle?'), 'the question held through its turn');
+    // …nor one a second later, before hop looked (the hook keeps the
+    // prompts just before the last).
+    await delay(3500);
+    const t2 = Date.now();
+    await fs.writeFile(path.join(dir, `${internal}.prompt`), JSON.stringify({ sessionId: 'conv', at: new Date(t2 + 500).toISOString(), text: '<task-notification>\n<task-id>c1</task-id>', earlier: [{ at: new Date(t2).toISOString(), text: 'how far along is epoch 4?' }] }));
+    n++;
+    await fs.writeFile(path.join(dir, `${internal}.answer`), JSON.stringify({ sessionId: 'conv', count: n, at: new Date(t2 + 5000).toISOString(), text: 'About half.' }));
+    await until(async () => (await kept()).includes('how far along is epoch 4?'), 'the question from just before');
+    await delay(3500);
+    assert.deepEqual(await kept(), ['how far along is epoch 4?', 'is the GPU idle?', 'what was the final AUC?', 'why is the validation loss flat?']);
   } finally {
     await S('POST', '/api/sessions/delete', { name: internal, internalName: internal });
     await S('POST', '/api/sessions/closed/forget', { internalName: internal });

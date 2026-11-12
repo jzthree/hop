@@ -325,8 +325,11 @@ the agent's reply at the end of that turn, in **Answers** (in the sidebar,
 or the phone menu), unread until you've read it. A session with an answer
 you haven't read shows **Answered** in its header. Only your own prompts
 count: not what hop typed for a check-back or another session, what an
-agent typed through hop, a session's own loop, or the agent app's own
-notices. It works for Claude, Codex and Antigravity, from their hooks
+agent typed through hop, a `/loop` or scheduled run, a subagent's or
+another agent's message, or the agent app's own notices. Claude's
+transcript says where each prompt came from, and hop goes by that; a
+question you ask mid-turn stays with that turn's reply even when a notice
+lands after it. It works for Claude, Codex and Antigravity, from their hooks
 (`hop agent-skill install` also tells agents to put the answer in the
 message that ends the turn). The answers are kept for two weeks, in
 `~/.hop2/answers.json`.

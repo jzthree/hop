@@ -2,7 +2,7 @@
 // person's: not what hop or an agent typed, a loop, or the agent app's own.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classify, emptyStore, normalizeStore, add, markRead, unreadBySession, prune, KEEP_MS } = require('../lib/answers');
+const { classify, emptyStore, normalizeStore, add, markRead, unreadBySession, prune, humanTurn, KEEP_MS } = require('../lib/answers');
 
 const NOW = Date.parse('2026-11-12T06:00:00.000Z');
 const M = 60_000;
@@ -62,5 +62,50 @@ test('answers are kept unread until read, by id, by session, or all', () => {
   add(store, { id: 'old', session: 's_a', question: 'q', askedAt: NOW - KEEP_MS - 2 * M, answer: '', answeredAt: NOW - KEEP_MS - M }, NOW);
   prune(store, NOW);
   assert.equal(store.items.some((a) => a.id === 'old'), false);
-  assert.deepEqual(normalizeStore({ items: [{ id: 'x' }, { id: 'ok', session: 's', askedAt: NOW }] }).items.map((a) => a.id), ['ok']);
+  assert.deepEqual(normalizeStore({ items: [{ id: 'x' }, { id: 'ok', session: 's', askedAt: NOW, question: 'q1' }] }).items.map((a) => a.id), ['ok']);
+});
+
+test('what runs on its own is not a question: a loop\'s runs, Claude\'s agents, the Codex app\'s catch-up', () => {
+  // /loop as it fires again — its agent rewrites the prompt each run.
+  assert.equal(classify('/loop Shepherd the fleet. STATE 03:02: outage continues (65 min)', { at: NOW }), 'loop');
+  assert.equal(classify('<<autonomous-loop-dynamic>>', { at: NOW }), 'loop');
+  assert.equal(classify('<agent-message from="abacfb">\n[Subagent hand-back] The text below…', { at: NOW }), 'agent');
+  assert.equal(classify('Another Claude session sent a message:\n<agent-message from="a1">', { at: NOW }), 'agent');
+  assert.equal(classify('The coordinator sent a message while you were working:\nResume lane C', { at: NOW }), 'agent');
+  assert.equal(classify('Your claude.ai usage limit has reset. Continue the task', { at: NOW }), 'internal');
+  assert.equal(classify('Write a brief catch-up for a user returning to this task. Return JSON with summary', { at: NOW }), 'internal');
+  // "loop" in the middle of a question is a question.
+  assert.equal(classify('should the /loop run every hour?', { at: NOW }), 'person');
+});
+
+test('a paste is read for what is inside: hop\'s messages arrive pasted', () => {
+  const wrapped = '\n\n<pasted_content id="81a8">\n[hop message from session "surf" (a Claude agent, not your user).] rerun\n</pasted_content id="81a8">\n';
+  assert.equal(classify(wrapped, { at: NOW }), 'agent');
+  // A long paste comes in pieces under one id; hop typed the whole of it.
+  const sent = 'Junction-model training has news (probe ops/e2e_event.sh: arm milestones). acceptor rows 0.639 / 0.883';
+  const pieces = `\n\n<pasted_content id="cba7">\n${sent.slice(0, 60)}\n</pasted_content id="cba7">\n\n\n<pasted_content id="cba7">\n${sent.slice(60)}\n</pasted_content id="cba7">\n`;
+  assert.equal(classify(pieces, { at: NOW, typed: [{ at: NOW - M, text: `\x1b[200~${sent}\x1b[201~` }] }), 'typed');
+  // The person's own paste, with their words around it, is theirs.
+  assert.equal(classify('can you check this model?\n\n<pasted_content id="e014">\nclass Net(nn.Module): …\n</pasted_content id="e014">\n', { at: NOW }), 'person');
+});
+
+test('where the agent app says a turn\'s prompts came from, a turn no person started is not kept', () => {
+  assert.equal(humanTurn(['human']), true);
+  assert.equal(humanTurn(['human', 'task-notification', 'peer']), true, 'a question with notices landing in its turn');
+  assert.equal(humanTurn(['scheduled']), false);
+  assert.equal(humanTurn(['task-notification', 'peer', 'coordinator', 'auto-continuation']), false);
+  assert.equal(humanTurn(['scheduled', 'unknown']), null, 'part of the turn out of sight: the text decides');
+  assert.equal(humanTurn(['sdk']), null, 'a kind hop does not know: the text decides');
+  assert.equal(humanTurn(undefined), null);
+  assert.equal(humanTurn([]), null);
+});
+
+test('answers kept before a rule knew better are dropped when read back', () => {
+  const kept = normalizeStore({ items: [
+    { id: 'q', session: 's', askedAt: NOW, question: 'why is the loss flat?' },
+    { id: 'l', session: 's', askedAt: NOW, question: '/loop Shepherd the fleet.' },
+    { id: 'p', session: 's', askedAt: NOW, question: '\n\n<pasted_content id="1">\n[hop message from session "x"] hi\n</pasted_content id="1">' },
+    { id: 'c', session: 's', askedAt: NOW, question: 'Write a brief catch-up for a user returning to this task.' }
+  ] });
+  assert.deepEqual(kept.items.map((a) => a.id), ['q']);
 });

@@ -7573,14 +7573,31 @@ function sweepAnswers() {
             w = { pm: pm && pm < answersSince ? pm : null, am: am && am < answersSince ? am : null, pending: null, asked: [] };
             answerWatch.set(s, w);
         }
+        // What was asked before, for the repeat rule: this run's prompts,
+        // and the questions kept (a schedule's second run after a restart).
+        const askedOf = () => [...w.asked, ...loadAnswers().items.filter((x) => x.session === s).map((x) => ({ at: x.askedAt, text: x.question }))];
+        const notePromptSeen = (text, at) => {
+            const kind = answers.classify(text, { at, typed: typedInputLog.get(s) || [], asked: askedOf() });
+            w.asked = [...w.asked.filter((x) => at - x.at <= answers.REPEAT_WINDOW_MS), { at, text }].slice(-50);
+            w.lastPromptAt = at;
+            const held = w.pending && w.pending.kind === 'person';
+            // The person's question holds through its turn: a task notice or
+            // a loop's prompt landing in the same turn must not replace it.
+            // A second question in the same turn joins the first.
+            if (held && kind !== 'person') return;
+            w.pending = held ? { text: `${w.pending.text}\n\n${text}`, at: w.pending.at, kind } : { text, at, kind };
+        };
         if (pm && pm !== w.pm) {
             w.pm = pm;
             const p = readJson(pf);
             if (p && typeof p.text === 'string' && p.text.trim()) {
                 const at = Date.parse(p.at) || Date.now();
-                const kind = answers.classify(p.text, { at, typed: typedInputLog.get(s) || [], asked: w.asked });
-                w.asked = [...w.asked.filter((x) => at - x.at <= answers.REPEAT_WINDOW_MS), { at, text: p.text }].slice(-50);
-                w.pending = { text: p.text, at, kind };
+                // The prompts just before it that this sweep has not seen.
+                for (const e of Array.isArray(p.earlier) ? p.earlier : []) {
+                    const eat = Date.parse(e && e.at);
+                    if (e && typeof e.text === 'string' && e.text.trim() && Number.isFinite(eat) && eat > (w.lastPromptAt || answersSince) && eat < at) notePromptSeen(e.text, eat);
+                }
+                notePromptSeen(p.text, at);
             }
         }
         if (am && am !== w.am) {
@@ -7592,11 +7609,14 @@ function sweepAnswers() {
             // Codex says what was asked at the end of the turn, with the answer.
             if (!q && typeof a.question === 'string' && a.question.trim()) {
                 const at = answeredAt - 1;
-                q = { text: a.question, at, kind: answers.classify(a.question, { at, typed: typedInputLog.get(s) || [], asked: w.asked }) };
+                q = { text: a.question, at, kind: answers.classify(a.question, { at, typed: typedInputLog.get(s) || [], asked: askedOf() }) };
                 w.asked = [...w.asked.filter((x) => at - x.at <= answers.REPEAT_WINDOW_MS), { at, text: a.question }].slice(-50);
             }
             w.pending = null;
             if (!q || q.kind !== 'person' || answeredAt < q.at) continue;
+            // The agent app says none of this turn's prompts was a person's
+            // (a scheduled run, a peer's message, a task notice).
+            if (answers.humanTurn(a.origins) === false) continue;
             answers.add(loadAnswers(), {
                 id: `a_${crypto.randomBytes(6).toString('hex')}`,
                 session: s,

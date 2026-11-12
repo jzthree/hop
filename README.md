@@ -374,7 +374,11 @@ an Open button that lands the Views reader on that item. Plain terminals
 and the phone see the same delivery as a text box.
 
 HTML, PDF, images, video and markdown all render (markdown is converted at
-serve time — headings, tables, fenced code). `--title` is what a human sees
+serve time — headings, tables, fenced code). A PDF opens in hop's own
+reader: − / + and the % (fit) at its foot, a trackpad pinch or ⌘/Ctrl +
+scroll zooming about the pointer, a two-finger pinch on a phone, `+` `-`
+`0` keys, a drag on the blank paper to pan, and its text still selects.
+`--title` is what a human sees
 in the session's Views list, so it is worth writing properly. Published files
 are grouped **by session**: a result belongs to the conversation that
 produced it.

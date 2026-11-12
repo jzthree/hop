@@ -7418,3 +7418,83 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 }
 .answer-pill:hover { filter: brightness(1.08); }
 .phone-term-bar .answer-pill { margin: 0 4px 0 2px; padding: 6px 10px 6px 8px; font-size: 12px; }
+
+/* hop's PDF reader (PdfReader.tsx): pages on the panel's ground, white
+   paper with a hairline edge, zoom tools floating at the foot. */
+.pdf-reader {
+  position: relative; flex: 1; min-height: 0; display: flex;
+  border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  background: var(--bg-alt);
+}
+.pdf-scroll {
+  flex: 1; min-width: 0; overflow: auto; outline: none;
+  /* The reader zooms; the browser must not zoom the page around it. */
+  touch-action: pan-x pan-y;
+  overscroll-behavior: contain;
+}
+.pdf-scroll.dragging { cursor: grabbing; user-select: none; }
+.pdf-pages {
+  display: flex; flex-direction: column; align-items: center;
+  width: max-content; min-width: 100%; box-sizing: border-box;
+  padding-bottom: 64px !important; /* room under the last page for the tools */
+}
+.pdf-page {
+  position: relative; flex: none; background: #fff;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.08), 0 1px 3px rgb(0 0 0 / 0.12);
+}
+.pdf-page canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.pdf-loading { padding: 32px; color: var(--ink-muted); text-align: center; font-size: 13px; }
+
+/* pdf.js's text layer: invisible words over the drawing, to select and copy. */
+.pdf-page .textLayer {
+  position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1;
+  text-align: initial; letter-spacing: normal; word-spacing: normal;
+  -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none;
+  transform-origin: 0 0; caret-color: CanvasText; z-index: 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.pdf-page .textLayer span, .pdf-page .textLayer br {
+  color: transparent; position: absolute; white-space: pre; cursor: text;
+  transform-origin: 0% 0%; -webkit-user-select: text; user-select: text;
+}
+.pdf-page .textLayer > :not(.markedContent),
+.pdf-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.pdf-page .textLayer .markedContent { display: contents; }
+.pdf-page .textLayer span[role="img"] { user-select: none; cursor: default; }
+.pdf-page .textLayer ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); color: transparent; }
+.pdf-page .textLayer br::selection { background: transparent; }
+.pdf-page .textLayer .endOfContent {
+  display: block; position: absolute; inset: 100% 0 0; z-index: 0;
+  cursor: default; user-select: none;
+}
+.pdf-page .textLayer.selecting .endOfContent { top: 0; }
+
+.pdf-tools {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 2px; padding: 3px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.14);
+  font: 500 12px/1 var(--font-sans); color: var(--ink);
+  user-select: none;
+}
+.pdf-tools button {
+  min-width: 30px; height: 28px; padding: 0 8px; border: 0; border-radius: 999px;
+  background: transparent; color: inherit; font: inherit; font-size: 16px; cursor: pointer;
+}
+.pdf-tools button.pdf-pct { font-size: 12px; font-variant-numeric: tabular-nums; min-width: 52px; }
+.pdf-tools button:hover:not(:disabled) { background: var(--bg-alt); }
+.pdf-tools button:disabled { opacity: 0.35; cursor: default; }
+.pdf-tools button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pdf-pageno {
+  padding: 0 10px 0 8px; border-left: 1px solid var(--line); margin-left: 2px;
+  color: var(--ink-muted); font-variant-numeric: tabular-nums; white-space: nowrap;
+}

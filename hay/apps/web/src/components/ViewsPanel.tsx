@@ -2,6 +2,7 @@ import React, { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { relativeTime } from "../utils/switcherModel";
 import { menuIsOpen } from "./ContextMenu";
 import { SideHandle, SideToggle, keyStartsInside } from "./SideColumn";
+import { PdfReader } from "./PdfReader";
 
 // Views: the results an agent hands a human that a terminal cannot draw — a
 // plot, a PDF, a rendered write-up, a live dev server.
@@ -141,6 +142,7 @@ const extOf = (name: string) => (name.split(".").pop() || "").toLowerCase();
 const isImage = (name: string) => ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(extOf(name));
 const isVideo = (name: string) => ["mp4", "mov", "webm", "m4v", "ogv"].includes(extOf(name));
 const isAudio = (name: string) => ["mp3", "m4a", "wav", "flac", "aac", "ogg", "oga", "opus"].includes(extOf(name));
+const isPdf = (name: string) => extOf(name) === "pdf";
 // Kinds the daemon renders into a full HTML page — the only ones where a
 // theme exists to pass.
 const isRendered = (name: string) => ["md", "markdown", "csv", "tsv", "json"].includes(extOf(name));
@@ -262,6 +264,8 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
   const [open, setOpen] = useState<ViewItem | null>(null);
   // The notebook being run live (its path), rather than read.
   const [liveNotebook, setLiveNotebook] = useState<string | null>(null);
+  // A PDF pdf.js could not read: the browser's own viewer instead.
+  const [pdfFallback, setPdfFallback] = useState<string | null>(null);
   // Opened straight on a result: Esc closes rather than "going back".
   const [direct, setDirect] = useState(!!item || !!foundId);
   const [showAll, setShowAll] = useState(!!saved.showAll);
@@ -730,7 +734,9 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
     try { return new URL(open.target || "").searchParams.get("file") || ""; } catch { return ""; }
   })();
   // Media gets native elements (an iframed raw image sits tiny in a corner;
-  // native <video> gives real controls). Documents are iframes — sandboxed
+  // native <video> gives real controls); a PDF, hop's own reader (zoom,
+  // pinch, selectable text — the iframed browser viewer can't zoom in the
+  // Mac app and shows one still page on a phone). Documents are iframes — sandboxed
   // only for LIVE servers; our own files skip the sandbox, which would
   // disable the browser's PDF viewer. A Nebula notebook reads here,
   // read-only (hop's saved copy, refreshed from Nebula when it answers);
@@ -773,6 +779,8 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
       <div className="views-media"><video src={open.path} controls autoPlay={false} /></div>
     ) : open.kind !== "server" && isAudio(open.name) ? (
       <div className="views-media audio"><audio src={open.path} controls /></div>
+    ) : open.kind !== "server" && isPdf(open.name) && pdfFallback !== open.path ? (
+      <PdfReader key={open.path} src={open.path} title={open.title || open.name} onFail={() => setPdfFallback(open.path)} />
     ) : (
       <iframe
         className="views-frame"

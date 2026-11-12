@@ -12941,6 +12941,8 @@ function recordAuth(authEmitter) {
 const STATIC_CONTENT_TYPES = {
     '.html': 'text/html; charset=utf-8',
     '.js': 'application/javascript',
+    // pdf.js's worker (the web's PDF reader) is a module file.
+    '.mjs': 'application/javascript',
     '.css': 'text/css',
     '.json': 'application/json',
     '.png': 'image/png',

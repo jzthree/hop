@@ -60,6 +60,7 @@ import { PulsePage } from "./components/PulsePage";
 import { UpdatePop, useUpdateInfo, type UpdateInfo } from "./components/UpdateNotice";
 import { SettingsPage } from "./components/SettingsPage";
 import { MessagesPage } from "./components/MessagesPage";
+import { AnswersPage } from "./components/AnswersPage";
 import { ContextMenu, type MenuItem, type MenuRequest } from "./components/ContextMenu";
 import { sessionMenuItems, shortPath, type MenuSession, type SessionPlace } from "./components/sessionMenu";
 import type { AgentHomes } from "./utils/switcherModel";
@@ -297,7 +298,7 @@ const UI_KEY = "hop_ui_v1";
 // of it (session null) or one session's share.
 type SideFeed = { kind: "briefing" | "pulse" | "calendar"; session: string | null };
 type SavedUi = {
-  place?: "briefing" | "pulse" | "calendar" | "settings" | "messages" | null;
+  place?: "briefing" | "pulse" | "calendar" | "settings" | "messages" | "answers" | null;
   views?: { session?: string; dock?: boolean; item?: string; page?: boolean; side?: boolean } | null;
   sideTab?: "calendar" | "briefing" | "pulse" | null; calendar?: string | null;
   sideFeed?: SideFeed | null;
@@ -382,6 +383,8 @@ const takeTypeahead = (): string => {
 type SessionInfo = {
   name: string;
   displayName: string;
+  /** Replies to its person's questions, not yet read (Answers). */
+  answersUnread?: number;
   active: boolean;
   starting: boolean;
   type?: "terminal" | "port";
@@ -627,7 +630,9 @@ const App = () => {
   // The sidebar's own places beyond Sessions and Views: the briefing (with
   // the session it is narrowed to) and mybot's pulse; and the update panel.
   const [closedSessions, setClosedSessions] = useState<ClosedSession[]>([]);
-  const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar" | "settings" | "messages">(() => savedUi().place ?? null);
+  const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar" | "settings" | "messages" | "answers">(() => savedUi().place ?? null);
+  // Answers: one session's (from its header's pill), or every session's.
+  const [answersScope, setAnswersScope] = useState<string | null>(null);
   // Messages between sessions: the newest one's time (from the session
   // list) against the newest this device has shown — the strip's badge.
   const [messagesAt, setMessagesAt] = useState(0);
@@ -3881,6 +3886,7 @@ const App = () => {
           agentPhase: s.agentPhase === "working" || s.agentPhase === "done" ? s.agentPhase : null,
           turnSeen: s.turnSeen !== false,
           checkbacks: Number(s.checkbacks) > 0 ? Number(s.checkbacks) : undefined,
+          answersUnread: Number(s.answersUnread) > 0 ? Number(s.answersUnread) : undefined,
           checkbackNext: Number(s.checkbackNext) > 0 ? Number(s.checkbackNext) : undefined,
           codexAutomations: Number(s.codexAutomations) > 0 ? Number(s.codexAutomations) : undefined,
           // Messages waiting for the turn to end: the card above the terminal.
@@ -4927,6 +4933,16 @@ const App = () => {
   // The room can still be the name from the URL; lists key by internalName.
   const currentKey = session ? sessionKeyOf(session.room) : null;
   const currentInfo = currentKey ? sessions.find((x) => (x.internalName || x.name) === currentKey) : undefined;
+  // This session answered a question of yours that you haven't read: a pill
+  // in its header, there however much it has done since.
+  const answersHere = currentInfo?.answersUnread || 0;
+  const answerPill = session && answersHere > 0 ? (
+    <button type="button" className="answer-pill" title="Its reply to your question, kept until you read it"
+            onClick={() => openAnswers(currentInfo!.internalName || currentInfo!.name)}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg>
+      {answersHere === 1 ? "Answered" : `${answersHere} answers`}
+    </button>
+  ) : null;
   // The tabs' counts: the session's unread briefing notes, today's pulse
   // items for it.
   const tabFeed = (() => {
@@ -4964,7 +4980,7 @@ const App = () => {
     sideUpRef.current = sideNow;
     if (toPageRef.current) { toPageRef.current = false; return; }
     if (!railDocked || !(wasUp || sideNow)) return;
-    const feedPlace = place === "settings" || place === "messages" ? null : place;
+    const feedPlace = place === "settings" || place === "messages" || place === "answers" ? null : place;
     const kind = feedPlace ?? sideTab;
     if (kind) {
       setSideFeed({ kind, session: feedPlace ? null : (currentKey ?? null) });
@@ -5094,6 +5110,19 @@ const App = () => {
     setPlace(null);
     if (session && !switcherOpen) focusTerminalSoon();
   };
+  // Answers: what each session said back to your questions, kept until read.
+  const openAnswers = (scope: string | null = null) => {
+    setDrawerOpen(false);
+    setSessionMenu(null);
+    if (viewsPage) setViewsOpen(null);
+    setAnswersScope(scope);
+    setPlace("answers");
+  };
+  const closeAnswers = () => {
+    setPlace(null);
+    if (session && !switcherOpen) focusTerminalSoon();
+  };
+  const answersUnreadTotal = sessions.reduce((n, x) => n + (x.answersUnread || 0), 0);
   toggleSettingsRef.current = toggleSettings;
   // The session header's ⋯, under it: the sidebar's menu for this session.
   const startRename = () => {
@@ -5312,6 +5341,10 @@ const App = () => {
       onClick: () => (railDocked && !viewsSide && !viewsSideNow ? openFromStrip("views") : openViews()) },
     { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />, active: (place === "calendar" && placePage) || schedTabNow || sideFeedNow?.kind === "calendar",
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => openFromStrip("calendar") },
+    // Your questions' replies, however much the agents did after.
+    { key: "answers", label: "Answers", icon: <RailIcon name="answers" />, active: place === "answers",
+      count: answersUnreadTotal || undefined, fresh: answersUnreadTotal > 0,
+      onClick: () => (place === "answers" && !answersScope ? closeAnswers() : openAnswers(null)) },
     // What the agents say to each other (hop send): read here, sent there.
     { key: "messages", label: "Messages", icon: <RailIcon name="messages" />, active: place === "messages",
       fresh: messagesAt > messagesSeen, onClick: () => (place === "messages" ? closeMessages() : openMessages()) },
@@ -5440,6 +5473,7 @@ const App = () => {
                       onClick={copyTitle}>{titleCopied ? "✓" : "⧉"}</button>
             </div>
           )}
+          {answerPill}
           {sessionTabs && (
             <nav className="session-tabs" role="tablist" aria-label="Session">
               <button type="button" role="tab" aria-selected={!viewsPage && !schedTabNow && !feedTabNow}
@@ -5488,6 +5522,7 @@ const App = () => {
           </div>
         </div>
         )}
+        {!railDocked && answerPill}
         <div className="presence-strip">
           {sortedPresence.map((client) => (
             <div
@@ -5636,6 +5671,8 @@ const App = () => {
             onOpenSettings={openSettings}
             onOpenMessages={openMessages}
             messagesFresh={messagesAt > messagesSeen}
+            onOpenAnswers={() => openAnswers(null)}
+            answersUnread={answersUnreadTotal}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -5725,6 +5762,7 @@ const App = () => {
                 <span className="phone-term-name">{sessionLabel || session.room}</span>
                 {isEmbeddedInHop() && <span className="phone-term-caret" aria-hidden="true">▾</span>}
               </button>
+              {answerPill}
               <span className="phone-term-divider" aria-hidden="true" />
               <button type="button" className="phone-term-btn" aria-label="Open menu" onClick={() => setDrawerOpen(true)}>
                 <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.8" fill="currentColor" /><circle cx="12" cy="12" r="1.8" fill="currentColor" /><circle cx="18.5" cy="12" r="1.8" fill="currentColor" /></svg>
@@ -6262,6 +6300,8 @@ const App = () => {
             onOpenSettings={openSettings}
             onOpenMessages={openMessages}
             messagesFresh={messagesAt > messagesSeen}
+            onOpenAnswers={() => openAnswers(null)}
+            answersUnread={answersUnreadTotal}
             onToggleKeyboard={
               isMobile
                 ? () => {
@@ -6392,7 +6432,7 @@ const App = () => {
           onPick={(next) => {
             // From a place or Views, a session in the sidebar is that
             // session on the same kind of tab.
-            if (place === "settings" || place === "messages") setPlace(null);
+            if (place === "settings" || place === "messages" || place === "answers") setPlace(null);
             else if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
             if (viewsPage) { openSessionTab(next.internalName || next.name, "views"); return; }
             // Side by side, the column follows: switch, and show the new
@@ -6522,6 +6562,17 @@ const App = () => {
                            onOpenSession={goToSession} />
         );
       })()}
+      {place === "answers" && (
+        <AnswersPage
+          placement={railDocked ? "page" : "sheet"}
+          sessions={sessions}
+          scope={answersScope}
+          onScope={setAnswersScope}
+          onClose={closeAnswers}
+          onOpenSession={(key) => { setPlace(null); goToSession(key); }}
+          onChanged={() => { void fetchSessions({ showLoading: false }); }}
+        />
+      )}
       {place === "messages" && (
         <MessagesPage
           placement={railDocked ? "page" : "sheet"}

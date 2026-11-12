@@ -317,6 +317,20 @@ turn instead of getting a message back, that turn's answer shows there too.
 It is read-only: messaging is for the agents, and you talk to a session in
 its terminal. The log keeps a month, in `~/.hop2/messages.json`.
 
+### Answers to your questions
+
+Agents left to drive themselves keep working after they answer you, and the
+answer scrolls away. hop keeps each question you type into a session with
+the agent's reply at the end of that turn, in **Answers** (in the sidebar,
+or the phone menu), unread until you've read it. A session with an answer
+you haven't read shows **Answered** in its header. Only your own prompts
+count: not what hop typed for a check-back or another session, what an
+agent typed through hop, a session's own loop, or the agent app's own
+notices. It works for Claude, Codex and Antigravity, from their hooks
+(`hop agent-skill install` also tells agents to put the answer in the
+message that ends the turn). The answers are kept for two weeks, in
+`~/.hop2/answers.json`.
+
 ### Render LaTeX math (`hop math`)
 
 Glance at a formula without leaving the terminal:

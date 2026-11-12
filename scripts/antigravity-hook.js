@@ -87,7 +87,8 @@ function noteModel(dir, hopSession, payload) {
 // model's words in the content of a PLANNER_RESPONSE step (tool output is a
 // GENERIC step). Anything else that looks like a model/assistant message is
 // taken too, in case the format moves.
-function lastMessage(payload) {
+function lastMessage(payload, { full = false } = {}) {
+  const cut = (t) => (full ? t.trim().slice(0, 64 * 1024) : t.replace(/\s+/g, " ").trim().slice(0, 600));
   const tp = typeof payload.transcriptPath === "string" ? payload.transcriptPath : "";
   if (!tp) return "";
   try {
@@ -105,14 +106,14 @@ function lastMessage(payload) {
       let rec;
       try { rec = JSON.parse(lines[i]); } catch { continue; }
       if (rec && rec.type === "PLANNER_RESPONSE") {
-        const said = typeof rec.content === "string" ? rec.content.replace(/\s+/g, " ").trim() : "";
-        if (said) return said.slice(0, 600);
+        const said = typeof rec.content === "string" ? cut(rec.content) : "";
+        if (said) return said;
         continue;
       }
       const role = String(rec?.role || rec?.type || rec?.message?.role || rec?.source || "").toLowerCase();
       if (!/model|assistant|agent/.test(role)) continue;
-      const text = textOf(rec.message ?? rec.content ?? rec.text ?? rec.parts ?? "").replace(/\s+/g, " ").trim();
-      if (text) return text.slice(0, 600);
+      const text = cut(textOf(rec.message ?? rec.content ?? rec.text ?? rec.parts ?? ""));
+      if (text) return text;
     }
   } catch { /* no transcript */ }
   return "";
@@ -130,13 +131,21 @@ function bumpTurn(dir, hopSession, payload) {
     at: new Date().toISOString(),
     ...(said ? { lastMessage: said } : {})
   }));
+  // The last words in full, for Answers (see the Claude hook).
+  try {
+    writeDurable(path.join(dir, `${hopSession}.answer`), JSON.stringify({
+      sessionId: typeof payload.conversationId === "string" ? payload.conversationId : null,
+      agent: AGENT, count: count + 1, at: new Date().toISOString(), text: lastMessage(payload, { full: true })
+    }));
+  } catch { /* never disrupt agy */ }
 }
 
 function notePrompt(dir, hopSession, payload) {
   writeDurable(path.join(dir, `${hopSession}.prompt`), JSON.stringify({
     sessionId: typeof payload.conversationId === "string" ? payload.conversationId : null,
     agent: AGENT,
-    at: new Date().toISOString()
+    at: new Date().toISOString(),
+    ...(typeof payload.prompt === "string" && payload.prompt.trim() ? { text: payload.prompt.slice(0, 4000) } : {})
   }));
 }
 

@@ -23,6 +23,7 @@ const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const recentlyClosed = require('./lib/recently-closed');
 const messageLog = require('./lib/message-log');
+const answers = require('./lib/answers');
 const nebulaRelay = require('./lib/nebula-relay');
 const notebookView = require('./lib/notebook-view');
 const { withCodexIdentity } = require('./lib/codex-identity');
@@ -6173,10 +6174,23 @@ async function attachTerminalApiClient(sessionName, displayName, opts = {}) {
     return sessionEntry;
 }
 
+// What hop itself typed into each session lately (deliveries, an agent's
+// writes through the terminal API): a prompt made of these words is not its
+// person's question (lib/answers.js). The person's own keys go to the host
+// directly and never pass here.
+const typedInputLog = new Map();
+function noteTypedInput(sessionName, text, person = false) {
+    if (!sessionName || !text) return;
+    const now = Date.now();
+    const list = (typedInputLog.get(sessionName) || []).filter((x) => now - x.at <= answers.TYPED_WINDOW_MS).slice(-200);
+    list.push({ at: now, text: String(text).slice(0, 8000), person });
+    typedInputLog.set(sessionName, list);
+}
 function sendTerminalInput(entry, data) {
     if (!entry || !data) return;
     // Typing is use: the idle reaper must not close a terminal mid-delivery.
     entry.lastTouchedAt = Date.now();
+    noteTypedInput(entry.sessionName, data);
     entry.adapter.emit(JSON.stringify({ type: 'input', data }));
 }
 
@@ -7223,7 +7237,7 @@ function listClaudeSessionRecords() {
 // session is not resurrected by `hop restore`.
 function removeClaudeSessionRecord(internalName) {
     if (!internalName || !SESSION_NAME_RE.test(internalName)) return;
-    for (const ext of ['.json', '.turn', '.meta', '.agy']) {
+    for (const ext of ['.json', '.turn', '.meta', '.agy', '.answer']) {
         try { fs.unlinkSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}${ext}`)); } catch (e) { /* best effort */ }
     }
 }
@@ -7517,6 +7531,84 @@ function syncMessageLog() {
         if (messageLog.noteReply(m, readTurnLast(m.to))) dirty = true;
     }
     if (dirty) saveMessageLog();
+}
+
+// ---- answers (lib/answers.js) -------------------------------------------------
+// Each question the person asks a session, paired with the agent's reply at
+// the end of that turn, kept until read — so an agent driving itself can't
+// bury it. The hooks write the prompt's words (.prompt) and the turn's last
+// words in full (.answer); a sweep pairs them.
+const ANSWERS_FILE = path.join(HOME_DIR, 'answers.json');
+let answersCache = null;
+function loadAnswers() {
+    if (answersCache) return answersCache;
+    try { answersCache = answers.normalizeStore(JSON.parse(fs.readFileSync(ANSWERS_FILE, 'utf8'))); }
+    catch (e) { answersCache = answers.emptyStore(); }
+    return answersCache;
+}
+function saveAnswers() {
+    try { writePrivateFile(ANSWERS_FILE, JSON.stringify(loadAnswers()), 0o600); } catch (e) { /* best effort */ }
+}
+const answerWatch = new Map();
+const answersSince = Date.now();
+function sweepAnswers() {
+    let files = [];
+    try { files = fs.readdirSync(CLAUDE_SESSIONS_DIR); } catch (e) { return; }
+    const names = new Set();
+    for (const f of files) {
+        const m = f.match(/^([A-Za-z0-9_-]+)\.(prompt|answer)$/);
+        if (m) names.add(m[1]);
+    }
+    const mtimeOf = (f) => { try { return fs.statSync(f).mtimeMs; } catch (e) { return null; } };
+    const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return null; } };
+    let dirty = false;
+    for (const s of names) {
+        const pf = path.join(CLAUDE_SESSIONS_DIR, `${s}.prompt`);
+        const af = path.join(CLAUDE_SESSIONS_DIR, `${s}.answer`);
+        const pm = mtimeOf(pf), am = mtimeOf(af);
+        let w = answerWatch.get(s);
+        // Written before this daemon started: history, not news. Anything
+        // since (a new session's first question included) is read.
+        if (!w) {
+            w = { pm: pm && pm < answersSince ? pm : null, am: am && am < answersSince ? am : null, pending: null, asked: [] };
+            answerWatch.set(s, w);
+        }
+        if (pm && pm !== w.pm) {
+            w.pm = pm;
+            const p = readJson(pf);
+            if (p && typeof p.text === 'string' && p.text.trim()) {
+                const at = Date.parse(p.at) || Date.now();
+                const kind = answers.classify(p.text, { at, typed: typedInputLog.get(s) || [], asked: w.asked });
+                w.asked = [...w.asked.filter((x) => at - x.at <= answers.REPEAT_WINDOW_MS), { at, text: p.text }].slice(-50);
+                w.pending = { text: p.text, at, kind };
+            }
+        }
+        if (am && am !== w.am) {
+            w.am = am;
+            const a = readJson(af);
+            if (!a) continue;
+            const answeredAt = Date.parse(a.at) || Date.now();
+            let q = w.pending;
+            // Codex says what was asked at the end of the turn, with the answer.
+            if (!q && typeof a.question === 'string' && a.question.trim()) {
+                const at = answeredAt - 1;
+                q = { text: a.question, at, kind: answers.classify(a.question, { at, typed: typedInputLog.get(s) || [], asked: w.asked }) };
+                w.asked = [...w.asked.filter((x) => at - x.at <= answers.REPEAT_WINDOW_MS), { at, text: a.question }].slice(-50);
+            }
+            w.pending = null;
+            if (!q || q.kind !== 'person' || answeredAt < q.at) continue;
+            answers.add(loadAnswers(), {
+                id: `a_${crypto.randomBytes(6).toString('hex')}`,
+                session: s,
+                agent: a.agent || readTurnInfo(s)?.agent || 'claude',
+                question: q.text, askedAt: q.at,
+                answer: typeof a.text === 'string' ? a.text : '', answeredAt
+            });
+            dirty = true;
+            log(`[answers] ${getSessionDisplayName(s) || s}: answered ${JSON.stringify(q.text.slice(0, 60))}`, DIM);
+        }
+    }
+    if (dirty) saveAnswers();
 }
 // A folder as typed in the create form (or sent by an agent): ~ is home,
 // a relative path is under home — what a shell in ~ would make of it, and
@@ -7867,6 +7959,8 @@ async function deliverIntoAgent(cb, entry, phase) {
 function applyDelivery(cb, r, now, displayName) {
     if (r.quiet) return false;
     if (r.ok) {
+        // The person's own queued message: hop typed it, the words are theirs.
+        if (cb.queued && !cb.fromSession && !cb.fromOutside && cb.createdBy !== 'agent') noteTypedInput(cb.session, messages.typedText(cb), true);
         Object.assign(cb, checkbacks.afterDelivery(cb, now));
         delete cb.sendNow; delete cb.failures;
         log(`[checkback] ${cb.id} → ${displayName}: ${JSON.stringify(cb.message.slice(0, 80))}${cb.status === 'pending' ? ' (recurs)' : ''}`, DIM);
@@ -14505,9 +14599,12 @@ happens until someone clicks it.
             // compares latestAt against its own last-seen mark. No new state,
             // no new poll, and the badge works the same everywhere.
             const viewsBySession = viewSummaryBySession();
+            const answersUnreadBy = answers.unreadBySession(loadAnswers());
             const phaseBySession = await agentPhaseFieldsForAll(visibleEntries);
             const sessions = visibleEntries.map(s => ({
                 views: viewsBySession[s.internalName] || undefined,
+                // Answers to its person's questions not yet read (Answers).
+                answersUnread: answersUnreadBy[s.internalName] || undefined,
                 name: s.displayName,
                 displayName: s.displayName,
                 internalName: s.internalName,
@@ -16347,6 +16444,45 @@ happens until someone clicks it.
         // inside its input box. /api/sessions/send: now if the agent is idle,
         // else queued (`mode`: "queue" always queues, "now" types even
         // mid-turn); a plain shell just gets the line.
+        // API: Answers — the person's questions and their replies. The
+        // person's: an agent reads its own replies in its own session.
+        if (parsedUrl.pathname === '/api/answers' && req.method === 'GET') {
+            if (resolveActor(req) === 'agent') {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Answers are for your person to read.' }));
+                return;
+            }
+            try { sweepAnswers(); } catch (e) { /* show what is kept */ }
+            const items = answers.prune(loadAnswers()).items.slice().reverse()
+                .map((a) => ({ ...a, sessionName: getSessionDisplayName(a.session) || a.session }));
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ answers: items }));
+            return;
+        }
+        if (parsedUrl.pathname === '/api/answers/read' && req.method === 'POST') {
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; if (body.length > 65536) req.destroy(); });
+            req.on('end', () => {
+                try {
+                    if (resolveActor(req) === 'agent') {
+                        res.writeHead(403, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Answers are for your person to read.' }));
+                        return;
+                    }
+                    const input = JSON.parse(body || '{}');
+                    const ids = Array.isArray(input.ids) ? input.ids.map(String).slice(0, 1000) : null;
+                    const session = typeof input.session === 'string' ? resolveSessionInternalName(input.session, input.session) || input.session : null;
+                    const n = answers.markRead(loadAnswers(), { ids, session, all: input.all === true });
+                    if (n) saveAnswers();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, read: n }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid request body' }));
+                }
+            });
+            return;
+        }
         // API: the message log, for the Messages page. Read-only: agents
         // send with hop send; people read here.
         if (parsedUrl.pathname === '/api/messages' && req.method === 'GET') {
@@ -23893,6 +24029,8 @@ async function main() {
         // and the session is idle. 15s is finer than any trigger needs.
         setTimeout(runCheckbackSweep, 20000).unref?.();
         setInterval(runCheckbackSweep, 15000).unref?.();
+        // Answers: the person's questions paired with their replies.
+        setInterval(() => { try { sweepAnswers(); } catch (e) { /* next tick */ } }, 3000).unref?.();
         // Send-and-wait answers land in the message log as their turns end.
         setInterval(() => { try { syncMessageLog(); } catch (e) { /* next tick */ } }, 15000).unref?.();
         // Queued messages: within seconds of the turn ending, not a sweep later.

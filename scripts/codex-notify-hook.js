@@ -173,14 +173,27 @@ function bumpTurn(payload) {
     ...(typeof payload?.["last-assistant-message"] === "string" && payload["last-assistant-message"].trim()
       ? { lastMessage: payload["last-assistant-message"].replace(/\s+/g, " ").trim().slice(0, 600) } : {})
   });
+  const durable = (f, data) => {
+    try {
+      const tmp = `${f}.tmp-${process.pid}`;
+      const fd = fs.openSync(tmp, "w", 0o600);
+      try { fs.writeSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      fs.renameSync(tmp, f);
+    } catch {
+      try { fs.writeFileSync(f, data, { mode: 0o600 }); } catch { /* never disrupt codex */ }
+    }
+  };
+  durable(file, rec);
+  // The turn's question and last words in full, for Answers: Codex hands
+  // notify both (its prompt start has no hook of its own).
   try {
-    const tmp = `${file}.tmp-${process.pid}`;
-    const fd = fs.openSync(tmp, "w", 0o600);
-    try { fs.writeSync(fd, rec); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    fs.renameSync(tmp, file);
-  } catch {
-    try { fs.writeFileSync(file, rec, { mode: 0o600 }); } catch { /* never disrupt codex */ }
-  }
+    const inputs = Array.isArray(payload?.["input-messages"]) ? payload["input-messages"].filter((t) => typeof t === "string") : [];
+    const said = typeof payload?.["last-assistant-message"] === "string" ? payload["last-assistant-message"].trim().slice(0, 64 * 1024) : "";
+    durable(path.join(dir, `${hopSession}.answer`), JSON.stringify({
+      sessionId: rootId, agent: "codex", count: count + 1, at: new Date().toISOString(), text: said,
+      ...(inputs.length ? { question: inputs.join("\n\n").slice(0, 4000) } : {})
+    }));
+  } catch { /* never disrupt codex */ }
 }
 
 function main() {

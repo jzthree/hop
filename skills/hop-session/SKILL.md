@@ -282,6 +282,17 @@ when progress genuinely stops until they act — a decision, credentials, a
 dead connection. A routine completion never warrants it; a loop that keeps
 running never warrants it. One notify per blockage.
 
+## When your person asks you something mid-run
+
+hop keeps each question your person types with your reply, in **Answers**,
+until they have read it, so the reply isn't buried under the work that
+follows. What hop keeps is the **final message of that turn**. So when a
+question arrives while you are working on your own, answer it in the
+message that ends the turn: the answer first, then where the work stands.
+Don't answer in passing mid-turn and end on a progress note. Questions
+from other sessions and from hop's check-backs are not kept there; answer
+those as usual.
+
 ## Phone-friendly output
 
 Key summaries should survive a ~46-column phone wrap: prefer short lines and

@@ -2242,6 +2242,74 @@ fs.writeFileSync(out, r.stdout + r.stderr + '\\nexit=' + r.status + '\\n');
   assert.ok(badge >= log[log.length - 1].at, 'the list carries the newest message time');
 });
 
+// Answers: a question the person asks a session, paired with the reply at
+// the end of that turn (from the hooks' .prompt and .answer), kept unread
+// until read. What hop or an agent typed, and the agent app's own turns,
+// are not the person's questions.
+test('answers: the person\'s question and its reply are kept until read; typed and internal prompts are not', async () => {
+  const S = (method, p, body, h = userHeaders) => requestJson(state.port, state.sessionSecret, method, p, body, h);
+  const term = await S('POST', '/api/terminals', { name: 'answerprobe', cwd: tempDir });
+  assert.equal(term.status, 200, JSON.stringify(term.data));
+  const internal = term.data.sessionName;
+  const dir = path.join(hopHome, 'claude-sessions');
+  await fs.mkdir(dir, { recursive: true });
+  let n = 0;
+  const turn = async (question, reply, extra = {}) => {
+    const at = Date.now();
+    if (question !== null) await fs.writeFile(path.join(dir, `${internal}.prompt`), JSON.stringify({ sessionId: 'conv', at: new Date(at).toISOString(), text: question }));
+    n++;
+    await fs.writeFile(path.join(dir, `${internal}.answer`), JSON.stringify({ sessionId: 'conv', count: n, at: new Date(at + 1000).toISOString(), text: reply, ...extra }));
+  };
+  const list = async () => (await S('GET', '/api/answers')).data.answers.filter((a) => a.session === internal);
+  const until = async (fn, what, ms = 12000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await delay(300); }
+    throw new Error(`timed out: ${what}`);
+  };
+  try {
+    // 1. The person asks; the turn ends: kept, unread, with both texts.
+    await turn('why is the validation loss flat?', 'Because the LR schedule ends at 0 after epoch 3.\n\n- fix: cosine to 1e-5');
+    const first = await until(async () => (await list())[0], 'the first answer');
+    assert.equal(first.question, 'why is the validation loss flat?');
+    assert.match(first.answer, /^Because the LR schedule ends at 0/);
+    assert.equal(first.answer.includes('\n\n- fix'), true, 'the reply as written, not one line');
+    assert.equal(first.sessionName, 'answerprobe');
+    assert.equal(first.readAt, null);
+    const unread = async () => (await S('GET', '/api/sessions')).data.sessions.find((x) => x.internalName === internal)?.answersUnread || 0;
+    assert.equal(await unread(), 1);
+
+    // 2. Words hop typed into the terminal (an agent through the terminal
+    //    API, a check-back): not the person's question.
+    const w = await S('POST', `/api/terminals/${term.data.id}/write`, { data: 'summarise the last three runs' });
+    assert.equal(w.status, 200, JSON.stringify(w.data));
+    await delay(3500);
+    await turn('summarise the last three runs', 'Run 1…');
+    // 3. The agent app's own turn (a background task finishing).
+    await delay(3500);
+    await turn('<task-notification>\n<task-id>b7</task-id>', 'Noted.');
+    // 4. Codex: the question arrives with the answer.
+    await delay(3500);
+    await turn(null, '0.812', { agent: 'codex', question: 'what was the final AUC?' });
+    const all = await until(async () => { const l = await list(); return l.length >= 2 ? l : null; }, 'the codex answer');
+    await delay(3500);
+    assert.deepEqual((await list()).map((a) => a.question), ['what was the final AUC?', 'why is the validation loss flat?'], 'newest first, only the person\'s');
+    assert.equal(all[0].agent, 'codex');
+    assert.equal(await unread(), 2);
+
+    // 5. Read: by id, then the rest of the session. Agents can't read them.
+    assert.equal((await S('POST', '/api/answers/read', { ids: [first.id] })).data.read, 1);
+    assert.equal(await unread(), 1);
+    assert.equal((await S('POST', '/api/answers/read', { session: internal })).data.read, 1);
+    assert.equal(await unread(), 0);
+    assert.equal((await S('GET', '/api/answers', null, agentHeaders)).status, 403);
+    assert.equal((await S('POST', '/api/answers/read', { all: true }, agentHeaders)).status, 403);
+  } finally {
+    await S('POST', '/api/sessions/delete', { name: internal, internalName: internal });
+    await S('POST', '/api/sessions/closed/forget', { internalName: internal });
+    for (const ext of ['prompt', 'answer']) await fs.rm(path.join(dir, `${internal}.${ext}`), { force: true });
+  }
+});
+
 // Files from a session — the Views shelf: what its agent wrote or named in
 // its replies, from its own record; read in place (a page sandboxed), never
 // any path asked for; pinned into Views; opened from a path in its terminal.

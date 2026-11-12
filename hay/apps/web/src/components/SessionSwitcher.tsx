@@ -132,6 +132,9 @@ type Props = {
   /** Messages between the sessions' agents (read-only); fresh: something new. */
   onOpenMessages?: () => void;
   messagesFresh?: boolean;
+  /** Replies to your questions, kept until read; how many are unread. */
+  onOpenAnswers?: () => void;
+  answersUnread?: number;
   // The Slack-style sidebar is docked beside the wall: it carries the
   // fleet-wide entries (Views, Scheduled, Codex app, Desktop, theme,
   // settings), so the header drops them, and the wall's filter box is
@@ -398,6 +401,7 @@ const PHONE_ICONS: Record<string, string> = {
   sun: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
   moon: "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z",
   gear: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1",
+  reply: "M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
   chat: "M4 5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H9l-4 3v-3H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM16 9h4a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-1v3l-4-3h-4a1 1 0 0 1-1-1v-1"
 };
 const PhoneIcon = ({ name, size = 20 }: { name: string; size?: number }) => (
@@ -1432,6 +1436,8 @@ export const SessionSwitcher = ({
   onOpenSettings,
   onOpenMessages,
   messagesFresh,
+  onOpenAnswers,
+  answersUnread = 0,
   themeMode,
   onThemeChange,
   onToggleKeyboard,
@@ -3490,6 +3496,7 @@ export const SessionSwitcher = ({
               <div className="phone-menu-section">
                 {onOpenViews && menuItem("Views", () => onOpenViews(), { icon: "tray", note: unseenViewSessions > 0 ? `${unseenViewSessions} new` : undefined })}
                 {onOpenCheckbacks && menuItem("Calendar", () => onOpenCheckbacks("*"), { icon: "clock", note: scheduledTotal > 0 ? String(scheduledTotal) : undefined })}
+                {onOpenAnswers && menuItem("Answers", onOpenAnswers, { icon: "reply", note: answersUnread > 0 ? String(answersUnread) : undefined })}
                 {onOpenMessages && menuItem("Messages", onOpenMessages, { icon: "chat", note: messagesFresh ? "new" : undefined })}
                 {onOpenCodexApp && menuItem("Codex app threads", onOpenCodexApp, { icon: "window" })}
                 {onOpenDesktop && menuItem("Desktop", onOpenDesktop, { icon: "display" })}

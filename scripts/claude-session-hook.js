@@ -180,8 +180,10 @@ function recordSession(dir, hopSession, payload, launchCmd) {
 // last_assistant_message when Claude Code provides it, else the last
 // assistant text block in the transcript tail. Bounded and best-effort —
 // a hook must never slow claude down or fail it.
-function lastAssistantMessage(payload) {
-  const clip = (t) => String(t).replace(/\s+/g, " ").trim().slice(0, 600);
+function lastAssistantMessage(payload, { full = false } = {}) {
+  // The notification line: one line, short. The answer (Answers in the
+  // web): the words as written, up to 64 KB.
+  const clip = full ? (t) => String(t).trim().slice(0, 64 * 1024) : (t) => String(t).replace(/\s+/g, " ").trim().slice(0, 600);
   if (typeof payload.last_assistant_message === "string" && payload.last_assistant_message.trim()) {
     return clip(payload.last_assistant_message);
   }
@@ -228,6 +230,18 @@ function bumpTurn(dir, hopSession, payload) {
   try {
     writeDurable(file, record);
   } catch { /* ignore */ }
+  // The turn's last words in full, beside the counter: hop pairs them with
+  // the question its person asked (Answers). Kept apart from .turn, which
+  // every session list reads.
+  try {
+    const text = lastAssistantMessage(payload, { full: true });
+    writeDurable(path.join(dir, `${hopSession}.answer`), JSON.stringify({
+      sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
+      count: count + 1,
+      at: new Date().toISOString(),
+      text
+    }));
+  } catch { /* ignore */ }
 }
 
 // A turn just began: the human (or a driver) submitted a prompt. With the
@@ -238,7 +252,9 @@ function notePrompt(dir, hopSession, payload) {
   const file = path.join(dir, `${hopSession}.prompt`);
   const record = JSON.stringify({
     sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
-    at: new Date().toISOString()
+    at: new Date().toISOString(),
+    // What was asked: hop tells its person's questions from a driver's.
+    ...(typeof payload.prompt === "string" && payload.prompt.trim() ? { text: payload.prompt.slice(0, 4000) } : {})
   });
   try { writeDurable(file, record); } catch { /* ignore */ }
 }

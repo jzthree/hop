@@ -5257,7 +5257,12 @@ const App = () => {
       const r = await fetch("/api/sessions/bring-back", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ internalName: c.internalName })
       });
-      const d = await r.json().catch(() => ({})) as { ok?: boolean; error?: string };
+      const d = await r.json().catch(() => ({})) as { ok?: boolean; error?: string; running?: boolean };
+      if (d.running) {
+        pushNotice(`${c.displayName} is already running`);
+        setClosedSessions((list) => list.filter((x) => x.internalName !== c.internalName));
+        return true;
+      }
       if (!r.ok || !d.ok) { pushNotice(`${c.displayName} didn't come back${d.error ? `: ${d.error}` : ""}`); return false; }
       pushNotice(`${c.displayName} is back${c.resumable ? ", resuming its conversation" : ""}`);
       setClosedSessions((list) => list.filter((x) => x.internalName !== c.internalName));
@@ -6326,7 +6331,8 @@ const App = () => {
           session, and from over the switcher, and it must outlive a switch. */}
       {(railDocked || (railOpen && session)) && (
         <SessionRail
-          closed={closedSessions}
+          // A running session is never "closed", whatever the list said.
+          closed={closedSessions.filter((c) => !sessions.some((x) => (x.internalName || x.name) === c.internalName && x.active))}
           onBringBack={bringBack}
           onForgetClosed={(c) => {
             setClosedSessions((list) => list.filter((x) => x.internalName !== c.internalName));

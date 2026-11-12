@@ -1007,6 +1007,67 @@ test('a stopped & parked session known only from its record is listed, parked', 
   }
 });
 
+// Recently closed lists what stopped running — never what runs. A host too
+// busy to answer (memory pressure, 2026-11-11) once read as "no sessions at
+// all", and every running session landed in Recently closed; Bring back on
+// one of those could tear a live room down to relaunch it.
+test('a host that does not answer is no news: nothing running is closed, and bring back leaves a running session alone', async () => {
+  const S = (method, p, body) => requestJson(state.port, state.sessionSecret, method, p, body, userHeaders);
+  const create = await S('POST', '/api/sessions', { name: 'stallprobe', type: 'terminal', cwd: tempDir, startRuntime: true });
+  assert.equal(create.status, 200);
+  const internal = create.data.internalName;
+  const created = [internal];
+  let hostPid = null;
+  try {
+    // Listed as closed while it runs (as the stall did): a restart reads it.
+    const previousState = state;
+    await stopDaemon(true);
+    await fs.writeFile(path.join(hopHome, 'recently-closed.json'), JSON.stringify({
+      version: 1, closed: [{ internalName: internal, displayName: 'stallprobe', cwd: tempDir, closedAt: Date.now(), how: 'ended', records: {} }]
+    }), { mode: 0o600 });
+    await launchDaemon(previousState);
+    const closed = await S('GET', '/api/sessions/closed');
+    assert.ok(!closed.data.closed.some((c) => c.internalName === internal), 'a running session is not closed');
+    const back = await S('POST', '/api/sessions/bring-back', { internalName: internal });
+    assert.equal(back.status, 409);
+    assert.equal(back.data.running, true);
+    const live = await S('GET', '/api/sessions');
+    assert.equal(live.data.sessions.find((s) => s.internalName === internal)?.live, true, 'still the same live room');
+    const stored = JSON.parse(await fs.readFile(path.join(hopHome, 'recently-closed.json'), 'utf8'));
+    assert.ok(!stored.closed.some((c) => c.internalName === internal), 'and the stray row is gone');
+
+    // A kill is listed at once.
+    await S('POST', '/api/sessions/delete', { name: internal, internalName: internal });
+    const killed = await S('GET', '/api/sessions/closed');
+    assert.ok(killed.data.closed.some((c) => c.internalName === internal && c.how === 'killed'), 'a kill is listed');
+    const again = await S('POST', '/api/sessions', { name: 'stallprobe2', type: 'terminal', cwd: tempDir, startRuntime: true });
+    assert.equal(again.status, 200);
+    created.push(again.data.internalName);
+
+    // The host stops answering for a few seconds: unknown, not empty.
+    hostPid = Number(JSON.parse(await fs.readFile(path.join(hopHome, '.hay-host-state'), 'utf8')).pid);
+    process.kill(hostPid, 'SIGSTOP');
+    await delay(400);
+    const stalled = await S('GET', '/api/sessions');
+    assert.equal(stalled.data.runtimeAvailable, false, 'no answer is not "nothing runs"');
+    process.kill(hostPid, 'SIGCONT');
+    hostPid = null;
+    let recovered = null;
+    for (let i = 0; i < 40 && !recovered?.data?.runtimeAvailable; i++) {
+      if (i) await delay(250);
+      recovered = await S('GET', '/api/sessions');
+    }
+    assert.equal(recovered.data.runtimeAvailable, true, 'answers again once the host does');
+    assert.equal(recovered.data.sessions.find((s) => s.internalName === created[1])?.live, true);
+  } finally {
+    if (hostPid) try { process.kill(hostPid, 'SIGCONT'); } catch (e) { /* gone */ }
+    for (const n of created) {
+      await S('POST', '/api/sessions/delete', { name: n, internalName: n });
+      await S('POST', '/api/sessions/closed/forget', { internalName: n });
+    }
+  }
+});
+
 
 // `hop view --nebula`: a notebook on a Nebula server becomes a LINK that
 // opens in the Nebula UI this machine reaches. A relative path is pinned to

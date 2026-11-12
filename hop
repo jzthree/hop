@@ -5110,7 +5110,12 @@ async function listActiveSessionsRuntimeFirst() {
         return { sessions: [], runtimeAvailable: false };
     }
     const runtimeRooms = reconciled?.rooms;
-    if (!Array.isArray(runtimeRooms)) {
+    // A host that did not answer comes back as { rooms: [], runtimeAvailable:
+    // false } — an empty array, but no news. Read as "nothing is running", it
+    // put every live session in Recently closed while the host was stalled
+    // (memory pressure, 2026-11-11) and told the ws path a running agent was
+    // gone. Unknown stays unknown.
+    if (!Array.isArray(runtimeRooms) || reconciled.runtimeAvailable === false) {
         return { sessions: [], runtimeAvailable: false };
     }
     const sessions = runtimeRooms.map((room) => ({
@@ -7266,7 +7271,15 @@ function noteSessionClosing(internalName, how) {
     liveSessionSnapshots.delete(internalName);
     saveClosedStore();
 }
+let closedSweepRunning = false;
 async function sweepRecentlyClosed() {
+    // Under load one listing can outlast the 30s interval; two sweeps
+    // interleaving on one snapshot map gain nothing.
+    if (closedSweepRunning) return;
+    closedSweepRunning = true;
+    try { await sweepRecentlyClosedOnce(); } finally { closedSweepRunning = false; }
+}
+async function sweepRecentlyClosedOnce() {
     const snapshot = await listAllSessionEntriesRuntimeFirst();
     // No host answering means no news about what is live: never read that
     // as "everything closed".
@@ -7285,6 +7298,16 @@ async function bringBackClosedSession(internalName) {
     const store = loadClosedStore();
     const entry = store.closed.find((e) => e.internalName === internalName);
     if (!entry) return { ok: false, status: 404, error: 'Not in recently closed' };
+    // Running after all: there is nothing to bring back, and a targeted
+    // restore of a live room may tear it down to relaunch it. Drop the row.
+    // Unknown (host not answering) is not "closed" either.
+    const runtime = await listActiveSessionsRuntimeFirst();
+    if (!runtime.runtimeAvailable) return { ok: false, status: 503, error: 'hop could not reach its terminals just now; try again in a moment' };
+    if (runtime.sessions.some((s) => s && s.name === internalName)) {
+        store.closed = store.closed.filter((e) => e.internalName !== internalName);
+        saveClosedStore();
+        return { ok: false, status: 409, error: 'It is already running', running: true };
+    }
     if (entry.config && !getSessionConfig(internalName)) {
         // Brought back on purpose: not parked any more.
         const { archived, ...config } = entry.config;
@@ -8765,6 +8788,12 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     const refiled = refileFromIdentitySnapshot({ dryRun });
     if (refiled.length) log(`${dryRun ? 'Would re-file' : 'Re-filed'} ${refiled.length} session(s) into their folders from the identity snapshot.`, DIM);
     const snapshot = await listAllSessionEntriesRuntimeFirst();
+    // No answer from the host is no news about what runs: planning on it
+    // would relaunch sessions that are running fine.
+    if (!snapshot.runtimeAvailable) {
+        log(`The terminal host is not answering — nothing restored. Try again in a moment.`, YELLOW);
+        return { outcomes: {}, restored: [], skipped: [{ name: '*', reason: 'the terminal host is not answering' }], count: 0, skippedAgents: [], dryRun };
+    }
     const live = new Set(snapshot.entries.filter((e) => e.live).map((e) => e.internalName));
     // The host cuts room ids to 32 characters, so a record filed under a
     // longer name (forks named after their source did this) belongs to the
@@ -12306,6 +12335,9 @@ async function terminateExternalHaySession(sessionName, { preserveRecords = fals
             if (closed && activeSessions[sessionName]) {
                 delete activeSessions[sessionName];
             }
+            // The next listing asks the host again: a cached one from just
+            // before the close would still call this session running.
+            if (closed) reconcileCached = { at: 0, value: null };
             return closed;
         }
     } catch (e) { }
@@ -15061,8 +15093,12 @@ happens until someone clicks it.
         // the conversation back up; every record/meta/buffer survives.
         // API: recently closed sessions, and bringing one back.
         if (parsedUrl.pathname === '/api/sessions/closed' && req.method === 'GET') {
+            // Never a session that is running: whatever put it in the store
+            // (a reopen the sweep has not seen yet), it is not closed.
+            const runtime = await listActiveSessionsRuntimeFirst().catch(() => ({ runtimeAvailable: false, sessions: [] }));
+            const running = new Set(runtime.runtimeAvailable ? runtime.sessions.map((s) => s && s.name) : []);
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            res.end(JSON.stringify({ closed: recentlyClosed.listing(loadClosedStore()) }));
+            res.end(JSON.stringify({ closed: recentlyClosed.listing(loadClosedStore()).filter((c) => !running.has(c.internalName)) }));
             return;
         }
         if (parsedUrl.pathname === '/api/sessions/closed/forget' && req.method === 'POST') {
@@ -15097,7 +15133,7 @@ happens until someone clicks it.
                     }
                     const r = await bringBackClosedSession(internalName);
                     res.writeHead(r.status, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: r.ok, error: r.error, displayName: getSessionDisplayName(internalName) || internalName }));
+                    res.end(JSON.stringify({ ok: r.ok, error: r.error, running: r.running || undefined, displayName: getSessionDisplayName(internalName) || internalName }));
                 } catch (e) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Bring back failed' }));
@@ -20643,6 +20679,7 @@ async function main() {
             if (!hit) { log(`No recently closed session named "${process.argv[4] || ''}". ${DIM}hop closed${RESET} lists them.`, RED); process.exit(1); }
             const r = await callLocalApi(state, '/api/sessions/bring-back', 'POST', { internalName: hit.internalName });
             if (r?.data?.ok) { log(`✓ ${hit.displayName} is back${hit.resumable ? ', resuming its conversation' : ''}.`, GREEN); process.exit(0); }
+            if (r?.data?.running) { log(`${hit.displayName} is already running.`, GREEN); process.exit(0); }
             log(`${hit.displayName} didn't come back${r?.data?.error ? `: ${r.data.error}` : ''}.`, RED);
             process.exit(1);
         }

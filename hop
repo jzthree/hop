@@ -26,10 +26,11 @@ const nebulaRelay = require('./lib/nebula-relay');
 const notebookView = require('./lib/notebook-view');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
-const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper } = require('./lib/session-identity');
+const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const messages = require('./lib/messages');
 const sessionFiles = require('./lib/session-files');
+const viewShares = require('./lib/view-shares');
 const composerLib = require('./lib/composer');
 const fileLocate = require('./lib/file-locate');
 const digestReads = require('./lib/digest-reads');
@@ -684,6 +685,9 @@ function rebuildViewManifest() {
                     // as often as inside the daemon, and the CLI's store is
                     // empty — every server row read dead from there.
                     live: m.kind === 'server' ? portSessionIsKnown(m.target) : undefined,
+                    // Shared with a public link (lib/view-shares.js): the
+                    // token, so the person's Views can show and copy it.
+                    share: m.kind !== 'server' && m.kind !== 'link' && m.share?.token ? m.share.token : undefined,
                     // The extensionless serving path — see the /view route for
                     // why the extension must stay off the URL's end.
                     path: `/view/${encodeURIComponent(sess)}/${encodeURIComponent(f)}/inline`,
@@ -3005,6 +3009,18 @@ function ownAddressesRelative(html, hosts) {
 }
 // hop's own addresses, as a page might name them: the public one, the
 // tunnel's, and the one this request came in on.
+// Shared views (lib/view-shares.js): which view a public link opens, and
+// the address those links are made at — the one people outside reach.
+const viewShareIndex = viewShares.createShareIndex({ viewsDir: VIEWS_DIR, readMeta: readViewMeta });
+function shareBaseUrl(req) {
+    const canonical = getCanonicalHost();
+    if (canonical) return `https://${canonical}`;
+    if (currentPublicUrl) return currentPublicUrl;
+    const proto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim()
+        || (req?.socket?.encrypted ? 'https' : 'http');
+    return `${proto}://${req?.headers?.host || `127.0.0.1:${PROXY_PORT}`}`;
+}
+
 function ownAddresses(req) {
     const set = new Set();
     const add = (h) => { const v = String(h || '').trim().toLowerCase(); if (v) set.add(v); };
@@ -12887,6 +12903,36 @@ function startAuthProxy(authEmitter) {
             return;
         }
 
+        // A shared view: public, before any sign-in. The token is the whole
+        // key (lib/view-shares.js); the page runs sandboxed, in an origin of
+        // its own, so a page opened here can never act as this hop — not for
+        // the stranger, and not for the person, signed in, opening their own
+        // link. It names nothing: no session, no hop chrome, no referrer.
+        const sharedMatch = (req.method === 'GET' || req.method === 'HEAD')
+            && parsedUrl.pathname.match(/^\/shared\/([A-Za-z0-9_-]{20,64})(\/download|\/thumb)?\/?$/);
+        if (sharedMatch) {
+            res.setHeader('Referrer-Policy', 'no-referrer');
+            res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+            const hit = viewShareIndex.find(sharedMatch[1]);
+            if (!hit) {
+                res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(req.method === 'HEAD' ? undefined : renderNoticePage('This link no longer works',
+                    '<p>Whoever shared it has stopped sharing it, or removed what it showed.</p>'));
+                return;
+            }
+            serveViewerFile(req, res, hit.file, {
+                thumb: sharedMatch[2] === '/thumb',
+                rawDownload: sharedMatch[2] === '/download',
+                inlineUrl: `/shared/${sharedMatch[1]}`,
+                fileName: hit.name,
+                caption: hit.title || undefined,
+                theme: parsedUrl.query.theme,
+                sandbox: true
+            });
+            return;
+        }
+
         // API: a ticket for the same-machine fast path (see issueLocalLinkTicket).
         // Browsers only — it stands in for the login cookie.
         if (parsedUrl.pathname === '/api/local-link' && req.method === 'GET') {
@@ -13925,6 +13971,12 @@ happens until someone clicks it.
             // Rebuild rather than answer "nothing published" over a folder
             // that has files in it.
             if (body === null) body = rebuildViewManifest();
+            // Where a shared view's public link lives (items carry `share`,
+            // the token): this hop's outside address, not the one this
+            // client happens to use (the Mac app reads hop over loopback).
+            if (body && parsedUrl.pathname === '/api/views') {
+                try { body = JSON.stringify({ ...JSON.parse(body), shareBase: shareBaseUrl(req) }); } catch (e) { /* as it was */ }
+            }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(body || '{"items":[]}');
             return;
@@ -13975,6 +14027,54 @@ happens until someone clicks it.
             } catch (e) {
                 respond(500, { ok: false, error: e.message });
             }
+            return;
+        }
+        // Share a view with a public link, or stop sharing it. The person's
+        // call, never an agent's: a public link reaches people hop knows
+        // nothing about. {session, name, share: true|false}
+        if (req.method === 'POST' && parsedUrl.pathname === '/api/views/share') {
+            const body = await readRequestJson(req);
+            const respond = (status, payload) => {
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(payload));
+            };
+            // Stopping is anyone's: it only makes a view more private.
+            if (body?.share !== false && resolveActor(req) === 'agent') {
+                respond(403, { ok: false, code: 'agent', error: 'A public link is your person\'s decision: they share a view from Views (Share), or with hop view --share in their own terminal.' });
+                return;
+            }
+            const sess = path.basename(String(body?.session || ''));
+            const name = path.basename(String(body?.name || ''));
+            const viewsRoot = path.resolve(VIEWS_DIR);
+            const target = path.resolve(path.join(viewsRoot, sess, name));
+            if (!sess || !name || name.startsWith('.') || !target.startsWith(viewsRoot + path.sep)
+                || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+                respond(404, { ok: false, error: 'No such view' });
+                return;
+            }
+            const meta = readViewMeta(sess);
+            if (meta[name]?.kind === 'server' || meta[name]?.kind === 'link') {
+                respond(400, { ok: false, error: 'Only a published file can be shared. A live server or a Nebula notebook stays on this hop.' });
+                return;
+            }
+            const on = body?.share !== false;
+            if (!on && !meta[name]?.share) {
+                respond(200, { ok: true, shared: false, url: null });
+                return;
+            }
+            viewShares.setShared(meta, name, on);
+            writeViewMeta(sess, meta);
+            const saved = readViewMeta(sess)[name] || {};
+            if (on ? saved.share?.token !== meta[name].share.token : !!saved.share) {
+                respond(500, { ok: false, error: 'Could not save the change to this view' });
+                return;
+            }
+            viewShareIndex.invalidate();
+            rebuildViewManifest();
+            log(`[views] ${on ? 'shared' : 'stopped sharing'} ${sess}/${name}`, DIM);
+            respond(200, on
+                ? { ok: true, shared: true, token: saved.share.token, url: viewShares.shareUrl(shareBaseUrl(req), saved.share.token) }
+                : { ok: true, shared: false, url: null });
             return;
         }
         // ---- Files from a session: the Views shelf (lib/session-files.js) ----
@@ -19536,6 +19636,7 @@ const HELP_SECTIONS = [
         `hop view --nebula <nb>    Link a notebook on a Nebula server; Views reads it, Open in Nebula runs it (hop config nebula <url>, nebula-token -)`,
         `hop view --list [--all]   What this session has published (--all: the whole fleet)`,
         `hop view --rm <name>      Unpublish one`,
+        `hop view --share <file>   Publish and make a public link anyone can open (--unshare <name> stops it)`,
         `hop view --clear [--all]  Clear published copies — frees hop's space, never touches source files`,
         `                          Views auto-evict oldest past the budget (HOP_VIEWS_BUDGET_MB, default 2048)`,
         `hop whoami [--json]      Which session this shell is inside — the name hop view targets`,
@@ -21231,8 +21332,10 @@ async function main() {
             const items = (JSON.parse(rebuildViewManifest() || '{"items":[]}').items || [])
                 .filter((i) => argv.includes('--all') || i.session === session);
             if (!items.length) { log(`No views published${argv.includes('--all') ? '' : ` by ${session}`} yet.`, DIM); process.exit(0); }
+            const shareBase = getCanonicalHost() ? `https://${getCanonicalHost()}` : (isServerRunning()?.url || '');
             for (const i of items) {
-                console.log(`${i.session}/${i.name}${i.title ? `  — ${i.title}` : ''}  (${Math.max(1, Math.round(i.bytes / 1024))} KB)`);
+                console.log(`${i.session}/${i.name}${i.title ? `  — ${i.title}` : ''}  (${Math.max(1, Math.round(i.bytes / 1024))} KB)`
+                    + (i.share ? `  shared: ${viewShares.shareUrl(shareBase, i.share)}` : ''));
             }
             process.exit(0);
         }
@@ -21247,6 +21350,67 @@ async function main() {
             log(`Cleared ${out.removed} view${out.removed === 1 ? '' : 's'} (${kb} KB) — published copies only; source files untouched.`,
                 out.removed ? GREEN : RESET);
             process.exit(0);
+        }
+        // --share: publish (or take an already published view) and make a
+        // public link to it; --unshare: stop. Making a link is the person's
+        // decision, so a command an agent runs cannot (see lib/view-shares.js).
+        const wantShare = argv.includes('--share');
+        const wantUnshare = argv.includes('--unshare');
+        const shareOnly = [];
+        const shareViews = async (st, names, on) => {
+            let bad = 0;
+            for (const name of names) {
+                let r = null;
+                try { r = await callLocalApi(st, '/api/views/share', 'POST', { session, name, share: on }); } catch (e) { r = null; }
+                if (!r || r.status !== 200 || !r.data?.ok) {
+                    log(`hop view: ${on ? 'could not share' : 'could not stop sharing'} ${name}: ${r?.data?.error || 'hop did not answer'}`, RED);
+                    bad += 1;
+                } else if (on) {
+                    console.log(`Shared: ${r.data.url}  (${name})`);
+                } else {
+                    log(`Stopped sharing ${name}. Its link no longer opens.`, GREEN);
+                }
+            }
+            if (on && names.length > bad) log(`Anyone with the link can open it, without signing in, while hop is running. Stop: hop view --unshare <name>`, DIM);
+            return bad;
+        };
+        if (wantShare || wantUnshare) {
+            if (wantShare && wantUnshare) { log('hop view: --share or --unshare, not both.', RED); process.exit(2); }
+            if (argv.includes('--nebula')) { log('hop view --share: a Nebula notebook stays on its own server; share a file.', RED); process.exit(2); }
+            if (wantShare) {
+                const agentAbove = process.env.CLAUDECODE === '1' || process.env.CLAUDE_CODE_SESSION_ID
+                    ? 'claude' : agentInAncestry({ pid: process.pid, readProc: readProcForIdentity });
+                if (agentAbove) {
+                    log('hop view --share: a public link is your person\'s decision, so an agent cannot make one.', RED);
+                    log('  Publish without --share; your person can press Share on it in Views.', DIM);
+                    process.exit(1);
+                }
+            }
+            if (!files.length) {
+                log('Usage: hop view --share [--title "..."] <file or published name...>', YELLOW);
+                log('       hop view --unshare <name...>', DIM);
+                process.exit(1);
+            }
+            if (!session) { callerSessionOrExplain('hop view'); process.exit(1); }
+            const st = isServerRunning();
+            if (!st) { printNotRunningError(); process.exit(1); }
+            // A name that is not a file here but is published in this
+            // session is shared as it stands; files are published first.
+            let missing = 0;
+            for (const f of [...files]) {
+                if (f === '-' && wantShare) continue;
+                const local = wantShare && fs.existsSync(f) && fs.statSync(f).isFile();
+                if (local) continue;
+                files.splice(files.indexOf(f), 1);
+                const name = path.basename(f);
+                if (fs.existsSync(path.join(destDir, name))) shareOnly.push(name);
+                else { log(`hop view: not published here: ${f}`, RED); missing += 1; }
+            }
+            if (wantUnshare || !files.length) {
+                const bad = await shareViews(st, shareOnly, wantShare);
+                process.exit(bad || missing ? 1 : 0);
+            }
+            if (missing) process.exit(1);
         }
         if (removals.length) {
             let gone = 0;
@@ -21348,6 +21512,7 @@ async function main() {
             log('Usage: hop view [--title "what this is"] <file...>', YELLOW);
             log('       hop view --name report.md --title "..." -     (read the file from stdin)', DIM);
             log('       hop view --list [--all]                        hop view --rm <name>', DIM);
+            log('       hop view --share <file or name>   a public link (yours to make)   --unshare <name>', DIM);
             log('       hop view --clear [--all]     free the published copies (sources are never touched)', DIM);
             log('HTML, PDF, images, video, markdown — anything a browser renders.', DIM);
             process.exit(1);
@@ -21446,6 +21611,7 @@ async function main() {
             process.stdout.write('\x07');
         }
         rebuildViewManifest();
+        if (wantShare && (published.length || shareOnly.length)) failed += await shareViews(state, [...published, ...shareOnly], true);
         process.exit(failed > 0 ? 1 : 0);
     }
 

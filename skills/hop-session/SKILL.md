@@ -104,6 +104,13 @@ Re-running after updating the file re-publishes under the same link.
 `hop view --list` shows what this session has published; `hop view --rm
 <name>` unpublishes.
 
+A view can also be shared outside hop with a public link that opens without
+signing in. That is your person's decision, not yours: they press **Share**
+on it in Views, or run `hop view --share <file>` in their own terminal, and
+`hop view --share` refuses when an agent runs it. Asked to share something,
+publish it and tell them it is ready to share from Views. Stopping a share
+(`hop view --unshare <name>`) is fine for anyone.
+
 Files you write or name in a reply also appear, unannounced, on a "Files
 from this session" shelf in your Views, and file paths you print are
 clickable. That is a safety net, not a handover: a result the human should

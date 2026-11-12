@@ -339,6 +339,8 @@ hop view --title "Q3 analysis" report.html analysis.pdf
 generate_summary | hop view --name findings.md --title "What the profiler found" -
 hop view --list          # what this session published
 hop view --rm x.png      # unpublish
+hop view --share report.html   # publish, and make a public link
+hop view --unshare report.html # stop: the link no longer opens
 ```
 
 On the web, every delivery also shows as a small inline card right where
@@ -351,6 +353,16 @@ serve time — headings, tables, fenced code). `--title` is what a human sees
 in the session's Views list, so it is worth writing properly. Published files
 are grouped **by session**: a result belongs to the conversation that
 produced it.
+
+**Sharing a view.** Press **Share** in the Views reader (or run `hop view
+--share`) for a public link like `https://<your hop>/shared/<token>`. Anyone
+who has it can open that one view without signing in, while hop is running.
+The link names nothing (no session, no file), shows the newest copy when the
+file is published again, and stops working when you press **Stop sharing**
+or delete the view. Shared pages run sandboxed, in an origin of their own,
+so a page can never act as your signed-in hop. Making a link is the
+person's call: an agent can publish a view but not share it (`hop view
+--share` refuses under an agent, and the API answers an agent with 403).
 
 **Files from this session.** Agents forget `hop view`. Below what a session
 published, its Views also shelve the files its agent *wrote* (Claude's

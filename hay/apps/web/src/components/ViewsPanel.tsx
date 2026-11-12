@@ -58,6 +58,8 @@ type ViewItem = {
   where?: string;
   how?: "wrote" | "mentioned";
   at?: number;
+  // Shared with a public link: its token (the link is shareBase/shared/token).
+  share?: string;
 };
 
 type FoundFile = { id: string; name: string; file: string; where?: string; how: "wrote" | "mentioned"; at: number; mtime: number; bytes: number; path: string };
@@ -270,6 +272,12 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
   const [armedDelete, setArmedDelete] = useState<string | null>(null);
   const [armedClear, setArmedClear] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  // Public links: where they live (hop's outside address), the item whose
+  // share bar is open (its path), a request in flight, and what went wrong.
+  const [shareBase, setShareBase] = useState<string | null>(null);
+  const [sharePanel, setSharePanel] = useState<string | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
   // Frozen at open: the mark-seen effect fires as soon as the list lands,
   // and reading live storage during render would clear every "new" dot in
   // the frame that exists to show them.
@@ -320,7 +328,10 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
 
   const loadViews = () => fetch("/api/views", { cache: "no-store", credentials: "same-origin" })
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-    .then((d: { items?: ViewItem[] }) => (Array.isArray(d?.items) ? d.items : []));
+    .then((d: { items?: ViewItem[]; shareBase?: string }) => {
+      if (typeof d?.shareBase === "string") setShareBase(d.shareBase);
+      return Array.isArray(d?.items) ? d.items : [];
+    });
   useEffect(() => {
     let cancelled = false;
     loadViews()
@@ -552,6 +563,36 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
     }).catch(() => { /* clipboard denied — ↗ still carries the URL */ });
   };
 
+  // A public link to one view: made, copied, and stopped here. hop keeps one
+  // link per view, so sharing again after a stop makes a new one.
+  const shareUrlOf = (i: ViewItem) => (i.share
+    ? `${(shareBase || location.origin).replace(/\/+$/, "")}/shared/${i.share}`
+    : null);
+  const copyShare = (url: string) => {
+    navigator.clipboard?.writeText(url).then(() => {
+      setCopied(url);
+      window.setTimeout(() => setCopied((c) => (c === url ? null : c)), 1400);
+    }).catch(() => { /* the link is selectable text */ });
+  };
+  const setShare = (i: ViewItem, on: boolean) => {
+    if (sharing) return;
+    setSharing(true);
+    setShareError(null);
+    fetch("/api/views/share", {
+      method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: i.session, name: i.name, share: on })
+    }).then(async (r) => {
+      const d = await r.json().catch(() => null) as { ok?: boolean; token?: string; url?: string; error?: string } | null;
+      if (!r.ok || !d?.ok) { setShareError(d?.error || "That didn't work. Try again."); return; }
+      const token = on ? d.token : undefined;
+      const swap = (x: ViewItem) => (x.path === i.path ? { ...x, share: token } : x);
+      setItems((cur) => (cur || []).map(swap));
+      setOpen((o) => (o ? swap(o) : o));
+      if (on && d.url) copyShare(d.url);
+    }).catch(() => setShareError("hop didn't answer. Try again."))
+      .finally(() => setSharing(false));
+  };
+
   // Clear the scope's published COPIES: `hop view` copies files into the
   // daemon's store, so this frees exactly what the feature uses and cannot
   // touch an agent's originals; live servers stay.
@@ -631,6 +672,7 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
               <span className="vg-doc-rule" aria-hidden="true" />
             </>)}
         {i.kind !== "found" && isFresh(i) && <span className="views-dot" aria-label="New" />}
+        {i.share && <span className="vg-shared" title="Shared with a public link">Shared</span>}
       </span>
       <span className="vg-caption">
         <span className="views-title">{i.title || i.name}</span>
@@ -776,6 +818,14 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
                     title="Pin as a view: keep it in this session's Views" aria-label="Pin as a view"
                     onClick={() => pinFound(open)}>{pinning === open.id ? "…" : "Pin"}</button>
           )}
+          {open.kind !== "server" && open.kind !== "found" && open.kind !== "link" && (
+            <button type="button" className={"views-act views-share" + (open.share ? " on" : "")}
+                    aria-expanded={sharePanel === open.path}
+                    title={open.share ? "Shared with a public link" : "Share with a public link"}
+                    onClick={() => { setShareError(null); setSharePanel((p) => (p === open.path ? null : open.path)); }}>
+              {open.share ? "Shared" : "Share"}
+            </button>
+          )}
           {open.kind !== "server" && open.kind !== "found" && (
             <button type="button" className={"views-act danger" + (armedDelete === open.path ? " armed" : "")}
                     title={armedDelete === open.path ? "Click again to delete" : "Delete"}
@@ -787,6 +837,27 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
           )}
         </span>
       </div>
+      {sharePanel === open.path && open.kind !== "found" && (
+        <div className="views-sharebar" role="region" aria-label="Public link">
+          {open.share ? (<>
+            <input className="views-share-url" readOnly value={shareUrlOf(open) || ""} aria-label="Public link"
+                   onFocus={(e) => e.currentTarget.select()} />
+            <button type="button" className="views-share-btn" onClick={() => copyShare(shareUrlOf(open) || "")}>
+              {copied === shareUrlOf(open) ? "Copied" : "Copy"}
+            </button>
+            <button type="button" className="views-share-btn quiet" disabled={sharing} onClick={() => setShare(open, false)}>
+              Stop sharing
+            </button>
+            <span className="views-share-note">Anyone with this link can open this view without signing in, while hop is running.</span>
+          </>) : (<>
+            <span className="views-share-note">A public link opens this view for anyone who has it, without signing in, while hop is running. You can stop sharing at any time.</span>
+            <button type="button" className="views-share-btn primary" disabled={sharing} onClick={() => setShare(open, true)}>
+              {sharing ? "Creating…" : "Create public link"}
+            </button>
+          </>)}
+          {shareError && <span className="views-share-error" role="alert">{shareError}</span>}
+        </div>
+      )}
       <div className="views-preview">{page}</div>
       {navList.length > 1 && (
         // The neighbours, in the order ← → walks: where you are in the set.

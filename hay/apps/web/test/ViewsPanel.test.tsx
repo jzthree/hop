@@ -410,3 +410,50 @@ describe("ViewsPanel › Files from this session", () => {
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
   });
 });
+
+describe("ViewsPanel › Sharing", () => {
+  const routed = (views: Array<Record<string, unknown>>, calls: Array<{ url: string; body?: unknown }>) => vi.fn(async (url: string, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    calls.push({ url, body });
+    if (url === "/api/views/share") {
+      return body.share
+        ? { ok: true, json: async () => ({ ok: true, shared: true, token: "T0kenT0kenT0kenT0kenT0ke", url: "https://hop.example.io/shared/T0kenT0kenT0kenT0kenT0ke" }) }
+        : { ok: true, json: async () => ({ ok: true, shared: false, url: null }) };
+    }
+    return { ok: true, json: async () => ({ items: views, shareBase: "https://hop.example.io" }) };
+  });
+
+  it("asks first, makes the link on Create, shows it, and Stop sharing takes it away", async () => {
+    const calls: Array<{ url: string; body?: unknown }> = [];
+    vi.stubGlobal("fetch", routed(items, calls));
+    render(<ViewsPanel session="Orion" item="views-test.html" sessions={[{ name: "Orion", internalName: "Orion" }]} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Share" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Share" }));
+    // Nothing public yet: the bar explains, and only Create makes the link.
+    expect(calls.some((c) => c.url === "/api/views/share")).toBe(false);
+    expect(screen.getByRole("region", { name: "Public link" }).textContent).toMatch(/without signing in/);
+    fireEvent.click(screen.getByRole("button", { name: "Create public link" }));
+    await waitFor(() => expect((screen.getByLabelText("Public link", { selector: "input" }) as HTMLInputElement).value)
+      .toBe("https://hop.example.io/shared/T0kenT0kenT0kenT0kenT0ke"));
+    expect(calls.find((c) => c.url === "/api/views/share")!.body).toEqual({ session: "Orion", name: "views-test.html", share: true });
+    expect(screen.getByRole("button", { name: "Shared" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop sharing" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create public link" })).toBeTruthy());
+    expect(calls.filter((c) => c.url === "/api/views/share").pop()!.body).toEqual({ session: "Orion", name: "views-test.html", share: false });
+  });
+
+  it("a shared view says so on its card, and its link is hop's outside address", async () => {
+    const calls: Array<{ url: string; body?: unknown }> = [];
+    const shared = items.map((i) => (i.name === "agent-result.md" ? { ...i, share: "S1S1S1S1S1S1S1S1S1S1S1S1" } : i));
+    vi.stubGlobal("fetch", routed(shared, calls));
+    render(<ViewsPanel session="Orion" sessions={[{ name: "Orion", internalName: "Orion" }]} onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelectorAll(".vg-card").length).toBe(2));
+    const cards = document.querySelectorAll(".vg-card");
+    expect(cards[0].querySelector(".vg-shared")?.textContent).toBe("Shared");
+    expect(cards[1].querySelector(".vg-shared")).toBeNull();
+    fireEvent.click(cards[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Shared" }));
+    expect((screen.getByLabelText("Public link", { selector: "input" }) as HTMLInputElement).value)
+      .toBe("https://hop.example.io/shared/S1S1S1S1S1S1S1S1S1S1S1S1");
+  });
+});

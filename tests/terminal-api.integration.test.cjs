@@ -2281,6 +2281,98 @@ test('a view naming hop by another address stays signed in; a framed sign-in pag
   assert.match(signin, /Open it in its own tab/);
 });
 
+// A shared view: a public link the person makes, opened with no sign-in,
+// sandboxed, following the view's newest copy, and gone when they stop or
+// the view is deleted. An agent publishes; it cannot make the link.
+test('a view shared by its person opens for anyone with the link, sandboxed, until they stop', async () => {
+  const sess = 'shareprobe';
+  const dir = path.join(hopHome, 'views', sess);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'page.html'), '<title>v1</title><script>document.title="ran"</script>v1');
+  await fs.writeFile(path.join(dir, '.meta.json'), JSON.stringify({ 'page.html': { title: 'Q3 page' } }));
+  const raw = (p, headers = {}) => new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: state.port, path: p, headers }, (res) => {
+      let body = ''; res.on('data', (c) => body += c); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    }).on('error', reject);
+  });
+  const share = (on, headers) => requestJson(state.port, state.sessionSecret, 'POST', '/api/views/share', { session: sess, name: 'page.html', share: on }, headers);
+
+  const refused = await share(true, agentHeaders);
+  assert.equal(refused.status, 403);
+  assert.equal(refused.data.code, 'agent');
+
+  const made = await share(true, userHeaders);
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const token = made.data.token;
+  assert.match(token, /^[A-Za-z0-9_-]{24,}$/);
+  assert.ok(made.data.url.endsWith(`/shared/${token}`), made.data.url);
+  assert.ok(!made.data.url.includes(sess), 'the link names no session');
+
+  const views = await requestJson(state.port, state.sessionSecret, 'GET', '/api/views', null, userHeaders);
+  assert.equal(views.data.items.find((i) => i.session === sess && i.name === 'page.html').share, token);
+  assert.equal(typeof views.data.shareBase, 'string');
+
+  // No cookie, no token: the page itself, walled off from hop.
+  const got = await raw(`/shared/${token}`);
+  assert.equal(got.status, 200);
+  assert.match(got.body, /v1/);
+  assert.match(String(got.headers['content-security-policy']), /^sandbox allow-scripts/);
+  assert.equal(got.headers['referrer-policy'], 'no-referrer');
+  assert.match(String(got.headers['x-robots-tag']), /noindex/);
+  assert.match(String(got.headers['cache-control']), /no-store/);
+  const dl = await raw(`/shared/${token}/download`);
+  assert.match(String(dl.headers['content-disposition']), /^attachment; filename="page\.html"/);
+
+  // Published again: same link, newest copy.
+  await fs.writeFile(path.join(dir, 'page.html'), '<title>v2</title>v2');
+  assert.match((await raw(`/shared/${token}`)).body, /v2/);
+
+  // Stopping is allowed to anyone, an agent too: it only takes access away.
+  const stopped = await share(false, agentHeaders);
+  assert.equal(stopped.status, 200);
+  const gone = await raw(`/shared/${token}`);
+  assert.equal(gone.status, 404);
+  assert.match(gone.body, /This link no longer works/);
+  assert.doesNotMatch(gone.body, /shareprobe|page\.html/, 'a dead link says nothing about what it was');
+
+  // Shared again: a new link. Deleting the view ends it.
+  const again = await share(true, userHeaders);
+  assert.notEqual(again.data.token, token);
+  assert.equal((await raw(`/shared/${again.data.token}`)).status, 200);
+  // Node sends a DELETE's body without a length unless told one.
+  const delBody = { session: sess, name: 'page.html' };
+  const del = await requestJson(state.port, state.sessionSecret, 'DELETE', '/api/views', delBody, { ...userHeaders, 'Content-Length': Buffer.byteLength(JSON.stringify(delBody)) });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  assert.equal((await raw(`/shared/${again.data.token}`)).status, 404);
+  assert.equal((await raw('/shared/' + 'A'.repeat(24))).status, 404);
+  assert.equal((await share(true, userHeaders)).status, 404, 'nothing left to share');
+
+  // The CLI: the person's links in --list, and --unshare; --share under an
+  // agent's process is refused before anything is published.
+  await fs.writeFile(path.join(dir, 'fig.png'), 'png');
+  const fig = await requestJson(state.port, state.sessionSecret, 'POST', '/api/views/share', { session: sess, name: 'fig.png', share: true }, userHeaders);
+  const cliEnv = { ...daemonEnv };
+  delete cliEnv.CLAUDECODE; delete cliEnv.CLAUDE_CODE_SESSION_ID; delete cliEnv.HOP_SESSION;
+  const cli = (...args) => require('child_process').spawnSync(process.execPath, [HOP_BIN, 'view', ...args], { env: cliEnv, encoding: 'utf8' });
+  const listed = cli('--list', '--session', sess);
+  assert.match(listed.stdout, new RegExp(`fig\\.png.*shared: \\S+/shared/${fig.data.token}`));
+  const wrapDir = path.join(tempDir, 'agentwrap');
+  await fs.mkdir(wrapDir, { recursive: true });
+  const wrapper = path.join(wrapDir, 'claude');
+  await fs.writeFile(wrapper, `const r = require('child_process').spawnSync(process.execPath, ${JSON.stringify([HOP_BIN, 'view', '--session', sess, '--share'])}.concat(process.argv.slice(2)), { encoding: 'utf8' });
+process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || ''); process.exit(r.status);`);
+  await fs.writeFile(path.join(tempDir, 'new.html'), 'new');
+  const byAgent = require('child_process').spawnSync(process.execPath, [wrapper, path.join(tempDir, 'new.html')], { env: cliEnv, encoding: 'utf8' });
+  assert.equal(byAgent.status, 1, byAgent.stdout + byAgent.stderr);
+  assert.match(byAgent.stdout + byAgent.stderr, /a public link is your person's decision/);
+  assert.equal(require('node:fs').existsSync(path.join(dir, 'new.html')), false, 'not published either');
+  const unshared = cli('--session', sess, '--unshare', 'fig.png');
+  assert.equal(unshared.status, 0, unshared.stdout + unshared.stderr);
+  assert.match(unshared.stdout + unshared.stderr, /Stopped sharing fig\.png/);
+  assert.equal((await raw(`/shared/${fig.data.token}`)).status, 404);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 // A new session's folder must be there: a mistyped one used to start the
 // session in home (and Codex then made itself a folder under ~/Documents).
 test('a new session in a missing folder is refused, and the form can create the folder', async () => {

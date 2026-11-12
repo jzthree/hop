@@ -1,6 +1,6 @@
 ---
 name: hop-session
-description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers finding your session identity with hop whoami, messaging other sessions' agents and answering theirs with hop who / hop send, rendering math with hop math, handing over results a terminal cannot render — plots, PDFs, images, rendered markdown write-ups — with hop view (always with --title), exposing a running local web server with hop port, ringing the bell for attention, and phone-friendly output.
+description: Conventions for agents working inside a hop terminal session (the HOP_SESSION environment variable is set). Humans watch these terminals live, often from a phone. Covers finding your session identity with hop whoami, messaging other sessions' agents and answering theirs with hop who / hop send, rendering math with hop math, handing over results a terminal cannot render — plots, PDFs, images, rendered markdown write-ups — with hop view (always with --title), making an HTML page that reads well on a phone, exposing a running local web server with hop port, ringing the bell for attention, and phone-friendly output.
 ---
 
 # Working in a hop terminal
@@ -109,6 +109,36 @@ from this session" shelf in your Views, and file paths you print are
 clickable. That is a safety net, not a handover: a result the human should
 look at still gets `hop view --title …`, which titles it, files it and tells
 them.
+
+### When the result is an HTML page
+
+Make a page only when it does something a figure, PDF or Markdown file
+cannot: filters, linked plots, a long side-by-side comparison. It is most
+often read inside hop's Views on a phone, so:
+
+- **One self-contained file.** `hop view` copies just the file you name;
+  images, CSS, scripts and data beside it stay behind. Inline the CSS and
+  JS, embed images as `data:` URIs, and load any library from a CDN at an
+  exact version.
+- **Fits a phone.** Include `<meta name="viewport" content="width=device-width, initial-scale=1">`,
+  keep at least 16px of side margin, stack columns on narrow screens, and
+  never let the whole page scroll sideways: a wide table or code block
+  scrolls inside its own `overflow-x: auto` box.
+- **Light and dark.** Keep every color in CSS variables on `:root`,
+  redefine them under `@media (prefers-color-scheme: dark)`, and give
+  `body` an explicit background. Chart text and gridlines use the same
+  variables.
+- **Complete when it opens.** Lead with the answer, then the detail.
+  Nothing waits for a scroll or a click to appear. Columns of digits get
+  `font-variant-numeric: tabular-nums`.
+- **Charts drawn to scale.** Axes labeled with units, ticks at values the
+  data reaches, nothing overlapping or cut off at the edges.
+- **A report, not a landing page.** A `<title>` that names the page, a few
+  type sizes used consistently, lines of about 70 characters. Leave out
+  hero banners, gradients, emoji headings and a box around every block.
+
+If you can, look at it once at phone width (a headless-browser screenshot
+at about 400px) before handing it over.
 
 ## Showing a running web server (dev server, local app)
 

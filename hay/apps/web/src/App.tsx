@@ -59,6 +59,7 @@ import { BriefingPage } from "./components/BriefingPage";
 import { PulsePage } from "./components/PulsePage";
 import { UpdatePop, useUpdateInfo, type UpdateInfo } from "./components/UpdateNotice";
 import { SettingsPage } from "./components/SettingsPage";
+import { MessagesPage } from "./components/MessagesPage";
 import { ContextMenu, type MenuItem, type MenuRequest } from "./components/ContextMenu";
 import { sessionMenuItems, shortPath, type MenuSession, type SessionPlace } from "./components/sessionMenu";
 import type { AgentHomes } from "./utils/switcherModel";
@@ -296,7 +297,7 @@ const UI_KEY = "hop_ui_v1";
 // of it (session null) or one session's share.
 type SideFeed = { kind: "briefing" | "pulse" | "calendar"; session: string | null };
 type SavedUi = {
-  place?: "briefing" | "pulse" | "calendar" | "settings" | null;
+  place?: "briefing" | "pulse" | "calendar" | "settings" | "messages" | null;
   views?: { session?: string; dock?: boolean; item?: string; page?: boolean; side?: boolean } | null;
   sideTab?: "calendar" | "briefing" | "pulse" | null; calendar?: string | null;
   sideFeed?: SideFeed | null;
@@ -626,7 +627,18 @@ const App = () => {
   // The sidebar's own places beyond Sessions and Views: the briefing (with
   // the session it is narrowed to) and mybot's pulse; and the update panel.
   const [closedSessions, setClosedSessions] = useState<ClosedSession[]>([]);
-  const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar" | "settings">(() => savedUi().place ?? null);
+  const [place, setPlace] = useState<null | "briefing" | "pulse" | "calendar" | "settings" | "messages">(() => savedUi().place ?? null);
+  // Messages between sessions: the newest one's time (from the session
+  // list) against the newest this device has shown — the strip's badge.
+  const [messagesAt, setMessagesAt] = useState(0);
+  const [messagesSeen, setMessagesSeen] = useState(() => { try { return Number(localStorage.getItem("hop_messages_seen")) || 0; } catch { return 0; } });
+  const markMessagesSeen = (at: number) => {
+    setMessagesSeen((prev) => {
+      if (at <= prev) return prev;
+      try { localStorage.setItem("hop_messages_seen", String(at)); } catch { /* private mode */ }
+      return at;
+    });
+  };
   const [updateOpen, setUpdateOpen] = useState(false);
   // An update opened from Settings › About (shown even when its notice was put off).
   const [updateShown, setUpdateShown] = useState<UpdateInfo | null>(null);
@@ -3841,6 +3853,7 @@ const App = () => {
     try {
       const res = await fetch("/api/sessions");
       const data = await res.json();
+      if (Number.isFinite(data.messagesAt)) setMessagesAt(data.messagesAt);
       const sessionMap = new Map<string, SessionInfo>();
 
       // Process sessions from the API
@@ -4951,7 +4964,7 @@ const App = () => {
     sideUpRef.current = sideNow;
     if (toPageRef.current) { toPageRef.current = false; return; }
     if (!railDocked || !(wasUp || sideNow)) return;
-    const feedPlace = place === "settings" ? null : place;
+    const feedPlace = place === "settings" || place === "messages" ? null : place;
     const kind = feedPlace ?? sideTab;
     if (kind) {
       setSideFeed({ kind, session: feedPlace ? null : (currentKey ?? null) });
@@ -5070,6 +5083,17 @@ const App = () => {
     if (session && !switcherOpen) focusTerminalSoon();
   };
   const toggleSettings = () => { if (place === "settings") closeSettings(); else openSettings(); };
+  // Messages: a place like Settings — beside the sidebar, or the whole window.
+  const openMessages = () => {
+    setDrawerOpen(false);
+    setSessionMenu(null);
+    if (viewsPage) setViewsOpen(null);
+    setPlace("messages");
+  };
+  const closeMessages = () => {
+    setPlace(null);
+    if (session && !switcherOpen) focusTerminalSoon();
+  };
   toggleSettingsRef.current = toggleSettings;
   // The session header's ⋯, under it: the sidebar's menu for this session.
   const startRename = () => {
@@ -5288,6 +5312,9 @@ const App = () => {
       onClick: () => (railDocked && !viewsSide && !viewsSideNow ? openFromStrip("views") : openViews()) },
     { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />, active: (place === "calendar" && placePage) || schedTabNow || sideFeedNow?.kind === "calendar",
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => openFromStrip("calendar") },
+    // What the agents say to each other (hop send): read here, sent there.
+    { key: "messages", label: "Messages", icon: <RailIcon name="messages" />, active: place === "messages",
+      fresh: messagesAt > messagesSeen, onClick: () => (place === "messages" ? closeMessages() : openMessages()) },
     { key: "codex", label: "Codex app", icon: <RailIcon name="codex" />, onClick: () => setCodexAppOpen(true) },
     ...(desktopEnabled ? [{ key: "desktop", label: "Desktop", icon: <RailIcon name="desktop" />, onClick: () => setDesktopOpen(true) }] : []),
     (() => {
@@ -5607,6 +5634,8 @@ const App = () => {
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
             onOpenSettings={openSettings}
+            onOpenMessages={openMessages}
+            messagesFresh={messagesAt > messagesSeen}
           />
           {toast && <div className="terminal-toast" role="status" aria-live="polite">{toast}</div>}
         </main>
@@ -6231,6 +6260,8 @@ const App = () => {
             searchPortal={wallSearchPortal}
             onFilterChange={setWallFilter}
             onOpenSettings={openSettings}
+            onOpenMessages={openMessages}
+            messagesFresh={messagesAt > messagesSeen}
             onToggleKeyboard={
               isMobile
                 ? () => {
@@ -6361,7 +6392,7 @@ const App = () => {
           onPick={(next) => {
             // From a place or Views, a session in the sidebar is that
             // session on the same kind of tab.
-            if (place === "settings") setPlace(null);
+            if (place === "settings" || place === "messages") setPlace(null);
             else if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
             if (viewsPage) { openSessionTab(next.internalName || next.name, "views"); return; }
             // Side by side, the column follows: switch, and show the new
@@ -6491,6 +6522,15 @@ const App = () => {
                            onOpenSession={goToSession} />
         );
       })()}
+      {place === "messages" && (
+        <MessagesPage
+          placement={railDocked ? "page" : "sheet"}
+          sessions={sessions}
+          onClose={closeMessages}
+          onOpenSession={(key) => { setPlace(null); goToSession(key); }}
+          onSeen={markMessagesSeen}
+        />
+      )}
       {place === "settings" && (
         <SettingsPage
           placement={railDocked ? "page" : "sheet"}

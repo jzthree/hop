@@ -22,6 +22,7 @@ const { HOST_TOKEN_HEADER, hostToken } = require('./lib/host-token');
 const { agentPhase, screenSaysWorking } = require('./lib/agent-phase');
 const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require('./lib/identity-snapshot');
 const recentlyClosed = require('./lib/recently-closed');
+const messageLog = require('./lib/message-log');
 const nebulaRelay = require('./lib/nebula-relay');
 const notebookView = require('./lib/notebook-view');
 const { withCodexIdentity } = require('./lib/codex-identity');
@@ -7463,6 +7464,59 @@ function loadCheckbacks() {
 function saveCheckbacks() {
     try { writePrivateFile(CHECKBACKS_FILE, JSON.stringify(loadCheckbacks(), null, 1), 0o600); }
     catch (e) { log(`[checkback] could not save: ${e?.message || e}`, YELLOW); }
+    // The messages it carries between sessions: their log follows along.
+    try { syncMessageLog(); } catch (e) { /* the log is a record, never a blocker */ }
+}
+
+// ---- message log (lib/message-log.js) ---------------------------------------
+// What sessions said to each other, kept for their person to read (the
+// Messages page) after the queue has forgotten the deliveries.
+const MESSAGE_LOG_FILE = path.join(HOME_DIR, 'messages.json');
+let messageLogCache = null;
+function loadMessageLog() {
+    if (messageLogCache) return messageLogCache;
+    try { messageLogCache = messageLog.normalizeLog(JSON.parse(fs.readFileSync(MESSAGE_LOG_FILE, 'utf8'))); }
+    catch (e) { messageLogCache = messageLog.emptyLog(); }
+    return messageLogCache;
+}
+function saveMessageLog() {
+    try { writePrivateFile(MESSAGE_LOG_FILE, JSON.stringify(loadMessageLog()), 0o600); } catch (e) { /* best effort */ }
+}
+/** One message from a session (or an agent outside hop) to another, as sent. */
+function logAgentMessage(m) {
+    try {
+        messageLog.record(loadMessageLog(), {
+            ...m,
+            fromName: m.from ? (getSessionDisplayName(m.from) || m.from) : null,
+            fromAgent: m.from ? sessionAgentKind(m.from) : null,
+            toName: getSessionDisplayName(m.to) || m.to
+        });
+        saveMessageLog();
+    } catch (e) { /* best effort */ }
+}
+/** A session's last finished turn: { count, at, lastMessage }. */
+function readTurnLast(internalName) {
+    if (!internalName || !SESSION_NAME_RE.test(internalName)) return null;
+    try {
+        const t = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internalName}.turn`), 'utf8'));
+        return { count: Number(t.count), at: t.at, lastMessage: t.lastMessage };
+    } catch (e) { return null; }
+}
+/** The queue's word on each message it carries; send-and-wait answers. */
+function syncMessageLog() {
+    const mlog = loadMessageLog();
+    if (!mlog.messages.length) return;
+    const ids = new Set(mlog.messages.map((m) => m.id));
+    let dirty = false;
+    for (const cb of loadCheckbacks().items) {
+        if (!ids.has(cb.id)) continue;
+        const turnCount = cb.replyHere && cb.status === 'delivered' ? readTurnCount(cb.session) : null;
+        if (messageLog.mirror(mlog, cb, { turnCount })) dirty = true;
+    }
+    for (const m of messageLog.awaitingReply(mlog)) {
+        if (messageLog.noteReply(m, readTurnLast(m.to))) dirty = true;
+    }
+    if (dirty) saveMessageLog();
 }
 // A folder as typed in the create form (or sent by an agent): ~ is home,
 // a relative path is under home — what a shell in ~ would make of it, and
@@ -14543,7 +14597,9 @@ happens until someone clicks it.
                 folders,
                 order: sessionStore.order,
                 aliases: sessionAliases,
-                runtimeAvailable: snapshot.runtimeAvailable
+                runtimeAvailable: snapshot.runtimeAvailable,
+                // The newest word between sessions: the Messages badge.
+                messagesAt: (() => { const m = loadMessageLog().messages; return m.length ? Math.max(m[m.length - 1].at, m[m.length - 1].replyAt || 0) : 0; })()
             }));
             return;
         }
@@ -16274,6 +16330,7 @@ happens until someone clicks it.
                     }, now);
                     const store = loadCheckbacks();
                     store.items.push(cb);
+                    if (fromSession && fromSession !== target) logAgentMessage({ id: cb.id, from: fromSession, to: target, text: cb.message, at: now, status: 'waiting', scheduled: true });
                     saveCheckbacks();
                     log(`[checkback] scheduled ${cb.id} for ${getSessionDisplayName(target) || target}: ${checkbacks.describe(cb, now)}`, DIM);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -16290,6 +16347,27 @@ happens until someone clicks it.
         // inside its input box. /api/sessions/send: now if the agent is idle,
         // else queued (`mode`: "queue" always queues, "now" types even
         // mid-turn); a plain shell just gets the line.
+        // API: the message log, for the Messages page. Read-only: agents
+        // send with hop send; people read here.
+        if (parsedUrl.pathname === '/api/messages' && req.method === 'GET') {
+            // What sessions say to each other is for their person, not for
+            // another agent to read across sessions it may not enter.
+            if (resolveActor(req) === 'agent') {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'The message log is for your person to read, in Messages.' }));
+                return;
+            }
+            try { syncMessageLog(); } catch (e) { /* show what is kept */ }
+            const all = messageLog.prune(loadMessageLog()).messages;
+            const name = (n, fallback) => (n ? (getSessionDisplayName(n) || fallback || n) : null);
+            const list = all.slice(-600).map((m) => {
+                const { turnBase, ...rest } = m;
+                return { ...rest, fromName: name(m.from, m.fromName), toName: name(m.to, m.toName) };
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ messages: list }));
+            return;
+        }
         if (parsedUrl.pathname === '/api/sessions/send' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -16309,19 +16387,33 @@ happens until someone clicks it.
                     // Anyone who wrote to you may be answered, even where agents
                     // may not otherwise go.
                     const answering = !!fromSession && messages.mayAnswer(store.items, fromSession, target, now);
+                    const text = String(input.text || '').replace(/[\r\n]+$/, '');
+                    // Between agents (another session, or one outside hop),
+                    // the Messages page keeps it — refused ones included.
+                    const betweenAgents = fromSession ? fromSession !== target : actor === 'agent';
+                    const logRefusal = (status, reason) => {
+                        if (betweenAgents && text.trim()) logAgentMessage({ id: `m_${crypto.randomBytes(6).toString('hex')}`, from: fromSession, to: target, text, at: now, status, reason });
+                    };
                     if (!answering && !canActorAccessSession(actor, getEffectiveSessionConfig(target))) {
+                        logRefusal('refused', 'agent access is off for this session');
                         return reply(403, { error: `${getSessionDisplayName(target) || target} doesn't take messages from agents. Its person can allow it: Enable agent access in the session's menu.` });
                     }
                     if (fromSession && fromSession !== target && messages.pairTraffic(store.items, fromSession, target, now) >= messages.PAIR_MAX) {
+                        logRefusal('held', `${messages.PAIR_MAX} messages between them in ${Math.round(messages.PAIR_WINDOW_MS / 60_000)} minutes: hop stopped the exchange and told them to go to their person`);
                         return reply(429, { error: `${getSessionDisplayName(fromSession) || fromSession} and ${getSessionDisplayName(target) || target} have sent each other ${messages.PAIR_MAX} messages in ${Math.round(messages.PAIR_WINDOW_MS / 60_000)} minutes. Stop here and tell your user; hop sends no more between them for now.` });
                     }
-                    const text = String(input.text || '').replace(/[\r\n]+$/, '');
                     if (!text.trim()) return reply(400, { error: 'Nothing to send' });
                     const { entry, phase } = await sessionEntryAndPhase(target);
-                    if (!entry || entry.live !== true) return reply(409, { error: 'The session is not running' });
+                    if (!entry || entry.live !== true) {
+                        logRefusal('refused', 'the session was not running');
+                        return reply(409, { error: 'The session is not running' });
+                    }
                     const agent = readTurnInfo(target)?.agent || entry.agent || null;
                     // The MCP types into a shell itself (exec/stream tracking).
-                    if (!agent && input.agentOnly) return reply(200, { ok: true, status: 'not-agent' });
+                    if (!agent && input.agentOnly) {
+                        logRefusal('refused', 'a plain shell: no agent there to read it');
+                        return reply(200, { ok: true, status: 'not-agent' });
+                    }
                     if (!agent) {
                         // A plain shell: the line, now.
                         const e2 = await attachTerminalApiClient(target, entry.displayName || target, { actor: actor === 'agent' ? 'agent' : 'system', label: 'send', typeOnly: true });
@@ -16333,6 +16425,7 @@ happens until someone clicks it.
                             sendTerminalInput(e2, '\r');
                             await sleepMs(200);
                         } finally { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
+                        if (betweenAgents) logAgentMessage({ id: `m_${crypto.randomBytes(6).toString('hex')}`, from: fromSession, to: target, text, at: now, status: 'delivered', deliveredAt: Date.now(), reason: 'typed into a shell' });
                         return reply(200, { ok: true, status: 'sent' });
                     }
                     const cb = checkbacks.normalizeCheckback({
@@ -16347,6 +16440,7 @@ happens until someone clicks it.
                     }, now);
                     if (input.mode === 'now') cb.sendNow = true;
                     store.items.push(cb);
+                    if (betweenAgents) logAgentMessage({ id: cb.id, from: fromSession, to: target, text, at: now, status: 'waiting', replyHere: cb.replyHere === true });
                     saveCheckbacks();
                     log(`[queue] ${cb.id} for ${entry.displayName || target} from ${cb.from || '?'}${phase === 'working' ? ' (busy: queued)' : ''}`, DIM);
                     if (input.mode !== 'queue') await attemptQueuedNow(cb);
@@ -23799,6 +23893,8 @@ async function main() {
         // and the session is idle. 15s is finer than any trigger needs.
         setTimeout(runCheckbackSweep, 20000).unref?.();
         setInterval(runCheckbackSweep, 15000).unref?.();
+        // Send-and-wait answers land in the message log as their turns end.
+        setInterval(() => { try { syncMessageLog(); } catch (e) { /* next tick */ } }, 15000).unref?.();
         // Queued messages: within seconds of the turn ending, not a sweep later.
         setInterval(() => {
             if (loadCheckbacks().items.some((c) => c.queued && c.status === 'pending' && !c.paused)) runCheckbackSweep();

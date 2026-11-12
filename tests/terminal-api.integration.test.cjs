@@ -2218,6 +2218,28 @@ fs.writeFileSync(out, r.stdout + r.stderr + '\\nexit=' + r.status + '\\n');
   await until(async () => (await got(bDir)).some((l) => l.endsWith('from the fork')), 25000, 'the fork\'s message');
   assert.match((await got(bDir)).find((l) => l.endsWith('from the fork')), /^\[hop message from session "msgfork"\./);
   assert.equal((await got(bDir)).some((l) => l.includes('as someone else')), false);
+
+  // 8. Messages: the person reads what the agents said to each other, and
+  //    what became of each — after the queue has forgotten them. The answer
+  //    alpha read off beta's turn (3.) is there too.
+  await fs.writeFile(path.join(sessDir, `${B}.turn`), JSON.stringify({ sessionId: `conv-${B}`, agent: 'claude', count: 1, at: new Date().toISOString(), lastMessage: 'Loss is 0.29 now.' }));
+  const log = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/messages', null, userHeaders)).data.messages;
+  const find = (text) => log.find((m) => m.text === text);
+  assert.deepEqual(['from', 'to', 'fromName', 'toName', 'status'].map((k) => find('Please report the loss')?.[k]), [A, B, 'msgalpha', 'msgbeta', 'delivered']);
+  assert.equal(find('Loss is 0.31 and falling')?.from, B);
+  assert.equal(find('Loss is 0.31 and falling')?.status, 'delivered');
+  assert.deepEqual([find('unasked')?.from, find('unasked')?.status], [null, 'refused'], 'an agent outside hop, turned away');
+  assert.equal(find('status?')?.reply, 'Loss is 0.29 now.', 'read off the turn');
+  assert.equal(find('from me'), undefined, 'the person\'s own messages are not agent talk');
+  assert.ok(log.some((m) => /^ping \d+$/.test(m.text) && m.status === 'cancelled'), 'cancelled in the queue');
+  assert.ok(log.some((m) => /^ping \d+$/.test(m.text) && m.status === 'held' && /stopped the exchange/.test(m.reason)), 'the loop brake');
+  assert.equal(log.find((m) => m.text === 'from the fork')?.fromName, 'msgfork');
+  assert.equal(log.some((m) => m.text === 'as someone else'), false);
+  assert.equal(log.some((m) => 'turnBase' in m), false, 'bookkeeping stays inside');
+  const asAgent = await requestJson(state.port, state.sessionSecret, 'GET', '/api/messages', null, agentHeaders);
+  assert.equal(asAgent.status, 403, 'not for agents to read across sessions');
+  const badge = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions')).data.messagesAt;
+  assert.ok(badge >= log[log.length - 1].at, 'the list carries the newest message time');
 });
 
 // Files from a session — the Views shelf: what its agent wrote or named in

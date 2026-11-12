@@ -309,6 +309,14 @@ stopped and told to come to you. Agents get the same over MCP
 (`hop_send_message`; `hop_list_sessions` carries each session's `presence`)
 and `hopa message`.
 
+You can read what they said in **Messages** (in the sidebar, or the phone
+menu). It shows one conversation per pair of sessions, and what became of
+each message: waiting for a turn to end, delivered, turned away, or stopped
+by the ten-minute limit. When an orchestrator waits on another session's
+turn instead of getting a message back, that turn's answer shows there too.
+It is read-only: messaging is for the agents, and you talk to a session in
+its terminal. The log keeps a month, in `~/.hop2/messages.json`.
+
 ### Render LaTeX math (`hop math`)
 
 Glance at a formula without leaving the terminal:

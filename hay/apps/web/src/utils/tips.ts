@@ -12,7 +12,6 @@ export const tips = (isMac: boolean): Tip[] => {
     { id: "queue", text: `${isMac ? "⌘⌥⏎" : "Ctrl+Alt+⏎"} sends what you typed when the agent's turn ends (Codex's Tab, for Claude too). It waits in a card above the terminal, not in the input box.` },
     { id: "math", text: "Point at LaTeX in a terminal, like $E = mc^2$, to see it drawn; click to keep it open, select inside to copy." },
     { id: "side", text: "Views, Briefing, Pulse and Calendar can sit beside the terminal: the ◫ button in each moves it there. While that column is open, whatever you open goes into it." },
-    { id: "catchup", text: `${mod("G")} jumps to the next session with news: a question for you first, then finished turns you haven't read.` },
     { id: "back", text: `${mod("E")} goes back to the session you were just in; press it again to return.` },
     { id: "switch", text: `${mod("K")}, then type part of a session's name (or what it's about) and ⏎. A name nobody has starts a new session.` },
     { id: "drop", text: "Drop a file on a terminal: its path is typed into the session for the agent to use. A file on this machine is used where it is; from anywhere else it is uploaded first." },

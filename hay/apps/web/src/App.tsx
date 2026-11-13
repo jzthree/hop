@@ -28,7 +28,6 @@ import { enableViewBlocks } from "./utils/viewBlocks";
 import { CheckbacksPanel } from "./components/CheckbacksPanel";
 import { parseViewLink, wantsNewTab } from "./utils/viewLinks";
 import { ShortcutsPanel } from "./components/ShortcutsPanel";
-import { nextSessionWithNews } from "./utils/catchUp";
 import { SessionRail, RailIcon, type ClosedSession, type RailNavItem, type Scope as RailScope } from "./components/SessionRail";
 import { CodexAppPanel } from "./components/CodexAppPanel";
 import { DesktopView } from "./components/DesktopView";
@@ -1070,7 +1069,7 @@ const App = () => {
   const shortcutHelpRef = useRef(shortcutHelpOpen);
   shortcutHelpRef.current = shortcutHelpOpen;
   // The app-wide chords — they work on the wall (the main page, where no
-  // session is open) as well as in a session: ⌘G catch up, ⌘B sidebar,
+  // session is open) as well as in a session: ⌘B sidebar,
   // ⌘/ the keyboard guide. Set each render (below), read by one listener.
   const appKeysRef = useRef<(event: KeyboardEvent) => void>(() => {});
   useEffect(() => {
@@ -1078,7 +1077,6 @@ const App = () => {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
-  const catchUpVisitedRef = useRef<{ keys: Set<string>; at: number }>({ keys: new Set(), at: 0 });
 
   // ── Panes ──
   // Any binary nesting of splits; the primary leaf can sit anywhere in it
@@ -4867,28 +4865,6 @@ const App = () => {
       else setRailOpen((v) => !v);
       return;
     }
-    if (key === "g" && (!isMacPlatform || !event.shiftKey)) {
-      grab();
-      // A run of ⌘G walks forward; a pause of a minute starts a fresh one.
-      const run = catchUpVisitedRef.current;
-      if (Date.now() - run.at > 60_000) run.keys = new Set();
-      run.at = Date.now();
-      const here = session && !switcherOpen && status !== "ended" ? session.room : null;
-      if (here) run.keys.add(here);
-      const next = nextSessionWithNews(sessions, here, run.keys);
-      if (!next) { showToast("All caught up — nothing new waiting for you"); return; }
-      run.keys.add(next.internalName || next.name);
-      if (!session) {
-        const path = buildSessionPath(next.displayName || next.name);
-        carryTypeaheadTo(path);
-        window.location.href = path;
-        return;
-      }
-      setViewsOpen(null);
-      setSwitcherOpen(false);
-      switchSession(next);
-      termRef.current?.focus();
-    }
   };
   // The wall is up: the hub page (no session), or the wall over a session.
   // Views as a page is a place of its own, and then the wall is not.
@@ -4957,7 +4933,7 @@ const App = () => {
     };
   })();
   // Side by side, the column follows the selection — a tile engaged on
-  // the wall, ⌘E / ⌘G full screen — unless it was opened on one result.
+  // the wall, ⌘E full screen — unless it was opened on one result.
   // Views opened as a page (a link, an inline card) takes over from a place.
   useEffect(() => { if (viewsOpen && !viewsSide) setPlace(null); }, [viewsOpen, viewsSide]);
   useEffect(() => {

@@ -23,7 +23,6 @@ export const dayRoutine = (isMac: boolean): Array<Row & { title: string }> => {
   const { mod } = shortcutKeys(isMac);
   return [
     { keys: mod("K") + ", type, ⏎", title: "Switch", what: "Type part of a session's name (or what it is about); ↑ ↓ choose, ⏎ opens it. A name nobody has starts a new session." },
-    { keys: mod("G"), title: "Catch up", what: "Jump to the next session with news — a question for you first, then finished turns you have not read." },
     { keys: mod("E"), title: "Go back", what: "To the session you were just in; again to return. " + mod("J") + " / " + mod("L") + " step left and right." },
     { keys: mod("K") + " " + mod("K"), title: "Survey", what: "The wall of every session. Arrows to move, ⏎ to step in, " + (isMac ? "⌘⏎" : "Ctrl+⏎") + " for full screen." },
     ...(isMac ? [{ keys: "⌘⇧V", title: "Read results", what: "The session's results — plots, PDFs, write-ups; ← → step through them. Again to go back to the session." }] : []),

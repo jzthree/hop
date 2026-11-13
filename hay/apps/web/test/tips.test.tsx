@@ -23,7 +23,7 @@ describe("tips", () => {
     expect(new Set(list.map((t) => t.id)).size).toBe(list.length);
     expect(tips(true).find((t) => t.id === "queue")!.text).toMatch(/^⌘⌥⏎/);
     expect(tips(false).find((t) => t.id === "queue")!.text).toMatch(/^Ctrl\+Alt\+⏎/);
-    expect(tips(false).find((t) => t.id === "catchup")!.text).toMatch(/^Ctrl\+Shift\+G/);
+    expect(tips(false).find((t) => t.id === "back")!.text).toMatch(/^Ctrl\+Shift\+E/);
   });
 
   it("the card: Next moves on, × hides it until tomorrow, Turn off for good", () => {

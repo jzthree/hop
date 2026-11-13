@@ -331,8 +331,11 @@ transcript says where each prompt came from, and hop goes by that; a
 question you ask mid-turn stays with that turn's reply even when a notice
 lands after it. It works for Claude, Codex and Antigravity, from their hooks
 (`hop agent-skill install` also tells agents to put the answer in the
-message that ends the turn). The answers are kept for two weeks, in
-`~/.hop2/answers.json`.
+message that ends the turn). Replies are drawn as the agent wrote them:
+tables (a wide one scrolls sideways inside its frame), code blocks with a
+Copy button, numbered and nested lists, task boxes, quotes and links — the
+same markdown rules as the digest, the pulse and markdown views. The
+answers are kept for two weeks, in `~/.hop2/answers.json`.
 
 ### Render LaTeX math (`hop math`)
 
@@ -374,7 +377,8 @@ an Open button that lands the Views reader on that item. Plain terminals
 and the phone see the same delivery as a text box.
 
 HTML, PDF, images, video and markdown all render (markdown is converted at
-serve time — headings, tables, fenced code). A PDF opens in hop's own
+serve time — headings, GitHub tables with their alignment, fenced code,
+numbered and nested lists, task boxes, quotes). A PDF opens in hop's own
 reader: − / + and the % (fit) at its foot, a trackpad pinch or ⌘/Ctrl +
 scroll zooming about the pointer, a two-finger pinch on a phone, `+` `-`
 `0` keys, a drag on the blank paper to pan, and its text still selects.

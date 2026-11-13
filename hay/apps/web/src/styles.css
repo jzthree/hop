@@ -6839,6 +6839,63 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 .prose h4 { margin: 1em 0 0.4em; font: 700 14px/1.3 var(--font-sans); }
 .prose code { font: 0.88em/1.4 var(--font-mono); padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .prose a { color: #6d28d9; text-decoration-color: color-mix(in srgb, #6d28d9 40%, transparent); text-underline-offset: 2px; }
+.prose ol { margin: 0 0 0.7em; padding-left: 1.6em; }
+.prose ol:last-child, .prose blockquote:last-child, .prose .prose-table:last-child, .prose .prose-code:last-child { margin-bottom: 0; }
+.prose li > ul, .prose li > ol { margin: 0.15em 0 0.25em; }
+.prose li > p { margin: 0.3em 0; }
+.prose li::marker { color: var(--ink-muted); }
+.prose ol > li::marker { font-variant-numeric: tabular-nums; }
+.prose h4.prose-h1, .prose h4.prose-h2 { font-size: 15px; }
+.prose h5 { margin: 0.9em 0 0.3em; font: 650 13px/1.3 var(--font-sans); color: var(--ink-muted); }
+.prose h4:first-child, .prose h5:first-child { margin-top: 0; }
+.prose del { color: var(--ink-muted); }
+.prose hr { margin: 1em 0; border: 0; border-top: 1px solid var(--card-line); }
+.prose blockquote {
+  margin: 0 0 0.7em; padding: 1px 0 1px 12px; color: var(--ink-muted);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 35%, var(--card-line));
+}
+.prose .prose-deadlink { text-decoration: underline dotted color-mix(in srgb, var(--ink) 35%, transparent); text-underline-offset: 2px; }
+.prose li.prose-task { list-style: none; margin-left: -1.15em; }
+.prose .prose-box {
+  display: inline-grid; place-items: center; width: 0.95em; height: 0.95em; margin-right: 0.45em; vertical-align: -0.12em;
+  box-sizing: border-box; border-radius: 3px; border: 1.5px solid color-mix(in srgb, var(--ink) 40%, transparent);
+  font: 800 0.68em/1 var(--font-sans); color: var(--accent-fg);
+}
+.prose .prose-box.done { background: var(--accent); border-color: var(--accent); }
+/* Tables: as wide as their figures need and no wider; a table wider than
+   the card scrolls sideways inside its own frame. */
+.prose .prose-table {
+  width: fit-content; max-width: 100%; overflow-x: auto; margin: 0.3em 0 0.9em;
+  border: 1px solid var(--card-line); border-radius: 8px; -webkit-overflow-scrolling: touch;
+}
+.prose .prose-table:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.prose .prose-table table { border-collapse: collapse; font-size: 0.9em; line-height: 1.45; }
+.prose .prose-table th, .prose .prose-table td {
+  padding: 6px 11px; text-align: left; vertical-align: top; min-width: 4.5em;
+  overflow-wrap: break-word; word-break: normal; border-top: 1px solid var(--card-line);
+}
+.prose .prose-table th + th, .prose .prose-table td + td { border-left: 1px solid var(--card-line); }
+.prose .prose-table thead th { border-top: 0; font-weight: 650; background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.prose .prose-table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--ink) 2.5%, transparent); }
+.prose .prose-table .num { text-align: right; font-variant-numeric: tabular-nums; min-width: 0; }
+.prose .prose-table .nw { white-space: nowrap; }
+.prose .prose-table td:not(.nw) { min-width: 12em; }
+.prose .prose-table code { white-space: nowrap; }
+/* Code blocks: a command to copy, a log to read; long lines scroll. */
+.prose .prose-code { position: relative; margin: 0.3em 0 0.9em; }
+.prose .prose-code pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto; border-radius: 8px; tab-size: 4;
+  background: color-mix(in srgb, var(--ink) 5%, transparent); border: 1px solid var(--card-line);
+  font: 12.5px/1.5 var(--font-mono); color: var(--ink); white-space: pre; overflow-wrap: normal;
+}
+.prose .prose-code pre code { font: inherit; padding: 0; background: none; border-radius: 0; white-space: inherit; }
+.prose .prose-copy {
+  position: absolute; top: 5px; right: 5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; transform: none;
+  border: 1px solid var(--card-line); background: var(--card-bg); color: var(--ink-muted);
+  font: 600 11px/1.2 var(--font-sans); opacity: 0; transition: opacity 120ms;
+}
+.prose .prose-code:hover .prose-copy, .prose .prose-copy:focus-visible { opacity: 1; }
+@media (hover: none) { .prose .prose-copy { opacity: 0.85; } }
 
 /* The pulse: a journal page. */
 .pulse-title { margin: 0 0 12px; font: 600 32px/1.15 var(--serif); letter-spacing: -0.015em; color: var(--ink); }

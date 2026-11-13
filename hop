@@ -26,6 +26,7 @@ const messageLog = require('./lib/message-log');
 const answers = require('./lib/answers');
 const nebulaRelay = require('./lib/nebula-relay');
 const notebookView = require('./lib/notebook-view');
+const markdownHtml = require('./lib/markdown-html');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
@@ -302,86 +303,12 @@ function writeViewMeta(session, meta) {
 
 // Markdown, rendered at SERVE time rather than converted at publish time: the
 // stored file stays the file the agent wrote (re-publishable, diffable), and
-// the URL still reads like it. Deliberately small and dependency-free — hop
-// ships as one script and a markdown dependency is not worth a node_modules
-// entry. Covers what an agent actually emits in a result: headings, fenced
-// code, lists, tables, quotes, links, emphasis.
+// the URL still reads like it. The parser is the web app's own (Answers and
+// the digest draw with it), generated into lib/markdown.js so hop still needs
+// no node_modules: headings, fenced code, lists (numbered, nested, task
+// boxes), GitHub tables, quotes, links, emphasis.
 function renderMarkdown(src, title, theme) {
-    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const blocks = [];
-    // Fenced code first, so nothing below rewrites its insides.
-    let text = src.replace(/```([\w-]*)\n([\s\S]*?)```/g, (m, lang, body) => {
-        blocks.push(`<pre class="code"><code>${esc(body.replace(/\n$/, ''))}</code></pre>`);
-        return `\u0000BLOCK${blocks.length - 1}\u0000`;
-    });
-    text = esc(text);
-    const inline = (s) => s
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">')
-        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>')
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
-    const out = [];
-    const lines = text.split('\n');
-    let para = [], list = null, table = null;
-    const flushPara = () => { if (para.length) { out.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
-    const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`); list = null; } };
-    const flushTable = () => {
-        if (!table) return;
-        const cells = (row, tag) => row.map((c) => `<${tag}>${inline(c.trim())}</${tag}>`).join('');
-        out.push(`<table><thead><tr>${cells(table.head, 'th')}</tr></thead><tbody>`
-            + table.rows.map((r) => `<tr>${cells(r, 'td')}</tr>`).join('') + '</tbody></table>');
-        table = null;
-    };
-    const flushAll = () => { flushPara(); flushList(); flushTable(); };
-    const splitRow = (l) => l.replace(/^\||\|$/g, '').split('|');
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (/^\u0000BLOCK\d+\u0000$/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
-        if (!line.trim()) { flushAll(); continue; }
-        // A table needs its separator row to be a table at all.
-        if (!table && line.includes('|') && /^\s*\|?[\s:-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1] || '')) {
-            flushPara(); flushList();
-            table = { head: splitRow(line), rows: [] };
-            i++;
-            continue;
-        }
-        if (table) {
-            if (line.includes('|')) { table.rows.push(splitRow(line)); continue; }
-            flushTable();
-        }
-        let m;
-        if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
-            flushAll();
-            out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`);
-        } else if (/^\s*([-*_])\s*\1\s*\1[\s\S]*$/.test(line) && line.trim().length >= 3
-                   && /^[-*_\s]+$/.test(line)) {
-            flushAll(); out.push('<hr>');
-        } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
-            flushPara(); flushTable();
-            if (list?.tag !== 'ul') { flushList(); list = { tag: 'ul', items: [] }; }
-            list.items.push(m[1]);
-        } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
-            flushPara(); flushTable();
-            if (list?.tag !== 'ol') { flushList(); list = { tag: 'ol', items: [] }; }
-            list.items.push(m[1]);
-        } else if ((m = line.match(/^&gt;\s?(.*)$/))) {
-            flushPara(); flushList(); flushTable();
-            out.push(`<blockquote>${inline(m[1])}</blockquote>`);
-        } else if (list && !para.length) {
-            // Lazy continuation: a wrapped bullet is still that bullet.
-            // Agents hard-wrap long list items constantly, and treating each
-            // wrap as a new block rendered a clean summary as a pile of
-            // one-item lists with orphaned paragraphs between them.
-            list.items[list.items.length - 1] += ' ' + line.trim();
-        } else {
-            flushList(); flushTable();
-            para.push(line.trim());
-        }
-    }
-    flushAll();
-    const body = out.join('\n').replace(/\u0000BLOCK(\d+)\u0000/g, (m, i) => blocks[Number(i)]);
-    return viewPageShell(title, body, theme);
+    return viewPageShell(title, markdownHtml.markdownToHtml(src), theme);
 }
 
 // The page every rendered view lives in. Tokened light AND dark palettes:
@@ -410,13 +337,19 @@ code { font-family:ui-monospace,"SF Mono",monospace; font-size:.87em; background
 pre.code { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px 14px;
   overflow-x:auto; } pre.code code { background:none; padding:0; font-size:.85rem; }
 blockquote { margin:1em 0; padding:.2em 0 .2em 1em; border-left:3px solid var(--line); color:var(--muted); }
+blockquote > :first-child { margin-top:0; } blockquote > :last-child { margin-bottom:0; }
 table { border-collapse:collapse; width:100%; margin:1.2em 0; font-size:.93rem; display:block; overflow-x:auto; }
-th,td { border:1px solid var(--line); padding:7px 10px; text-align:left; }
+th,td { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; }
 th { background:var(--panel); position:sticky; top:0; }
-th.num,td.num { text-align:right; font-variant-numeric:tabular-nums;
-  font-family:ui-monospace,"SF Mono",monospace; font-size:.88em; }
+th.num,td.num { text-align:right; font-variant-numeric:tabular-nums; }
+td.num { font-family:ui-monospace,"SF Mono",monospace; font-size:.88em; }
+.nw { white-space:nowrap; } td.wrap { min-width:12em; }
 tbody tr:nth-child(even) td { background:color-mix(in srgb, var(--panel) 45%, transparent); }
 hr { border:0; border-top:1px solid var(--line); margin:2em 0; }
+li > p { margin:.35em 0; } li > ul, li > ol { margin:.2em 0; }
+li.task { list-style:none; margin-left:-1.4em; } li.task input { margin:0 .45em 0 0; vertical-align:-.1em; }
+h5,h6 { font-size:1rem; margin:1.3em 0 .4em; } h6 { color:var(--muted); }
+del { color:var(--muted); }
 img { max-width:100%; border-radius:10px; }
 .foot { color:var(--muted); font-size:.8rem; margin-top:1.1em; }
 </style></head><body>\n${body}\n</body></html>`;

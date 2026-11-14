@@ -4518,15 +4518,13 @@ function isServerRunning() {
     ensurePrivateFile(STATE_FILE);
     try {
         const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-        // Check if the process is still alive
-        try {
-            process.kill(state.pid, 0);
-            return state;
-        } catch (e) {
-            // Process is dead, clean up
-            fs.unlinkSync(STATE_FILE);
-            return null;
-        }
+        if (isProcessAlive(state.pid)) return state;
+        // Gone (ESRCH): clean up. Not on EPERM: an agent's sandbox (agy's
+        // terminal, codex's seatbelt) refuses even signal 0 to the daemon,
+        // and taking that for death unlinked the LIVE daemon's record — every
+        // CLI and agent after it read "Hop is not running" while it ran.
+        fs.unlinkSync(STATE_FILE);
+        return null;
     } catch (e) {
         return null;
     }
@@ -10277,13 +10275,15 @@ function isExternalTerminalBackend() {
     return TERMINAL_BACKEND === 'external';
 }
 
+// EPERM means the process exists but this caller may not signal it (a
+// sandboxed agent's shell) — alive. Only ESRCH means it is gone.
 function isProcessAlive(pid) {
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
         process.kill(pid, 0);
         return true;
     } catch (e) {
-        return false;
+        return e && e.code === 'EPERM';
     }
 }
 

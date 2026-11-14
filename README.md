@@ -241,6 +241,8 @@ conversation in a new session — Claude and Codex alike) and **Continue in
 Codex… / Continue in Claude…** (the transcript is extracted to a file and the
 other tool reads all of it before it says a word). The new session lands
 beside its source: same folder, same directory, labelled by what it runs.
+It is a new session: its Views, its briefing and its pulse start empty, and
+what its source made or said before the fork stays with the source.
 The same operation is one call for agents:
 
 ```bash

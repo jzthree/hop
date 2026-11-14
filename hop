@@ -2883,11 +2883,21 @@ function sessionFileItem(internalName, e, st) {
         path: `/sessionfile/${encodeURIComponent(internalName)}/${id}/inline`
     };
 }
+// When a session's own history starts: a fork is a new session, and the
+// conversation it copied from its source (a claude fork's transcript opens
+// with the whole of it, at the source's times) is the source's, not its own.
+// 0 for any other session.
+function sessionOwnHistoryStart(internalName) {
+    const t = Date.parse(readClaudeSessionMeta(internalName)?.forkedAt || '');
+    return Number.isFinite(t) ? t : 0;
+}
 function sessionFilesList(internalName) {
     const published = publishedViewSources(internalName);
+    const since = sessionOwnHistoryStart(internalName);
     const items = [];
     for (const e of sessionFileEntries(internalName).values()) {
         if (published.has(e.path)) continue;
+        if (since && e.at && e.at < since) continue;   // the source's files, not the fork's
         let st;
         try { st = fs.statSync(e.path); } catch (err) { continue; }
         if (!st.isFile()) continue;
@@ -14815,6 +14825,13 @@ happens until someone clicks it.
                         kind = 'codex';
                     }
                     log(`[fork] ${sourceDisplay} (${sourceKind}) → ${forkName}: ${kind}${command ? ` — ${command.slice(0, 80)}` : ' (shell)'}`, DIM);
+                    // Where the fork's OWN history starts. A claude fork's
+                    // transcript opens with a copy of its source's whole
+                    // conversation, at the source's times; everything hop
+                    // reads from a transcript as this session's (its files,
+                    // the briefing's "since you last looked") starts here,
+                    // before the new process has written a line.
+                    const forkedAt = new Date().toISOString();
 
                     // The fork inherits the source's origin: forking an agent
                     // worker makes another agent worker; forking your own
@@ -14861,6 +14878,8 @@ happens until someone clicks it.
                         createdBy,
                         folderId: folderId || undefined,
                         forkedFrom: source,
+                        forkedAt,
+                        createdAt: forkedAt,
                         ...(handoff ? { handoffFrom: sourceKind, handoffTo: receiver } : {})
                     });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -14947,7 +14966,10 @@ happens until someone clicks it.
                     log(`[codex] continue ${id.slice(0, 8)}… (${holder || 'free'}) → ${name}: ${command}`, DIM);
                     await ensureExternalRuntimeSession(internal, cwd, name, { createdBy: 'user', saveDefinition: false, command });
                     rememberRuntimeSessionMetadata(internal, { type: 'terminal', displayName: name, cwd, createdBy: 'user' });
-                    writeClaudeSessionMeta(internal, { internalName: internal, displayName: name, cwd, createdBy: 'user', fromCodexApp: id });
+                    // A fork of the app's thread is a new session: its own
+                    // history starts now (see /api/sessions/fork).
+                    const at = new Date().toISOString();
+                    writeClaudeSessionMeta(internal, { internalName: internal, displayName: name, cwd, createdBy: 'user', fromCodexApp: id, createdAt: at, ...(kind === 'fork' ? { forkedAt: at } : {}) });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, internalName: internal, name, kind, holder }));
                 } catch (e) {

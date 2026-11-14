@@ -2433,6 +2433,54 @@ test('files from a session: listed from its record, read in place, pinned as a v
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
 });
 
+// A fork is a new session. A claude fork's transcript opens with a copy of
+// its source's whole conversation, at the source's times — and its Views
+// shelf listed the source's files as its own.
+test('a fork starts with no files of its own: what its source made stays with the source', async () => {
+  const proj = path.join(tempDir, 'forkfiles');
+  await fs.mkdir(proj, { recursive: true });
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a5b2f0b10000000049454e44ae426082', 'hex');
+  await fs.writeFile(path.join(proj, 'before.png'), PNG);
+  await fs.writeFile(path.join(proj, 'after.png'), PNG);
+  const fakeClaude = path.join(tempDir, 'claude-fake-forkfiles');
+  await fs.writeFile(fakeClaude, '#!/bin/sh\nsleep 30\n', { mode: 0o755 });
+  const configDir = path.join(tempDir, 'claude-cfg-forkfiles');
+  const pdir = path.join(configDir, 'projects', proj.replace(/[^A-Za-z0-9]/g, '-'));
+  await fs.mkdir(pdir, { recursive: true });
+  const said = (text, at) => JSON.stringify({ type: 'assistant', cwd: proj, timestamp: at, message: { content: [{ type: 'text', text }] } }) + '\n';
+  const record = (internal, sessionId) => fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.json`),
+    JSON.stringify({ sessionId, cwd: proj, configDir, launchCmd: fakeClaude, updatedAt: new Date().toISOString() }), { mode: 0o600 });
+
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'forkfilessrc', cwd: proj }, userHeaders);
+  assert.equal(create.status, 200, JSON.stringify(create.data));
+  const source = create.data.sessionName;
+  const srcId = '55555555-6666-7777-8888-999999999999';
+  const inherited = said('The plot is at before.png.', new Date(Date.now() - 3600e3).toISOString());
+  await fs.writeFile(path.join(pdir, `${srcId}.jsonl`), inherited);
+  await record(source, srcId);
+
+  const fork = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', { internalName: source });
+  assert.equal(fork.status, 200, JSON.stringify(fork.data));
+  assert.equal(fork.data.kind, 'claude');
+  const forked = fork.data.internalName;
+  const meta = JSON.parse(await fs.readFile(path.join(hopHome, 'claude-sessions', `${forked}.meta`), 'utf8'));
+  assert.equal(meta.forkedFrom, source);
+  assert.ok(Math.abs(Date.parse(meta.forkedAt) - Date.now()) < 60e3, `forkedAt is the moment of the fork, got ${meta.forkedAt}`);
+
+  // What claude's --fork-session writes: the source's lines, then its own.
+  const forkId = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+  await fs.writeFile(path.join(pdir, `${forkId}.jsonl`), inherited + said('New plot: after.png.', new Date(Date.now() + 1000).toISOString()));
+  await record(forked, forkId);
+
+  const names = async (internal) => (await requestJson(state.port, state.sessionSecret, 'GET', `/api/sessions/files?name=${internal}`, null, userHeaders)).data.items.map((i) => i.name);
+  assert.deepEqual(await names(forked), ['after.png'], 'only what the fork itself made');
+  assert.deepEqual(await names(source), ['before.png'], 'the source keeps its own');
+
+  for (const name of [source, forked]) {
+    await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name, internalName: name });
+  }
+});
+
 // A view that links to hop by another of its addresses (an agent's redirect
 // to the public https://hop…/s/<server>/) used to open, inside the Mac app's
 // 127.0.0.1 frame, on a signed-out sign-in page whose passkey button did

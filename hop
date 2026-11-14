@@ -6462,7 +6462,10 @@ function agyResumeFlags(launchCmd) {
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         const [flag, inline] = a.split('=');
-        if (alone.has(a)) keep.push(a);
+        // Once each: an `agy()` shell wrapper adds --dangerously-skip-
+        // permissions to every launch, recorded launches included, so a
+        // kept copy grew by one on every restore (claude's did the same).
+        if (alone.has(a)) { if (!keep.includes(a)) keep.push(a); }
         else if (withValue.has(flag)) {
             const v = inline ?? argv[i + 1];
             if (inline === undefined) i += 1;

@@ -1333,7 +1333,8 @@ test('antigravity conversations continue in any CLI, and any continue in antigra
   ].map((e) => JSON.stringify(e)).join('\n') + '\n');
   await fs.mkdir(path.join(hopHome, 'claude-sessions'), { recursive: true });
   await fs.writeFile(path.join(hopHome, 'claude-sessions', `${internal}.agy`), JSON.stringify({
-    sessionId: conv, agent: 'antigravity', cwd: tempDir, launchCmd: 'agy --model gemini-x --dangerously-skip-permissions',
+    // Twice, as an `agy()` wrapper records it: kept once.
+    sessionId: conv, agent: 'antigravity', cwd: tempDir, launchCmd: 'agy --dangerously-skip-permissions --model gemini-x --dangerously-skip-permissions',
     transcriptPath: path.join(logs, 'transcript.jsonl'), updatedAt: new Date().toISOString()
   }), { mode: 0o600 });
 
@@ -1355,7 +1356,7 @@ test('antigravity conversations continue in any CLI, and any continue in antigra
   assert.match(fork.data.name, /^agysrc-fork\d*$/);
   let argv = '';
   for (let i = 0; i < 40 && !argv; i++) { await delay(150); argv = await fs.readFile(argvFile, 'utf8').catch(() => ''); }
-  assert.match(argv, /^--model\ngemini-x\n--dangerously-skip-permissions\n-i\nRead the ENTIRE file /, `agy -i with the source's flags, got ${JSON.stringify(argv)}`);
+  assert.match(argv, /^--dangerously-skip-permissions\n--model\ngemini-x\n-i\nRead the ENTIRE file /, `agy -i with the source's flags, each once, got ${JSON.stringify(argv)}`);
   assert.ok(argv.includes(fork.data.extract.path), 'the prompt names the extract');
   assert.match(argv, /previous Antigravity conversation/);
   // hop's hooks are now in (the test's) agy config, so the fork is restorable.

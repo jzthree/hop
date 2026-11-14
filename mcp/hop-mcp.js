@@ -82,8 +82,10 @@ function codexPresetCommand(ceiling = DEFAULT_AGENT_PERMISSION_CEILING) {
 function antigravityPresetCommand(ceiling = DEFAULT_AGENT_PERMISSION_CEILING) {
   // Antigravity CLI (`agy`): a managed worker cannot answer its permission
   // prompts, so at the top ceiling it approves its own tools; below, it runs
-  // in auto mode inside agy's terminal sandbox.
-  return ceiling === 'bypassPermissions' ? 'agy --dangerously-skip-permissions' : 'agy --mode auto';
+  // in auto mode inside agy's terminal sandbox. `command`, as for codex: an
+  // `agy()` shell function that skips permissions by default would apply
+  // the flag twice at the top and lift the cap below it.
+  return ceiling === 'bypassPermissions' ? 'command agy --dangerously-skip-permissions' : 'command agy --mode auto';
 }
 
 function withAgentSessionMarker(task) {

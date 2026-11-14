@@ -140,6 +140,29 @@ export const hasUnseenViews = (
 
 const extOf = (name: string) => (name.split(".").pop() || "").toLowerCase();
 const isImage = (name: string) => ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(extOf(name));
+
+// An image view as PNG bytes, the one image type every clipboard takes: PNGs
+// as they are, anything else (JPEG, WebP, SVG) drawn once at its own size.
+async function imageAsPng(src: string): Promise<Blob> {
+  const res = await fetch(src, { credentials: "same-origin" });
+  if (!res.ok) throw new Error(`image ${res.status}`);
+  const blob = await res.blob();
+  if (blob.type === "image/png") return blob;
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth || 1600;   // an SVG without a size
+    canvas.height = img.naturalHeight || 1200;
+    canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("no png"))), "image/png"));
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 const isVideo = (name: string) => ["mp4", "mov", "webm", "m4v", "ogv"].includes(extOf(name));
 const isAudio = (name: string) => ["mp3", "m4a", "wav", "flac", "aac", "ogg", "oga", "opus"].includes(extOf(name));
 const isPdf = (name: string) => extOf(name) === "pdf";
@@ -490,6 +513,15 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
         return;
       }
       if (open) {
+        // ⌘C / Ctrl-C on an open image with nothing selected: the picture.
+        if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "c"
+            && open.kind !== "server" && open.kind !== "link" && isImage(open.name)
+            && !(window.getSelection()?.toString())) {
+          event.preventDefault();
+          event.stopPropagation();
+          copyImage(open);
+          return;
+        }
         const dir = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
           : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
         if (dir) { event.preventDefault(); event.stopPropagation(); step(dir); }
@@ -565,6 +597,23 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
       setCopied(i.path);
       window.setTimeout(() => setCopied((c) => (c === i.path ? null : c)), 1400);
     }).catch(() => { /* clipboard denied — ↗ still carries the URL */ });
+  };
+
+  // The picture alone, as Preview copies it. A browser's own Copy Image also
+  // puts HTML naming the image's URL on the clipboard; Google Docs pastes
+  // from that by fetching the URL from Google's servers, which hop's login
+  // turns away, so nothing pastes. (The Mac app's Copy Image is cleaned the
+  // same way natively.) Async ClipboardItem: built inside the click so Safari
+  // keeps the gesture; the PNG is made after.
+  const copyImage = (i: ViewItem) => {
+    const key = "img:" + i.path;
+    const done = (ok: boolean) => {
+      setCopied(ok ? key : "img-failed:" + i.path);
+      window.setTimeout(() => setCopied((c) => (c === key || c === "img-failed:" + i.path ? null : c)), 1600);
+    };
+    if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) { done(false); return; }
+    navigator.clipboard.write([new ClipboardItem({ "image/png": imageAsPng(i.path) })])
+      .then(() => done(true), () => done(false));
   };
 
   // A public link to one view: made, copied, and stopped here. hop keeps one
@@ -819,6 +868,13 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
           )}
           <button type="button" className="views-act" title="Open in a new tab" aria-label="Open in a new tab"
                   onClick={() => window.open(hrefFor(open), "_blank", "noopener")}>↗</button>
+          {open.kind !== "server" && open.kind !== "link" && isImage(open.name) && (
+            <button type="button" className="views-act views-copy-img"
+                    title="Copy the image itself (⌘C), to paste into Google Docs, Slides, Keynote…"
+                    aria-label="Copy image" onClick={() => copyImage(open)}>
+              {copied === "img:" + open.path ? "✓ Copied" : copied === "img-failed:" + open.path ? "Copy failed" : "Copy image"}
+            </button>
+          )}
           <button type="button" className="views-act" title={copied === open.path ? "Copied" : "Copy link"} aria-label="Copy link"
                   onClick={() => copyLink(open)}>{copied === open.path ? "✓" : "⧉"}</button>
           {open.kind === "found" && (

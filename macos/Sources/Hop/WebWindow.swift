@@ -271,6 +271,64 @@ final class HopWebView: WKWebView {
         }
         return super.draggingEntered(sender)
     }
+
+    /// Copy Image puts the picture on the clipboard as Preview does, and
+    /// nothing else. WebKit's own copy also carries the image's URL and a web
+    /// archive naming it; Google Docs pastes from those by fetching the URL
+    /// from Google's servers — a hop URL behind its login (or 127.0.0.1) —
+    /// and nothing pastes. WebKit still does the copy; what it wrote is then
+    /// cut down to PNG and TIFF.
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        for item in menu.items where item.identifier?.rawValue == "WKMenuItemIdentifierCopyImage" {
+            guard let action = item.action, action != #selector(copyPictureOnly(_:)) else { continue }
+            item.representedObject = OriginalMenuAction(target: item.target, action: action)
+            item.target = self
+            item.action = #selector(copyPictureOnly(_:))
+        }
+    }
+
+    private final class OriginalMenuAction: NSObject {
+        let target: AnyObject?
+        let action: Selector
+        init(target: AnyObject?, action: Selector) { self.target = target; self.action = action }
+    }
+
+    @objc private func copyPictureOnly(_ sender: NSMenuItem) {
+        guard let original = sender.representedObject as? OriginalMenuAction else { return }
+        let pasteboard = NSPasteboard.general
+        let before = pasteboard.changeCount
+        NSApp.sendAction(original.action, to: original.target, from: sender)
+        Self.keepOnlyPicture(on: pasteboard, after: before, triesLeft: 60)
+    }
+
+    /// The web process writes the pasteboard over IPC, so wait for its copy to
+    /// land (a new change count with image data), let the rest of that write
+    /// finish, then replace it with the picture alone — unless something else
+    /// has been copied meanwhile.
+    private static func keepOnlyPicture(on pasteboard: NSPasteboard, after count: Int, triesLeft: Int) {
+        let landed = pasteboard.changeCount != count
+            && (pasteboard.data(forType: .png) != nil || pasteboard.data(forType: .tiff) != nil)
+        guard landed else {
+            if triesLeft > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    keepOnlyPicture(on: pasteboard, after: count, triesLeft: triesLeft - 1)
+                }
+            }
+            return
+        }
+        let copied = pasteboard.changeCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard pasteboard.changeCount == copied else { return }
+            let tiff = pasteboard.data(forType: .tiff)
+            let png = pasteboard.data(forType: .png)
+                ?? tiff.flatMap { NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:]) }
+            guard let png else { return }
+            pasteboard.clearContents()
+            pasteboard.setData(png, forType: .png)
+            if let tiff { pasteboard.setData(tiff, forType: .tiff) }
+        }
+    }
 }
 
 /// One window as it was when the app quit (see AppDelegate's restore).

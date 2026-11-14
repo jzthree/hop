@@ -7307,7 +7307,7 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 .drawer-settings-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; }
 /* Public links (Share in the reader): a toggle in the bar, a strip under it
    with the link, and a quiet chip on shared cards. */
-.views-act.views-share { width: auto; padding: 0 10px; font: 600 12px/1 var(--font-sans); }
+.views-act.views-share, .views-act.views-copy-img { width: auto; padding: 0 10px; font: 600 12px/1 var(--font-sans); white-space: nowrap; }
 .views-act.views-share.on { color: var(--settled, #16a34a); background: color-mix(in srgb, var(--settled, #16a34a) 12%, transparent); }
 .views-sharebar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;

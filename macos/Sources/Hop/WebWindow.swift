@@ -278,24 +278,30 @@ final class HopWebView: WKWebView {
     /// from Google's servers — a hop URL behind its login (or 127.0.0.1) —
     /// and nothing pastes. WebKit still does the copy; what it wrote is then
     /// cut down to PNG and TIFF.
+    ///
+    /// The item's representedObject is WebKit's and must stay untouched: its
+    /// forwardContextMenuAction: casts it to WKUserDataWrapper with a checked
+    /// cast, and anything else there crashes the app. The original target and
+    /// action are kept here instead, for the last menu opened (one at a time).
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
         for item in menu.items where item.identifier?.rawValue == "WKMenuItemIdentifierCopyImage" {
             guard let action = item.action, action != #selector(copyPictureOnly(_:)) else { continue }
-            item.representedObject = OriginalMenuAction(target: item.target, action: action)
+            copyImageOriginal = CopyImageOriginal(item: item, target: item.target, action: action)
             item.target = self
             item.action = #selector(copyPictureOnly(_:))
         }
     }
 
-    private final class OriginalMenuAction: NSObject {
+    private struct CopyImageOriginal {
+        weak var item: NSMenuItem?
         let target: AnyObject?
         let action: Selector
-        init(target: AnyObject?, action: Selector) { self.target = target; self.action = action }
     }
+    private var copyImageOriginal: CopyImageOriginal?
 
     @objc private func copyPictureOnly(_ sender: NSMenuItem) {
-        guard let original = sender.representedObject as? OriginalMenuAction else { return }
+        guard let original = copyImageOriginal, original.item === sender else { return }
         let pasteboard = NSPasteboard.general
         let before = pasteboard.changeCount
         NSApp.sendAction(original.action, to: original.target, from: sender)

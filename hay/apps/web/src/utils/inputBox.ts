@@ -17,9 +17,13 @@
 //
 // Antigravity's agy draws the same box (`> `, rules) but never reads the
 // mouse, so hop moves its cursor with arrow keys instead of a click (verified
-// against agy 1.5: one character per arrow, across wrapped rows). agy parks
-// its cursor ON the last character typed: the insertion point is one cell to
-// the right of where the terminal shows the cursor.
+// against agy 1.5 and 1.5.9: one character per arrow, across wrapped rows).
+// Where agy shows its cursor changed between them: 1.5 parked it ON the last
+// character typed (the insertion point one cell right), 1.5.9 shows it at
+// the insertion point — and a session started before an update still runs
+// the older one. So a walk does not start from the cursor: it goes to the
+// text's start first (← there does nothing), then right (agyWalkTo). Not the
+// end: spaces typed there are never drawn, so the screen cannot count them.
 
 const RULE = /^\s*[─━]{8,}/;
 const PROMPT = /^\s*[❯›>](\s|$)/;
@@ -107,6 +111,18 @@ export const boxIndexAt = (line: (row: number) => string | undefined, box: BoxRo
 
 /** The arrow keys that move a cursor `delta` characters (right when positive). */
 export const arrowWalk = (delta: number): string => (delta > 0 ? "\x1b[C" : "\x1b[D").repeat(Math.abs(delta));
+
+/**
+ * The arrow keys that put agy's insertion point at `want`, whichever way the
+ * running agy shows its cursor (`shown`: the cursor's place in the text) —
+ * at the insertion point, or one cell left of it. Enough ← to reach the
+ * text's start from either, then → to `want`.
+ */
+export const agyWalkTo = (shown: number, want: number): string =>
+  arrowWalk(-(Math.max(0, shown) + 1)) + arrowWalk(Math.max(0, want));
+
+/** agy's cursor, shown at `shown`, says its insertion point is `want` — in either way of showing it. */
+export const agyCursorAt = (shown: number, want: number): boolean => shown === want || shown === want - 1;
 
 /** A left click at a viewport cell, in the mouse encoding the app asked for. */
 export const mouseClick = (col: number, row: number, encoding: string): { press: string; release: string } => {

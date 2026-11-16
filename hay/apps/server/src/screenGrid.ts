@@ -124,6 +124,26 @@ const withHyperlinks = (term: HeadlessTerminal, serialized: string, scrollback: 
   }
 };
 
+// The serialize addon puts the cursor back with RELATIVE moves, counted from
+// where its own text left off — and after a row written to the last column
+// it counts from one past the edge, where xterm clamps first: the replayed
+// cursor landed one cell left. Antigravity's status line ends at the right
+// edge, so every snapshot of agy misplaced its cursor, and what agy drew next
+// (the letter typed) landed on the wrong cell in the browser. The live
+// screen's own position, absolute, ends the snapshot.
+type CursorBuffer = { cursorX?: number; cursorY?: number };
+const withCursor = (term: HeadlessTerminal, serialized: string): string => {
+  try {
+    const buf = term.buffer?.active as CursorBuffer | undefined;
+    const x = buf?.cursorX, y = buf?.cursorY;
+    // Under origin mode a position counts from the scroll region, unknown here.
+    if (!Number.isInteger(x) || !Number.isInteger(y) || (term as { modes?: { originMode?: boolean } }).modes?.originMode) return serialized;
+    return `${serialized}\x1b[${(y as number) + 1};${Math.min(x as number, Math.max(0, (term.cols ?? 1) - 1)) + 1}H`;
+  } catch {
+    return serialized;
+  }
+};
+
 export const createScreenGrid = (cols: number, rows: number): ScreenGrid | null => {
   if (!deps) return null;
   let term: HeadlessTerminal;
@@ -194,7 +214,7 @@ export const createScreenGrid = (cols: number, rows: number): ScreenGrid | null 
           if (disposed) { callback(null); return; }
           try {
             const sb = Math.max(0, Math.min(scrollback, GRID_SCROLLBACK));
-            callback(withHyperlinks(term, addon.serialize({ scrollback: sb }), sb));
+            callback(withCursor(term, withHyperlinks(term, addon.serialize({ scrollback: sb }), sb)));
           } catch {
             callback(null);
           }

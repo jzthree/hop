@@ -67,7 +67,7 @@ import { currentNames, renamer, threadFor, useBriefing } from "./utils/briefingF
 import { pulseItemsFor, usePulse, type PulseAction } from "./utils/pulseFeed";
 import { QueueCard, normalizeQueued, type QueuedMessage } from "./components/QueueCard";
 import { sendToSession } from "./utils/quickReply";
-import { arrowWalk, boxIndexAt, clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
+import { agyCursorAt, agyWalkTo, boxIndexAt, clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscreenChord";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
@@ -1669,18 +1669,22 @@ const App = () => {
     !!termRef.current && remoteMouseReportingRef.current
     && (foregroundIsClaude() || currentSessionAgentRef.current?.() === "codex");
   // Antigravity's box: the same edits, made with arrow keys (agy never reads
-  // the mouse, so a drag already selects natively). Its insertion point is
-  // one cell right of the cursor it shows (utils/inputBox).
+  // the mouse, so a drag already selects natively). Its cursor shows the
+  // insertion point, or (agy 1.5) one cell left of it: walks go by the
+  // text's start, the same in both (utils/inputBox).
   const agyBox = () =>
     !!termRef.current && !remoteMouseReportingRef.current && currentSessionAgentRef.current?.() === "antigravity";
   const sendKeysRaw = (data: string) => {
     if (!data || wsRef.current?.readyState !== WebSocket.OPEN) return;
     sendMessage({ type: "input", data });
   };
-  const agyCursorIndex = (t: Terminal, box: { start: number; end: number }, line: (r: number) => string | undefined) => {
+  type Box = { start: number; end: number };
+  const agyShown = (t: Terminal, box: Box, line: (r: number) => string | undefined) => {
     const buf = t.buffer.active;
-    return boxIndexAt(line, box, buf.baseY + buf.cursorY, buf.cursorX + 1, t.cols);
+    return boxIndexAt(line, box, buf.baseY + buf.cursorY, buf.cursorX, t.cols);
   };
+  const agyWalk = (t: Terminal, box: Box, line: (r: number) => string | undefined, want: number) =>
+    agyWalkTo(agyShown(t, box, line), want);
   // A mouse report goes straight to the app — not through the typing path,
   // which would mark this window as typing.
   const sendMouseClick = (col: number, row: number) => {
@@ -1738,13 +1742,15 @@ const App = () => {
       }
       for (const d of held) handleUserInput(d);
     };
-    if (agy) sendKeysRaw(arrowWalk(want - agyCursorIndex(t, box, line)));
+    const walk = agy ? agyWalk(t, box, line, want) : "";
+    if (agy) sendKeysRaw(walk);
     else sendMouseClick(target.col, row);
     void (async () => {
       const t0 = Date.now();
       // Claude redraws its cursor after the click; that can take a moment.
-      while (Date.now() - t0 < 2500) {
-        if (agy ? agyCursorIndex(t, box, line) === want
+      // agy takes its arrows one at a time: a long box takes longer.
+      while (Date.now() - t0 < 2500 + walk.length) {
+        if (agy ? agyCursorAt(agyShown(t, box, line), want)
           : buf.baseY + buf.cursorY === target.row && buf.cursorX === target.col) { finish(true); return; }
         await new Promise((r) => window.setTimeout(r, 25));
       }
@@ -1780,7 +1786,7 @@ const App = () => {
     const row = buf.viewportY + cell.row;
     if (!box || row < box.start || row > box.end) return;
     for (let r = box.start; r <= box.end; r++) if (hasWideChars(line(r) || "")) return;
-    sendKeysRaw(arrowWalk(boxIndexAt(line, box, row, cell.col, t.cols) - agyCursorIndex(t, box, line)));
+    sendKeysRaw(agyWalk(t, box, line, boxIndexAt(line, box, row, cell.col, t.cols)));
   };
   boxClickRef.current = (press: MouseEvent) => {
     if (!boxEditable()) return;

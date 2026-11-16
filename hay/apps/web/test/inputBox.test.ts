@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { arrowWalk, boxIndexAt, clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox } from "../src/utils/inputBox";
+import { agyCursorAt, agyWalkTo, arrowWalk, boxIndexAt, clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox } from "../src/utils/inputBox";
 
 // Claude's box: "❯" and a no-break space, continuation rows indented two
 // spaces, between two rules.
@@ -81,5 +81,33 @@ describe("Antigravity's box, walked with arrow keys", () => {
     expect(arrowWalk(2)).toBe("\x1b[C\x1b[C");
     expect(arrowWalk(-3)).toBe("\x1b[D\x1b[D\x1b[D");
     expect(arrowWalk(0)).toBe("");
+  });
+});
+
+// agy 1.5.9 shows its cursor at the insertion point; 1.5 showed it one cell
+// left. Simulate both: the keys must land on `want` from either.
+describe("an agy walk lands the same for either cursor", () => {
+  // ← past the start does nothing; → past the end does nothing.
+  const press = (insertion: number, end: number, keys: string) => {
+    let at = insertion;
+    for (const k of keys.match(/\x1b\[[CD]/g) || []) at = k === "\x1b[C" ? Math.min(end, at + 1) : Math.max(0, at - 1);
+    return at;
+  };
+  const END = 16; // "fix this, then  " — two spaces typed at the end, never drawn
+  for (const [label, shift] of [["at the insertion point (1.5.9)", 0], ["one cell left of it (1.5)", 1]] as const) {
+    it(`shown ${label}`, () => {
+      for (const insertion of [0, 1, 7, 14, 15, 16]) {
+        const shown = Math.max(0, insertion - shift);
+        for (const want of [0, 3, 8, 14, 16]) {
+          expect(press(insertion, END, agyWalkTo(shown, want))).toBe(want);
+          // Once there, the cursor says so.
+          expect(agyCursorAt(Math.max(0, want - shift), want)).toBe(true);
+        }
+      }
+    });
+  }
+  it("the old walk from the cursor fell one short on 1.5.9", () => {
+    // What hop sent before: (want - (shown + 1)) arrows from the cursor.
+    expect(press(15, END, arrowWalk(11 - (15 + 1)))).toBe(10);
   });
 });

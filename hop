@@ -7767,9 +7767,10 @@ async function readRoomComposer(internalName, agent = sessionAgentKind(internalN
         const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
         const d = hostRes?.data;
         if (!d || typeof d.data !== 'string') return null;
-        // agy parks its cursor ON the last character typed (one cell left of
-        // where the next goes) and shows no ghost suggestions: the rule that
-        // text from the cursor on is a suggestion would drop a real letter.
+        // agy shows no ghost suggestions, and its cursor is no boundary: 1.5
+        // parked it ON the last character typed (1.5.9 shows the insertion
+        // point). The rule that text from the cursor on is a suggestion
+        // would drop a real letter.
         const r = await composerLib.readComposerFromSerialized(d.data, d.cols, d.rows, { cursorGhost: agent !== 'antigravity' });
         // The same screen says whether a turn is in flight — fresher than the
         // phase (whose screen check is cached for seconds).

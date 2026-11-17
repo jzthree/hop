@@ -7700,13 +7700,24 @@ function pruneCheckbacks(now = Date.now()) {
     store.items = store.items.filter((c) => c.status === 'pending' || (now - (c.deliveredAt || c.cancelledAt || c.createdAt || 0)) < 86_400_000);
     if (store.items.length !== before) saveCheckbacks();
 }
+// Only the exit status matters. execFile's timeout killed the shell alone:
+// its children (an ssh hung on a dropped network, the rest of a pipe) ran
+// on, and a probe every minute left one more behind each time. Now the probe
+// runs in its own process group, and the whole group goes at the limit.
+const SHELL_PROBE_TIMEOUT_MS = 20000;
 function runShellProbe(command, cwd) {
     return new Promise((resolve) => {
+        let done = false, timer = null, child;
+        const finish = (code) => { if (done) return; done = true; clearTimeout(timer); resolve(code); };
         try {
-            execFile('/bin/sh', ['-c', command], { cwd: cwd || HOME_DIR, timeout: 20000, maxBuffer: 1024 * 1024 }, (err) => {
-                resolve(err ? (Number.isInteger(err.code) ? err.code : 1) : 0);
-            });
-        } catch (e) { resolve(1); }
+            child = spawn('/bin/sh', ['-c', command], { cwd: cwd || HOME_DIR, stdio: 'ignore', detached: true });
+        } catch (e) { finish(1); return; }
+        child.on('error', () => finish(1));
+        child.on('exit', (code) => finish(Number.isInteger(code) ? code : 1));
+        timer = setTimeout(() => {
+            try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) { /* gone */ } }
+            finish(124);
+        }, SHELL_PROBE_TIMEOUT_MS);
     });
 }
 // Typing into a session the way a person does: see deliverIntoAgent below.
@@ -7961,13 +7972,27 @@ async function attemptQueuedNow(cb) {
     } catch (e) { /* the sweep tries again */ }
 }
 
+// A sweep waits on the host, the screen and shell probes. Each of those is
+// bounded, but should one ever hang anyway, it must not hold every
+// check-back with it: a sweep running past CHECKBACK_SWEEP_STUCK_MS is left
+// behind and the next one starts. (A message it was typing stays in
+// deliveriesInFlight, so it is never typed twice.)
+const CHECKBACK_SWEEP_STUCK_MS = 10 * 60_000;
 let checkbackSweepBusy = false;
+let checkbackSweepStartedAt = 0;
+let checkbackSweepGen = 0;
 async function runCheckbackSweep() {
-    if (shuttingDown || checkbackSweepBusy) return;
+    if (shuttingDown) return;
+    if (checkbackSweepBusy) {
+        if (Date.now() - checkbackSweepStartedAt < CHECKBACK_SWEEP_STUCK_MS) return;
+        log(`[checkback] the sweep started ${new Date(checkbackSweepStartedAt).toISOString()} never finished — leaving it behind`, YELLOW);
+    }
     const store = loadCheckbacks();
     const pending = store.items.filter((c) => c.status === 'pending');
     if (!pending.length) return;
     checkbackSweepBusy = true;
+    checkbackSweepStartedAt = Date.now();
+    const gen = ++checkbackSweepGen;
     const now = Date.now();
     try {
         // One session snapshot for the whole sweep: who is working, who exists.
@@ -7980,6 +8005,9 @@ async function runCheckbackSweep() {
         let dirty = false;
         for (const cb of pending) {
             if (cb.paused) continue; // typing joined it: the person decides
+            // Sent (or cancelled) since this sweep began — by a queued send,
+            // or a sweep left running behind this one.
+            if (cb.status !== 'pending') continue;
             const entry = entryBy.get(cb.session);
             const phase = phaseBy.get(cb.session)?.agentPhase ?? (entry ? null : undefined);
             const ctx = { phase, idleSince: entry ? Number(entry.lastActivityAt) || 0 : 0 };
@@ -8023,7 +8051,7 @@ async function runCheckbackSweep() {
         }
         if (dirty) saveCheckbacks();
         pruneCheckbacks(now);
-    } finally { checkbackSweepBusy = false; }
+    } finally { if (gen === checkbackSweepGen) checkbackSweepBusy = false; }
 }
 
 // Claude Code slugifies a project cwd for <config-root>/projects/<slug>/.
@@ -10920,14 +10948,47 @@ function readGridScreen(grid) {
 // sharing one grid would each fetch the same delta and write it twice
 // (duplicated scroll lines), or race create/dispose. Coalesce — concurrent
 // callers want the same screen anyway.
+// Coalescing also means one read that never settles is handed to every
+// later caller for that room. One did (Nov 15): the check-back sweep, the
+// tagline loop and the resume-prompt sweep all waited on it for two days.
+// So a read is bounded, and one past its time throws its grid away — the
+// next read reseeds from the host's whole screen.
 const roomGridInflight = new Map(); // internalName -> Promise
+const ROOM_GRID_READ_TIMEOUT_MS = 20000;
 function getRoomGridPreviewShared(internalName) {
     const inflight = roomGridInflight.get(internalName);
     if (inflight) return inflight;
-    const p = getRoomGridPreview(internalName)
-        .finally(() => roomGridInflight.delete(internalName));
+    let timer = null;
+    const p = Promise.race([
+        getRoomGridPreview(internalName),
+        new Promise((resolve) => {
+            timer = setTimeout(() => {
+                log(`[grid] ${internalName}: the screen read didn't finish in ${ROOM_GRID_READ_TIMEOUT_MS / 1000}s — starting its grid over`, YELLOW);
+                disposeRoomGrid(internalName);
+                resolve(null);
+            }, ROOM_GRID_READ_TIMEOUT_MS);
+            timer.unref?.();
+        })
+    ]).finally(() => {
+        clearTimeout(timer);
+        if (roomGridInflight.get(internalName) === p) roomGridInflight.delete(internalName);
+    });
     roomGridInflight.set(internalName, p);
     return p;
+}
+// xterm calls a write's callback once it has parsed the data — and never,
+// when its parser throws partway (the "Cannot set properties of undefined
+// (setting 'isWrapped')" crash in lineFeed: thrown on xterm's own timer,
+// past any try here, logged as an uncaughtException). False when the write
+// did not finish in time; that terminal's state is then unknown.
+const GRID_WRITE_TIMEOUT_MS = 10000;
+function writeGridTerm(term, data) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), GRID_WRITE_TIMEOUT_MS);
+        timer.unref?.();
+        try { term.write(data, () => { clearTimeout(timer); resolve(true); }); }
+        catch (e) { clearTimeout(timer); resolve(false); }
+    });
 }
 
 // The grid path's whole contract: returns the room's ACTUAL current screen,
@@ -11002,10 +11063,9 @@ async function getRoomGridPreview(internalName) {
         }
         grid = { term, serialize, offset: res.offset, cols, rows, lastUsedAt: Date.now() };
         roomGrids.set(internalName, grid);
-        if (seed) {
-            await new Promise((resolve) => {
-                try { term.write(seed.data, () => resolve()); } catch (e) { resolve(); }
-            });
+        if (seed && !(await writeGridTerm(term, seed.data))) {
+            if (roomGrids.get(internalName) === grid) disposeRoomGrid(internalName);
+            return null;
         }
         if (roomGrids.size > ROOM_GRID_MAX) {
             let oldestKey = null;
@@ -11024,10 +11084,10 @@ async function getRoomGridPreview(internalName) {
     }
     grid.offset = res.offset;
     grid.lastUsedAt = Date.now();
-    if (res.data) {
-        await new Promise((resolve) => {
-            try { grid.term.write(res.data, () => resolve()); } catch (e) { resolve(); }
-        });
+    if (res.data && !(await writeGridTerm(grid.term, res.data))) {
+        // Its parser broke mid-write: start over from the host's screen.
+        if (roomGrids.get(internalName) === grid) disposeRoomGrid(internalName);
+        return null;
     }
     return readGridScreen(grid);
 }

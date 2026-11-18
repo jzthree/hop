@@ -32,3 +32,7 @@ your "Developer ID Application" identity when the Keychain has one
 (hardened runtime), else ad hoc. To notarize for other Macs, store a
 notarytool profile once (`xcrun notarytool store-credentials hop`) and run
 `HOP_MAC_NOTARY_PROFILE=hop ./build.sh`.
+
+    ./tests/new-window.sh # a hop page opening another in a new window
+
+runs the app's window code off screen against a local page.

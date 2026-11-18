@@ -6,7 +6,7 @@ import WebKit
 // for folder names), file pickers, downloads, links out to the default
 // browser, and new windows for hop pages opened in a "new tab".
 
-final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
+final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
     let webView: WKWebView
     private var origin: URL
     private var onClose: ((WebWindowController) -> Void)?
@@ -45,7 +45,6 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         window.delegate = self
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        config.userContentController.add(self, name: "hop")
         if let seed { seedSessionStorage(seed) }
         webView.load(URLRequest(url: url))
     }
@@ -88,6 +87,7 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         let marker = WKUserScript(source: "window.hopNative = { platform: 'mac', version: '\(version)', post: function (m) { try { window.webkit.messageHandlers.hop.postMessage(m); } catch (e) {} } };",
                                   injectionTime: .atDocumentStart, forMainFrameOnly: true)
         c.userContentController.addUserScript(marker)
+        c.userContentController.add(HopMessages.shared, name: "hop")
         return c
     }
 
@@ -96,25 +96,8 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     func retarget(origin: URL) { self.origin = origin }
 
     func windowWillClose(_ notification: Notification) {
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "hop")
         onClose?(self)
         onClose = nil
-    }
-
-    // MARK: - Messages from the page
-
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let m = message.body as? [String: Any], let kind = m["type"] as? String else { return }
-        switch kind {
-        case "badge":
-            let n = (m["count"] as? Int) ?? 0
-            NSApp.dockTile.badgeLabel = n > 0 ? String(n) : nil
-        case "start-daemon":
-            (NSApp.delegate as? AppDelegate)?.startLocalDaemon()
-        case "retry":
-            (NSApp.delegate as? AppDelegate)?.connect()
-        default: break
-        }
     }
 
     // MARK: - Navigation
@@ -245,6 +228,30 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     private func present(_ alert: NSAlert, then done: @escaping (NSApplication.ModalResponse) -> Void) {
         if let window { alert.beginSheetModal(for: window, completionHandler: done) } else { done(alert.runModal()) }
+    }
+}
+
+/// Messages from hop's pages, on "hop": one handler for every window, set
+/// once on each content controller as it is made. A window opened from a page
+/// (a view's ↗, "Open in new tab") is handed its opener's configuration, and
+/// with it the opener's content controller: a handler added per window was
+/// added there a second time, which WebKit refuses by throwing, and the app
+/// quit. Closing that window also took the opener's handler with it.
+final class HopMessages: NSObject, WKScriptMessageHandler {
+    static let shared = HopMessages()
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let m = message.body as? [String: Any], let kind = m["type"] as? String else { return }
+        switch kind {
+        case "badge":
+            let n = (m["count"] as? Int) ?? 0
+            NSApp.dockTile.badgeLabel = n > 0 ? String(n) : nil
+        case "start-daemon":
+            (NSApp.delegate as? AppDelegate)?.startLocalDaemon()
+        case "retry":
+            (NSApp.delegate as? AppDelegate)?.connect()
+        default: break
+        }
     }
 }
 

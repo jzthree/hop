@@ -29,6 +29,7 @@ const notebookView = require('./lib/notebook-view');
 const markdownHtml = require('./lib/markdown-html');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
+const agentUsage = require('./lib/agent-usage');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const messages = require('./lib/messages');
@@ -6583,7 +6584,7 @@ function probeAgentLogin(agent, home) {
             if (agent === 'claude') {
                 try {
                     const j = JSON.parse(out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1));
-                    value = { loggedIn: j.loggedIn === true, email: typeof j.email === 'string' ? j.email : null };
+                    value = { loggedIn: j.loggedIn === true, email: typeof j.email === 'string' ? j.email : null, plan: j.planTier || j.subscriptionType || null };
                 } catch (e) { value = null; }
             } else if (out.trim()) {
                 value = { loggedIn: /logged in/i.test(out) && !/not logged in/i.test(out), email: null };
@@ -6600,6 +6601,403 @@ async function listAgentHomesWithLogins() {
         out[agent] = await Promise.all(all[agent].map(async (h) => ({ ...h, login: await probeAgentLogin(agent, h) })));
     }
     return out;
+}
+
+// ---- Accounts: usage and rotation (lib/agent-usage.js) ---------------------
+// How much of each account's limits is used comes from the agents' own CLIs
+// (no prompt is sent: nothing is spent), and a session that stops at its
+// account's limit can be moved to one with room and told to continue.
+// ~/.hop2/accounts.json keeps the choices (rotation on/off, accounts left
+// out of it) and what the rotation did.
+const ACCOUNTS_FILE = path.join(HOME_DIR, 'accounts.json');
+const USAGE_PROBE_DIR = path.join(HOME_DIR, 'usage-probe');
+const USAGE_PROBE_TIMEOUT_MS = 20_000;
+const USAGE_MAX_AGE_MS = 60_000;
+let accountsState = null;
+function loadAccountsState() {
+    if (accountsState) return accountsState;
+    let s = null;
+    try { s = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')); } catch (e) { s = null; }
+    accountsState = {
+        autoSwitch: s?.autoSwitch === true,
+        excluded: Array.isArray(s?.excluded) ? s.excluded.filter((d) => typeof d === 'string') : [],
+        actions: Array.isArray(s?.actions) ? s.actions.filter((a) => a && Number.isFinite(a.at)).slice(-200) : []
+    };
+    return accountsState;
+}
+function saveAccountsState() {
+    try { writePrivateFile(ACCOUNTS_FILE, JSON.stringify(loadAccountsState(), null, 1), 0o600); }
+    catch (e) { log(`[account] could not save: ${e?.message || e}`, YELLOW); }
+}
+
+/**
+ * Run an agent's CLI as a short helper that speaks JSON lines. `onLine(json,
+ * send, finish)` settles it; a helper that says nothing in time, or exits
+ * first, resolves null. The helper and anything it started are killed either
+ * way (its own process group), and it runs in a folder of hop's own.
+ */
+function runAgentProbe(bin, args, { env, onStart, onLine, timeoutMs = USAGE_PROBE_TIMEOUT_MS }) {
+    return new Promise((resolve) => {
+        let done = false, child = null, timer = null, buf = '';
+        const finish = (value) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            try { child.stdin.end(); } catch (e) { /* closed */ }
+            try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) { /* gone */ } }
+            resolve(value === undefined ? null : value);
+        };
+        try {
+            fs.mkdirSync(USAGE_PROBE_DIR, { recursive: true });
+            child = spawn(bin, args, { env, cwd: USAGE_PROBE_DIR, stdio: ['pipe', 'pipe', 'ignore'], detached: true });
+        } catch (e) { resolve(null); return; }
+        const send = (obj) => { try { child.stdin.write(JSON.stringify(obj) + '\n'); } catch (e) { /* closed */ } };
+        const feed = (line) => {
+            if (done || !line.trim()) return;
+            let j = null;
+            try { j = JSON.parse(line); } catch (e) { return; }
+            try { onLine(j, send, finish); } catch (e) { finish(null); }
+        };
+        child.on('error', () => finish(null));
+        child.stdin.on('error', () => { /* it left before reading */ });
+        child.stdout.on('data', (d) => {
+            buf += d;
+            let i;
+            while ((i = buf.indexOf('\n')) >= 0) { feed(buf.slice(0, i)); buf = buf.slice(i + 1); }
+        });
+        child.on('close', () => { feed(buf); finish(null); });
+        timer = setTimeout(() => finish(null), timeoutMs);
+        try { if (onStart) onStart(send, () => { try { child.stdin.end(); } catch (e) { /* closed */ } }); } catch (e) { finish(null); }
+    });
+}
+// The account a folder is logged in as must answer for itself: a token or
+// key in hop's own environment would answer for every folder alike.
+function usageProbeEnv() {
+    const env = aiChildEnv();
+    for (const k of Object.keys(env)) {
+        if (k.startsWith('CLAUDE_CODE_OAUTH_TOKEN') || k === 'ANTHROPIC_API_KEY' || k === 'ANTHROPIC_AUTH_TOKEN' || k === 'CODEX_HOME' || k === 'OPENAI_API_KEY') delete env[k];
+    }
+    return env;
+}
+async function probeClaudeUsage(home) {
+    const bin = agentBinary('claude');
+    if (!bin) return null;
+    const env = usageProbeEnv();
+    if (!home.isDefault) env.CLAUDE_CONFIG_DIR = home.dir;
+    // Headless, with no MCP servers, hooks or saved conversation: it is asked
+    // one thing over the control channel and no prompt is ever sent.
+    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
+        '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--settings', '{"disableAllHooks":true}'];
+    const reply = await runAgentProbe(bin, args, {
+        env,
+        onStart: (send) => send({ type: 'control_request', request_id: 'hop-usage', request: { subtype: 'get_usage', skip_behaviors: true } }),
+        onLine: (j, send, finish) => {
+            if (j.type === 'control_response' && j.response?.request_id === 'hop-usage') finish(j.response.subtype === 'success' ? (j.response.response || null) : null);
+        }
+    });
+    return reply ? agentUsage.parseClaudeUsage(reply) : null;
+}
+async function probeCodexUsage(home) {
+    const bin = agentBinary('codex');
+    if (!bin) return null;
+    const env = usageProbeEnv();
+    if (!home.isDefault) env.CODEX_HOME = home.dir;
+    // A private app-server on stdio (not the shared daemon), asked who the
+    // account is and what is left, then stopped.
+    // (The two answers come back in either order: wait for both.)
+    let account, limits;
+    const both = await runAgentProbe(bin, ['app-server'], {
+        env,
+        onStart: (send) => send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'hop', title: 'hop', version: '1' } } }),
+        onLine: (j, send, finish) => {
+            if (j.id === 1) {
+                if (j.error) { finish(null); return; }
+                send({ method: 'initialized' });
+                send({ id: 2, method: 'account/read', params: { refreshToken: false } });
+                send({ id: 3, method: 'account/rateLimits/read', params: null });
+            } else if (j.id === 2) account = j.result || null;
+            else if (j.id === 3) limits = j.result || null;
+            if (account !== undefined && limits !== undefined) finish({ account, limits });
+        }
+    });
+    return both && both.limits ? agentUsage.parseCodexUsage(both.account, both.limits) : null;
+}
+// agy answers `/quota` itself in print mode, spending nothing. A build that
+// does not know the command would take it for a prompt and spend tokens on
+// it: seen once, that build is never asked again.
+let agyQuotaUnsupported = null;
+async function probeAgyUsage() {
+    const bin = agentBinary('agy');
+    if (!bin) return null;
+    let stamp = null;
+    try { stamp = fs.statSync(bin).mtimeMs; } catch (e) { return null; }
+    if (agyQuotaUnsupported === stamp) return null;
+    const logFile = path.join(USAGE_PROBE_DIR, 'agy.log');
+    try { fs.mkdirSync(USAGE_PROBE_DIR, { recursive: true }); fs.rmSync(logFile, { force: true }); } catch (e) { /* a fresh log is a nicety */ }
+    const reply = await runAgentProbe(bin, ['-p', '/quota', '--output-format', 'json', '--print-timeout', '15s', '--log-file', logFile], {
+        env: usageProbeEnv(),
+        onStart: (send, end) => end(),
+        onLine: (j, send, finish) => { if (j && typeof j === 'object' && 'status' in j) finish(j); }
+    });
+    if (!reply) return null;
+    if (reply.command?.name !== 'usage' || Number(reply.num_turns) > 0) {
+        agyQuotaUnsupported = stamp;
+        log(`[account] this agy does not answer /quota by itself — its usage is not read`, YELLOW);
+        return null;
+    }
+    const usage = agentUsage.parseAgyQuota(reply);
+    if (usage) {
+        // Who it is signed in as: agy says so in its own log, nowhere else.
+        try {
+            const all = fs.readFileSync(logFile, 'utf8').match(/authenticated successfully as (\S+@\S+)/g);
+            if (all && all.length) usage.email = all[all.length - 1].replace(/^.* as /, '');
+        } catch (e) { /* unknown */ }
+    }
+    return usage;
+}
+
+// One reading per account, shared by everyone asking, kept a minute.
+const agentUsageCache = new Map();    // `${agent}:${dir}` -> { at, usage }
+const agentUsageInflight = new Map();
+function readAgentUsage(agent, home, maxAgeMs = USAGE_MAX_AGE_MS) {
+    const key = `${agent}:${home.dir}`;
+    const hit = agentUsageCache.get(key);
+    if (hit && Date.now() - hit.at <= maxAgeMs) return Promise.resolve(hit);
+    const flying = agentUsageInflight.get(key);
+    if (flying) return flying;
+    const probe = agent === 'claude' ? probeClaudeUsage(home) : agent === 'codex' ? probeCodexUsage(home) : probeAgyUsage();
+    const p = probe.catch(() => null).then((usage) => {
+        const value = { at: Date.now(), usage: usage || null };
+        agentUsageCache.set(key, value);
+        return value;
+    }).finally(() => { if (agentUsageInflight.get(key) === p) agentUsageInflight.delete(key); });
+    agentUsageInflight.set(key, p);
+    return p;
+}
+/** A reading hop already has, however old — for places that must not wait. */
+function cachedAgentUsage(agent, dir) {
+    const hit = agentUsageCache.get(`${agent}:${dir}`);
+    return hit && hit.usage ? { at: hit.at, usage: hit.usage } : null;
+}
+/** Antigravity keeps one login for the whole machine: one account, its data folder. */
+function agyAccountHome() {
+    try { if (!fs.statSync(AGY_DATA_DIR).isDirectory()) return null; } catch (e) { return null; }
+    return agentBinary('agy') ? { dir: GEMINI_HOME, label: 'default', isDefault: true } : null;
+}
+/**
+ * Every account on this machine with its login, its usage and how many live
+ * sessions run on it. `maxAgeMs` is how old a usage reading may be before
+ * the CLI is asked again; `agents` narrows it to some.
+ */
+async function listAccounts({ maxAgeMs = USAGE_MAX_AGE_MS, agents = ['claude', 'codex', 'antigravity'] } = {}) {
+    agentHomesCache.at = 0;
+    const state = loadAccountsState();
+    const homes = await listAgentHomesWithLogins();
+    const counts = new Map();
+    try {
+        const snapshot = await listAllSessionEntriesRuntimeFirst();
+        for (const e of snapshot.entries || []) {
+            if (e.live !== true || !e.agent) continue;
+            const dir = e.agent === 'antigravity' ? GEMINI_HOME : e.agentHome?.dir;
+            if (dir) counts.set(`${e.agent}:${dir}`, (counts.get(`${e.agent}:${dir}`) || 0) + 1);
+        }
+    } catch (e) { /* counts are a nicety */ }
+    const one = async (agent, h, canRotate) => {
+        const reading = h.login && h.login.loggedIn === false ? null : await readAgentUsage(agent, h, maxAgeMs);
+        const usage = reading?.usage || null;
+        const login = h.login || (usage ? { loggedIn: true, email: usage.email || null } : null);
+        return {
+            agent, dir: h.dir, label: h.label, isDefault: h.isDefault,
+            login: login ? { loggedIn: login.loggedIn === true, email: login.email || usage?.email || null } : null,
+            plan: h.login?.plan || usage?.plan || null,
+            usage, usageAt: reading?.at || null,
+            pooled: canRotate ? !state.excluded.includes(h.dir) : null,
+            sessions: counts.get(`${agent}:${h.dir}`) || 0
+        };
+    };
+    const out = { claude: [], codex: [], antigravity: [] };
+    const jobs = [];
+    for (const agent of ['claude', 'codex']) {
+        if (!agents.includes(agent)) continue;
+        jobs.push(Promise.all((homes[agent] || []).map((h) => one(agent, h, true))).then((list) => { out[agent] = list; }));
+    }
+    const agy = agents.includes('antigravity') ? agyAccountHome() : null;
+    if (agy) jobs.push(one('antigravity', agy, false).then((a) => { out.antigravity = [a]; }));
+    await Promise.all(jobs);
+    return out;
+}
+
+/**
+ * A new account for an agent: its own folder beside the default one
+ * (~/.claude_<name>, ~/.codex_<name>), set up like the default — the same
+ * settings and hooks, the same standing instructions, hop's skills — and
+ * logged out, for its person to sign in to.
+ */
+function addAgentAccount(agent, rawName) {
+    if (agent !== 'claude' && agent !== 'codex') return { status: 400, body: { error: 'An account can be added for Claude Code or Codex' } };
+    const name = String(rawName || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+    if (!name || name === 'default') return { status: 400, body: { error: 'A short name is needed: letters, digits, - or _' } };
+    const base = agentHomesLib.defaultHome(agent, os.homedir());
+    const dir = `${base}_${name}`;
+    if (fs.existsSync(dir)) return { status: 409, body: { error: `${tildePath(dir)} is already there` } };
+    try {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        // The folder counts as an account by what an agent keeps in one.
+        fs.mkdirSync(path.join(dir, agent === 'claude' ? 'projects' : 'sessions'), { recursive: true, mode: 0o700 });
+        const copy = (file) => { const from = path.join(base, file); if (fs.existsSync(from)) fs.copyFileSync(from, path.join(dir, file)); };
+        const link = (file) => { const from = path.join(base, file); if (fs.existsSync(from)) { try { fs.symlinkSync(from, path.join(dir, file)); } catch (e) { copy(file); } } };
+        if (agent === 'claude') { copy('settings.json'); link('CLAUDE.md'); }
+        else { copy('config.toml'); copy('hooks.json'); link('AGENTS.md'); }
+        try { installAgentSkills([dir]); } catch (e) { /* the account still works */ }
+    } catch (e) {
+        return { status: 500, body: { error: `Could not set up ${tildePath(dir)}: ${e?.message || e}` } };
+    }
+    agentHomesCache.at = 0;
+    log(`[account] new ${agent} account folder ${dir}`, CYAN);
+    return { status: 200, body: { ok: true, home: agentHomesLib.describeAgentHome(dir, agent, os.homedir()) } };
+}
+
+// ---- The rotation -----------------------------------------------------------
+// Every 30s, when it is on: a live session whose agent sits idle on its own
+// usage-limit notice is moved to an account with room and told to continue;
+// or told to continue where it is, once its own account has room again. One
+// session per sweep, so a crowd that stopped together moves in a file.
+const ACCOUNT_SWEEP_MS = 30_000;
+const ACCOUNT_SWEEP_STUCK_MS = 10 * 60_000;
+const LIMIT_STOP_MAX_AGE_MS = 12 * 3600_000;
+let accountSweepBusy = false;
+let accountSweepStartedAt = 0;
+let accountSweepGen = 0;
+let accountWaiting = [];              // sessions stopped with nowhere to go, for the page
+const limitStopCache = new Map();     // conversation file -> { size, mtimeMs, stop }
+function readFileTail(file, bytes = 512 * 1024) {
+    const fd = fs.openSync(file, 'r');
+    try {
+        const size = fs.fstatSync(fd).size;
+        const len = Math.min(bytes, size);
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, size - len);
+        return buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+}
+/** { at, text } when the session's conversation ends on its agent's usage-limit notice. */
+function sessionLimitStop(internalName, agent) {
+    try {
+        let file = null;
+        if (agent === 'claude') {
+            const rec = readClaudeSessionRecord(internalName);
+            file = rec && rec.sessionId ? resolveClaudeTranscriptPath(rec) : null;
+        } else if (agent === 'codex') {
+            const turn = readTurnInfo(internalName);
+            file = turn && turn.sessionId ? findCodexRolloutById(codexRootThreadId(turn.sessionId)) : null;
+        }
+        if (!file) return null;
+        const st = fs.statSync(file);
+        const hit = limitStopCache.get(file);
+        if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.stop;
+        const tail = readFileTail(file);
+        const stop = agent === 'claude' ? agentUsage.claudeLimitStop(tail) : agentUsage.codexLimitStop(tail);
+        if (limitStopCache.size > 500) limitStopCache.clear();
+        limitStopCache.set(file, { size: st.size, mtimeMs: st.mtimeMs, stop });
+        return stop;
+    } catch (e) { return null; }
+}
+function recordAccountAction(action) {
+    const state = loadAccountsState();
+    state.actions.push(action);
+    if (state.actions.length > 200) state.actions = state.actions.slice(-200);
+    saveAccountsState();
+}
+/** hop's own "continue" for a session, still waiting to be typed. */
+function continuePending(internalName) {
+    return loadCheckbacks().items.some((c) => c.session === internalName && c.status === 'pending' && c.queued === true && c.from === 'hop' && c.createdBy === 'system');
+}
+function queueContinue(internalName, message) {
+    const cb = checkbacks.normalizeCheckback({ session: internalName, message, idle: true, queued: true, from: 'hop', createdBy: 'system' }, Date.now());
+    loadCheckbacks().items.push(cb);
+    saveCheckbacks();
+    return cb;
+}
+async function runAccountSweep() {
+    if (shuttingDown) return;
+    if (!loadAccountsState().autoSwitch) { accountWaiting = []; return; }
+    if (accountSweepBusy) {
+        if (Date.now() - accountSweepStartedAt < ACCOUNT_SWEEP_STUCK_MS) return;
+        log(`[account] the sweep started ${new Date(accountSweepStartedAt).toISOString()} never finished — leaving it behind`, YELLOW);
+    }
+    accountSweepBusy = true;
+    accountSweepStartedAt = Date.now();
+    const gen = ++accountSweepGen;
+    try {
+        const snapshot = await listAllSessionEntriesRuntimeFirst();
+        const entries = (snapshot.entries || []).filter((e) => e.live === true && (e.agent === 'claude' || e.agent === 'codex'));
+        if (!entries.length) { accountWaiting = []; return; }
+        const phases = await agentPhaseFieldsForAll(entries);
+        const now = Date.now();
+        const stopped = [];
+        for (const entry of entries) {
+            if (phases.get(entry.internalName)?.agentPhase === 'working') continue;
+            const stop = sessionLimitStop(entry.internalName, entry.agent);
+            // A notice from long ago is its person's to pick up, not hop's.
+            if (stop && now - stop.at <= LIMIT_STOP_MAX_AGE_MS) stopped.push({ entry, stop });
+        }
+        const waiting = [];
+        const accountsBy = {};
+        let acted = false;
+        for (const { entry, stop } of stopped) {
+            const name = entry.displayName || entry.internalName;
+            // Its "continue" from an earlier sweep has not been typed yet
+            // (the agent is still coming back): one is enough.
+            if (continuePending(entry.internalName)) continue;
+            if (acted) { waiting.push({ session: entry.internalName, name, agent: entry.agent, reason: 'next in line', until: null }); continue; }
+            const agent = entry.agent;
+            if (!accountsBy[agent]) {
+                // Readings taken after the newest stop, and no older than two minutes.
+                const newest = stopped.filter((s) => s.entry.agent === agent).reduce((m, s) => Math.max(m, s.stop.at), 0);
+                const list = (await listAccounts({ agents: [agent], maxAgeMs: Math.max(0, Math.min(120_000, Date.now() - newest - 1)) }))[agent];
+                accountsBy[agent] = list.map((a) => ({ dir: a.dir, label: a.label, loggedIn: a.login?.loggedIn === true, email: a.login?.email || null, pooled: a.pooled !== false, usage: a.usage, usageAt: a.usageAt }));
+            }
+            const homeDir = entry.agentHome?.dir || agentHomesLib.defaultHome(agent, os.homedir());
+            const history = loadAccountsState().actions.filter((a) => a.session === entry.internalName);
+            const plan = agentUsage.planForStop({ stop, session: { model: entry.agentModel || null, homeDir }, accounts: accountsBy[agent], history, now: Date.now() });
+            if (plan.action === 'resume') {
+                queueContinue(entry.internalName, 'Continue where you left off. (hop: the usage limit this session stopped at has reset.)');
+                recordAccountAction({ at: Date.now(), kind: 'resume', session: entry.internalName, name, agent, from: homeDir, to: homeDir, why: stop.text });
+                log(`[account] ${name}: its account has room again — told to continue`, CYAN);
+                acted = true;
+            } else if (plan.action === 'move') {
+                const r = await switchSessionAgentHome(entry.internalName, plan.target.dir);
+                const ok = r.status === 200 && r.body?.ok === true && r.body.unchanged !== true;
+                // A move that did not happen still counts as a try: the next one waits its turn.
+                recordAccountAction({ at: Date.now(), kind: ok ? 'move' : 'failed', session: entry.internalName, name, agent, from: homeDir, to: plan.target.dir, why: ok ? stop.text : (r.body?.error || 'the move did not happen') });
+                if (ok) {
+                    queueContinue(entry.internalName, 'Continue where you left off. (hop moved this session to another account after it stopped at a usage limit.)');
+                    log(`[account] ${name}: stopped at its limit — moved to ${plan.target.label} (${plan.reason}) and told to continue`, CYAN);
+                } else log(`[account] ${name}: could not move to ${plan.target.label}: ${r.body?.error || 'unknown'}`, YELLOW);
+                acted = true;
+            } else if (plan.action === 'wait') {
+                waiting.push({ session: entry.internalName, name, agent, reason: plan.reason, until: plan.until || null });
+            }
+        }
+        accountWaiting = waiting;
+    } catch (e) {
+        log(`[account] sweep failed: ${e?.message || e}`, YELLOW);
+    } finally {
+        if (gen === accountSweepGen) accountSweepBusy = false;
+    }
+}
+/** What the Accounts page shows. */
+async function accountsOverview({ refresh = false } = {}) {
+    const state = loadAccountsState();
+    const agents = await listAccounts({ maxAgeMs: refresh ? 0 : USAGE_MAX_AGE_MS });
+    const label = (agent, dir) => (agents[agent] || []).find((a) => a.dir === dir)?.label || path.basename(dir || '');
+    return {
+        autoSwitch: state.autoSwitch,
+        agents,
+        waiting: accountWaiting,
+        actions: state.actions.filter((a) => a.kind === 'move' || a.kind === 'resume').slice(-8).reverse()
+            .map((a) => ({ at: a.at, kind: a.kind, name: a.name, agent: a.agent, from: label(a.agent, a.from), to: label(a.agent, a.to), why: a.why || null }))
+    };
 }
 
 /** Codex rollouts can live under any Codex account's root. */
@@ -16111,11 +16509,60 @@ happens until someone clicks it.
         if (parsedUrl.pathname === '/api/agent-homes' && req.method === 'GET') {
             agentHomesCache.at = 0; // a fresh look: someone may have just logged in somewhere
             listAgentHomesWithLogins().then((homes) => {
+                // With the usage reading hop already has, if any: menus
+                // that list accounts say how full each is, and never wait
+                // on a CLI to do it.
+                const out = {};
+                for (const agent of Object.keys(homes)) out[agent] = homes[agent].map((h) => ({ ...h, usage: cachedAgentUsage(agent, h.dir) }));
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify(homes));
+                res.end(JSON.stringify(out));
             }).catch(() => {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(listAgentHomes()));
+            });
+            return;
+        }
+        // Accounts (Settings): every agent login on this machine, how much
+        // of its limits is used, and the rotation's switch and record.
+        if (parsedUrl.pathname === '/api/accounts' && req.method === 'GET') {
+            accountsOverview({ refresh: parsedUrl.query?.refresh === '1' }).then((body) => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(body));
+            }).catch((e) => {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: `Could not read the accounts: ${e?.message || e}` }));
+            });
+            return;
+        }
+        if ((parsedUrl.pathname === '/api/accounts/settings' || parsedUrl.pathname === '/api/accounts/add') && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                const reply = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+                try {
+                    const input = body ? JSON.parse(body) : {};
+                    if (parsedUrl.pathname === '/api/accounts/add') {
+                        const r = addAgentAccount(String(input.agent || ''), input.name);
+                        return reply(r.status, r.body);
+                    }
+                    const state = loadAccountsState();
+                    if (typeof input.autoSwitch === 'boolean' && input.autoSwitch !== state.autoSwitch) {
+                        state.autoSwitch = input.autoSwitch;
+                        log(`[account] rotation turned ${state.autoSwitch ? 'on' : 'off'}`, CYAN);
+                        if (state.autoSwitch) setTimeout(runAccountSweep, 1000).unref?.();
+                        else accountWaiting = [];
+                    }
+                    if (typeof input.dir === 'string' && typeof input.pooled === 'boolean') {
+                        const known = ['claude', 'codex'].some((agent) => listAgentHomes(agent).some((h) => h.dir === input.dir));
+                        if (!known) return reply(400, { error: 'No such account' });
+                        state.excluded = state.excluded.filter((d) => d !== input.dir);
+                        if (!input.pooled) state.excluded.push(input.dir);
+                    }
+                    saveAccountsState();
+                    reply(200, { ok: true, autoSwitch: state.autoSwitch, excluded: state.excluded });
+                } catch (e) {
+                    reply(400, { error: e?.message || 'Invalid request' });
+                }
             });
             return;
         }
@@ -24070,6 +24517,9 @@ async function main() {
         // and the session is idle. 15s is finer than any trigger needs.
         setTimeout(runCheckbackSweep, 20000).unref?.();
         setInterval(runCheckbackSweep, 15000).unref?.();
+        // The account rotation (a no-op until it is turned on in Settings).
+        setTimeout(runAccountSweep, 45000).unref?.();
+        setInterval(runAccountSweep, ACCOUNT_SWEEP_MS).unref?.();
         // Answers: the person's questions paired with their replies.
         setInterval(() => { try { sweepAnswers(); } catch (e) { /* next tick */ } }, 3000).unref?.();
         // Send-and-wait answers land in the message log as their turns end.

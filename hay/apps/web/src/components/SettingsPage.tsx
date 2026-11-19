@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { relativeTime } from "../utils/switcherModel";
 import { setTipsOff, tipsAreOff } from "./TipCard";
 import type { UpdateInfo } from "./UpdateNotice";
+import { AccountsSection } from "./AccountsSection";
 
 // Settings: how hop looks and behaves in this browser, who you are to the
 // others watching, where you are signed in, and which hop this is. A place
@@ -12,7 +13,8 @@ import type { UpdateInfo } from "./UpdateNotice";
 // What is NOT here: what you do to one session (rename, fit, redraw, copy,
 // who may type, kill) — that is the session's menu (its ⋯ in the header, or
 // a right-click in the sidebar), where the session is. Preferences are per
-// browser (localStorage) unless a row says otherwise.
+// browser (localStorage) unless a row says otherwise — Agent accounts are
+// the host's: the same from every browser.
 
 export type ThemeMode = "system" | "light" | "dark";
 
@@ -53,6 +55,8 @@ type Props = {
   onShowUpdate?: (u: UpdateInfo) => void;
   onShowShortcuts: () => void;
   onNotice: (text: string) => void;
+  /** Leave Settings for a session just made (an account's sign-in). */
+  onOpenNewSession: (name: string) => void;
   now?: number;
 };
 
@@ -231,6 +235,8 @@ export const SettingsPage = (p: Props) => {
             <button type="button" className="set-btn" onClick={p.onShowShortcuts}>Show{!p.touch && <kbd>{key("/")}</kbd>}</button>
           </Row>
         </Section>
+
+        <AccountsSection onNotice={p.onNotice} onOpenNewSession={p.onOpenNewSession} now={now} />
 
         <Section id="you" title="You">
           <Row title="Your name" note="Shown to anyone else watching the same session.">

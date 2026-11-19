@@ -6583,6 +6583,7 @@ const App = () => {
           onShowUpdate={(u) => setUpdateShown(u)}
           onShowShortcuts={() => setShortcutHelpOpen(true)}
           onNotice={pushNotice}
+          onOpenNewSession={(made) => { window.location.href = buildSessionPath(made); }}
         />
       )}
       <ContextMenu request={sessionMenu} onClose={() => setSessionMenu(null)} />

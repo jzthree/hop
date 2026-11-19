@@ -251,6 +251,32 @@ curl -X POST http://127.0.0.1:$PORT/api/sessions/fork \
   -d '{"name":"angler","target":"codex"}'     # omit target to fork with the same tool
 ```
 
+### Several accounts, and keeping going past a limit
+
+**Settings → Agent accounts** lists every login the agents have on the
+machine with how much of its limits is used: the 5-hour and weekly windows,
+any per-model limit, and when each resets. hop reads this from each agent's
+own command line (Claude Code's usage request, Codex's app-server,
+Antigravity's `/quota`); reading it sends no prompt and uses none of the
+limit.
+
+Claude Code and Codex keep one login per config folder (`~/.claude`,
+`~/.claude_work`, `~/.codex_work`, …). **Add an account…** makes such a
+folder, set up like the default one, and **Sign in** opens a session that
+signs it in. A session's `⋯` menu moves it to another account with its
+conversation intact. Antigravity keeps a single login for the whole machine,
+so its usage is shown but it has no second account to move to.
+
+With **Keep going past a limit** on, a session that stops at its account's
+usage limit is moved to the account in the rotation with the most room for
+its model and told to continue; with no room anywhere, it continues when a
+limit resets. hop acts only on a session sitting idle on the agent's own
+limit notice, one session per half minute, at most four moves per session a
+day, and leaves a notice older than twelve hours for you. Untick **In
+rotation** to keep an account out of it. A moved session re-reads its
+conversation on its first turn, which the new account pays for — so hop
+moves a session only once it has actually stopped.
+
 ### Check back later (`hop checkback`)
 
 Agents promise to "check back in 30 minutes" and then don't — Codex

@@ -12,6 +12,30 @@ const logins = [
   { id: "b2", label: "iPhone app", via: "device-token", lastSeenAt: NOW - 3 * 3600_000, expiresAt: null, current: false }
 ];
 // As the daemon sends them: ISO text.
+// What /api/accounts answers: two Claude logins (one at its Fable limit), a
+// signed-out third, one Codex and Antigravity's single login.
+const meter = (id: string, label: string, percent: number, more: Record<string, unknown> = {}) =>
+  ({ id, label, window: id === "session" ? "5h" : "week", percent, resetsAt: NOW + 3 * 86400000, model: null, models: null, ...more });
+const claude = (label: string, dir: string, meters: unknown[] | null, more: Record<string, unknown> = {}) => ({
+  agent: "claude", dir, label, isDefault: label === "default", login: { loggedIn: true, email: `${label}@example.org` }, plan: "max_20x",
+  usage: meters ? { plan: "max", available: true, meters } : null, usageAt: NOW - 30_000, pooled: true, sessions: 0, ...more
+});
+let accounts = {
+  autoSwitch: false,
+  agents: {
+    claude: [
+      claude("default", "/home/u/.claude", [meter("session", "5-hour", 0, { idle: true, resetsAt: null }), meter("week", "Week", 12)], { sessions: 4 }),
+      claude("fable", "/home/u/.claude_fable", [meter("week", "Week", 76), meter("week:Fable", "Fable week", 100, { model: "Fable" })]),
+      claude("spare", "/home/u/.claude_spare", null, { login: { loggedIn: false, email: null }, plan: null })
+    ],
+    codex: [{ agent: "codex", dir: "/home/u/.codex", label: "default", isDefault: true, login: { loggedIn: true, email: "c@example.org" }, plan: "pro",
+      usage: { plan: "pro", available: true, meters: [meter("codex:10080", "Week", 14)], resets: 2 }, usageAt: NOW - 30_000, pooled: true, sessions: 1 }],
+    antigravity: [{ agent: "antigravity", dir: "/home/u/.gemini", label: "default", isDefault: true, login: { loggedIn: true, email: "g@example.org" }, plan: null,
+      usage: { plan: null, available: true, meters: [meter("gemini-5h", "Gemini 5-hour", 9, { models: ["Gemini 4 Carbon"] })] }, usageAt: NOW - 30_000, pooled: null, sessions: 0 }]
+  },
+  waiting: [] as unknown[],
+  actions: [] as unknown[]
+};
 const passkeys = [{ id: "pk1", rpID: "hop.example.org", label: null, createdAt: new Date(NOW - 30 * 86400000).toISOString(), lastUsedAt: new Date(NOW - 86400000).toISOString() }];
 
 beforeEach(() => {
@@ -30,6 +54,8 @@ beforeEach(() => {
     if (url === "/api/passkeys/list") return json({ ok: true, passkeys });
     if (url === "/api/update") return json({ current: "2.4.0", latest: "2.5.0", updateAvailable: true, command: "hop update" });
     if (url === "/api/instance") return json({ canonicalUrl: "https://hop.example.org" });
+    if (url.startsWith("/api/accounts") && !init?.method) return json(accounts);
+    if (url === "/api/sessions") return json({ ok: true, name: "sign-in-claude-spare" });
     return json({ ok: true });
   }));
   vi.stubGlobal("confirm", () => true);
@@ -40,16 +66,16 @@ const base = () => ({
   placement: "page" as const, onClose: vi.fn(), isMac: true, touch: false,
   themeMode: "system" as const, onTheme: vi.fn(), fontSize: 14, onFontSize: vi.fn(),
   viewMode: "fit" as const, onViewMode: vi.fn(), name: "Robin", onName: vi.fn(),
-  native: false, build: "abc1234 · 2026-11-10", onShowShortcuts: vi.fn(), onNotice: vi.fn(), now: NOW
+  native: false, build: "abc1234 · 2026-11-10", onShowShortcuts: vi.fn(), onNotice: vi.fn(), onOpenNewSession: vi.fn(), now: NOW
 });
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
 describe("Settings", () => {
-  it("is one page of sections — how hop looks, terminals, attention, you, sign-in, about", async () => {
+  it("is one page of sections — how hop looks, terminals, attention, agent accounts, you, sign-in, about", async () => {
     render(<SettingsPage {...base()} />);
     await settle();
     const heads = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
-    expect(heads).toEqual(["Appearance", "Terminals", "Attention & help", "You", "Sign-in", "About"]);
+    expect(heads).toEqual(["Appearance", "Terminals", "Attention & help", "Agent accounts", "You", "Sign-in", "About"]);
     // Nothing about one session lives here (that is its ⋯ menu).
     expect(screen.queryByText(/Kill|Redraw|Fit to this window/)).toBeNull();
   });
@@ -187,5 +213,76 @@ describe("Settings › Signed in, when there are many", () => {
     expect(names()).toEqual(["Login 6", "Login 0", "Login 1", "Login 2", "Login 3"]);
     fireEvent.click(screen.getByRole("button", { name: "4 more…" }));
     expect(names()).toHaveLength(9);
+  });
+
+  describe("Agent accounts", () => {
+    const section = () => screen.getByRole("region", { name: "Agent accounts" });
+
+    it("shows every login with how full its limits are", async () => {
+      render(<SettingsPage {...base()} />);
+      await settle();
+      const s = within(section());
+      for (const title of ["Claude Code", "Codex", "Antigravity"]) expect(s.getByText(title)).toBeTruthy();
+      expect(s.getByText("fable@example.org · Max 20x")).toBeTruthy();
+      expect(s.getByText("4 sessions")).toBeTruthy();
+      expect(s.getByRole("meter", { name: "Fable week used" }).getAttribute("aria-valuenow")).toBe("100");
+      expect(s.getByText(/^100% · resets/)).toBeTruthy();
+      expect(s.getByText("not started")).toBeTruthy();
+      expect(s.getByText("2 banked resets")).toBeTruthy();
+      // The signed-out one has no meters, and a way in.
+      expect(s.getByText("Signed out")).toBeTruthy();
+      // Antigravity has one login: nothing to rotate, nothing to add.
+      expect(s.queryByRole("button", { name: /Add a Antigravity/ })).toBeNull();
+      expect(s.getAllByRole("checkbox", { name: "In rotation" })).toHaveLength(2);
+    });
+
+    it("turns the rotation on, and takes an account out of it", async () => {
+      render(<SettingsPage {...base()} />);
+      await settle();
+      const s = within(section());
+      const group = s.getByRole("radiogroup", { name: "Keep going past a limit" });
+      expect(within(group).getByRole("radio", { name: "Off" }).getAttribute("aria-checked")).toBe("true");
+      fireEvent.click(within(group).getByRole("radio", { name: "On" }));
+      await settle();
+      expect(calls).toContainEqual({ url: "/api/accounts/settings", body: { autoSwitch: true } });
+      fireEvent.click(s.getAllByRole("checkbox", { name: "In rotation" })[1]);
+      await settle();
+      expect(calls).toContainEqual({ url: "/api/accounts/settings", body: { dir: "/home/u/.claude_fable", pooled: false } });
+    });
+
+    it("signs in to a signed-out account in a session of its own, under that account", async () => {
+      const p = base();
+      render(<SettingsPage {...p} />);
+      await settle();
+      fireEvent.click(within(section()).getByRole("button", { name: "Sign in" }));
+      await settle();
+      expect(calls).toContainEqual({ url: "/api/sessions", body: { name: "sign-in-claude-spare", type: "terminal", port: null, startup: "claude auth login", agentHome: "/home/u/.claude_spare" } });
+      expect(p.onOpenNewSession).toHaveBeenCalledWith("sign-in-claude-spare");
+    });
+
+    it("adds an account by name", async () => {
+      vi.stubGlobal("prompt", () => "work");
+      const p = base();
+      render(<SettingsPage {...p} />);
+      await settle();
+      fireEvent.click(within(section()).getByRole("button", { name: "Add a Codex account…" }));
+      await settle();
+      expect(calls).toContainEqual({ url: "/api/accounts/add", body: { agent: "codex", name: "work" } });
+      expect(p.onNotice).toHaveBeenCalledWith("Added — sign in to it to use it");
+    });
+
+    it("says what the rotation is waiting for, and what it did", async () => {
+      const before = accounts;
+      accounts = { ...accounts, autoSwitch: true,
+        waiting: [{ session: "s_1", name: "angler", agent: "claude", reason: "no account in the rotation has room", until: NOW + 2 * 3600_000 }],
+        actions: [{ at: NOW - 20 * 60_000, kind: "move", name: "tern", agent: "claude", from: "fable", to: "default", why: "You've hit your Fable limit" }] };
+      try {
+        render(<SettingsPage {...base()} />);
+        await settle();
+        const s = within(section());
+        expect(s.getByText(/^angler is stopped at a limit with no account to move to — the first limit resets/)).toBeTruthy();
+        expect(s.getByText("tern").closest(".acct-log-row")?.textContent).toBe("Moved tern from fable to default20m ago");
+      } finally { accounts = before; }
+    });
   });
 });

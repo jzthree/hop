@@ -1,3 +1,5 @@
+import { usageHint, type AccountUsage } from "./accounts";
+
 /** One login of an agent: a config root on the host. */
 export type AgentHome = {
   dir: string;
@@ -5,13 +7,17 @@ export type AgentHome = {
   isDefault: boolean;
   /** Who the root is logged in as, when the host could ask (null = unknown). */
   login?: { loggedIn: boolean; email: string | null } | null;
+  /** The usage reading the host already has for it, if any (Settings → Agent accounts takes one). */
+  usage?: { at: number; usage: AccountUsage } | null;
 };
-/** "fable · a@b.org", "claude2 · logged out", or just the label. */
-export const describeAccount = (h: AgentHome): string => {
+/** "fable · a@b.org", "claude2 · logged out", or just the label — and how full it is, when known. */
+export const describeAccount = (h: AgentHome, nowMs = Date.now()): string => {
   const name = h.isDefault ? "default" : h.label;
   if (!h.login) return name;
   if (!h.login.loggedIn) return `${name} · logged out`;
-  return h.login.email ? `${name} · ${h.login.email}` : name;
+  // A reading older than a quarter of an hour says little about now.
+  const hint = h.usage && nowMs - h.usage.at < 15 * 60_000 ? usageHint(h.usage.usage, nowMs) : "";
+  return [name, h.login.email, hint].filter(Boolean).join(" · ");
 };
 export type AgentHomes = { claude: AgentHome[]; codex: AgentHome[] };
 

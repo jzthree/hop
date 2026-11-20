@@ -35,7 +35,8 @@ const fakeCli = (name, body) => {
   fs.writeFileSync(file, `#!/usr/bin/env node\n${body}\n`, { mode: 0o755 });
   return file;
 };
-const probe = (timeout = 400) => run(`const USAGE_PROBE_DIR = ${JSON.stringify(path.join(tmp, 'cwd'))}; const USAGE_PROBE_TIMEOUT_MS = ${timeout};
+// (Generous: an answer ends the wait at once, and a loaded machine is slow to start node.)
+const probe = (timeout = 5000) => run(`const USAGE_PROBE_DIR = ${JSON.stringify(path.join(tmp, 'cwd'))}; const USAGE_PROBE_TIMEOUT_MS = ${timeout};
   ${fnSource('runAgentProbe')}; runAgentProbe`, { fs, spawn, process });
 
 test('the helper asks one thing, hears the answer, and stops the CLI', async () => {

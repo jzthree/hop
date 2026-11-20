@@ -30,6 +30,7 @@ const markdownHtml = require('./lib/markdown-html');
 const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
 const agentUsage = require('./lib/agent-usage');
+const codexHelpers = require('./lib/codex-helpers');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const messages = require('./lib/messages');
@@ -6986,6 +6987,93 @@ async function runAccountSweep() {
         if (gen === accountSweepGen) accountSweepBusy = false;
     }
 }
+// ---- Codex helper pile-ups (lib/codex-helpers.js) ---------------------------
+// Codex leaves the helper servers it starts during a long session running
+// (11 copies of each, 6.5 GB, in one session by Nov 19), and only a restart
+// clears them. Every ten minutes hop looks for a codex with many copies of
+// one helper and, while that session sits idle and unwatched, restarts it in
+// place: the same conversation resumes, with fresh helpers. One per sweep, a
+// few a day at most. A Codex that no longer leaks never matches. Off with
+// HOP_CODEX_RESTART=0. ~/.hop2/codex-restarts.json keeps what was done.
+const CODEX_RESTARTS_FILE = path.join(HOME_DIR, 'codex-restarts.json');
+const CODEX_HELPER_SWEEP_MS = 10 * 60_000;
+const CODEX_HELPER_SWEEP_STUCK_MS = 15 * 60_000;
+let codexHelperSweepBusy = false, codexHelperSweepStartedAt = 0;
+// Why each piled-up session is still waiting, logged when it changes.
+const codexHelperWaitLogged = new Map();
+function loadCodexRestarts() {
+    try {
+        const list = JSON.parse(fs.readFileSync(CODEX_RESTARTS_FILE, 'utf8'));
+        return Array.isArray(list) ? list.filter((x) => x && Number.isFinite(x.at)) : [];
+    } catch (e) { return []; }
+}
+function recordCodexRestart(entry) {
+    const list = [...loadCodexRestarts(), entry].slice(-100);
+    try { writePrivateFile(CODEX_RESTARTS_FILE, JSON.stringify(list, null, 1), 0o600); }
+    catch (e) { log(`[codex-helpers] could not save: ${e?.message || e}`, YELLOW); }
+}
+function psSnapshot() {
+    return new Promise((resolve) => {
+        execFile('/bin/ps', ['-axww', '-o', 'pid=,ppid=,command='], { maxBuffer: 32 * 1024 * 1024, timeout: 15_000 },
+            (err, stdout) => resolve(err ? null : String(stdout || '')));
+    });
+}
+async function runCodexHelperSweep() {
+    if (shuttingDown || process.env.HOP_CODEX_RESTART === '0') return;
+    if (codexHelperSweepBusy && Date.now() - codexHelperSweepStartedAt < CODEX_HELPER_SWEEP_STUCK_MS) return;
+    codexHelperSweepBusy = true;
+    codexHelperSweepStartedAt = Date.now();
+    try {
+        const ps = await psSnapshot();
+        if (!ps) return;
+        const piled = codexHelpers.findPileUps(ps);
+        if (!piled.length) return;
+        const snapshot = await listAllSessionEntriesRuntimeFirst();
+        if (!snapshot.runtimeAvailable) return;
+        const entries = new Map((snapshot.entries || []).filter((e) => e.live === true).map((e) => [e.internalName, e]));
+        const candidates = piled.map((p) => ({ ...p, entry: entries.get(p.session) })).filter((p) => p.entry);
+        if (!candidates.length) return;
+        const phases = await agentPhaseFieldsForAll(candidates.map((p) => p.entry));
+        for (const p of candidates) {
+            const name = getSessionDisplayName(p.session) || p.session;
+            const seen = getSessionSeenInfo(p.session);
+            const state = {
+                session: p.session,
+                phase: phases.get(p.session)?.agentPhase || null,
+                lastActivityAt: Number(p.entry.lastActivityAt) || 0,
+                userAttached: seen.userAttached === true,
+                lastUserSeenAt: Number(seen.lastUserSeenAt) || 0,
+                draft: false
+            };
+            let verdict = codexHelpers.mayRestart(state, loadCodexRestarts(), Date.now());
+            if (verdict.ok) {
+                // Whatever is typed in its box would be lost with the old process.
+                const box = await readRoomComposer(p.session, 'codex').catch(() => null);
+                if (!box || box.working || !box.state?.found || !box.state.isEmpty) verdict = { ok: false, why: box?.working ? 'working' : 'its input box is not empty or not on screen' };
+            }
+            const what = `${p.worst.copies} copies of ${p.worst.label} (${p.helpers} helper processes)`;
+            if (!verdict.ok) {
+                if (codexHelperWaitLogged.get(p.session) !== verdict.why) log(`[codex-helpers] ${name}: Codex has piled up ${what} — restart waits (${verdict.why})`, DIM);
+                codexHelperWaitLogged.set(p.session, verdict.why);
+                continue;
+            }
+            codexHelperWaitLogged.delete(p.session);
+            const probe = await restoreSavedSessions({ dryRun: true, includeAgents: true, only: [p.session], replaceIdleAgent: true });
+            const busy = (probe?.skipped || []).find((x) => /busy/.test(String(x.reason || '')));
+            if (busy) { log(`[codex-helpers] ${name}: restart waits (${busy.reason})`, DIM); continue; }
+            const result = await restoreSavedSessions({ includeAgents: true, only: [p.session], replaceIdleAgent: true });
+            const restarted = (result?.restored || []).length > 0;
+            recordCodexRestart({ at: Date.now(), session: p.session, name, pid: p.pid, helper: p.worst.label, copies: p.worst.copies, helpers: p.helpers, restarted });
+            log(`[codex-helpers] ${name}: Codex had piled up ${what} — ${restarted ? 'restarted it while idle; the conversation resumes' : 'the restart did not happen'}`, restarted ? CYAN : YELLOW);
+            return; // one per sweep
+        }
+    } catch (e) {
+        log(`[codex-helpers] sweep failed: ${e?.message || e}`, YELLOW);
+    } finally {
+        codexHelperSweepBusy = false;
+    }
+}
+
 /** What the Accounts page shows. */
 async function accountsOverview({ refresh = false } = {}) {
     const state = loadAccountsState();
@@ -24520,6 +24608,9 @@ async function main() {
         // The account rotation (a no-op until it is turned on in Settings).
         setTimeout(runAccountSweep, 45000).unref?.();
         setInterval(runAccountSweep, ACCOUNT_SWEEP_MS).unref?.();
+        // Codex sessions whose helper servers have piled up: restarted while idle.
+        setTimeout(runCodexHelperSweep, 5 * 60_000).unref?.();
+        setInterval(runCodexHelperSweep, CODEX_HELPER_SWEEP_MS).unref?.();
         // Answers: the person's questions paired with their replies.
         setInterval(() => { try { sweepAnswers(); } catch (e) { /* next tick */ } }, 3000).unref?.();
         // Send-and-wait answers land in the message log as their turns end.

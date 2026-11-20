@@ -277,6 +277,10 @@ rotation** to keep an account out of it. A moved session re-reads its
 conversation on its first turn, which the new account pays for — so hop
 moves a session only once it has actually stopped.
 
+### Codex sessions that pile up helpers
+
+Codex (seen with 0.166) starts fresh copies of its helper servers — the computer-use REPL, plugin runtimes, MCP servers — during a long session and leaves the old ones running; one session reached 77 processes and 6.5 GB. Every ten minutes hop looks for a Codex session with six or more copies of one helper (a healthy one runs one or two) and, once that session has been idle for 20 minutes, has not been looked at for 10, and has nothing typed in its input box, restarts it in place: the same conversation resumes with fresh helpers. One session per sweep, each at most every six hours, eight a day. When Codex stops leaking, nothing matches and nothing restarts. `HOP_CODEX_RESTART=0` turns it off; `~/.hop2/codex-restarts.json` lists what it did, and the daemon log has a `[codex-helpers]` line for each.
+
 ### Check back later (`hop checkback`)
 
 Agents promise to "check back in 30 minutes" and then don't — Codex

@@ -70,6 +70,7 @@ import { sendToSession } from "./utils/quickReply";
 import { agyCursorAt, agyWalkTo, boxIndexAt, clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscreenChord";
+import { queueTypedInput, tabQueues } from "./utils/queueInput";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
 import { watchLiveness } from "./utils/socketLiveness";
 
@@ -881,7 +882,9 @@ const App = () => {
   const openPathRef = useRef<(p: string) => Promise<void>>(async () => {});
   const foregroundIsClaudeRef = useRef<(() => boolean) | null>(null);
   // ⌘⌥⏎: what is typed in the agent's box goes when its turn ends.
-  const queueInputRef = useRef<() => void>(() => {});
+  const queueInputRef = useRef<(viaTab?: boolean) => void>(() => {});
+  // The session on screen's agent and whether it is working: Tab queues there.
+  const tabQueueRef = useRef<{ agent: string | null; working: boolean }>({ agent: null, working: false });
   // The input box's click and replace (utils/inputBox), reached from the
   // terminal's long-lived handlers.
   const replaceBoxSelectionRef = useRef<(text: string | null, paste?: boolean) => boolean>(() => false);
@@ -2916,6 +2919,14 @@ const App = () => {
         if (event.type === 'keydown') {
           event.preventDefault();
           queueInputRef.current();
+        }
+        return false;
+      }
+      // Tab, while Claude or Antigravity works: the same, as Codex's own Tab.
+      if (tabQueues(event, tabQueueRef.current.agent, tabQueueRef.current.working)) {
+        if (event.type === 'keydown') {
+          event.preventDefault();
+          queueInputRef.current(true);
         }
         return false;
       }
@@ -5230,22 +5241,14 @@ const App = () => {
     if (queuedCount > prevQueuedRef.current) setQueueHidden(false);
     prevQueuedRef.current = queuedCount;
   }, [queuedCount, currentKey]);
-  queueInputRef.current = () => {
+  tabQueueRef.current = { agent: currentInfo?.agent ?? null, working: currentInfo?.agentPhase === "working" };
+  queueInputRef.current = (viaTab = false) => {
     const room = session?.room;
     if (!room) return;
     void (async () => {
-      try {
-        const res = await fetch("/api/sessions/queue-input", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: room })
-        });
-        const data = await res.json().catch(() => ({})) as { status?: string; error?: string; warning?: string };
-        if (!res.ok) { pushNotice(data.error || "Couldn't queue it"); return; }
-        if (data.status === "empty") pushNotice("Nothing typed to send later");
-        else if (data.status === "queued-in-agent") pushNotice("Queued in Codex: it goes when this turn ends");
-        else if (data.status === "queued") { setQueueHidden(false); pushNotice(data.warning ? `Queued. ${data.warning}` : "Queued: it goes when this turn ends"); }
-        // "sent": the agent was free, so it went as Enter would send it.
-        void fetchSessions({ showLoading: false });
-      } catch { pushNotice("Couldn't queue it"); }
+      const status = await queueTypedInput(room, { viaTab, notice: pushNotice });
+      if (status === "queued") setQueueHidden(false);
+      if (status && status !== "passed") void fetchSessions({ showLoading: false });
     })();
   };
   // A pulse follow-up, as on the phone: the session that owns the item gets

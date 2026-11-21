@@ -42,7 +42,8 @@ import {
   insertAfter, describeAccount, type AgentHome, type AgentHomes, shortModelName,
   meaningfulTailIndices, shortRelativeTime, phoneAttentionLabel, fleetSummaryCompact } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
-import { IS_MAC, isAppCtrlEnter, isFullscreenChord } from "../utils/fullscreenChord";
+import { IS_MAC, isAppCtrlEnter, isFullscreenChord, isQueueChord } from "../utils/fullscreenChord";
+import { queueTypedInput, tabQueues } from "../utils/queueInput";
 import { TipCard } from "./TipCard";
 import { chipWhen } from "../utils/checkbackText";
 import { currentWsBase, noteSocketClosed } from "../utils/localLink";
@@ -479,7 +480,9 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, codexApp = false, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender, onOpenView }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, codexApp = false, agent = null, working = false, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender, onOpenView }: {
+  /** The session's agent and whether a turn is running: Tab queues in Claude and Antigravity (utils/queueInput.ts). */
+  agent?: string | null; working?: boolean;
   /** The wall keeps a registry of live tiles' input senders (file drops). */
   onSender?: (send: ((data: string) => void) | null) => void;
   /** An inline hop view card's Open: the reader for that session, on that item. */
@@ -626,6 +629,8 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
   const liveRef = useRef(live);
   liveRef.current = live;
   const onFullscreenRef = useRef(onFullscreen);
+  const tabQueueRef = useRef({ agent, working, room });
+  tabQueueRef.current = { agent, working, room };
   onFullscreenRef.current = onFullscreen;
   const onUnfocusRef = useRef(onUnfocus);
   onUnfocusRef.current = onUnfocus;
@@ -818,6 +823,15 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey
           && (kbdEnhancedRef.current || looksLikeClaude())) {
         if (ev.type === "keydown") sendInputRef.current?.("\x1b[13;2u");
+        return false;
+      }
+      // ⌘⌥⏎, or Tab while Claude or Antigravity works: what is typed goes
+      // when the turn ends (Codex does Tab itself).
+      if (isQueueChord(ev) || tabQueues(ev, tabQueueRef.current.agent, tabQueueRef.current.working)) {
+        if (ev.type === "keydown") {
+          ev.preventDefault();
+          void queueTypedInput(tabQueueRef.current.room, { viaTab: ev.key === "Tab", notice: (m) => onNoticeRef.current?.(m) });
+        }
         return false;
       }
       // On a Mac only ⌘⏎ — Ctrl⏎ goes to the app (see fullscreenChord.ts).
@@ -3222,6 +3236,8 @@ export const SessionSwitcher = ({
               deliberate={deliberateFocusRef.current === key}
               claudeApp={appLabel(s) === "claude"}
               codexApp={appLabel(s) === "codex"}
+              agent={s.agent ?? null}
+              working={s.agentPhase === "working"}
               claimSize={s.hasLocalCli !== true}
               activeCols={preview?.cols}
               activeRows={preview?.rows}

@@ -34,6 +34,7 @@ const codexHelpers = require('./lib/codex-helpers');
 const agyAccounts = require('./lib/agy-accounts');
 const agyArchive = require('./lib/agy-archive');
 const claudeProcs = require('./lib/claude-procs');
+const agyRecovery = require('./lib/agy-recovery');
 const agentSignin = require('./lib/agent-signin');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
@@ -6553,9 +6554,14 @@ function agyConversationRunning(sessionId) {
         return out.split('\n').some((line) => /(^|\/)agy\s/.test(line.trim()) && re.test(line));
     } catch (e) { return false; }
 }
+// Why agy cannot reopen a recorded conversation, for the person reading it.
+const AGY_LOST_WHY = 'agy no longer has its conversation file (agy deletes all but its newest ~500 conversations, open ones included, and agy 1.5.9 kept none on disk)';
 function agyRestorePlan(rec, cwd, home = null) {
     if (!agyConversationExists(rec)) {
-        return { command: null, cwd, warning: `recorded Antigravity conversation ${rec.sessionId.slice(0, 8)}… is not on this host (agy keeps only its newest conversations) — opening a plain shell instead` };
+        // hop recover starts a new conversation from what hop kept (agyLost);
+        // a restore of every session opens a plain shell.
+        return { command: null, cwd, agyLost: { rec, home },
+            warning: `Antigravity conversation ${rec.sessionId.slice(0, 8)}… cannot be reopened: ${AGY_LOST_WHY} — opening a plain shell instead` };
     }
     const flags = agyResumeFlags(rec.launchCmd);
     // An account folder: agy through its launcher, with the account named
@@ -6564,6 +6570,45 @@ function agyRestorePlan(rec, cwd, home = null) {
     const plan = { command: [word, '--conversation', `'${rec.sessionId}'`, ...flags].join(' '), cwd, agent: 'antigravity' };
     if (home && home.missing) plan.warning = `its Antigravity account folder ${tildePath(home.missing)} is gone — resuming on the default account`;
     return plan;
+}
+
+/**
+ * The handoff for a lost Antigravity conversation, written to the session's
+ * uploads folder: { file, summary }. dryRun: the path only, nothing written.
+ */
+function writeAgyRecoveryHandoff(internalName, display, cwd, rec, { dryRun = false } = {}) {
+    const dir = path.join(HOME_DIR, 'uploads', internalName);
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
+    const file = path.join(dir, `agy-recovery-${stamp}.md`);
+    const readText = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return ''; } };
+    let msgs = [];
+    try { msgs = (JSON.parse(readText(MESSAGE_LOG_FILE)).messages || []).filter((m) => m && (m.from === internalName || m.to === internalName)); } catch (e) { /* none */ }
+    msgs.sort((a, b) => Number(a.at) - Number(b.at));
+    // Scheduled prompts (messages are in the log above): typed, and to come.
+    const cbs = (loadCheckbacks().items || []).filter((c) => c && c.session === internalName && !c.queued && c.status !== 'cancelled')
+        .map((c) => ({ at: c.deliveredAt || c.firedAt || c.createdAt, text: c.message, pending: !c.deliveredAt, by: c.createdBy === 'agent' ? 'an agent' : null }))
+        .sort((a, b) => Number(a.at) - Number(b.at));
+    const brain = path.join(GEMINI_HOME, 'antigravity-cli', 'brain', String(rec.sessionId || ''));
+    const transcriptFile = rec.transcriptPath && fs.existsSync(rec.transcriptPath) ? rec.transcriptPath : path.join(brain, '.system_generated', 'logs', 'transcript_full.jsonl');
+    const transcript = agyRecovery.transcriptEntries(readText(transcriptFile));
+    let brainFiles = [];
+    try { brainFiles = fs.readdirSync(brain).filter((n) => !n.startsWith('.')).map((n) => tildePath(path.join(brain, n))); } catch (e) { /* none */ }
+    let handoffFiles = [];
+    try {
+        handoffFiles = fs.readdirSync(dir).filter((n) => /handoff|recovery|transcript/i.test(n) && !n.startsWith('agy-recovery-'))
+            .map((n) => path.join(dir, n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs).slice(0, 5).map(tildePath);
+    } catch (e) { /* none */ }
+    const meta = readClaudeSessionMeta(internalName) || {};
+    const text = agyRecovery.buildHandoff({
+        display, internalName, cwd, conversationId: rec.sessionId, why: AGY_LOST_WHY,
+        forkedFromName: meta.forkedFrom ? (getSessionDisplayName(meta.forkedFrom) || meta.forkedFrom) : null,
+        handoffFiles, transcript, messages: msgs, checkbacks: cbs, brainFiles, now: Date.now()
+    });
+    if (!dryRun) {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        writePrivateFile(file, text, 0o600);
+    }
+    return { file, summary: `${transcript.length} transcript line${transcript.length === 1 ? '' : 's'}, ${msgs.length} message${msgs.length === 1 ? '' : 's'}, ${cbs.length} check-back${cbs.length === 1 ? '' : 's'}` };
 }
 
 // ---- antigravity-hook install/remove (~/.gemini/config/hooks.json) --------
@@ -21518,6 +21563,19 @@ async function main() {
                 command = `codex resume '${rolloutId.replace(/'/g, `'\\''`)}'`;
                 kind = 'codex';
             }
+        }
+        // An Antigravity conversation agy cannot reopen: a new one, reading
+        // what hop kept of the old (lib/agy-recovery.js).
+        if (!command && plan?.agyLost) {
+            const made = writeAgyRecoveryHandoff(target, display, plan.cwd || cwd, plan.agyLost.rec, { dryRun });
+            const home = plan.agyLost.home;
+            const word = home && home.dir && !home.missing ? agyAccounts.shellLaunch(home, AGY_LAUNCHER) : AGY_BIN;
+            const q = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
+            command = [word, ...agyResumeFlags(plan.agyLost.rec.launchCmd), '-i', q(agyRecovery.startPrompt(made.file, display))].join(' ');
+            kind = 'antigravity';
+            log(`${display}: its Antigravity conversation ${String(plan.agyLost.rec.sessionId).slice(0, 8)}… cannot be reopened — ${AGY_LOST_WHY}.`, YELLOW);
+            log(`  Starting a new one that reads what hop kept of it (${made.summary}):`, RESET);
+            log(`  ${DIM}${tildePath(made.file)}${RESET}`, RESET);
         }
         if (!command) {
             log(`${display}: nothing to recover — no Claude, Codex or Antigravity conversation is recorded for this session${plan?.warning ? ` (${plan.warning})` : ''}.`, YELLOW);

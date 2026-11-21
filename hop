@@ -35,6 +35,7 @@ const agyAccounts = require('./lib/agy-accounts');
 const agyArchive = require('./lib/agy-archive');
 const claudeProcs = require('./lib/claude-procs');
 const agyRecovery = require('./lib/agy-recovery');
+const termInput = require('./lib/term-input');
 const agentSignin = require('./lib/agent-signin');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
@@ -5914,6 +5915,8 @@ if (DAEMON_FLAG && TERMINAL_API_IDLE_TTL_MS > 0) {
 
 function closeTerminalApiEntry(terminalId) {
     const entry = terminalApiSessions.get(terminalId);
+    // A long text still going in (sendTerminalInput's pieces) finishes first.
+    if (entry && entry.inputChain) { entry.inputChain.then(() => closeTerminalApiEntry(terminalId)); return; }
     terminalApiSessions.delete(terminalId);
     const streams = terminalApiStreams.get(terminalId);
     if (streams) {
@@ -6134,12 +6137,30 @@ function noteTypedInput(sessionName, text, person = false) {
     list.push({ at: now, text: String(text).slice(0, 8000), person });
     typedInputLog.set(sessionName, list);
 }
+/**
+ * Type into a terminal. Long input goes in 256-byte pieces 20 ms apart
+ * (lib/term-input.js: in one burst Claude Code kept only its last ~1 KB),
+ * in order: what is sent next waits for a long text still going in.
+ * Resolves once all of it has been sent.
+ */
 function sendTerminalInput(entry, data) {
-    if (!entry || !data) return;
+    if (!entry || !data) return Promise.resolve();
     // Typing is use: the idle reaper must not close a terminal mid-delivery.
     entry.lastTouchedAt = Date.now();
     noteTypedInput(entry.sessionName, data);
-    entry.adapter.emit(JSON.stringify({ type: 'input', data }));
+    const parts = termInput.pieces(data);
+    const emit = (piece) => { entry.lastTouchedAt = Date.now(); entry.adapter.emit(JSON.stringify({ type: 'input', data: piece })); };
+    if (parts.length === 1 && !entry.inputChain) { emit(parts[0]); return Promise.resolve(); }
+    const run = async () => {
+        for (let i = 0; i < parts.length; i++) {
+            if (i) await sleepMs(termInput.PIECE_GAP_MS);
+            try { emit(parts[i]); } catch (e) { return; }
+        }
+    };
+    const done = (entry.inputChain || Promise.resolve()).then(run).catch(() => {});
+    entry.inputChain = done;
+    done.then(() => { if (entry.inputChain === done) entry.inputChain = null; });
+    return done;
 }
 
 function sendTerminalResize(entry, cols, rows) {
@@ -8756,7 +8777,7 @@ async function deliverIntoAgent(cb, entry, phase) {
             if (alreadyTyped) {
                 log(`[checkback] ${cb.id}: its text was already in the input box, unsent; sending it`, YELLOW);
             } else {
-                sendTerminalInput(e2, typed);
+                await sendTerminalInput(e2, typed);
                 // Codex folds keys within ~half a second of the text into a
                 // paste (measured: 400ms failed, 1s submitted).
                 await sleepMs(agent === 'codex' ? 1000 : 500);
@@ -17574,7 +17595,7 @@ happens until someone clicks it.
                         try {
                             try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
                             await sleepMs(200);
-                            sendTerminalInput(e2, text);
+                            await sendTerminalInput(e2, text);
                             await sleepMs(300);
                             sendTerminalInput(e2, '\r');
                             await sleepMs(200);

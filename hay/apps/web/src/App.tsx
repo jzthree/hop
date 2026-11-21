@@ -293,13 +293,13 @@ const PENDING_INPUT_MAX_ENTRIES = 200;
 // What is open over the sessions, for a refresh to restore (sessionStorage:
 // this browser tab only, gone with it).
 const UI_KEY = "hop_ui_v1";
-// Briefing, Pulse or Calendar in the column beside the session: the whole
-// of it (session null) or one session's share.
-type SideFeed = { kind: "briefing" | "pulse" | "calendar"; session: string | null };
+// Briefing, Pulse, Calendar or Answers in the column beside the session:
+// the whole of it (session null) or one session's share.
+type SideFeed = { kind: "briefing" | "pulse" | "calendar" | "answers"; session: string | null };
 type SavedUi = {
   place?: "briefing" | "pulse" | "calendar" | "settings" | "messages" | "answers" | null;
   views?: { session?: string; dock?: boolean; item?: string; page?: boolean; side?: boolean } | null;
-  sideTab?: "calendar" | "briefing" | "pulse" | null; calendar?: string | null;
+  sideTab?: "calendar" | "briefing" | "pulse" | "answers" | null; calendar?: string | null;
   sideFeed?: SideFeed | null;
 };
 let savedUiCache: SavedUi | null = null;
@@ -984,7 +984,7 @@ const App = () => {
   // A full-screen session's Calendar tab (Views is its other tab).
   // Full screen, the tab other than Terminal and Views: Calendar, or the
   // session's share of the briefing or the pulse.
-  const [sideTab, setSideTab] = useState<null | "calendar" | "briefing" | "pulse">(() => savedUi().sideTab ?? null);
+  const [sideTab, setSideTab] = useState<null | "calendar" | "briefing" | "pulse" | "answers">(() => savedUi().sideTab ?? null);
   // Briefing, Pulse or Calendar in the column beside the session.
   const [sideFeed, setSideFeed] = useState<SideFeed | null>(() => savedUi().sideFeed ?? null);
   // A refresh comes back to exactly this: the place, Views (and the result
@@ -4898,6 +4898,8 @@ const App = () => {
   const sessionTabs = railDocked && !!session && !switcherOpen && isEmbeddedInHop();
   const schedTabNow = sessionTabs && schedTab && !placePage;
   const feedTabNow = sessionTabs && !placePage && !viewsPage && (sideTab === "briefing" || sideTab === "pulse") ? sideTab : null;
+  // A session's Answers: its turns' replies, as the Answers page has them.
+  const answersTabNow = sessionTabs && !placePage && !viewsPage && sideTab === "answers";
   useEffect(() => { if (viewsPage) setSideTab(null); }, [viewsPage]);
   const focusTerminalSoon = () => window.setTimeout(() => termRef.current?.focus(), 0);
   // A place is about every session: none is selected there.
@@ -4920,7 +4922,7 @@ const App = () => {
   const answersHere = currentInfo?.answersUnread || 0;
   const answerPill = session && answersHere > 0 ? (
     <button type="button" className="answer-pill" title="Its reply to your question, kept until you read it"
-            onClick={() => openAnswers(currentInfo!.internalName || currentInfo!.name)}>
+            onClick={() => (sessionTabs ? openSessionTab(currentInfo!.internalName || currentInfo!.name, "answers") : openAnswers(currentInfo!.internalName || currentInfo!.name))}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg>
       {answersHere === 1 ? "Answered" : `${answersHere} answers`}
     </button>
@@ -4962,7 +4964,7 @@ const App = () => {
     sideUpRef.current = sideNow;
     if (toPageRef.current) { toPageRef.current = false; return; }
     if (!railDocked || !(wasUp || sideNow)) return;
-    const feedPlace = place === "settings" || place === "messages" || place === "answers" ? null : place;
+    const feedPlace = place === "settings" || place === "messages" ? null : place;
     const kind = feedPlace ?? sideTab;
     if (kind) {
       setSideFeed({ kind, session: feedPlace ? null : (currentKey ?? null) });
@@ -4995,7 +4997,7 @@ const App = () => {
     toPageRef.current = true;
     setSideFeed(null);
     if (f.session && sessionTabs && sessionKeyOf(f.session) === currentKey) setSideTab(f.kind);
-    else setPlace(f.kind);
+    else { if (f.kind === "answers") setAnswersScope(f.session); setPlace(f.kind); }
   };
   const toggleViewsSide = () => {
     const next = !viewsSideNow;
@@ -5063,7 +5065,7 @@ const App = () => {
   };
   // Opening a place: clicked again while there, a narrowed briefing shows
   // all of itself again (as Views does), else the place stays.
-  const openPlace = (which: "briefing" | "pulse" | "calendar") => {
+  const openPlace = (which: "briefing" | "pulse" | "calendar" | "answers") => {
     if (place === which) return;
     if (viewsPage) setViewsOpen(null);
     setPlace(which);
@@ -5156,7 +5158,7 @@ const App = () => {
   // under its header — from the terminal, a place, a tile's chip or a menu
   // alike. (The hub has no terminal: there, the session's own page opens on
   // that tab; the tab is saved first, for the page to come back to.)
-  const openSessionTab = (key: string, tab: "views" | "briefing" | "pulse" | "calendar") => {
+  const openSessionTab = (key: string, tab: "views" | "briefing" | "pulse" | "calendar" | "answers") => {
     const lc = key.toLowerCase();
     const target = sessions.find((x) => [x.internalName, x.name, x.displayName].some((n) => (n || "").toLowerCase() === lc));
     // (Before the list has loaded, the session on screen can still change tab.)
@@ -5184,12 +5186,13 @@ const App = () => {
   // The strip: full screen on a session, its tab of that kind; on that tab
   // already, or from the wall (whose tile under the keyboard is no choice to
   // leave for), the page about every session.
-  const openFromStrip = (which: "views" | "briefing" | "pulse" | "calendar") => {
+  const openFromStrip = (which: "views" | "briefing" | "pulse" | "calendar" | "answers") => {
     if (which !== "views" && sideFeedNow?.kind === which) { setSideFeed(null); return; }
     const here = which === "views" ? viewsPage && !!viewsOpen?.session
-      : which === "calendar" ? schedTabNow : feedTabNow === which;
+      : which === "calendar" ? schedTabNow : which === "answers" ? answersTabNow : feedTabNow === which;
     if (selectedRoom && !wallUnder && !here) { openSessionTab(selectedRoom, which); return; }
     if (which === "views") { setPlace(null); setViewsOpen({ page: true }); return; }
+    if (which === "answers") { openAnswers(null); return; }
     openPlace(which);
   };
   // A briefing story's reply chip (or a pulse note): the answer typed into
@@ -5324,9 +5327,10 @@ const App = () => {
     { key: "scheduled", label: "Calendar", icon: <RailIcon name="calendar" />, active: (place === "calendar" && placePage) || schedTabNow || sideFeedNow?.kind === "calendar",
       count: sessions.reduce((n, s) => n + (s.checkbacks || 0), 0), onClick: () => openFromStrip("calendar") },
     // Your questions' replies, however much the agents did after.
-    { key: "answers", label: "Answers", icon: <RailIcon name="answers" />, active: place === "answers",
+    // Like the places above: the selected session's tab, or every session's page.
+    { key: "answers", label: "Answers", icon: <RailIcon name="answers" />, active: place === "answers" || answersTabNow || sideFeedNow?.kind === "answers",
       count: answersUnreadTotal || undefined, fresh: answersUnreadTotal > 0,
-      onClick: () => (place === "answers" && !answersScope ? closeAnswers() : openAnswers(null)) },
+      onClick: () => openFromStrip("answers") },
     // What the agents say to each other (hop send): read here, sent there.
     { key: "messages", label: "Messages", icon: <RailIcon name="messages" />, active: place === "messages",
       fresh: messagesAt > messagesSeen, onClick: () => (place === "messages" ? closeMessages() : openMessages()) },
@@ -5458,7 +5462,7 @@ const App = () => {
           {answerPill}
           {sessionTabs && (
             <nav className="session-tabs" role="tablist" aria-label="Session">
-              <button type="button" role="tab" aria-selected={!viewsPage && !schedTabNow && !feedTabNow}
+              <button type="button" role="tab" aria-selected={!viewsPage && !schedTabNow && !feedTabNow && !answersTabNow}
                       onClick={() => { setSchedTab(false); if (viewsPage) setViewsOpen(null); focusTerminalSoon(); }}>Terminal</button>
               <button type="button" role="tab" aria-selected={viewsPage || viewsSideNow}
                       title={`This session's results (${isMacPlatform ? "⌘⇧V" : "Views"})`}
@@ -5486,6 +5490,11 @@ const App = () => {
                       title={`What is coming up on this session (${isMacPlatform ? "⌘⇧S" : "Ctrl+Shift+S"})`}
                       onClick={() => { setSchedTab(true); if (viewsPage) setViewsOpen(null); }}>
                 Calendar{!!currentInfo?.checkbacks && <span className="session-tab-n">{currentInfo.checkbacks}</span>}
+              </button>
+              <button type="button" role="tab" aria-selected={answersTabNow || sideFeedNow?.kind === "answers"}
+                      title="Its replies to your questions, and the turns agents started here"
+                      onClick={() => { setSideTab("answers"); if (viewsPage) setViewsOpen(null); }}>
+                Answers{answersHere > 0 && <span className="session-tab-n fresh">{answersHere}</span>}
               </button>
             </nav>
           )}
@@ -6414,7 +6423,7 @@ const App = () => {
           onPick={(next) => {
             // From a place or Views, a session in the sidebar is that
             // session on the same kind of tab.
-            if (place === "settings" || place === "messages" || place === "answers") setPlace(null);
+            if (place === "settings" || place === "messages" || (place === "answers" && !placePage)) setPlace(null);
             else if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
             if (viewsPage) { openSessionTab(next.internalName || next.name, "views"); return; }
             // Side by side, the column follows: switch, and show the new
@@ -6440,7 +6449,7 @@ const App = () => {
             // From Views: back to where you were, on the selected session.
             if (viewsPage || placePage) { backToSessions(); return; }
             // On a session's other tab: its terminal, as from its Views.
-            if (schedTabNow || feedTabNow) { setSideTab(null); focusTerminalSoon(); return; }
+            if (schedTabNow || feedTabNow || answersTabNow) { setSideTab(null); focusTerminalSoon(); return; }
             // Full screen: out to the wall (a column beside stays). On the
             // wall already: nothing to do.
             if (session && !switcherOpen) setSwitcherOpen(true);
@@ -6462,6 +6471,13 @@ const App = () => {
                    onFollowUp={pulseFollowUp} markSeen={pulse.markSeen}
                    onToggleSide={() => feedToSide("pulse", currentKey)}
                    onClose={() => { setSideTab(null); focusTerminalSoon(); }} />
+      )}
+      {answersTabNow && currentKey && (
+        <AnswersPage key={"answers-" + currentKey} placement="tab" sessions={sessions} scope={currentKey}
+                     onToggleSide={() => feedToSide("answers", currentKey)}
+                     onClose={() => { setSideTab(null); focusTerminalSoon(); }}
+                     onOpenSession={(key) => { if (sessionKeyOf(key) === currentKey) { setSideTab(null); focusTerminalSoon(); } else goToSession(key); }}
+                     onChanged={() => { void fetchSessions({ showLoading: false }); }} />
       )}
       {schedTabNow && (
         <CheckbacksPanel placement="tab"
@@ -6535,6 +6551,13 @@ const App = () => {
                      existing={new Set(sessions.flatMap((x) => [x.name, x.displayName].filter(Boolean) as string[]))}
                      onFollowUp={pulseFollowUp} markSeen={pulse.markSeen} />
         );
+        if (f.kind === "answers") return (
+          <AnswersPage key="side-answers" placement="side" sessions={sessions} scope={f.session}
+                       scopeLabel={scopeLabel} onSideScope={onScope}
+                       onToggleSide={common.onToggleSide} onResizeSide={resizeViewsSide} onClose={close}
+                       onOpenSession={goToSession}
+                       onChanged={() => { void fetchSessions({ showLoading: false }); }} />
+        );
         const name = f.session ? (sessions.find((x) => (x.internalName || x.name) === f.session)?.displayName || f.session) : "every session";
         return (
           <CheckbacksPanel key="side-calendar" placement="side" session={f.session || "*"} sessionName={name}
@@ -6550,6 +6573,7 @@ const App = () => {
           sessions={sessions}
           scope={answersScope}
           onScope={setAnswersScope}
+          onToggleSide={railDocked ? () => feedToSide("answers", answersScope) : undefined}
           onClose={closeAnswers}
           onOpenSession={(key) => { setPlace(null); goToSession(key); }}
           onChanged={() => { void fetchSessions({ showLoading: false }); }}

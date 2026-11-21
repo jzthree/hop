@@ -2,7 +2,7 @@
 // person's: not what hop or an agent typed, a loop, or the agent app's own.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classify, describe, emptyStore, normalizeStore, add, markRead, unreadBySession, prune, humanTurn, KEEP_MS } = require('../lib/answers');
+const { classify, describe, emptyStore, normalizeStore, add, markRead, archive, move, unreadBySession, prune, humanTurn, ARCHIVE_KEEP_MS, KEEP_MAX } = require('../lib/answers');
 
 const NOW = Date.parse('2026-11-12T06:00:00.000Z');
 const M = 60_000;
@@ -58,10 +58,7 @@ test('answers are kept unread until read, by id, by session, or all', () => {
   assert.equal(markRead(store, { all: true }, NOW), 1);
   assert.deepEqual(unreadBySession(store), {});
   assert.equal(markRead(store, { all: true }, NOW), 0, 'nothing left');
-  // Two weeks, oldest first; a bad file reads as empty.
-  add(store, { id: 'old', session: 's_a', question: 'q', askedAt: NOW - KEEP_MS - 2 * M, answer: '', answeredAt: NOW - KEEP_MS - M }, NOW);
-  prune(store, NOW);
-  assert.equal(store.items.some((a) => a.id === 'old'), false);
+  // A bad file reads as empty.
   assert.deepEqual(normalizeStore({ items: [{ id: 'x' }, { id: 'ok', session: 's', askedAt: NOW, question: 'q1' }] }).items.map((a) => a.id), ['ok']);
 });
 
@@ -101,7 +98,7 @@ test('where the agent app says a turn\'s prompts came from, a turn no person sta
 });
 
 test('answers kept before hop said where a prompt came from are filed when read back', () => {
-  const loop = 'Autonomous music-model loop (self-paced), user-authorized to modify and submit runs without approval: keep going.';
+  const loop = 'Self-paced training loop, allowed to adjust and resubmit runs without asking: keep going until it converges.';
   const kept = normalizeStore({ items: [
     { id: 'q', session: 's', askedAt: NOW, question: 'why is the loss flat?' },
     { id: 'l', session: 's', askedAt: NOW + 1, question: '/loop Shepherd the fleet.' },
@@ -141,4 +138,70 @@ test('only the person\'s own questions count toward a session\'s unread badge', 
   add(store, { id: 'b', session: 's', question: 'msg', askedAt: NOW, answer: 'y', from: 'agents', source: 'message', by: 'plotter' }, NOW);
   assert.deepEqual(unreadBySession(store), { s: 1 });
   assert.deepEqual(store.items.map((a) => [a.from, a.source, a.by]), [['you', 'you', null], ['agents', 'message', 'plotter']]);
+});
+
+test('kept like mail: read answers stay until archived, archived ones go a month later', () => {
+  const store = emptyStore();
+  const YEAR = 365 * 24 * 3600_000;
+  add(store, { id: 'old', session: 's', question: 'q0', askedAt: NOW - YEAR, answer: 'r', answeredAt: NOW - YEAR }, NOW - YEAR);
+  add(store, { id: 'a', session: 's', question: 'q1', askedAt: NOW - 2 * M, answer: 'r', answeredAt: NOW - M }, NOW);
+  markRead(store, { all: true }, NOW);
+  assert.equal(prune(store, NOW), 0, 'read, not archived: stays, however old');
+  assert.equal(archive(store, { ids: ['old'] }, NOW), 1);
+  assert.equal(archive(store, { ids: ['old'] }, NOW), 0, 'already archived');
+  assert.equal(archive(store, { ids: ['a'], archived: false }, NOW), 0, 'already in the inbox');
+  // Archiving reads it; putting it back keeps it read.
+  add(store, { id: 'u', session: 's', question: 'q2', askedAt: NOW, answer: 'r', answeredAt: NOW }, NOW);
+  assert.deepEqual(unreadBySession(store), { s: 1 });
+  archive(store, { ids: ['u'] }, NOW);
+  assert.ok(store.items.find((a) => a.id === 'u').readAt);
+  assert.deepEqual(unreadBySession(store), {});
+  archive(store, { ids: ['u'], archived: false }, NOW);
+  assert.equal(store.items.find((a) => a.id === 'u').archivedAt, null);
+  assert.equal(prune(store, NOW + ARCHIVE_KEEP_MS - M), 0);
+  assert.equal(prune(store, NOW + ARCHIVE_KEEP_MS + M), 1);
+  assert.deepEqual(store.items.map((a) => a.id), ['a', 'u']);
+});
+
+test('past a tab\'s limit the archived go first, then the read, then the oldest unread; the other tab keeps its own', () => {
+  const store = emptyStore();
+  const n = KEEP_MAX.agents;
+  for (let i = 0; i < n; i++) store.items.push({ id: `g${i}`, session: 's', from: 'agents', question: 'q', askedAt: NOW + i, answeredAt: NOW + i, readAt: null, archivedAt: null });
+  store.items.push({ id: 'mine', session: 's', from: 'you', question: 'q', askedAt: NOW - 1, answeredAt: NOW - 1, readAt: null, archivedAt: null });
+  store.items[5].archivedAt = NOW + 9; store.items[5].readAt = NOW + 9;
+  store.items[7].readAt = NOW + 9;
+  store.items.push({ id: 'g-new', session: 's', from: 'agents', question: 'q', askedAt: NOW + n, answeredAt: NOW + n, readAt: null, archivedAt: null });
+  store.items.push({ id: 'g-newer', session: 's', from: 'agents', question: 'q', askedAt: NOW + n + 1, answeredAt: NOW + n + 1, readAt: null, archivedAt: null });
+  store.items.push({ id: 'g-newest', session: 's', from: 'agents', question: 'q', askedAt: NOW + n + 2, answeredAt: NOW + n + 2, readAt: null, archivedAt: null });
+  assert.equal(prune(store, NOW + n + 3), 3);
+  const ids = new Set(store.items.map((a) => a.id));
+  assert.equal(ids.has('g5') || ids.has('g7') || ids.has('g0'), false);
+  assert.ok(ids.has('g1') && ids.has('mine') && ids.has('g-newest'));
+});
+
+test('its person can move a turn to the other tab; only the person\'s own count on the badge', () => {
+  const store = emptyStore();
+  add(store, { id: 'l', session: 's', question: 'Autonomous loop: keep going', askedAt: NOW, answer: 'r', answeredAt: NOW }, NOW);
+  assert.deepEqual(unreadBySession(store), { s: 1 });
+  assert.equal(move(store, { ids: ['l'], from: 'agents' }, NOW), 1);
+  assert.equal(move(store, { ids: ['l'], from: 'agents' }, NOW), 0);
+  assert.equal(move(store, { ids: ['l'], from: 'nobody' }, NOW), 0);
+  assert.equal(store.items[0].movedAt, NOW);
+  assert.deepEqual(unreadBySession(store), {});
+});
+
+test('a legacy store\'s schedule: a long prompt kept three times or more, a little reworded, is not the person\'s', () => {
+  const body = 'Self-paced training loop: check the newest run, adjust and resubmit without asking, and log what changed. '.repeat(3);
+  const mine = 'please rerun the comparison with the same seeds and tell me whether the difference survives the rerun before anything else. '.repeat(2);
+  const kept = normalizeStore({ items: [
+    { id: 'r1', session: 'm', askedAt: NOW, question: `${body} Run 1.` },
+    { id: 'r2', session: 'm', askedAt: NOW + 4 * 3600_000 * 2, question: `${body} Run 2: the eval improved.` },
+    { id: 'r3', session: 'm', askedAt: NOW + 4 * 3600_000 * 4, question: `<pasted_content id="1">${body}</pasted_content id="1"> Run 3.` },
+    { id: 'other', session: 'x', askedAt: NOW, question: `${body} Run 1.` },
+    { id: 'p1', session: 'm', askedAt: NOW + 1, question: mine },
+    { id: 'p2', session: 'm', askedAt: NOW + 8 * 3600_000, question: mine }
+  ] });
+  assert.deepEqual(Object.fromEntries(kept.items.map((a) => [a.id, `${a.from}/${a.source}`])), {
+    r1: 'agents/repeat', r2: 'agents/repeat', r3: 'agents/repeat', other: 'you/you', p1: 'you/you', p2: 'you/you'
+  });
 });

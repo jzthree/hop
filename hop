@@ -8273,7 +8273,13 @@ function loadAnswers() {
     catch (e) { answersCache = answers.emptyStore(); }
     return answersCache;
 }
+// Changes since this daemon started: the page asks with the one it has
+// and gets the whole list only when something changed.
+const answersEpoch = crypto.randomBytes(3).toString('hex');
+let answersChanges = 0;
+const answersRev = () => `${answersEpoch}.${answersChanges}`;
 function saveAnswers() {
+    answersChanges++;
     try { writePrivateFile(ANSWERS_FILE, JSON.stringify(loadAnswers()), 0o600); } catch (e) { /* best effort */ }
 }
 const answerWatch = new Map();
@@ -17411,13 +17417,18 @@ happens until someone clicks it.
                 return;
             }
             try { sweepAnswers(); } catch (e) { /* show what is kept */ }
-            const items = answers.prune(loadAnswers()).items.slice().reverse()
-                .map((a) => ({ ...a, sessionName: getSessionDisplayName(a.session) || a.session }));
+            if (answers.prune(loadAnswers())) saveAnswers();
+            const rev = answersRev();
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            res.end(JSON.stringify({ answers: items }));
+            if (parsedUrl.query.rev === rev) { res.end(JSON.stringify({ rev, unchanged: true })); return; }
+            const items = loadAnswers().items.slice().reverse()
+                .map((a) => ({ ...a, sessionName: getSessionDisplayName(a.session) || a.session }));
+            res.end(JSON.stringify({ rev, answers: items }));
             return;
         }
-        if (parsedUrl.pathname === '/api/answers/read' && req.method === 'POST') {
+        // Read, archive (or back to the inbox), move to the other tab.
+        const answersAct = parsedUrl.pathname.match(/^\/api\/answers\/(read|archive|move)$/);
+        if (answersAct && req.method === 'POST') {
             let body = '';
             req.on('data', (chunk) => { body += chunk; if (body.length > 65536) req.destroy(); });
             req.on('end', () => {
@@ -17428,12 +17439,18 @@ happens until someone clicks it.
                         return;
                     }
                     const input = JSON.parse(body || '{}');
-                    const ids = Array.isArray(input.ids) ? input.ids.map(String).slice(0, 1000) : null;
+                    const ids = Array.isArray(input.ids) ? input.ids.map(String).slice(0, 5000) : null;
                     const session = typeof input.session === 'string' ? resolveSessionInternalName(input.session, input.session) || input.session : null;
-                    const n = answers.markRead(loadAnswers(), { ids, session, all: input.all === true });
+                    let n;
+                    if (answersAct[1] === 'read') n = answers.markRead(loadAnswers(), { ids, session, all: input.all === true });
+                    else if (answersAct[1] === 'archive') n = answers.archive(loadAnswers(), { ids: ids || [], archived: input.archived !== false });
+                    else {
+                        if (input.from !== 'you' && input.from !== 'agents') throw new Error('from: you or agents');
+                        n = answers.move(loadAnswers(), { ids: ids || [], from: input.from });
+                    }
                     if (n) saveAnswers();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true, read: n }));
+                    res.end(JSON.stringify({ ok: true, changed: n, ...(answersAct[1] === 'read' ? { read: n } : {}), rev: answersRev() }));
                 } catch (e) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid request body' }));

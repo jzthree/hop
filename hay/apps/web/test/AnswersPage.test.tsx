@@ -31,19 +31,21 @@ describe("AnswersPage", () => {
     page();
     expect(screen.getByRole("tab", { name: "From you 2" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("tab", { name: "From agents 1" })).toBeTruthy();
-    // Unread first; a kept answer with no "from" is yours.
-    expect(rows().map((r) => within(r).getByText(/\?$/).textContent)).toEqual(["what was the final AUC?", "why is the validation loss flat?"]);
+    // The inbox, newest first: read ones stay; a kept answer with no "from" is yours.
+    expect(rows().map((r) => within(r).getByText(/\?$/).textContent)).toEqual(["what was the final AUC?", "why is the validation loss flat?", "is the data loader the bottleneck?"]);
+    fireEvent.click(screen.getByRole("radio", { name: "Unread" }));
+    expect(rows()).toHaveLength(2);
     fireEvent.click(screen.getByRole("tab", { name: "From agents 1" }));
     expect(rows()).toHaveLength(1);
     expect(within(rows()[0]).getByText("check-back · coordinator")).toBeTruthy();
-    fireEvent.click(screen.getByRole("radio", { name: "All" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Inbox" }));
     expect(rows()).toHaveLength(2);
     // hop's sender line is not part of the preview; the sender is the row's tag.
     expect(within(rows()[1]).getByText("plotter")).toBeTruthy();
     expect(within(rows()[1]).getByText("the plot moved")).toBeTruthy();
   });
 
-  it("reads like mail: the list on the left, the one you pick on the right, read once opened", () => {
+  it("reads like mail: the list on the left, the one you pick on the right, read once opened, there until archived", () => {
     const changed = vi.fn();
     page({ onChanged: changed });
     // The first is on show, not yet read.
@@ -54,13 +56,65 @@ describe("AnswersPage", () => {
     expect(reader().querySelectorAll("li").length).toBe(1);
     expect(changed).toHaveBeenCalled();
     expect(screen.getByRole("tab", { name: "From you 1" })).toBeTruthy();
-    // Read, it stays in the unread list while you read it.
-    expect(rows()).toHaveLength(2);
+    // Read, it stays in the inbox.
+    expect(rows()).toHaveLength(3);
     expect(rows()[1].getAttribute("aria-current")).toBe("true");
+    // Archived, it leaves the inbox and the next one is on show.
+    fireEvent.click(within(reader()).getByRole("button", { name: "Archive" }));
+    expect(rows()).toHaveLength(2);
+    expect(within(reader()).getByText("is the data loader the bottleneck?")).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "Archived" }));
+    expect(rows()).toHaveLength(1);
+    expect(within(rows()[0]).getByText("why is the validation loss flat?")).toBeTruthy();
+    fireEvent.click(within(reader()).getByRole("button", { name: "Move to inbox" }));
+    expect(rows()).toHaveLength(0);
+    expect(screen.getByText("Nothing archived.")).toBeTruthy();
     // An agent's turn says who started it.
     fireEvent.click(screen.getByRole("tab", { name: "From agents 1" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Inbox" }));
     fireEvent.click(rows()[0]);
     expect(within(reader()).getByText("Check-back set by coordinator")).toBeTruthy();
+  });
+
+  it("archives every read one at once, or one from the list; e archives the one on show", () => {
+    page();
+    fireEvent.click(screen.getByRole("button", { name: "Archive read (1)" }));
+    expect(rows()).toHaveLength(2);
+    fireEvent.click(within(rows()[0].parentElement as HTMLElement).getByRole("button", { name: "Archive" }));
+    expect(rows()).toHaveLength(1);
+    fireEvent.keyDown(window, { key: "e" });
+    expect(screen.getByText("Inbox empty.")).toBeTruthy();
+  });
+
+  it("searches both tabs and the archive, and marks what matched", () => {
+    page();
+    fireEvent.click(screen.getByRole("button", { name: "Archive read (1)" }));
+    const box = screen.getByRole("searchbox", { name: "Search answers" });
+    fireEvent.change(box, { target: { value: "GPU util" } });
+    // Found in an archived reply; the tabs count matches.
+    expect(rows()).toHaveLength(1);
+    expect(within(rows()[0]).getByText("Archived")).toBeTruthy();
+    expect(rows()[0].querySelector("mark")?.textContent?.toLowerCase()).toBe("gpu");
+    expect(screen.getByRole("tab", { name: "From you 1" })).toBeTruthy();
+    fireEvent.change(box, { target: { value: "plotter" } });
+    expect(rows()).toHaveLength(0);
+    expect(screen.getByText(/Nothing in From you matches/)).toBeTruthy();
+    expect(screen.getByText("1 in From agents.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "From agents 1" }));
+    expect(rows()).toHaveLength(1);
+    // Esc in the box clears it first.
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect((box as HTMLInputElement).value).toBe("");
+  });
+
+  it("moves a turn that was not your question to the other tab", () => {
+    page();
+    fireEvent.click(within(reader()).getByRole("button", { name: "Move to From agents" }));
+    // It counts on the other tab now; the next one opens (and so is read), as in mail.
+    expect(within(reader()).getByText("why is the validation loss flat?")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "From you" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "From agents 2" }));
+    expect(rows().some((r) => within(r).queryByText("what was the final AUC?"))).toBe(true);
   });
 
   it("moves through the list with the arrow keys, and opens the session from the reading pane", () => {
@@ -86,23 +140,39 @@ describe("AnswersPage", () => {
     expect(within(reader()).getByText("what was the final AUC?")).toBeTruthy();
     expect(document.querySelector(".ans-inbox")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "‹ Your questions" }));
-    expect(rows()).toHaveLength(2);
+    expect(rows()).toHaveLength(3);
   });
 
   it("from a session's header: only that session's turns, and a way out to all", () => {
     const onScope = vi.fn();
     page({ placement: "sheet", scope: "s_t", onScope });
     expect(document.querySelector(".ans-scope strong")?.textContent).toBe("trainer");
-    expect(rows()).toHaveLength(1);
+    expect(rows()).toHaveLength(2);
     expect(screen.queryByText("what was the final AUC?")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Every session's answers" }));
     expect(onScope).toHaveBeenCalledWith(null);
   });
 
+  it("as a session's tab: that session's only, no head of its own; in the column: its share or all", () => {
+    page({ placement: "tab", scope: "s_e" });
+    expect(screen.getByRole("tabpanel", { name: "Answers" })).toBeTruthy();
+    expect(document.querySelector(".place-head")).toBeNull();
+    expect(rows()).toHaveLength(1);
+    expect(document.querySelector(".ans-row-session")).toBeNull();
+    cleanup();
+    const onSideScope = vi.fn();
+    page({ placement: "side", scope: "s_e", scopeLabel: "eval", onSideScope, onToggleSide: () => {} });
+    expect(screen.getByRole("complementary", { name: "Answers" })).toBeTruthy();
+    // The column is narrow: the list first.
+    expect(document.querySelector(".ans-reader")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "all" }));
+    expect(onSideScope).toHaveBeenCalledWith(true);
+  });
+
   it("empty: says what will appear on each tab", () => {
     page({ initial: [] });
     expect(screen.getByText("No answers yet.")).toBeTruthy();
-    expect(screen.getByText(/stays here until you've read it/)).toBeTruthy();
+    expect(screen.getByText(/stays until you archive it/)).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "From agents" }));
     expect(screen.getByText("Nothing from agents yet.")).toBeTruthy();
   });

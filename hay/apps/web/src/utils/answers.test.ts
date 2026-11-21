@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { preview, promptText, sourceLabel, sourceTag, tabOf, unreadByTab, type Answer } from "./answers";
+import { inView, markParts, matches, preview, promptText, searchTerms, snippet, sourceLabel, sourceTag, tabOf, unreadByTab, type Answer } from "./answers";
 
 const a = (over: Partial<Answer>): Answer => ({
   id: "x", session: "s", sessionName: "s", agent: "claude", question: "q", askedAt: 0, answer: "a", answeredAt: 1, readAt: null, ...over
@@ -27,7 +27,29 @@ describe("the Answers page's words", () => {
     expect(promptText("<pasted_content id=\"1\">[hop message from session \"plotter\" (a Claude agent, not your user). To answer…] the plot\nmoved</pasted_content id=\"1\">")).toBe("the plot\nmoved");
   });
 
-  it("counts unread per tab", () => {
-    expect(unreadByTab([a({}), a({ readAt: 5 }), a({ from: "agents" })])).toEqual({ you: 1, agents: 1 });
+  it("counts unread per tab, in the inbox", () => {
+    expect(unreadByTab([a({}), a({ readAt: 5 }), a({ from: "agents" }), a({ archivedAt: 9 })])).toEqual({ you: 1, agents: 1 });
+    expect(sourceLabel(a({ from: "agents", movedAt: 3 }))).toBe("Moved here by you (not your question)");
+  });
+
+  it("views: the inbox keeps read ones until archived", () => {
+    expect([inView(a({}), "inbox"), inView(a({ readAt: 2 }), "inbox"), inView(a({ readAt: 2, archivedAt: 3 }), "inbox")]).toEqual([true, true, false]);
+    expect([inView(a({}), "unread"), inView(a({ readAt: 2 }), "unread")]).toEqual([true, false]);
+    expect([inView(a({}), "archived"), inView(a({ archivedAt: 3 }), "archived")]).toEqual([false, true]);
+  });
+
+  it("search: every word, anywhere in the turn or its session's name; the snippet shows where", () => {
+    const t = searchTerms("  GPU  util ");
+    expect(t).toEqual(["gpu", "util"]);
+    expect(matches(a({ answer: "GPU util is 97%" }), "s", t)).toBe(true);
+    expect(matches(a({ answer: "GPU is busy" }), "s", t)).toBe(false);
+    expect(matches(a({}), "trainer", searchTerms("train"))).toBe(true);
+    const long = `${"filler words ".repeat(30)}the needle is here ${"more ".repeat(30)}`;
+    expect(snippet(long, ["needle"], 60).startsWith("…")).toBe(true);
+    expect(snippet(long, ["needle"], 60)).toContain("needle");
+    expect(snippet("short one", ["needle"], 60)).toBe("short one");
+    expect(snippet("a short text whose needle is late but fits", ["needle"], 60)).toBe("a short text whose needle is late but fits");
+    expect(markParts("GPU util, gpu", ["gpu"])).toEqual([{ text: "GPU", hit: true }, { text: " util, ", hit: false }, { text: "gpu", hit: true }]);
+    expect(markParts("a (b)", ["(b)"])).toEqual([{ text: "a ", hit: false }, { text: "(b)", hit: true }]);
   });
 });

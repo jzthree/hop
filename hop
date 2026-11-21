@@ -33,6 +33,7 @@ const agentUsage = require('./lib/agent-usage');
 const codexHelpers = require('./lib/codex-helpers');
 const agyAccounts = require('./lib/agy-accounts');
 const agyArchive = require('./lib/agy-archive');
+const claudeProcs = require('./lib/claude-procs');
 const agentSignin = require('./lib/agent-signin');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
@@ -9548,24 +9549,21 @@ function recordRestoreExpectations(planned) {
 // what stops the reconciler from nagging (or, guarded elsewhere, re-driving)
 // a claude that has been running fine for an hour (angler, lightscope).
 let claudeProcListCache = { at: 0, text: '' };
-function claudeProcessRunning(sessionId) {
-    if (!sessionId) return false;
+/** The claude processes holding conversation `sessionId` ([{ pid, tty }]); a fork of it is not one (lib/claude-procs.js). */
+function claudeProcessesFor(sessionId) {
+    if (!sessionId) return [];
     const now = Date.now();
     if (now - claudeProcListCache.at > 3000) {
         try {
             // One cheap snapshot of every claude argv, cached for a few
             // seconds so a whole sweep costs one ps, not one per session.
-            claudeProcListCache = { at: now, text: execFileSync('ps', ['-axo', 'command'], { encoding: 'utf8', timeout: 4000 }) };
+            claudeProcListCache = { at: now, text: execFileSync('ps', ['-axo', 'pid=,tty=,command='], { encoding: 'utf8', timeout: 4000 }) };
         } catch (e) { claudeProcListCache = { at: now, text: '' }; }
     }
-    const lines = claudeProcListCache.text.split('\n');
-    const idInResume = new RegExp(`--resume(=|\\s+)${sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
-    for (const line of lines) {
-        if (!/(^|\/|\s)claude[\w.-]*(\s|$)/.test(line)) continue; // an actual claude process
-        if (/\bps\b.*-axo|grep\b/.test(line)) continue;           // not our own probe
-        if (idInResume.test(line)) return true;
-    }
-    return false;
+    return claudeProcs.resumeProcesses(claudeProcListCache.text, sessionId);
+}
+function claudeProcessRunning(sessionId) {
+    return claudeProcessesFor(sessionId).length > 0;
 }
 
 let restoreReconcileBusy = false;
@@ -21495,8 +21493,16 @@ async function main() {
         const cfg = getSessionConfig(target);
         const cwd = meta?.cwd || cfg?.cwd || process.cwd();
         const rec = readClaudeSessionRecord(target);
-        if (rec?.sessionId && claudeProcessRunning(rec.sessionId)) {
-            log(`${display}: its claude conversation ${String(rec.sessionId).slice(0, 8)}… is already running in this session.`, YELLOW);
+        const holders = rec?.sessionId ? claudeProcessesFor(rec.sessionId) : [];
+        if (holders.length) {
+            // Say where: this terminal, or another one (two claudes writing
+            // one conversation would interleave it).
+            let myTty = '';
+            try { myTty = execFileSync('ps', ['-o', 'tty=', '-p', String(process.pid)], { encoding: 'utf8', timeout: 4000 }).trim(); } catch (e) { /* unknown */ }
+            const here = holders.find((p) => myTty && p.tty === myTty);
+            const id = `${String(rec.sessionId).slice(0, 8)}…`;
+            if (here) log(`${display}: its claude conversation ${id} is already running in this session.`, YELLOW);
+            else log(`${display}: its claude conversation ${id} is open in another terminal (pid ${holders[0].pid}${holders[0].tty && holders[0].tty !== '??' ? `, ${holders[0].tty}` : ''}). Quit it there first.`, YELLOW);
             process.exit(1);
         }
         const plan = restorePlanForSession({ internalName: target, cwd, startup: cfg?.startup, autoStart: cfg?.autoStart });

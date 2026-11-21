@@ -4079,6 +4079,24 @@ body.pane-dragging { user-select: none; }
 }
 .switcher-live-chrome button:hover { color: var(--ink); }
 
+/* A tile's queued messages: over the terminal's top-left, never beside it
+   (room taken from the terminal would resize the session). */
+.switcher-tile-queued {
+  position: absolute; top: 2px; left: 4px; z-index: 3; max-width: calc(100% - 120px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 7px; border-radius: 6px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, #7c3aed 45%, transparent);
+  background: color-mix(in srgb, var(--panel) 86%, #7c3aed 14%);
+  color: var(--ink); font: 600 10px/1.5 var(--font-mono);
+}
+.switcher-tile-queued:hover { background: color-mix(in srgb, var(--panel) 76%, #7c3aed 24%); }
+.switcher-tile-queued.fresh { animation: tile-queued-pulse 0.8s ease-in-out 3; }
+@keyframes tile-queued-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, #7c3aed 0%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, #7c3aed 35%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .switcher-tile-queued.fresh { animation: none; } }
+
 /* Voice input (hold Space in a Claude session): floating listen indicator. */
 .voice-overlay {
   position: absolute;

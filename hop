@@ -6149,7 +6149,11 @@ function sendTerminalInput(entry, data) {
     entry.lastTouchedAt = Date.now();
     noteTypedInput(entry.sessionName, data);
     const parts = termInput.pieces(data);
-    const emit = (piece) => { entry.lastTouchedAt = Date.now(); entry.adapter.emit(JSON.stringify({ type: 'input', data: piece })); };
+    // Passive: what hop types (a delivery, a queued message taken out of the
+    // box, an agent's write) never takes the session's size. The host gives
+    // the size to whoever types, and these clients join at 80×24, so each
+    // delivery squeezed the session to 80×24 until its person typed again.
+    const emit = (piece) => { entry.lastTouchedAt = Date.now(); entry.adapter.emit(JSON.stringify({ type: 'input', data: piece, passive: true })); };
     if (parts.length === 1 && !entry.inputChain) { emit(parts[0]); return Promise.resolve(); }
     const run = async () => {
         for (let i = 0; i < parts.length; i++) {

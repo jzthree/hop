@@ -64,6 +64,8 @@ export type SwitcherSession = {
   agentModel?: string | null;
   /** Server-decided: a turn in flight / the last turn finished; turnSeen = a human opened it since. */
   agentPhase?: "working" | "done" | null;
+  /** Messages hop holds for when the agent's turn ends (typed or queued with Tab). */
+  queued?: { id: string; message: string }[];
   turnSeen?: boolean;
   /** Scheduled check-backs waiting on this session (hop checkback). */
   checkbacks?: number;

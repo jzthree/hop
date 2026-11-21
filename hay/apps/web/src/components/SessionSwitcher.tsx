@@ -480,9 +480,11 @@ const runningApp = (s: SwitcherSession) => {
 // responsiveness and whether keystrokes are accepted. The old design — an
 // HTML preview swapped for a fresh xterm + socket behind a veil — is gone.
 const LIVETILE_POLL_MS = 5000;
-const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, codexApp = false, agent = null, working = false, claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender, onOpenView }: {
+const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, codexApp = false, agent = null, working = false, queued = [], claimSize, activeCols, activeRows, onFullscreen, onUnfocus, onNotice, onSender, onOpenView }: {
   /** The session's agent and whether a turn is running: Tab queues in Claude and Antigravity (utils/queueInput.ts). */
   agent?: string | null; working?: boolean;
+  /** What hop holds for when the turn ends: shown on the tile, so a Tab that queued is seen to have. */
+  queued?: { id: string; message: string }[];
   /** The wall keeps a registry of live tiles' input senders (file drops). */
   onSender?: (send: ((data: string) => void) | null) => void;
   /** An inline hop view card's Open: the reader for that session, on that item. */
@@ -629,6 +631,17 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
   const liveRef = useRef(live);
   liveRef.current = live;
   const onFullscreenRef = useRef(onFullscreen);
+  // A new queued message: the chip says so loudly for a moment.
+  const [queuedFresh, setQueuedFresh] = useState(false);
+  const queuedCountRef = useRef(queued.length);
+  useEffect(() => {
+    const grew = queued.length > queuedCountRef.current;
+    queuedCountRef.current = queued.length;
+    if (!grew) return;
+    setQueuedFresh(true);
+    const t = window.setTimeout(() => setQueuedFresh(false), 2400);
+    return () => window.clearTimeout(t);
+  }, [queued.length]);
   const tabQueueRef = useRef({ agent, working, room });
   tabQueueRef.current = { agent, working, room };
   onFullscreenRef.current = onFullscreen;
@@ -1354,6 +1367,14 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       onPointerDown={live ? (e) => e.stopPropagation() : undefined}
     >
       <div className="switcher-focus-term" ref={boxRef} />
+      {queued.length > 0 && (
+        // Over the terminal, never beside it: taking room would resize the session.
+        <button type="button" className={"switcher-tile-queued" + (queuedFresh ? " fresh" : "")}
+                title={`Queued — goes when this turn ends:\n${queued.map((q) => `• ${q.message.slice(0, 140)}${q.message.length > 140 ? "…" : ""}`).join("\n")}\nClick to see, edit or cancel it.`}
+                onClick={(e) => { e.stopPropagation(); onFullscreenRef.current(); }}>
+          ⧗ {queued.length === 1 ? "1 queued" : `${queued.length} queued`} · sends when this turn ends
+        </button>
+      )}
       {voiceInterim !== null && (
         <div className="voice-overlay" aria-hidden="true">
           <span className="voice-dot" />
@@ -3238,6 +3259,7 @@ export const SessionSwitcher = ({
               codexApp={appLabel(s) === "codex"}
               agent={s.agent ?? null}
               working={s.agentPhase === "working"}
+              queued={s.queued ?? []}
               claimSize={s.hasLocalCli !== true}
               activeCols={preview?.cols}
               activeRows={preview?.rows}

@@ -17,6 +17,11 @@ terminals, as an app of its own instead of a browser tab.
   drag-and-drop, downloads to ~/Downloads, links out to your browser, hop
   pages "in a new tab" as new windows, Open at Login, the Safari Web
   Inspector (Develop menu).
+- **Hold Space to dictate.** In a Claude session, holding Space listens
+  (WebKit's speech recogniser) and types what you said. macOS asks once for
+  the microphone and for speech recognition; hop's own pages then listen
+  without WebKit asking again (`hop.entitlements` lets the hardened runtime
+  open the microphone).
 
 The page knows it is in the app: `window.hopNative` (`{ platform: 'mac',
 version, post(message) }`). `post({ type: 'badge', count })` sets the Dock

@@ -190,6 +190,32 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     func webViewDidClose(_ webView: WKWebView) { window?.close() }
 
+    /// Hold-Space dictation (the web app's Web Speech, WebKit's own
+    /// recogniser): hop's own pages may listen without WebKit asking again
+    /// on every page load; macOS still asks once for the microphone and for
+    /// speech recognition (Info.plist says why). Any other page is refused.
+    /// WebKit's private WKUIDelegate hook: without it, WebKit's default alert.
+    @objc(_webView:requestSpeechRecognitionPermissionForOrigin:decisionHandler:)
+    func webView(_ webView: WKWebView, requestSpeechRecognitionPermissionFor origin: WKSecurityOrigin, decisionHandler: @escaping (Bool) -> Void) {
+        decisionHandler(isHop(origin))
+    }
+
+    /// The microphone for a page's own capture (getUserMedia): hop's pages
+    /// without a prompt each time, others as WebKit decides (it asks).
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        decisionHandler(type == .microphone && isHop(origin) ? .grant : .prompt)
+    }
+
+    private func isHop(_ o: WKSecurityOrigin) -> Bool {
+        var c = URLComponents()
+        c.scheme = o.protocol
+        c.host = o.host
+        if o.port != 0 { c.port = o.port }
+        // (A default port is 0 in the origin and nil in a URL: left unset.)
+        guard let url = c.url else { return false }
+        return isHop(url)
+    }
+
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
         let alert = NSAlert()
         alert.messageText = message

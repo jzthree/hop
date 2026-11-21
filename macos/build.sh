@@ -41,6 +41,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>hop — terminals for humans and agents</string>
+  <!-- Hold Space to dictate into a terminal: WebKit's speech recogniser. -->
+  <key>NSMicrophoneUsageDescription</key><string>Hold Space in a session to dictate: hop listens while the key is down and types what you said.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Hold Space in a session to dictate: your words are turned into text and typed into the terminal.</string>
   <!-- The local daemon is plain http on loopback. -->
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
@@ -59,7 +62,9 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 IDENTITY="${HOP_MAC_SIGN:-$(security find-identity -v -p codesigning 2>/dev/null | sed -nE 's/.*"(Developer ID Application:[^"]+)".*/\1/p' | head -1)}"
 if [[ -n "$IDENTITY" ]]; then
   echo "==> signing: $IDENTITY"
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+  # The hardened runtime keeps the microphone shut unless the app is
+  # entitled to it (dictation; see Info.plist).
+  codesign --force --options runtime --timestamp --entitlements hop.entitlements --sign "$IDENTITY" "$APP"
 else
   echo "==> signing ad hoc (no Developer ID in the Keychain)"
   codesign --force --sign - "$APP"

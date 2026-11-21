@@ -4917,12 +4917,14 @@ const App = () => {
   // The room can still be the name from the URL; lists key by internalName.
   const currentKey = session ? sessionKeyOf(session.room) : null;
   const currentInfo = currentKey ? sessions.find((x) => (x.internalName || x.name) === currentKey) : undefined;
-  // This session answered a question of yours that you haven't read: a pill
-  // in its header, there however much it has done since.
+  // This session answered a question of yours that you haven't read. Where
+  // the session has tabs, its Answers tab carries the count; elsewhere (a
+  // phone, no sidebar) a pill in its header, there however much it has done
+  // since.
   const answersHere = currentInfo?.answersUnread || 0;
-  const answerPill = session && answersHere > 0 ? (
+  const answerPill = session && !sessionTabs && answersHere > 0 ? (
     <button type="button" className="answer-pill" title="Its reply to your question, kept until you read it"
-            onClick={() => (sessionTabs ? openSessionTab(currentInfo!.internalName || currentInfo!.name, "answers") : openAnswers(currentInfo!.internalName || currentInfo!.name))}>
+            onClick={() => openAnswers(currentInfo!.internalName || currentInfo!.name)}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg>
       {answersHere === 1 ? "Answered" : `${answersHere} answers`}
     </button>

@@ -245,6 +245,23 @@ test('a turn\'s end says where its prompts came from: the person, a scheduled ru
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'beta.answer'), 'utf8')).origins, undefined);
 });
 
+test('a long turn is read back to the prompt that started it: a loop\'s run is never the person\'s', () => {
+  const home = freshHome();
+  const dir = path.join(home, 'claude-sessions');
+  const tp = path.join(home, 'transcript.jsonl');
+  const at = (ms) => new Date(Date.now() + ms).toISOString();
+  // A scheduled run, then ~10 MB of tool output in the same turn.
+  let body = JSON.stringify({ type: 'user', timestamp: at(-60000), promptId: 'p1', isMeta: true, promptSource: 'system', scheduledTaskId: 't1',
+    message: { role: 'user', content: 'Autonomous loop (self-paced): keep going.' } }) + '\n';
+  const big = JSON.stringify({ type: 'user', timestamp: at(-30000), message: { content: [{ type: 'tool_result', content: 'x'.repeat(1024 * 1024) }] } }) + '\n';
+  for (let i = 0; i < 10; i++) body += big;
+  body += JSON.stringify({ type: 'assistant', timestamp: at(-1000), message: { content: [{ type: 'text', text: 'Round done.' }] } }) + '\n';
+  fs.writeFileSync(tp, body);
+  fs.writeFileSync(path.join(dir, 'alpha.turn'), JSON.stringify({ count: 1, at: at(-3600000) }));
+  runHook(home, 'alpha', { hook_event_name: 'Stop', session_id: 'sess-1', transcript_path: tp });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'alpha.answer'), 'utf8')).origins, ['scheduled']);
+});
+
 test('a prompt keeps the ones just before it, so a burst hides nothing', () => {
   const home = freshHome();
   const prompt = (text) => { runHook(home, 'alpha', { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt: text }); return JSON.parse(fs.readFileSync(path.join(home, 'claude-sessions', 'alpha.prompt'), 'utf8')); };

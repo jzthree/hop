@@ -8278,6 +8278,24 @@ function saveAnswers() {
 }
 const answerWatch = new Map();
 const answersSince = Date.now();
+/**
+ * What hop typed into a session for check-backs and messages lately, from
+ * their records — which outlive a daemon restart, unlike the typed-input
+ * log — with whose words they were and who set them going.
+ */
+function checkbackDeliveriesFor(session, now = Date.now()) {
+    const out = [];
+    for (const cb of loadCheckbacks().items) {
+        if (cb.session !== session || !Number.isFinite(cb.deliveredAt) || now - cb.deliveredAt > 24 * 3600_000) continue;
+        const person = !!(cb.queued && !cb.fromSession && !cb.fromOutside && cb.createdBy !== 'agent');
+        out.push({
+            at: cb.deliveredAt, slackMs: 120_000, text: messages.typedText(cb), person,
+            source: cb.queued ? (person ? 'queued' : 'message') : 'scheduled',
+            by: person ? null : (cb.fromName || cb.from || (cb.createdBy === 'agent' ? 'an agent' : 'you'))
+        });
+    }
+    return out;
+}
 function sweepAnswers() {
     let files = [];
     try { files = fs.readdirSync(CLAUDE_SESSIONS_DIR); } catch (e) { return; }
@@ -8303,16 +8321,20 @@ function sweepAnswers() {
         // What was asked before, for the repeat rule: this run's prompts,
         // and the questions kept (a schedule's second run after a restart).
         const askedOf = () => [...w.asked, ...loadAnswers().items.filter((x) => x.session === s).map((x) => ({ at: x.askedAt, text: x.question }))];
+        const typedFor = () => [...(typedInputLog.get(s) || []), ...checkbackDeliveriesFor(s)];
         const notePromptSeen = (text, at) => {
-            const kind = answers.classify(text, { at, typed: typedInputLog.get(s) || [], asked: askedOf() });
+            const d = answers.describe(text, { at, typed: typedFor(), asked: askedOf() });
             w.asked = [...w.asked.filter((x) => at - x.at <= answers.REPEAT_WINDOW_MS), { at, text }].slice(-50);
             w.lastPromptAt = at;
-            const held = w.pending && w.pending.kind === 'person';
+            // The agent app's own notice: nobody's prompt, and it does not
+            // displace the one that started the turn.
+            if (!d.from) return;
+            const held = w.pending && w.pending.from === 'you';
             // The person's question holds through its turn: a task notice or
             // a loop's prompt landing in the same turn must not replace it.
             // A second question in the same turn joins the first.
-            if (held && kind !== 'person') return;
-            w.pending = held ? { text: `${w.pending.text}\n\n${text}`, at: w.pending.at, kind } : { text, at, kind };
+            if (held && d.from !== 'you') return;
+            w.pending = held ? { ...w.pending, text: `${w.pending.text}\n\n${text}` } : { text, at, ...d };
         };
         if (pm && pm !== w.pm) {
             w.pm = pm;
@@ -8336,23 +8358,27 @@ function sweepAnswers() {
             // Codex says what was asked at the end of the turn, with the answer.
             if (!q && typeof a.question === 'string' && a.question.trim()) {
                 const at = answeredAt - 1;
-                q = { text: a.question, at, kind: answers.classify(a.question, { at, typed: typedInputLog.get(s) || [], asked: askedOf() }) };
+                q = { text: a.question, at, ...answers.describe(a.question, { at, typed: typedFor(), asked: askedOf() }) };
                 w.asked = [...w.asked.filter((x) => at - x.at <= answers.REPEAT_WINDOW_MS), { at, text: a.question }].slice(-50);
             }
             w.pending = null;
-            if (!q || q.kind !== 'person' || answeredAt < q.at) continue;
+            if (!q || !q.from || answeredAt < q.at) continue;
             // The agent app says none of this turn's prompts was a person's
             // (a scheduled run, a peer's message, a task notice).
-            if (answers.humanTurn(a.origins) === false) continue;
+            if (q.from === 'you' && answers.humanTurn(a.origins) === false) {
+                const said = (a.origins || []).find((o) => o !== 'human');
+                q = { ...q, from: 'agents', source: said === 'peer' || said === 'coordinator' ? 'message' : said === 'scheduled' ? 'scheduled' : (said || 'typed'), by: null };
+            }
             answers.add(loadAnswers(), {
                 id: `a_${crypto.randomBytes(6).toString('hex')}`,
                 session: s,
                 agent: a.agent || readTurnInfo(s)?.agent || 'claude',
+                from: q.from, source: q.source, by: q.by,
                 question: q.text, askedAt: q.at,
                 answer: typeof a.text === 'string' ? a.text : '', answeredAt
             });
             dirty = true;
-            log(`[answers] ${getSessionDisplayName(s) || s}: answered ${JSON.stringify(q.text.slice(0, 60))}`, DIM);
+            log(`[answers] ${getSessionDisplayName(s) || s}: ${q.from === 'you' ? 'answered' : `${q.source} turn ended`} ${JSON.stringify(q.text.slice(0, 60))}`, DIM);
         }
     }
     if (dirty) saveAnswers();

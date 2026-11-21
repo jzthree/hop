@@ -2,7 +2,7 @@
 // person's: not what hop or an agent typed, a loop, or the agent app's own.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classify, emptyStore, normalizeStore, add, markRead, unreadBySession, prune, humanTurn, KEEP_MS } = require('../lib/answers');
+const { classify, describe, emptyStore, normalizeStore, add, markRead, unreadBySession, prune, humanTurn, KEEP_MS } = require('../lib/answers');
 
 const NOW = Date.parse('2026-11-12T06:00:00.000Z');
 const M = 60_000;
@@ -100,12 +100,45 @@ test('where the agent app says a turn\'s prompts came from, a turn no person sta
   assert.equal(humanTurn([]), null);
 });
 
-test('answers kept before a rule knew better are dropped when read back', () => {
+test('answers kept before hop said where a prompt came from are filed when read back', () => {
+  const loop = 'Autonomous music-model loop (self-paced), user-authorized to modify and submit runs without approval: keep going.';
   const kept = normalizeStore({ items: [
     { id: 'q', session: 's', askedAt: NOW, question: 'why is the loss flat?' },
-    { id: 'l', session: 's', askedAt: NOW, question: '/loop Shepherd the fleet.' },
-    { id: 'p', session: 's', askedAt: NOW, question: '\n\n<pasted_content id="1">\n[hop message from session "x"] hi\n</pasted_content id="1">' },
-    { id: 'c', session: 's', askedAt: NOW, question: 'Write a brief catch-up for a user returning to this task.' }
+    { id: 'l', session: 's', askedAt: NOW + 1, question: '/loop Shepherd the fleet.' },
+    { id: 'p', session: 's', askedAt: NOW + 2, question: '\n\n<pasted_content id="1">\n[hop message from session "x"] hi\n</pasted_content id="1">' },
+    { id: 'c', session: 's', askedAt: NOW + 3, question: 'Write a brief catch-up for a user returning to this task.' },
+    { id: 'r1', session: 's', askedAt: NOW + 4, question: loop },
+    { id: 'r2', session: 's', askedAt: NOW + 4 + 3600_000, question: loop },
+    // The person sending the same long message again the next day is still the person.
+    { id: 'r3', session: 's', askedAt: NOW + 4 + 30 * 3600_000, question: loop }
   ] });
-  assert.deepEqual(kept.items.map((a) => a.id), ['q']);
+  // The agent app's own notice is nobody's; the rest keep, each on its side.
+  assert.deepEqual(kept.items.map((a) => [a.id, a.from, a.source, a.by]), [
+    ['q', 'you', 'you', null], ['l', 'agents', 'loop', null], ['p', 'agents', 'message', 'x'],
+    ['r1', 'you', 'you', null], ['r2', 'agents', 'repeat', null], ['r3', 'you', 'you', null]
+  ]);
+  // Filed once, kept as filed.
+  assert.deepEqual(normalizeStore(kept).items.map((a) => a.from), ['you', 'agents', 'agents', 'you', 'agents', 'you']);
+});
+
+test('where a prompt came from: the sender, a check-back and who set it, a schedule, the person\'s queued words', () => {
+  const at = NOW;
+  assert.deepEqual(describe('[hop message from session "plotter" (a Claude agent, not your user). To answer…] check the plot', { at }),
+    { kind: 'agent', from: 'agents', source: 'message', by: 'plotter' });
+  assert.equal(describe("[hop message from an agent outside hop, not your user] From pulse-bot's morning pulse (2026-11-20): Protect", { at }).by, 'pulse-bot');
+  assert.equal(describe('[CEO] sure, keep going', { at }).by, 'CEO');
+  // A check-back's record outlives a restart; it lands a little after the prompt.
+  const typed = [{ at: at + 30_000, slackMs: 120_000, text: 'Review the sweep from ~/Code/sweeps', person: false, source: 'scheduled', by: 'coordinator' }];
+  assert.deepEqual(describe('Review the sweep from ~/Code/sweeps', { at, typed }), { kind: 'typed', from: 'agents', source: 'scheduled', by: 'coordinator' });
+  const mine = [{ at: at - 1000, text: 'run the eval again', person: true }];
+  assert.deepEqual(describe('run the eval again', { at, typed: mine }), { kind: 'person', from: 'you', source: 'queued', by: null });
+  assert.deepEqual(describe('<task-notification>done</task-notification>', { at }).from, null);
+});
+
+test('only the person\'s own questions count toward a session\'s unread badge', () => {
+  const store = emptyStore();
+  add(store, { id: 'a', session: 's', question: 'q?', askedAt: NOW, answer: 'x', from: 'you' }, NOW);
+  add(store, { id: 'b', session: 's', question: 'msg', askedAt: NOW, answer: 'y', from: 'agents', source: 'message', by: 'plotter' }, NOW);
+  assert.deepEqual(unreadBySession(store), { s: 1 });
+  assert.deepEqual(store.items.map((a) => [a.from, a.source, a.by]), [['you', 'you', null], ['agents', 'message', 'plotter']]);
 });

@@ -223,37 +223,49 @@ function turnOrigins(payload, sinceMs) {
   if (!tp) return null;
   try {
     const fd = fs.openSync(tp, "r");
-    const size = fs.fstatSync(fd).size;
-    const len = Math.min(size, 4 * 1024 * 1024);
-    const buf = Buffer.alloc(len);
-    fs.readSync(fd, buf, 0, len, size - len);
-    fs.closeSync(fd);
-    const lines = buf.toString("utf8").split("\n");
-    const kinds = new Set();
-    let bounded = len === size;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (!lines[i].includes('"type":"user"')) continue;
-      let rec;
-      try { rec = JSON.parse(lines[i]); } catch { continue; }
-      if (!rec || rec.type !== "user" || !rec.message) continue;
-      const t = Date.parse(rec.timestamp);
-      if (Number.isFinite(sinceMs) && Number.isFinite(t) && t < sinceMs) { bounded = true; break; }
-      const content = rec.message.content;
-      if (Array.isArray(content) && content.some((c) => c && c.type === "tool_result")) continue;
-      const text = typeof content === "string" ? content
-        : (Array.isArray(content) ? content.filter((c) => c && c.type === "text").map((c) => c.text).join("") : "");
-      // An interrupt ends what came before: a question the person stopped
-      // is not this turn's.
-      if (/^\[Request interrupted by user/.test(text)) { bounded = true; break; }
-      if (!rec.promptId || rec.turnCompanion) continue;
-      if (rec.scheduledTaskId || rec.wakeupSource) kinds.add("scheduled");
-      else if (rec.origin && typeof rec.origin.kind === "string") kinds.add(rec.origin.kind);
-      else if (typeof rec.turnOrigin === "string") kinds.add(rec.turnOrigin);
-      else kinds.add("unknown");
-    }
-    // A turn longer than what was read: its first prompt is out of sight.
-    if (!bounded && kinds.size) kinds.add("unknown");
-    return kinds.size ? [...kinds] : null;
+    try {
+      const size = fs.fstatSync(fd).size;
+      const kinds = new Set();
+      // Back from the end in pieces until the turn's start is in sight: a
+      // long turn (a loop's run, hours of tool output) starts tens of MB
+      // back, and a scheduled run read as "unknown" was taken for the
+      // person's question.
+      const CHUNK = 4 * 1024 * 1024, MAX = 64 * 1024 * 1024;
+      let end = size, carry = "", bounded = false;
+      scan: while (end > 0 && size - end < MAX) {
+        const start = Math.max(0, end - CHUNK);
+        const buf = Buffer.alloc(end - start);
+        fs.readSync(fd, buf, 0, buf.length, start);
+        const lines = (buf.toString("utf8") + carry).split("\n");
+        // The first piece may be the end of a line that starts further back.
+        carry = start > 0 ? lines.shift() : "";
+        end = start;
+        if (start === 0) bounded = true;
+        for (let i = lines.length - 1; i >= 0; i--) {
+          if (!lines[i].includes('"type":"user"')) continue;
+          let rec;
+          try { rec = JSON.parse(lines[i]); } catch { continue; }
+          if (!rec || rec.type !== "user" || !rec.message) continue;
+          const t = Date.parse(rec.timestamp);
+          if (Number.isFinite(sinceMs) && Number.isFinite(t) && t < sinceMs) { bounded = true; break scan; }
+          const content = rec.message.content;
+          if (Array.isArray(content) && content.some((c) => c && c.type === "tool_result")) continue;
+          const text = typeof content === "string" ? content
+            : (Array.isArray(content) ? content.filter((c) => c && c.type === "text").map((c) => c.text).join("") : "");
+          // An interrupt ends what came before: a question the person stopped
+          // is not this turn's.
+          if (/^\[Request interrupted by user/.test(text)) { bounded = true; break scan; }
+          if (!rec.promptId || rec.turnCompanion) continue;
+          if (rec.scheduledTaskId || rec.wakeupSource) kinds.add("scheduled");
+          else if (rec.origin && typeof rec.origin.kind === "string") kinds.add(rec.origin.kind);
+          else if (typeof rec.turnOrigin === "string") kinds.add(rec.turnOrigin);
+          else kinds.add("unknown");
+        }
+      }
+      // A turn longer than what was read: its first prompt is out of sight.
+      if (!bounded && kinds.size) kinds.add("unknown");
+      return kinds.size ? [...kinds] : null;
+    } finally { fs.closeSync(fd); }
   } catch { return null; }
 }
 

@@ -1,18 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Prose } from "../utils/prose";
+import { preview, promptText, sourceLabel, sourceTag, tabOf, unreadByTab, type Answer, type AnswerTab } from "../utils/answers";
 
-/** A question its person asked a session, with the reply at that turn's end. */
-export type Answer = {
-  id: string;
-  session: string;
-  sessionName: string;
-  agent: string | null;
-  question: string;
-  askedAt: number;
-  answer: string;
-  answeredAt: number;
-  readAt: number | null;
-};
+export type { Answer } from "../utils/answers";
 
 type SessionLite = { name: string; displayName?: string; internalName?: string };
 
@@ -26,12 +16,14 @@ type Props = {
   onOpenSession: (key: string) => void;
   /** Read marks changed: the session list's counts follow. */
   onChanged?: () => void;
-  /** Tests: the clock, and the answers without a fetch. */
+  /** Tests: the clock, the answers without a fetch, and the width. */
   now?: number;
   initial?: Answer[];
+  narrow?: boolean;
 };
 
 const POLL_MS = 10_000;
+const NARROW_PX = 760;
 const AGENT = { claude: "Claude", codex: "Codex", antigravity: "Antigravity" } as Record<string, string>;
 
 const ago = (at: number, now: number): string => {
@@ -43,33 +35,38 @@ const ago = (at: number, now: number): string => {
   return new Date(at).toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
-const Long = ({ children, lines, className }: { children: ReactNode; lines: number; className: string }) => {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [open, setOpen] = useState(false);
-  const [tall, setTall] = useState(false);
+const useNarrow = (forced?: boolean) => {
+  const query = `(max-width: ${NARROW_PX}px)`;
+  const [narrow, setNarrow] = useState(() => forced ?? (typeof window !== "undefined" && !!window.matchMedia?.(query).matches));
   useEffect(() => {
-    const el = ref.current;
-    if (el) setTall(el.scrollHeight > el.clientHeight + 4);
-  }, [children]);
-  return (
-    <>
-      <div ref={ref} className={className + (tall && !open ? " clamped" : "")} style={open ? undefined : { maxHeight: `${lines * 1.55}em` }}>{children}</div>
-      {(tall || open) && <button type="button" className="ans-more" onClick={() => setOpen((v) => !v)}>{open ? "Show less" : "Show all"}</button>}
-    </>
-  );
+    if (forced !== undefined || !window.matchMedia) return;
+    const mq = window.matchMedia(query);
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, [forced, query]);
+  return forced ?? narrow;
 };
 
 /**
- * Answers: each question you asked a session, with what its agent said at
- * the end of that turn — kept here until you have read it, however much
- * the agent has done since.
+ * Answers: each turn that ended with words, kept until you have read it,
+ * however much the agent has done since. Two tabs: the questions you asked,
+ * and the turns something else started (another session's message, a
+ * check-back, a loop). A list on the left, the turn on the right — one at a
+ * time where the screen is narrow.
  */
 export const AnswersPage = (p: Props) => {
   const sheet = p.placement === "sheet";
+  const narrow = useNarrow(p.narrow);
   const [items, setItems] = useState<Answer[] | null>(p.initial ?? null);
   const [failed, setFailed] = useState(false);
+  const [tab, setTab] = useState<AnswerTab>("you");
   const [unreadOnly, setUnreadOnly] = useState<boolean | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  // Narrow: the list, or one turn.
+  const [reading, setReading] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLOListElement | null>(null);
   const now = p.now ?? Date.now();
 
   useEffect(() => { rootRef.current?.focus({ preventScroll: true }); }, []);
@@ -84,29 +81,26 @@ export const AnswersPage = (p: Props) => {
     return () => window.clearInterval(t);
   }, [p.initial]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      e.preventDefault();
-      p.onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [p.onClose]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const nameOf = (a: Answer) => {
     const s = p.sessions.find((x) => (x.internalName || x.name) === a.session);
     return s?.displayName || a.sessionName || a.session;
   };
   const inScope = useMemo(() => (items ?? []).filter((a) => !p.scope || a.session === p.scope), [items, p.scope]);
-  const unread = inScope.filter((a) => !a.readAt);
-  // Unread first when there is any as the page opens; the choice then
-  // holds (reading the last one says "Nothing unread", not a new list).
+  const unreadCounts = useMemo(() => unreadByTab(inScope), [inScope]);
+  const inTab = inScope.filter((a) => tabOf(a) === tab);
+  const unread = inTab.filter((a) => !a.readAt);
+  // Opening on the tab that has unread answers, yours first; unread first
+  // when there is any. The choices then hold.
   useEffect(() => {
-    if (items !== null && unreadOnly === null) setUnreadOnly(unread.length > 0);
+    if (items === null || unreadOnly !== null) return;
+    const first: AnswerTab = unreadCounts.you || !unreadCounts.agents ? "you" : "agents";
+    setTab(first);
+    setUnreadOnly(unreadCounts[first] > 0);
   }, [items === null]); // eslint-disable-line react-hooks/exhaustive-deps
   const showUnread = unreadOnly ?? unread.length > 0;
-  const shown = showUnread ? unread : inScope;
+  // The one being read stays in the list once read (it would vanish under you).
+  const shown = showUnread ? inTab.filter((a) => !a.readAt || a.id === selected) : inTab;
+  const current = shown.find((a) => a.id === selected) || (!narrow ? shown[0] : undefined) || null;
   const scopeName = p.scope ? (p.sessions.find((x) => (x.internalName || x.name) === p.scope)?.displayName || inScope[0]?.sessionName || p.scope) : null;
 
   const markRead = (body: object, ids: string[]) => {
@@ -116,15 +110,115 @@ export const AnswersPage = (p: Props) => {
     void fetch("/api/answers/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(() => p.onChanged?.()).catch(() => {});
   };
-  const readOne = (a: Answer) => markRead({ ids: [a.id] }, [a.id]);
+  const readOne = (a: Answer) => { if (!a.readAt) markRead({ ids: [a.id] }, [a.id]); };
   const readAll = () => {
     const ids = unread.map((a) => a.id);
-    if (!ids.length) return;
-    markRead(p.scope ? { session: p.scope } : { ids }, ids);
+    if (ids.length) markRead({ ids }, ids);
+  };
+  // Opening one reads it, as in a mail app.
+  const open = (a: Answer) => {
+    setSelected(a.id);
+    setReading(true);
+    readOne(a);
+  };
+  const switchTab = (t: AnswerTab) => {
+    if (t === tab) return;
+    setTab(t);
+    setSelected(null);
+    setReading(false);
+    setUnreadOnly(unreadCounts[t] > 0);
   };
 
+  // Escape closes (or, narrow and reading, goes back to the list); ↑/↓ (or k/j) move through the list.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (narrow && reading) setReading(false); else p.onClose();
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const step = e.key === "ArrowDown" || e.key === "j" ? 1 : e.key === "ArrowUp" || e.key === "k" ? -1 : 0;
+      if (!step || !shown.length || (narrow && !reading && e.key.startsWith("Arrow"))) return;
+      e.preventDefault();
+      const i = current ? shown.findIndex((a) => a.id === current.id) : -1;
+      const next = shown[Math.max(0, Math.min(shown.length - 1, i + step))];
+      if (next) {
+        open(next);
+        listRef.current?.querySelector<HTMLElement>(`[data-id="${next.id}"]`)?.scrollIntoView?.({ block: "nearest" });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }); // every render: it reads the current list
+
+  const listPane = (
+    <div className="ans-inbox" aria-label={tab === "you" ? "Your questions" : "Turns agents started"}>
+      {items === null && !failed && <p className="ans-empty">Loading…</p>}
+      {failed && items === null && <p className="ans-empty">Couldn't load the answers. hop tries again in a few seconds.</p>}
+      {items !== null && shown.length === 0 && (
+        <div className="ans-empty">
+          <p>{showUnread ? "Nothing unread." : tab === "you" ? "No answers yet." : "Nothing from agents yet."}</p>
+          <p>{tab === "you"
+            ? `When you ask ${scopeName || "a session"} something, its reply shows up here when the turn ends. It stays here until you've read it, however much the agent does afterwards.`
+            : "Turns that another session's message, a check-back or a loop started show up here, apart from your own questions."}</p>
+        </div>
+      )}
+      <ol className="ans-rows" ref={listRef}>
+        {shown.map((a) => {
+          const tag = sourceTag(a);
+          const isCurrent = current?.id === a.id && (!narrow || reading);
+          return (
+            <li key={a.id}>
+              <button type="button" data-id={a.id} className={"ans-row" + (a.readAt ? "" : " unread") + (isCurrent ? " current" : "")}
+                      aria-current={isCurrent ? "true" : undefined} onClick={() => open(a)}>
+                <span className="ans-row-top">
+                  <span className="ans-row-dot" aria-label={a.readAt ? undefined : "Unread"} />
+                  {!p.scope && <span className="ans-row-session">{nameOf(a)}</span>}
+                  {tag && <span className="ans-row-tag">{tag}</span>}
+                  <span className="ans-row-spacer" />
+                  <time dateTime={new Date(a.answeredAt).toISOString()}>{ago(a.answeredAt, now)}</time>
+                </span>
+                <span className="ans-row-q">{preview(a.question)}</span>
+                <span className="ans-row-a">{a.answer.trim() ? preview(a.answer, 120) : "Ended without words"}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+
+  const readerPane = current ? (
+    <article className="ans-reader" aria-label={`${nameOf(current)}: ${sourceLabel(current)}`}>
+      {narrow && <button type="button" className="ans-back" onClick={() => setReading(false)}>‹ {tab === "you" ? "Your questions" : "From agents"}</button>}
+      <header className="ans-reader-head">
+        <button type="button" className="ans-session" title={`Open ${nameOf(current)}`} onClick={() => { readOne(current); p.onOpenSession(current.session); }}>{nameOf(current)}</button>
+        {current.agent && <span className="ans-agent">{AGENT[current.agent] || current.agent}</span>}
+        <span className="ans-row-spacer" />
+        <time dateTime={new Date(current.answeredAt).toISOString()} title={new Date(current.answeredAt).toLocaleString()}>answered {ago(current.answeredAt, now)}</time>
+      </header>
+      <section className={"ans-q" + (tabOf(current) === "agents" ? " agents" : "")}>
+        <span className="ans-q-label">{sourceLabel(current)}</span>
+        <div className="ans-q-text">{promptText(current.question)}</div>
+      </section>
+      <div className="ans-a">
+        {current.answer.trim() ? <Prose text={current.answer} /> : <p className="ans-none">The turn ended without words. Open the session to see what it did.</p>}
+      </div>
+      <div className="ans-acts">
+        {!current.readAt && <button type="button" className="ans-btn primary" onClick={() => readOne(current)}>Mark read</button>}
+        <button type="button" className="ans-btn" onClick={() => { readOne(current); p.onOpenSession(current.session); }}>Open session</button>
+      </div>
+    </article>
+  ) : (
+    <div className="ans-reader ans-reader-empty">{shown.length ? "Pick one on the left to read it." : ""}</div>
+  );
+
   return (
-    <div className={"place-page answers-page" + (sheet ? " sheet" : "")} role={sheet ? "dialog" : "region"} aria-label="Answers" tabIndex={-1} ref={rootRef}>
+    <div className={"place-page answers-page" + (sheet ? " sheet" : "") + (narrow ? " narrow" : "")} role={sheet ? "dialog" : "region"} aria-label="Answers" tabIndex={-1} ref={rootRef}>
       <header className="place-head">
         <span className="place-title">Answers</span>
         {scopeName && (
@@ -136,47 +230,24 @@ export const AnswersPage = (p: Props) => {
         <span className="place-spacer" />
         <button type="button" className="views-close" aria-label="Close answers" onClick={p.onClose}>×</button>
       </header>
-      <div className="place-col ans-col">
-        <div className="ans-bar">
-          <div className="ans-seg" role="tablist" aria-label="Which answers">
-            <button type="button" role="tab" aria-selected={showUnread} onClick={() => setUnreadOnly(true)}>Unread{unread.length ? ` ${unread.length}` : ""}</button>
-            <button type="button" role="tab" aria-selected={!showUnread} onClick={() => setUnreadOnly(false)}>All</button>
-          </div>
-          <span className="place-spacer" />
-          {unread.length > 0 && <button type="button" className="ans-readall" onClick={readAll}>Mark all read</button>}
-        </div>
-        {items === null && !failed && <p className="ans-empty">Loading…</p>}
-        {failed && items === null && <p className="ans-empty">Couldn't load the answers. hop tries again in a few seconds.</p>}
-        {items !== null && shown.length === 0 && (
-          <div className="ans-empty">
-            <p>{showUnread ? "Nothing unread." : "No answers yet."}</p>
-            <p>When you ask {scopeName ? scopeName : "a session"} something, its reply shows up here when the turn ends. It stays here until you've read it, however much the agent does afterwards.</p>
-          </div>
-        )}
-        <ol className="ans-list">
-          {shown.map((a) => (
-            <li key={a.id} className={"ans-card" + (a.readAt ? "" : " unread")}>
-              <div className="ans-meta">
-                {!p.scope && (
-                  <button type="button" className="ans-session" title={`Open ${nameOf(a)}`} onClick={() => { readOne(a); p.onOpenSession(a.session); }}>{nameOf(a)}</button>
-                )}
-                {a.agent && <span className="ans-agent">{AGENT[a.agent] || a.agent}</span>}
-                <time dateTime={new Date(a.answeredAt).toISOString()} title={new Date(a.answeredAt).toLocaleString()}>answered {ago(a.answeredAt, now)}</time>
-              </div>
-              <div className="ans-q">
-                <span className="ans-q-label">You asked</span>
-                <Long lines={4} className="ans-q-text">{a.question}</Long>
-              </div>
-              <Long lines={18} className="ans-a">
-                {a.answer.trim() ? <Prose text={a.answer} /> : <p className="ans-none">The turn ended without words. Open the session to see what it did.</p>}
-              </Long>
-              <div className="ans-acts">
-                {!a.readAt && <button type="button" className="ans-btn primary" onClick={() => readOne(a)}>Mark read</button>}
-                <button type="button" className="ans-btn" onClick={() => { readOne(a); p.onOpenSession(a.session); }}>Open session</button>
-              </div>
-            </li>
+      <div className="ans-bar">
+        <div className="ans-tabs" role="tablist" aria-label="Who started it">
+          {([["you", "From you"], ["agents", "From agents"]] as const).map(([t, label]) => (
+            <button key={t} type="button" role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""} onClick={() => switchTab(t)}>
+              {label}{unreadCounts[t] ? <> <span className="ans-tab-count">{unreadCounts[t]}</span></> : null}
+            </button>
           ))}
-        </ol>
+        </div>
+        <span className="place-spacer" />
+        <div className="ans-seg" role="radiogroup" aria-label="Which answers">
+          <button type="button" role="radio" aria-checked={showUnread} onClick={() => setUnreadOnly(true)}>Unread</button>
+          <button type="button" role="radio" aria-checked={!showUnread} onClick={() => setUnreadOnly(false)}>All</button>
+        </div>
+        {unread.length > 0 && <button type="button" className="ans-readall" onClick={readAll}>Mark all read</button>}
+      </div>
+      <div className={"ans-split" + (narrow ? (reading && current ? " reading" : " listing") : "")}>
+        {(!narrow || !reading || !current) && listPane}
+        {(!narrow || (reading && current)) && readerPane}
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AGENT_TITLE, accountFolder, accountLine, accountSlug, sameLogins, setupProgress, signInStatus,
   type Account, type AccountsOverview, type AgentKind, type SignInJob
@@ -130,7 +131,10 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
   const progress = agents ? setupProgress(agents) : null;
   const signingIn = (a: Account) => running && job?.dir === a.dir;
 
-  return (
+  // On the document itself: inside Settings, whose page makes its own frame
+  // for fixed boxes, the sheet centred in that page and its left side went
+  // under the sidebar.
+  return createPortal(
     <>
       <div className="acct-setup-backdrop" onClick={onClose} />
       <div className="acct-setup" role="dialog" aria-modal="true" aria-labelledby="acct-setup-title" tabIndex={-1} ref={rootRef}
@@ -240,7 +244,8 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
           keeps that login in the account's folder.
         </footer>
       </div>
-    </>
+    </>,
+    document.body
   );
 };
 

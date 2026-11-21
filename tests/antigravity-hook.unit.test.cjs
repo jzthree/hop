@@ -77,3 +77,28 @@ test('the record names the model, and follows a /model switch', () => {
     assert.strictEqual(rec.model, 'gemini-4-pro');
     assert.strictEqual(rec.cwd, '/w', 'the rest of the record is kept');
 });
+
+test('an `agy -p` run inside the room never takes over its record or its turns', () => {
+    const { main, isPrintMode } = require(SCRIPT);
+    assert.ok(isPrintMode('/Users/j/.local/bin/agy -p You are an expert reader of Science'));
+    assert.ok(isPrintMode('agy --print=hello'));
+    assert.ok(isPrintMode('agy --model m --prompt hi'));
+    assert.ok(!isPrintMode('agy --dangerously-skip-permissions --conversation=abc'));
+    assert.ok(!isPrintMode('agy -i Read the ENTIRE file'));
+    assert.ok(!isPrintMode('agy --prompt-interactive hi --print-timeout 5s'));
+    assert.ok(!isPrintMode(null));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agyhook-'));
+    const env = { HOP_HOME: home, HOP_SESSION: 's_bbbbbbbbbb' };
+    const prev = process.env.HOP_HOME;
+    process.env.HOP_HOME = home;
+    try {
+        main('SessionStart', JSON.stringify({ conversationId: 'c1b2c3d4-e5f6-7890-abcd-ef1234567890' }), env, () => 'agy -p judge this');
+        main('Stop', JSON.stringify({ conversationId: 'c1b2c3d4-e5f6-7890-abcd-ef1234567890' }), env, () => 'agy -p judge this');
+        assert.strictEqual(read(home, 'agy', 's_bbbbbbbbbb'), null);
+        assert.strictEqual(read(home, 'turn', 's_bbbbbbbbbb'), null);
+        main('SessionStart', JSON.stringify({ conversationId: 'd1b2c3d4-e5f6-7890-abcd-ef1234567890' }), env, () => 'agy --conversation=x');
+        assert.strictEqual(read(home, 'agy', 's_bbbbbbbbbb').sessionId, 'd1b2c3d4-e5f6-7890-abcd-ef1234567890');
+    } finally {
+        if (prev === undefined) delete process.env.HOP_HOME; else process.env.HOP_HOME = prev;
+    }
+});

@@ -1,0 +1,18 @@
+#!/bin/sh
+# agy, run as the Antigravity account whose folder is $HOP_AGY_HOME
+# (hop's Settings → Agent accounts; lib/agy-accounts.js says how it works).
+#
+# Unset, or the default folder (~/.gemini): plain agy, signed in through the
+# keychain as always. Otherwise agy keeps everything in that folder
+# (--gemini_dir) and runs in a sandbox that keeps it from the keychain, so
+# it uses the login kept in the folder.
+real="${HOP_AGY_REAL_BIN:-agy}"
+home="${HOP_AGY_HOME:-}"
+if [ -z "$home" ] || [ "$home" = "$HOME/.gemini" ]; then
+    exec "$real" "$@"
+fi
+if [ ! -f "$home/.hop-agy-account" ]; then
+    echo "agy-account: $home is not an Antigravity account folder hop set up" >&2
+    exit 1
+fi
+exec /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny process-exec (literal "/usr/bin/security"))' "$real" --gemini_dir "$home" "$@"

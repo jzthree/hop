@@ -54,7 +54,15 @@ beforeEach(() => {
     if (url === "/api/passkeys/list") return json({ ok: true, passkeys });
     if (url === "/api/update") return json({ current: "2.4.0", latest: "2.5.0", updateAvailable: true, command: "hop update" });
     if (url === "/api/instance") return json({ canonicalUrl: "https://hop.example.org" });
+    if (url === "/api/accounts/signin" && !init?.method) return json({ job: null });
     if (url.startsWith("/api/accounts") && !init?.method) return json(accounts);
+    if (url === "/api/accounts/signin") {
+      const b = JSON.parse(String(init?.body || "{}"));
+      return json({ job: { id: "j1", agent: b.agent, dir: b.dir, label: String(b.dir).split("_").pop(), startedAt: NOW, state: "running",
+        url: "https://claude.ai/oauth/authorize?code=true&state=x", wantsCode: true, lines: ["Paste code here if prompted >"],
+        email: null, duplicateOf: null, message: null, endedAt: null } });
+    }
+    if (url === "/api/accounts/add") return json({ ok: true, home: { dir: "/home/u/.codex_work", label: "work", isDefault: false } });
     if (url === "/api/sessions") return json({ ok: true, name: "sign-in-claude-spare" });
     return json({ ok: true });
   }));
@@ -231,8 +239,8 @@ describe("Settings › Signed in, when there are many", () => {
       expect(s.getByText("2 banked resets")).toBeTruthy();
       // The signed-out one has no meters, and a way in.
       expect(s.getByText("Signed out")).toBeTruthy();
-      // Antigravity has one login: nothing to rotate, nothing to add.
-      expect(s.queryByRole("button", { name: /Add a Antigravity/ })).toBeNull();
+      // Every agent can have more accounts (Antigravity's run sandboxed).
+      expect(s.getByRole("button", { name: "Add an Antigravity account…" })).toBeTruthy();
       expect(s.getAllByRole("checkbox", { name: "In rotation" })).toHaveLength(2);
     });
 
@@ -250,25 +258,35 @@ describe("Settings › Signed in, when there are many", () => {
       expect(calls).toContainEqual({ url: "/api/accounts/settings", body: { dir: "/home/u/.claude_fable", pooled: false } });
     });
 
-    it("signs in to a signed-out account in a session of its own, under that account", async () => {
+    it("signs a signed-out account in on the page: its link, and a box for the code the page hands back", async () => {
       const p = base();
       render(<SettingsPage {...p} />);
       await settle();
       fireEvent.click(within(section()).getByRole("button", { name: "Sign in" }));
       await settle();
-      expect(calls).toContainEqual({ url: "/api/sessions", body: { name: "sign-in-claude-spare", type: "terminal", port: null, startup: "claude auth login", agentHome: "/home/u/.claude_spare" } });
-      expect(p.onOpenNewSession).toHaveBeenCalledWith("sign-in-claude-spare");
+      expect(calls).toContainEqual({ url: "/api/accounts/signin", body: { agent: "claude", dir: "/home/u/.claude_spare" } });
+      const sheet = within(screen.getByRole("dialog", { name: "Sign in to your accounts" }));
+      expect(sheet.getByRole("link", { name: "Open sign-in page" }).getAttribute("href")).toBe("https://claude.ai/oauth/authorize?code=true&state=x");
+      expect(sheet.getByText("Paste the code the sign-in page shows")).toBeTruthy();
+      fireEvent.change(sheet.getByRole("textbox", { name: "Code from the sign-in page" }), { target: { value: " 4/0Ab-xyz " } });
+      fireEvent.click(sheet.getByRole("button", { name: "Send" }));
+      await settle();
+      expect(calls).toContainEqual({ url: "/api/accounts/signin/input", body: { id: "j1", text: "4/0Ab-xyz" } });
+      expect(p.onOpenNewSession).not.toHaveBeenCalled();
     });
 
-    it("adds an account by name", async () => {
-      vi.stubGlobal("prompt", () => "work");
-      const p = base();
-      render(<SettingsPage {...p} />);
+    it("adds an account by name, then signs it in", async () => {
+      render(<SettingsPage {...base()} />);
       await settle();
       fireEvent.click(within(section()).getByRole("button", { name: "Add a Codex account…" }));
       await settle();
+      const sheet = within(screen.getByRole("dialog", { name: "Sign in to your accounts" }));
+      fireEvent.change(sheet.getByRole("textbox", { name: "Name" }), { target: { value: "Work" } });
+      expect(sheet.getByText("~/.codex_work")).toBeTruthy();
+      fireEvent.click(sheet.getByRole("button", { name: "Add and sign in" }));
+      await settle(); await settle();
       expect(calls).toContainEqual({ url: "/api/accounts/add", body: { agent: "codex", name: "work" } });
-      expect(p.onNotice).toHaveBeenCalledWith("Added — sign in to it to use it");
+      expect(calls).toContainEqual({ url: "/api/accounts/signin", body: { agent: "codex", dir: "/home/u/.codex_work" } });
     });
 
     it("says what the rotation is waiting for, and what it did", async () => {

@@ -31,6 +31,9 @@ const { withCodexIdentity } = require('./lib/codex-identity');
 const agentHomesLib = require('./lib/agent-homes');
 const agentUsage = require('./lib/agent-usage');
 const codexHelpers = require('./lib/codex-helpers');
+const agyAccounts = require('./lib/agy-accounts');
+const agyArchive = require('./lib/agy-archive');
+const agentSignin = require('./lib/agent-signin');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const messages = require('./lib/messages');
@@ -6434,6 +6437,9 @@ const AGY_DATA_DIR = path.join(GEMINI_HOME, 'antigravity-cli');
 // stand-in in tests: a session's login shell puts ~/.local/bin (the real
 // agy) ahead of the test's PATH, and the real agent must never run there.
 const AGY_BIN = process.env.HOP_AGY_BIN || 'agy';
+// agy as one of the Antigravity accounts hop set up: it reads the account's
+// folder from HOP_AGY_HOME (lib/agy-accounts.js).
+const AGY_LAUNCHER = path.join(__dirname, 'scripts', 'agy-account');
 // The same for the CLIs a fork or a Continue-in starts.
 const AGENT_BIN = { claude: process.env.HOP_CLAUDE_BIN || 'claude', codex: process.env.HOP_CODEX_BIN || 'codex', antigravity: AGY_BIN };
 // The agent CLIs a conversation can be continued in (/api/sessions/fork).
@@ -6474,16 +6480,89 @@ function agyResumeFlags(launchCmd) {
     }
     return keep;
 }
+// hop's own copies of its sessions' agy conversations (lib/agy-archive.js):
+// agy deletes all but its newest few hundred, open ones included.
+const AGY_ARCHIVE_DIR = path.join(HOME_DIR, 'agy-archive');
+/**
+ * Can agy open this conversation? 1.5.13 opens conversations/<id>.db and
+ * nothing else: a brain/<id> folder or transcript alone (agy re-creates the
+ * folder; an older agy wrote only those) resumes nothing — agy says "not
+ * found, ignoring --conversation flag" and starts blank. One agy lost is
+ * put back from hop's copy first.
+ */
 function agyConversationExists(rec) {
-    if (rec.transcriptPath && fs.existsSync(rec.transcriptPath)) return true;
-    return fs.existsSync(path.join(AGY_DATA_DIR, 'brain', rec.sessionId));
+    if (agyArchive.isLive(AGY_DATA_DIR, rec.sessionId)) return true;
+    if (agyArchive.restoreConversation({ dataDir: AGY_DATA_DIR, archiveRoot: AGY_ARCHIVE_DIR, id: rec.sessionId })) {
+        log(`[agy] put conversation ${rec.sessionId.slice(0, 8)}… back from hop's copy (agy had deleted it)`, CYAN);
+        return true;
+    }
+    return false;
 }
-function agyRestorePlan(rec, cwd) {
+const AGY_ARCHIVE_SWEEP_MS = 5 * 60_000;
+let agyArchiveBusy = false;
+/**
+ * Copy the conversation of every live agy session that changed since its
+ * last copy, one at a time (a large one takes a second or two), and let go
+ * of copies nothing has named for a month.
+ */
+async function runAgyArchiveSweep() {
+    if (shuttingDown || agyArchiveBusy || process.env.HOP_AGY_ARCHIVE === '0') return;
+    agyArchiveBusy = true;
+    try {
+        const wanted = new Set();
+        let names = [];
+        try { names = fs.readdirSync(CLAUDE_SESSIONS_DIR).filter((f) => f.endsWith('.agy')).map((f) => f.slice(0, -4)); } catch (e) { /* none */ }
+        for (const name of names) {
+            const rec = readAgyRecord(name);
+            if (rec) wanted.add(rec.sessionId);
+        }
+        const snapshot = await listAllSessionEntriesRuntimeFirst();
+        for (const e of snapshot.entries || []) {
+            if (shuttingDown) break;
+            if (e.live !== true || e.agent !== 'antigravity') continue;
+            const rec = readAgyRecord(e.internalName);
+            if (!rec) continue;
+            const r = await agyArchive.archiveConversation({ dataDir: AGY_DATA_DIR, archiveRoot: AGY_ARCHIVE_DIR, id: rec.sessionId });
+            if (r === 'failed') log(`[agy] could not copy conversation ${rec.sessionId.slice(0, 8)}… of ${e.displayName || e.internalName}`, YELLOW);
+        }
+        for (const id of agyArchive.staleCopies(AGY_ARCHIVE_DIR, wanted)) fs.rmSync(path.join(AGY_ARCHIVE_DIR, id), { recursive: true, force: true });
+    } catch (e) {
+        log(`[agy] conversation copy sweep failed: ${e?.message || e}`, YELLOW);
+    } finally {
+        agyArchiveBusy = false;
+    }
+}
+/**
+ * The Antigravity account a session runs as, from its environment (null =
+ * the default). A folder that is no longer an account falls back to the
+ * default, said in `warning`.
+ */
+function sessionAgyHome(internalName) {
+    const cfg = getSessionConfig(internalName) || getEffectiveSessionConfig(internalName);
+    const dir = cfg?.env?.HOP_AGY_HOME;
+    if (!dir || dir === GEMINI_HOME) return null;
+    if (!fs.existsSync(path.join(dir, agyAccounts.MARKER))) return { missing: dir };
+    return agentHomesLib.describeAgentHome(dir, 'antigravity', os.homedir());
+}
+/** Is an agy already running this conversation (in this terminal or another)? */
+function agyConversationRunning(sessionId) {
+    try {
+        const out = execFileSync('/bin/ps', ['-axww', '-o', 'command='], { encoding: 'utf8', timeout: 5000 });
+        const re = new RegExp(`--conversation[= ]'?${String(sessionId).replace(/[^A-Za-z0-9-]/g, '')}(?![A-Za-z0-9-])`);
+        return out.split('\n').some((line) => /(^|\/)agy\s/.test(line.trim()) && re.test(line));
+    } catch (e) { return false; }
+}
+function agyRestorePlan(rec, cwd, home = null) {
     if (!agyConversationExists(rec)) {
-        return { command: null, cwd, warning: `recorded Antigravity conversation ${rec.sessionId.slice(0, 8)}… is not on this host — opening a plain shell instead` };
+        return { command: null, cwd, warning: `recorded Antigravity conversation ${rec.sessionId.slice(0, 8)}… is not on this host (agy keeps only its newest conversations) — opening a plain shell instead` };
     }
     const flags = agyResumeFlags(rec.launchCmd);
-    return { command: [AGY_BIN, '--conversation', `'${rec.sessionId}'`, ...flags].join(' '), cwd, agent: 'antigravity' };
+    // An account folder: agy through its launcher, with the account named
+    // in the command itself (the room's environment may predate it).
+    const word = home && home.dir && !home.missing ? agyAccounts.shellLaunch(home, AGY_LAUNCHER) : AGY_BIN;
+    const plan = { command: [word, '--conversation', `'${rec.sessionId}'`, ...flags].join(' '), cwd, agent: 'antigravity' };
+    if (home && home.missing) plan.warning = `its Antigravity account folder ${tildePath(home.missing)} is gone — resuming on the default account`;
+    return plan;
 }
 
 // ---- antigravity-hook install/remove (~/.gemini/config/hooks.json) --------
@@ -6546,11 +6625,22 @@ function listAgentHomes(agent) {
             at: Date.now(),
             value: {
                 claude: agentHomesLib.discoverAgentHomes('claude', { ...opts, envDir: process.env.CLAUDE_CONFIG_DIR || null }),
-                codex: agentHomesLib.discoverAgentHomes('codex', { ...opts, envDir: process.env.CODEX_HOME || null })
+                codex: agentHomesLib.discoverAgentHomes('codex', { ...opts, envDir: process.env.CODEX_HOME || null }),
+                antigravity: listAgyHomes(opts)
             }
         };
     }
     return agent ? (agentHomesCache.value[agent] || []) : agentHomesCache.value;
+}
+/**
+ * Antigravity's accounts: its own folder (the keychain's login) when agy has
+ * run here, then the account folders hop set up (~/.gemini_<name>).
+ */
+function listAgyHomes(opts) {
+    const out = [];
+    try { if (fs.statSync(AGY_DATA_DIR).isDirectory()) out.push({ dir: GEMINI_HOME, label: 'default', isDefault: true }); } catch (e) { /* agy never ran here */ }
+    for (const h of agentHomesLib.discoverAgentHomes('antigravity', { ...opts, envDir: null })) if (!h.isDefault) out.push(h);
+    return out;
 }
 // Who each root is logged in as: `claude auth status` (JSON: loggedIn,
 // email) and `codex login status`, run with the root pinned. Both answer
@@ -6561,6 +6651,9 @@ const agentLoginCache = new Map(); // `${agent}:${dir}` -> { at, value }
 let agentBinCache = null;
 function agentBinary(agent) {
     if (!agentBinCache) agentBinCache = {};
+    // A stand-in, in tests (the same variables the launches honour).
+    const standIn = process.env[`HOP_${String(agent).toUpperCase()}_BIN`];
+    if (standIn && path.isAbsolute(standIn)) return standIn;
     if (!(agent in agentBinCache)) {
         let bin = null;
         try { bin = execSync(`/bin/zsh -lc 'whence -p ${agent}'`, { encoding: 'utf8', timeout: 5000 }).trim().split('\n').pop() || null; } catch (e) { bin = null; }
@@ -6569,6 +6662,8 @@ function agentBinary(agent) {
     return agentBinCache[agent];
 }
 function probeAgentLogin(agent, home) {
+    // agy has no status command: its usage check says who it is (or that it is signed out).
+    if (agent === 'antigravity') return Promise.resolve(agyLoginFromReading(home.dir));
     const key = `${agent}:${home.dir}`;
     const hit = agentLoginCache.get(key);
     if (hit && Date.now() - hit.at < 120_000) return Promise.resolve(hit.value);
@@ -6633,11 +6728,12 @@ function saveAccountsState() {
 
 /**
  * Run an agent's CLI as a short helper that speaks JSON lines. `onLine(json,
- * send, finish)` settles it; a helper that says nothing in time, or exits
- * first, resolves null. The helper and anything it started are killed either
- * way (its own process group), and it runs in a folder of hop's own.
+ * send, finish)` settles it (`onText(line, finish)` hears the lines that are
+ * not JSON); a helper that says nothing in time, or exits first, resolves
+ * null. The helper and anything it started are killed either way (its own
+ * process group), and it runs in a folder of hop's own.
  */
-function runAgentProbe(bin, args, { env, onStart, onLine, timeoutMs = USAGE_PROBE_TIMEOUT_MS }) {
+function runAgentProbe(bin, args, { env, onStart, onLine, onText, timeoutMs = USAGE_PROBE_TIMEOUT_MS }) {
     return new Promise((resolve) => {
         let done = false, child = null, timer = null, buf = '';
         const finish = (value) => {
@@ -6656,7 +6752,10 @@ function runAgentProbe(bin, args, { env, onStart, onLine, timeoutMs = USAGE_PROB
         const feed = (line) => {
             if (done || !line.trim()) return;
             let j = null;
-            try { j = JSON.parse(line); } catch (e) { return; }
+            try { j = JSON.parse(line); } catch (e) {
+                if (onText) { try { onText(line, finish); } catch (e2) { finish(null); } }
+                return;
+            }
             try { onLine(j, send, finish); } catch (e) { finish(null); }
         };
         child.on('error', () => finish(null));
@@ -6726,21 +6825,41 @@ async function probeCodexUsage(home) {
 // agy answers `/quota` itself in print mode, spending nothing. A build that
 // does not know the command would take it for a prompt and spend tokens on
 // it: seen once, that build is never asked again.
+//
+// Each account is asked as itself (lib/agy-accounts.js): an account folder
+// in its sandbox, the default one — whose login is the keychain's — with a
+// data folder of hop's own, so a check never lands among the person's
+// conversations or runs their hooks. A check never opens a browser: a
+// signed-out agy would open its sign-in page by itself.
 let agyQuotaUnsupported = null;
-async function probeAgyUsage() {
+const agyProbeTag = (home) => (home && !home.isDefault ? crypto.createHash('sha256').update(home.dir).digest('hex').slice(0, 10) : 'default');
+async function probeAgyUsage(home) {
     const bin = agentBinary('agy');
     if (!bin) return null;
     let stamp = null;
     try { stamp = fs.statSync(bin).mtimeMs; } catch (e) { return null; }
     if (agyQuotaUnsupported === stamp) return null;
-    const logFile = path.join(USAGE_PROBE_DIR, 'agy.log');
-    try { fs.mkdirSync(USAGE_PROBE_DIR, { recursive: true }); fs.rmSync(logFile, { force: true }); } catch (e) { /* a fresh log is a nicety */ }
-    const reply = await runAgentProbe(bin, ['-p', '/quota', '--output-format', 'json', '--print-timeout', '15s', '--log-file', logFile], {
+    home = home || { dir: GEMINI_HOME, isDefault: true };
+    const tag = agyProbeTag(home);
+    const logFile = path.join(USAGE_PROBE_DIR, `agy-${tag}.log`);
+    const dataDir = path.join(USAGE_PROBE_DIR, 'agy-default');
+    try {
+        fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+        fs.rmSync(logFile, { force: true });
+    } catch (e) { /* a fresh log is a nicety */ }
+    const launch = agyAccounts.launchFor(home, { bin, browser: false, dataDir });
+    const signedOut = (finish) => finish({ signedOut: true });
+    const reply = await runAgentProbe(launch.file, [...launch.args, '-p', '/quota', '--output-format', 'json', '--print-timeout', '15s', '--log-file', logFile], {
         env: usageProbeEnv(),
         onStart: (send, end) => end(),
+        onText: (line, finish) => { if (agyAccounts.SIGNED_OUT_RE.test(line)) signedOut(finish); },
         onLine: (j, send, finish) => { if (j && typeof j === 'object' && 'status' in j) finish(j); }
     });
     if (!reply) return null;
+    if (reply.signedOut) return { signedOut: true };
+    if (reply.status !== 'SUCCESS') {
+        return /authenticat|log ?in|sign(?:ed)? ?in/i.test(String(reply.error || '')) ? { signedOut: true } : null;
+    }
     if (reply.command?.name !== 'usage' || Number(reply.num_turns) > 0) {
         agyQuotaUnsupported = stamp;
         log(`[account] this agy does not answer /quota by itself — its usage is not read`, YELLOW);
@@ -6749,10 +6868,7 @@ async function probeAgyUsage() {
     const usage = agentUsage.parseAgyQuota(reply);
     if (usage) {
         // Who it is signed in as: agy says so in its own log, nowhere else.
-        try {
-            const all = fs.readFileSync(logFile, 'utf8').match(/authenticated successfully as (\S+@\S+)/g);
-            if (all && all.length) usage.email = all[all.length - 1].replace(/^.* as /, '');
-        } catch (e) { /* unknown */ }
+        try { usage.email = agyAccounts.emailFromLog(fs.readFileSync(logFile, 'utf8')); } catch (e) { /* unknown */ }
     }
     return usage;
 }
@@ -6766,9 +6882,10 @@ function readAgentUsage(agent, home, maxAgeMs = USAGE_MAX_AGE_MS) {
     if (hit && Date.now() - hit.at <= maxAgeMs) return Promise.resolve(hit);
     const flying = agentUsageInflight.get(key);
     if (flying) return flying;
-    const probe = agent === 'claude' ? probeClaudeUsage(home) : agent === 'codex' ? probeCodexUsage(home) : probeAgyUsage();
+    const probe = agent === 'claude' ? probeClaudeUsage(home) : agent === 'codex' ? probeCodexUsage(home) : probeAgyUsage(home);
     const p = probe.catch(() => null).then((usage) => {
-        const value = { at: Date.now(), usage: usage || null };
+        // A check that found the account signed out has no usage to show.
+        const value = usage && usage.signedOut ? { at: Date.now(), usage: null, signedOut: true } : { at: Date.now(), usage: usage || null };
         agentUsageCache.set(key, value);
         return value;
     }).finally(() => { if (agentUsageInflight.get(key) === p) agentUsageInflight.delete(key); });
@@ -6780,10 +6897,12 @@ function cachedAgentUsage(agent, dir) {
     const hit = agentUsageCache.get(`${agent}:${dir}`);
     return hit && hit.usage ? { at: hit.at, usage: hit.usage } : null;
 }
-/** Antigravity keeps one login for the whole machine: one account, its data folder. */
-function agyAccountHome() {
-    try { if (!fs.statSync(AGY_DATA_DIR).isDirectory()) return null; } catch (e) { return null; }
-    return agentBinary('agy') ? { dir: GEMINI_HOME, label: 'default', isDefault: true } : null;
+/** An Antigravity account's login as its last usage check found it (agy has no status command). */
+function agyLoginFromReading(dir) {
+    const hit = agentUsageCache.get(`antigravity:${dir}`);
+    if (!hit) return null;
+    if (hit.signedOut) return { loggedIn: false, email: null };
+    return hit.usage ? { loggedIn: true, email: hit.usage.email || null } : null;
 }
 /**
  * Every account on this machine with its login, its usage and how many live
@@ -6799,14 +6918,15 @@ async function listAccounts({ maxAgeMs = USAGE_MAX_AGE_MS, agents = ['claude', '
         const snapshot = await listAllSessionEntriesRuntimeFirst();
         for (const e of snapshot.entries || []) {
             if (e.live !== true || !e.agent) continue;
-            const dir = e.agent === 'antigravity' ? GEMINI_HOME : e.agentHome?.dir;
+            const dir = e.agentHome?.dir || (e.agent === 'antigravity' ? GEMINI_HOME : null);
             if (dir) counts.set(`${e.agent}:${dir}`, (counts.get(`${e.agent}:${dir}`) || 0) + 1);
         }
     } catch (e) { /* counts are a nicety */ }
     const one = async (agent, h, canRotate) => {
         const reading = h.login && h.login.loggedIn === false ? null : await readAgentUsage(agent, h, maxAgeMs);
         const usage = reading?.usage || null;
-        const login = h.login || (usage ? { loggedIn: true, email: usage.email || null } : null);
+        const login = reading?.signedOut ? { loggedIn: false, email: null }
+            : h.login || (usage ? { loggedIn: true, email: usage.email || null } : null);
         return {
             agent, dir: h.dir, label: h.label, isDefault: h.isDefault,
             login: login ? { loggedIn: login.loggedIn === true, email: login.email || usage?.email || null } : null,
@@ -6818,26 +6938,36 @@ async function listAccounts({ maxAgeMs = USAGE_MAX_AGE_MS, agents = ['claude', '
     };
     const out = { claude: [], codex: [], antigravity: [] };
     const jobs = [];
-    for (const agent of ['claude', 'codex']) {
+    for (const agent of ['claude', 'codex', 'antigravity']) {
         if (!agents.includes(agent)) continue;
+        if (agent === 'antigravity' && !agentBinary('agy')) continue;
         jobs.push(Promise.all((homes[agent] || []).map((h) => one(agent, h, true))).then((list) => { out[agent] = list; }));
     }
-    const agy = agents.includes('antigravity') ? agyAccountHome() : null;
-    if (agy) jobs.push(one('antigravity', agy, false).then((a) => { out.antigravity = [a]; }));
     await Promise.all(jobs);
     return out;
 }
 
 /**
  * A new account for an agent: its own folder beside the default one
- * (~/.claude_<name>, ~/.codex_<name>), set up like the default — the same
- * settings and hooks, the same standing instructions, hop's skills — and
- * logged out, for its person to sign in to.
+ * (~/.claude_<name>, ~/.codex_<name>, ~/.gemini_<name>), set up like the
+ * default — the same settings and hooks, the same standing instructions,
+ * hop's skills; for Antigravity, the same conversations — and logged out,
+ * for its person to sign in to.
  */
 function addAgentAccount(agent, rawName) {
-    if (agent !== 'claude' && agent !== 'codex') return { status: 400, body: { error: 'An account can be added for Claude Code or Codex' } };
+    if (agent !== 'claude' && agent !== 'codex' && agent !== 'antigravity') return { status: 400, body: { error: 'An account can be added for Claude Code, Codex or Antigravity' } };
     const name = String(rawName || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
     if (!name || name === 'default') return { status: 400, body: { error: 'A short name is needed: letters, digits, - or _' } };
+    if (agent === 'antigravity') {
+        if (!agentBinary('agy')) return { status: 409, body: { error: 'Antigravity (agy) is not installed here' } };
+        const dir = path.join(os.homedir(), `.gemini_${name}`);
+        if (fs.existsSync(dir)) return { status: 409, body: { error: `${tildePath(dir)} is already there` } };
+        try { agyAccounts.setUpAccountDir(dir, GEMINI_HOME); }
+        catch (e) { return { status: 500, body: { error: `Could not set up ${tildePath(dir)}: ${e?.message || e}` } }; }
+        agentHomesCache.at = 0;
+        log(`[account] new antigravity account folder ${dir}`, CYAN);
+        return { status: 200, body: { ok: true, home: agentHomesLib.describeAgentHome(dir, agent, os.homedir()) } };
+    }
     const base = agentHomesLib.defaultHome(agent, os.homedir());
     const dir = `${base}_${name}`;
     if (fs.existsSync(dir)) return { status: 409, body: { error: `${tildePath(dir)} is already there` } };
@@ -6856,6 +6986,148 @@ function addAgentAccount(agent, rawName) {
     agentHomesCache.at = 0;
     log(`[account] new ${agent} account folder ${dir}`, CYAN);
     return { status: 200, body: { ok: true, home: agentHomesLib.describeAgentHome(dir, agent, os.homedir()) } };
+}
+
+// ---- Accounts: signing in (lib/agent-signin.js) -----------------------------
+// Settings → Agent accounts signs an account in through the agent's own
+// sign-in, run in a terminal of the daemon's own: the page shows the link
+// to sign in at, takes the code a sign-in page may hand back, and says who
+// it ended up signed in as. One at a time (Codex's sign-in listens on one
+// fixed port), and none runs longer than ten minutes.
+const SIGNIN_MAX_MS = 10 * 60_000;
+const SIGNIN_KEEP_MS = 10 * 60_000;     // a finished one stays on the page this long
+const SIGNIN_DIR = path.join(USAGE_PROBE_DIR, 'signin');
+let signInJob = null;
+let signInPty = null;
+function signInPtyLib() {
+    if (!signInPty) signInPty = require('node-pty-prebuilt-multiarch');
+    return signInPty;
+}
+/** What the page sees of a sign-in. */
+function signInView(job) {
+    if (!job) return null;
+    const read = agentSignin.readSignIn(job.agent, job.raw);
+    return {
+        id: job.id, agent: job.agent, dir: job.dir, label: job.label, startedAt: job.startedAt,
+        state: job.state, url: read.url, wantsCode: job.state === 'running' && read.wantsCode,
+        lines: read.lines, email: job.email || null, duplicateOf: job.duplicateOf || null,
+        message: job.message || null, endedAt: job.endedAt || null
+    };
+}
+/** The CLI and its environment for signing `home` in. */
+function signInLaunch(agent, home, { email = null, logFile = null } = {}) {
+    const env = usageProbeEnv();
+    env.TERM = 'xterm-256color';
+    if (agent === 'claude' || agent === 'codex') {
+        const bin = agentBinary(agent);
+        if (!bin) return null;
+        const varName = agentHomesLib.ENV_VAR[agent];
+        if (home.isDefault) delete env[varName]; else env[varName] = home.dir;
+        const args = agent === 'claude' ? ['auth', 'login', ...(email ? ['--email', email] : [])] : ['login'];
+        return { file: bin, args, env };
+    }
+    const bin = agentBinary('agy');
+    if (!bin) return null;
+    // Its first screen asks how to sign in; the runner picks Google, the first.
+    const l = agyAccounts.launchFor(home, { bin, browser: true });
+    return { file: l.file, args: [...l.args, ...(logFile ? ['--log-file', logFile] : [])], env };
+}
+function endSignIn(job, state, message = null) {
+    if (job.state !== 'running') return;
+    job.state = state;
+    job.message = message;
+    job.endedAt = Date.now();
+    clearTimeout(job.timer);
+    clearInterval(job.poll);
+    try { job.pty.kill(); } catch (e) { /* gone */ }
+    log(`[account] sign-in to ${job.agent} ${job.label}: ${state}${message ? ` — ${message}` : ''}`, state === 'done' ? GREEN : YELLOW);
+}
+/** After a CLI says it is signed in: who it is now, and whether another folder holds the same login. */
+async function confirmSignIn(job, home) {
+    agentLoginCache.delete(`${job.agent}:${home.dir}`);
+    agentHomesCache.at = 0;
+    const reading = await readAgentUsage(job.agent, home, 0);
+    let login = job.agent === 'antigravity' ? agyLoginFromReading(home.dir) : await probeAgentLogin(job.agent, home);
+    if (job.agent === 'codex' && login && !login.email) login = { ...login, email: reading?.usage?.email || null };
+    if (!login || login.loggedIn !== true) {
+        endSignIn(job, 'failed', 'The sign-in ended, but the account still reads as signed out');
+        return;
+    }
+    job.email = login.email || reading?.usage?.email || job.email || null;
+    if (job.email) {
+        for (const other of listAgentHomes(job.agent)) {
+            if (other.dir === home.dir) continue;
+            const theirs = job.agent === 'antigravity' ? agyLoginFromReading(other.dir) : agentLoginCache.get(`${job.agent}:${other.dir}`)?.value;
+            const theirEmail = theirs?.email || cachedAgentUsage(job.agent, other.dir)?.usage?.email || null;
+            if (theirEmail && theirEmail.toLowerCase() === job.email.toLowerCase()) { job.duplicateOf = other.isDefault ? 'default' : other.label; break; }
+        }
+    }
+    endSignIn(job, 'done');
+}
+function startSignIn(agent, dir, { email = null } = {}) {
+    if (!['claude', 'codex', 'antigravity'].includes(agent)) return { status: 400, body: { error: 'Unknown agent' } };
+    agentHomesCache.at = 0;
+    const home = listAgentHomes(agent).find((h) => h.dir === dir);
+    if (!home) return { status: 404, body: { error: `No ${agent} account at ${dir}` } };
+    if (signInJob && signInJob.state === 'running') {
+        if (signInJob.agent === agent && signInJob.dir === dir) return { status: 200, body: signInView(signInJob) };
+        return { status: 409, body: { error: `Signing in to ${signInJob.label} is still going — finish or cancel it first`, job: signInView(signInJob) } };
+    }
+    const cleanEmail = typeof email === 'string' && /^[^\s@]+@[^\s@]+$/.test(email.trim()) ? email.trim() : null;
+    const id = crypto.randomBytes(6).toString('hex');
+    const logFile = agent === 'antigravity' ? path.join(SIGNIN_DIR, `agy-${id}.log`) : null;
+    const launch = signInLaunch(agent, home, { email: cleanEmail, logFile });
+    if (!launch) return { status: 409, body: { error: `${agent === 'antigravity' ? 'agy' : agent} is not installed here` } };
+    let term;
+    try {
+        fs.mkdirSync(SIGNIN_DIR, { recursive: true, mode: 0o700 });
+        // Wide, so a long sign-in link is never wrapped across lines.
+        term = signInPtyLib().spawn(launch.file, launch.args, { name: 'xterm-256color', cols: 1000, rows: 50, cwd: SIGNIN_DIR, env: launch.env });
+    } catch (e) {
+        return { status: 500, body: { error: `Could not start the sign-in: ${e?.message || e}` } };
+    }
+    const job = {
+        id, agent, dir: home.dir, label: home.isDefault ? 'default' : home.label, startedAt: Date.now(),
+        state: 'running', raw: '', pty: term, chose: false, email: null, duplicateOf: null, logFile
+    };
+    signInJob = job;
+    log(`[account] signing in to ${agent} ${job.label} (${home.dir})`, CYAN);
+    term.onData((d) => {
+        job.raw += d;
+        if (job.raw.length > 400_000) job.raw = job.raw.slice(-200_000);
+        if (job.state !== 'running') return;
+        const read = agentSignin.readSignIn(agent, job.raw);
+        if (read.chooseMethod && !job.chose) {
+            job.chose = true;
+            setTimeout(() => { try { term.write('\r'); } catch (e) { /* gone */ } }, 300);
+        }
+    });
+    term.onExit(({ exitCode }) => {
+        if (job.state !== 'running' || job.confirming) return;
+        if (agent === 'antigravity') { endSignIn(job, 'failed', 'agy stopped before the sign-in finished'); return; }
+        job.confirming = exitCode === 0;
+        if (exitCode === 0) confirmSignIn(job, home).catch((e) => endSignIn(job, 'failed', e?.message || 'could not confirm the sign-in'));
+        else endSignIn(job, 'failed', `${agent} login stopped (exit ${exitCode})`);
+    });
+    // agy stays open once signed in (it is an agent): its log says when.
+    if (agent === 'antigravity') {
+        job.poll = setInterval(() => {
+            let email = null;
+            try { email = agyAccounts.emailFromLog(fs.readFileSync(logFile, 'utf8')); } catch (e) { return; }
+            if (!email || job.state !== 'running') return;
+            clearInterval(job.poll);
+            job.email = email;
+            job.confirming = true;
+            try { term.kill(); } catch (e) { /* gone */ }
+            confirmSignIn(job, home).catch((e) => endSignIn(job, 'failed', e?.message || 'could not confirm the sign-in'));
+        }, 1500);
+    }
+    job.timer = setTimeout(() => endSignIn(job, 'failed', 'It took longer than ten minutes — start again'), SIGNIN_MAX_MS);
+    return { status: 200, body: signInView(job) };
+}
+function currentSignIn() {
+    if (signInJob && signInJob.state !== 'running' && Date.now() - (signInJob.endedAt || 0) > SIGNIN_KEEP_MS) signInJob = null;
+    return signInView(signInJob);
 }
 
 // ---- The rotation -----------------------------------------------------------
@@ -6903,6 +7175,24 @@ function sessionLimitStop(internalName, agent) {
         return stop;
     } catch (e) { return null; }
 }
+// agy's quota notice is read off its screen, which has no clock: a notice is
+// dated when hop first saw it, and the same notice keeps that date.
+const agyStopSeen = new Map(); // internalName -> { text, at }
+async function agySessionLimitStop(internalName) {
+    let text = '';
+    try {
+        const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
+        const d = hostRes?.data;
+        if (!d || typeof d.data !== 'string') return null;
+        text = stripAnsiForSearch(d.data);
+    } catch (e) { return null; }
+    const stop = agentUsage.agyLimitStop(text);
+    if (!stop) { agyStopSeen.delete(internalName); return null; }
+    const seen = agyStopSeen.get(internalName);
+    const at = seen && seen.text === stop.text ? seen.at : Date.now();
+    agyStopSeen.set(internalName, { text: stop.text, at });
+    return { at, text: stop.text, screen: true };
+}
 function recordAccountAction(action) {
     const state = loadAccountsState();
     state.actions.push(action);
@@ -6931,16 +7221,19 @@ async function runAccountSweep() {
     const gen = ++accountSweepGen;
     try {
         const snapshot = await listAllSessionEntriesRuntimeFirst();
-        const entries = (snapshot.entries || []).filter((e) => e.live === true && (e.agent === 'claude' || e.agent === 'codex'));
+        const entries = (snapshot.entries || []).filter((e) => e.live === true && (e.agent === 'claude' || e.agent === 'codex' || e.agent === 'antigravity'));
         if (!entries.length) { accountWaiting = []; return; }
         const phases = await agentPhaseFieldsForAll(entries);
         const now = Date.now();
         const stopped = [];
         for (const entry of entries) {
             if (phases.get(entry.internalName)?.agentPhase === 'working') continue;
-            const stop = sessionLimitStop(entry.internalName, entry.agent);
+            const stop = entry.agent === 'antigravity' ? await agySessionLimitStop(entry.internalName) : sessionLimitStop(entry.internalName, entry.agent);
             // A notice from long ago is its person's to pick up, not hop's.
-            if (stop && now - stop.at <= LIMIT_STOP_MAX_AGE_MS) stopped.push({ entry, stop });
+            if (!stop || now - stop.at > LIMIT_STOP_MAX_AGE_MS) continue;
+            // A notice on a screen stays there after hop has dealt with it.
+            if (stop.screen && loadAccountsState().actions.some((a) => a.session === entry.internalName && a.at >= stop.at)) continue;
+            stopped.push({ entry, stop });
         }
         const waiting = [];
         const accountsBy = {};
@@ -7105,6 +7398,10 @@ function sessionAgentHome(internalName, agent, config) {
     }
     if (agent === 'codex') {
         return agentHomesLib.describeAgentHome(config?.env?.CODEX_HOME || null, 'codex', os.homedir());
+    }
+    if (agent === 'antigravity') {
+        const dir = config?.env?.HOP_AGY_HOME || null;
+        return dir ? agentHomesLib.describeAgentHome(dir, 'antigravity', os.homedir()) : { dir: GEMINI_HOME, label: 'default', isDefault: true };
     }
     return null;
 }
@@ -8862,12 +9159,23 @@ function rebuildClaudeLaunch(launchCmd) {
  */
 function accountEnvForLaunch(launchCmd, homeDir) {
     if (!homeDir) return null;
-    const word = (String(launchCmd || '').trim().split(/\s+/)[0] || '').split('/').pop();
-    const agent = word === 'codex' ? 'codex' : /^claude/.test(word) ? 'claude' : null;
-    if (!agent) return { error: 'An account applies only to a Claude or Codex session' };
+    const first = String(launchCmd || '').trim().split(/\s+/)[0] || '';
+    const word = first.split('/').pop();
+    const agent = word === 'codex' ? 'codex' : /^claude/.test(word) ? 'claude' : word === 'agy' ? 'antigravity' : null;
+    if (!agent) return { error: 'An account applies only to a Claude, Codex or Antigravity session' };
     const home = listAgentHomes(agent).find((h) => h.dir === homeDir);
     if (!home) return { error: `No ${agent} account at ${homeDir}` };
-    return home.isDefault ? null : { env: agentHomesLib.envForAgentHome(agent, home.dir) };
+    if (home.isDefault) return null;
+    if (agent === 'antigravity') {
+        // agy has no setting of its own for this: the launcher runs it as the
+        // account (lib/agy-accounts.js), and the room's environment names the
+        // account for anything typed there later.
+        return {
+            env: { HOP_AGY_HOME: home.dir, HOP_AGY_LAUNCHER: AGY_LAUNCHER },
+            command: `${agyAccounts.shellLaunch(home, AGY_LAUNCHER)}${String(launchCmd).trim().slice(first.length)}`
+        };
+    }
+    return { env: agentHomesLib.envForAgentHome(agent, home.dir) };
 }
 
 /**
@@ -8881,7 +9189,7 @@ async function switchSessionAgentHome(name, homeDir) {
     const internalName = resolveSessionInternalName(name, name);
     if (!internalName) return { status: 404, body: { error: 'No such session' } };
     const agent = sessionAgentKind(internalName);
-    if (!agent) return { status: 409, body: { error: 'Not a Claude or Codex session' } };
+    if (!agent) return { status: 409, body: { error: 'Not a Claude, Codex or Antigravity session' } };
     const home = listAgentHomes(agent).find((h) => h.dir === homeDir);
     if (!home) return { status: 400, body: { error: `No ${agent} account at ${homeDir}` } };
     const config = getSessionConfig(internalName) || getEffectiveSessionConfig(internalName) || {};
@@ -8919,18 +9227,29 @@ async function switchSessionAgentHome(name, homeDir) {
             launchCmd: agentHomesLib.stripConfigPrefix(rec.launchCmd || `claude --resume ${rec.sessionId}`),
             updatedAt: new Date().toISOString()
         });
-    } else {
+    } else if (agent === 'codex') {
         const turn = readTurnInfo(internalName);
         const rootId = turn?.sessionId ? codexRootThreadId(turn.sessionId) : null;
         const file = rootId ? findCodexRolloutById(rootId) : null;
         if (!file) return { status: 409, body: { error: 'No recorded Codex conversation to move' } };
         moved = copyInto(file, codexRolloutRoots().find((r) => file.startsWith(r + path.sep)));
+    } else {
+        // Every Antigravity account shares one conversation store
+        // (lib/agy-accounts.js): nothing to copy, only to find.
+        const rec = readAgyRecord(internalName);
+        if (!rec) return { status: 409, body: { error: 'No recorded Antigravity conversation to move' } };
+        if (!agyConversationExists(rec)) return { status: 409, body: { error: `Conversation ${rec.sessionId.slice(0, 8)}… is no longer kept by agy` } };
+        moved = null;
     }
     // The session's own env carries the account into every later launch.
     const varName = agentHomesLib.ENV_VAR[agent];
     const env = { ...(config.env || {}) };
     delete env[varName];
-    if (!home.isDefault) env[varName] = home.dir;
+    if (agent === 'antigravity') delete env.HOP_AGY_LAUNCHER;
+    if (!home.isDefault) {
+        env[varName] = home.dir;
+        if (agent === 'antigravity') env.HOP_AGY_LAUNCHER = AGY_LAUNCHER;
+    }
     const base = getSessionConfig(internalName) || getEffectiveSessionConfig(internalName);
     if (base) setSessionConfig(internalName, { ...base, env: Object.keys(env).length ? env : undefined, updatedAt: new Date().toISOString() });
 
@@ -8943,7 +9262,7 @@ async function switchSessionAgentHome(name, homeDir) {
 function restorePlanForSession(entry) {
     // An Antigravity conversation, when agy is what last ran here.
     const agy = agyRecordIsCurrent(entry.internalName);
-    if (agy) return agyRestorePlan(agy, readClaudeSessionMeta(entry.internalName)?.cwd || agy.cwd || entry.cwd);
+    if (agy) return agyRestorePlan(agy, readClaudeSessionMeta(entry.internalName)?.cwd || agy.cwd || entry.cwd, sessionAgyHome(entry.internalName));
     let rec = readClaudeSessionRecord(entry.internalName);
     // Codex has no SessionStart record; its notify hook leaves only the
     // .turn naming the thread. Without this, every codex session came back
@@ -16321,6 +16640,8 @@ happens until someone clicks it.
                                 res.end(JSON.stringify({ error: homeEnv.error }));
                                 return;
                             }
+                            // (agy's account changes the command itself: a launcher runs it.)
+                            const roomLaunch = homeEnv?.command || launchCmd;
                             await ensureExternalRuntimeSession(internalName, cwd, displayName, {
                                 folderId: targetFolderId,
                                 env: homeEnv?.env || undefined,
@@ -16328,8 +16649,8 @@ happens until someone clicks it.
                                 // app back, not a bare shell. Plain terminals stay
                                 // runtime-only as before.
                                 saveDefinition: !!launchCmd,
-                                startup: launchCmd || undefined,
-                                command: launchCmd || undefined,
+                                startup: roomLaunch || undefined,
+                                command: roomLaunch || undefined,
                                 autoStart: launchCmd ? true : undefined,
                                 createdBy: actorCreatedBy,
                                 createdVia
@@ -16622,6 +16943,41 @@ happens until someone clicks it.
             });
             return;
         }
+        // Signing an account in (Settings → Agent accounts): the one running
+        // sign-in, its link and last lines; a code typed for it; cancel.
+        if (parsedUrl.pathname === '/api/accounts/signin' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ job: currentSignIn() }));
+            return;
+        }
+        if (['/api/accounts/signin', '/api/accounts/signin/input', '/api/accounts/signin/cancel'].includes(parsedUrl.pathname) && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 20_000) req.destroy(); });
+            req.on('end', () => {
+                const reply = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+                try {
+                    const input = body ? JSON.parse(body) : {};
+                    if (parsedUrl.pathname === '/api/accounts/signin') {
+                        const r = startSignIn(String(input.agent || ''), String(input.dir || ''), { email: input.email });
+                        return reply(r.status, r.status === 200 ? { job: r.body } : r.body);
+                    }
+                    const job = signInJob;
+                    if (!job || job.id !== input.id) return reply(404, { error: 'That sign-in is over' });
+                    if (parsedUrl.pathname === '/api/accounts/signin/cancel') {
+                        endSignIn(job, 'cancelled');
+                        return reply(200, { job: signInView(job) });
+                    }
+                    const text = agentSignin.cleanInput(input.text);
+                    if (!text || job.state !== 'running') return reply(400, { error: text ? 'That sign-in is over' : 'Nothing to send' });
+                    job.pty.write(text);
+                    setTimeout(() => { try { job.pty.write('\r'); } catch (e) { /* gone */ } }, 150);
+                    return reply(200, { job: signInView(job) });
+                } catch (e) {
+                    reply(400, { error: e?.message || 'Invalid request' });
+                }
+            });
+            return;
+        }
         if ((parsedUrl.pathname === '/api/accounts/settings' || parsedUrl.pathname === '/api/accounts/add') && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -16641,7 +16997,7 @@ happens until someone clicks it.
                         else accountWaiting = [];
                     }
                     if (typeof input.dir === 'string' && typeof input.pooled === 'boolean') {
-                        const known = ['claude', 'codex'].some((agent) => listAgentHomes(agent).some((h) => h.dir === input.dir));
+                        const known = ['claude', 'codex', 'antigravity'].some((agent) => listAgentHomes(agent).some((h) => h.dir === input.dir));
                         if (!known) return reply(400, { error: 'No such account' });
                         state.excluded = state.excluded.filter((d) => d !== input.dir);
                         if (!input.pooled) state.excluded.push(input.dir);
@@ -21115,7 +21471,13 @@ async function main() {
             }
         }
         if (!command) {
-            log(`${display}: nothing to recover — no claude or codex conversation is recorded for this session${plan?.warning ? ` (${plan.warning})` : ''}.`, YELLOW);
+            log(`${display}: nothing to recover — no Claude, Codex or Antigravity conversation is recorded for this session${plan?.warning ? ` (${plan.warning})` : ''}.`, YELLOW);
+            process.exit(1);
+        }
+        // Two agy processes on one conversation would both write it.
+        const agyId = kind === 'antigravity' ? (/--conversation '([A-Za-z0-9-]{8,})'/.exec(command) || [])[1] : null;
+        if (agyId && agyConversationRunning(agyId)) {
+            log(`${display}: its Antigravity conversation ${agyId.slice(0, 8)}… is already running in another terminal.`, YELLOW);
             process.exit(1);
         }
         // Codex lets one process write a conversation. When another holds
@@ -24611,6 +24973,9 @@ async function main() {
         // Codex sessions whose helper servers have piled up: restarted while idle.
         setTimeout(runCodexHelperSweep, 5 * 60_000).unref?.();
         setInterval(runCodexHelperSweep, CODEX_HELPER_SWEEP_MS).unref?.();
+        // hop's own copies of its sessions' agy conversations (agy deletes old ones).
+        setTimeout(runAgyArchiveSweep, 60_000).unref?.();
+        setInterval(runAgyArchiveSweep, AGY_ARCHIVE_SWEEP_MS).unref?.();
         // Answers: the person's questions paired with their replies.
         setInterval(() => { try { sweepAnswers(); } catch (e) { /* next tick */ } }, 3000).unref?.();
         // Send-and-wait answers land in the message log as their turns end.

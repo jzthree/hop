@@ -260,12 +260,24 @@ own command line (Claude Code's usage request, Codex's app-server,
 Antigravity's `/quota`); reading it sends no prompt and uses none of the
 limit.
 
-Claude Code and Codex keep one login per config folder (`~/.claude`,
-`~/.claude_work`, `~/.codex_work`, …). **Add an account…** makes such a
-folder, set up like the default one, and **Sign in** opens a session that
-signs it in. A session's `⋯` menu moves it to another account with its
-conversation intact. Antigravity keeps a single login for the whole machine,
-so its usage is shown but it has no second account to move to.
+Every account is a folder: Claude Code's and Codex's own setting
+(`CLAUDE_CONFIG_DIR`, `CODEX_HOME`: `~/.claude_work`, `~/.codex_work`, …), and
+hop's for Antigravity, whose login is otherwise one keychain entry for the
+whole Mac. An Antigravity account (`~/.gemini_work`) is a folder agy runs
+with (`--gemini_dir`) inside a macOS sandbox that keeps it from the keychain,
+so it keeps that account's login in the folder; it shares conversations,
+hooks and skills with `~/.gemini` through links, so a session can move
+between accounts. `scripts/agy-account` runs agy as the account named in
+`HOP_AGY_HOME` (a session on that account has it set). Background usage
+checks never open a sign-in page.
+
+**Sign in to accounts…** is where they are set up: add an account by name
+and sign each one in. The agent's own sign-in runs on the host; the page
+shows its link (open it, or copy it into a private window when the browser
+is signed in to someone else), takes the code a sign-in page hands back
+(Claude, Antigravity), and says who the account turned out to be — and when
+two folders hold the same login. A session's `⋯` menu moves it to another
+account with its conversation intact; a new session can start on any account.
 
 With **Keep going past a limit** on, a session that stops at its account's
 usage limit is moved to the account in the rotation with the most room for
@@ -276,6 +288,18 @@ day, and leaves a notice older than twelve hours for you. Untick **In
 rotation** to keep an account out of it. A moved session re-reads its
 conversation on its first turn, which the new account pays for — so hop
 moves a session only once it has actually stopped.
+
+### Antigravity conversations hop keeps a copy of
+
+agy keeps only about its 500 newest conversations and deletes the rest, open
+ones included, and every `agy -p` counts as one: a batch of print-mode runs
+can delete a long session's conversation within the hour, after which a
+resume starts blank. Every five minutes hop copies the conversation of each
+live agy session that changed (`~/.hop2/agy-archive/<id>/`: the database
+through SQLite's backup, and its brain folder), and restore and `hop recover`
+put a deleted one back before resuming it. Copies nobody names are dropped
+after a month; `HOP_AGY_ARCHIVE=0` turns this off. An `agy -p` run inside a
+session never takes over that session's record.
 
 ### Codex sessions that pile up helpers
 

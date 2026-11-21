@@ -154,12 +154,21 @@ function reply(event) {
   return event === "Stop" ? { decision: "stop" } : {};
 }
 
-function main(event, raw, env = process.env) {
+// `agy -p …` run inside a room — a script's judge calls, a quick check — is
+// not the room's agent. Filed, it took over the room's record: a restore then
+// resumed a one-shot judge run instead of the room's conversation (seen
+// 2026-11-20, a batch of judge runs started from one room).
+function isPrintMode(cmd) {
+  return typeof cmd === "string" && /(^|\s)(-p|--print|--prompt)(=\S*)?(\s|$)/.test(cmd);
+}
+
+function main(event, raw, env = process.env, launchCmd = agyLaunchCmd) {
   const hopSession = env.HOP_SESSION;
   if (!hopSession || !/^[A-Za-z0-9_-]+$/.test(hopSession)) return;
   let payload;
   try { payload = JSON.parse(raw || "{}"); } catch { return; }
   if (!payload || typeof payload !== "object") return;
+  if (isPrintMode(launchCmd())) return;
   const dir = sessionsDir();
   if (event === "SessionStart") recordSession(dir, hopSession, payload);
   else if (event === "PreInvocation") {
@@ -185,4 +194,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { main, reply, AGENT };
+module.exports = { main, reply, isPrintMode, AGENT };

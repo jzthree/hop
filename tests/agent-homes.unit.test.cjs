@@ -51,3 +51,15 @@ test('a transcript keeps its relative place under the new root', () => {
   assert.equal(transcriptTarget('/Users/j/.codex/sessions/2026/10/08/rollout-x.jsonl', '/Users/j/.codex', '/Users/j/.codex-work'), '/Users/j/.codex-work/sessions/2026/10/08/rollout-x.jsonl');
   assert.equal(transcriptTarget('/elsewhere/abc.jsonl', '/Users/j/.claude', '/Users/j/.claude_fable'), null);
 });
+
+test('Antigravity accounts: ~/.gemini is the default; only folders hop set up count as more', () => {
+  const paths = new Set([
+    '/Users/j/.gemini',
+    '/Users/j/.gemini_work', '/Users/j/.gemini_work/.hop-agy-account',
+    '/Users/j/.gemini-cli', '/Users/j/.gemini-cli/settings.json' // another tool's folder
+  ]);
+  const homes = discoverAgentHomes('antigravity', { homeDir: HOME, entries: ['.gemini', '.gemini_work', '.gemini-cli'], exists: (d) => paths.has(d), envDir: null });
+  assert.deepEqual(homes.map((h) => [h.label, h.isDefault]), [['default', true], ['work', false]]);
+  assert.equal(agentHomeLabel('/Users/j/.gemini_lab', 'antigravity', HOME), 'lab');
+  assert.deepEqual(envForAgentHome('antigravity', '/Users/j/.gemini_lab'), { HOP_AGY_HOME: '/Users/j/.gemini_lab' });
+});

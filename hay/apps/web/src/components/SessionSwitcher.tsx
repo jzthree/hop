@@ -1900,11 +1900,12 @@ export const SessionSwitcher = ({
   const loadAgentHomes = () => {
     fetch("/api/agent-homes", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d && Array.isArray(d.claude) && Array.isArray(d.codex)) setAgentHomes(d); })
+      .then((d) => { if (d && Array.isArray(d.claude) && Array.isArray(d.codex)) setAgentHomes({ ...d, antigravity: Array.isArray(d.antigravity) ? d.antigravity : [] }); })
       .catch(() => { /* no accounts info: nothing labelled */ });
   };
   useEffect(() => { loadAgentHomes(); }, []);
-  const homesFor = (agent?: string | null): AgentHome[] => (agent === "claude" || agent === "codex" ? agentHomes[agent] : []);
+  const homesFor = (agent?: string | null): AgentHome[] =>
+    (agent === "claude" || agent === "codex" ? agentHomes[agent] : agent === "antigravity" ? agentHomes.antigravity || [] : []);
   // The account a NEW agent session starts in; "" = the agent's default.
   const [createHome, setCreateHome] = useState("");
   const startupFor = (t: "terminal" | "claude" | "codex" | "antigravity") => (t === "claude" ? "claude" : t === "codex" ? "codex" : t === "antigravity" ? "agy" : "");
@@ -1924,10 +1925,10 @@ export const SessionSwitcher = ({
           onClick={() => setCreateType(t)}
         >{t === "terminal" ? "Terminal" : t === "claude" ? "Claude" : t === "codex" ? "Codex" : "Antigravity"}</button>
       ))}
-      {(createType === "claude" || createType === "codex") && homesFor(createType).length > 1 && (
+      {createType !== "terminal" && homesFor(createType).length > 1 && (
         <select
           className="create-account"
-          aria-label={`${createType === "claude" ? "Claude" : "Codex"} account`}
+          aria-label={`${createType === "claude" ? "Claude" : createType === "codex" ? "Codex" : "Antigravity"} account`}
           title="Which login this session runs as (its config directory)"
           value={createHome}
           onChange={(e) => setCreateHome(e.target.value)}
@@ -2914,7 +2915,7 @@ export const SessionSwitcher = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: next, type: "terminal", port: null, startup: startupFor(createType), cwd: createCwd.trim() || undefined,
-          agentHome: (createType === "claude" || createType === "codex") && createHome && homesFor(createType).some((h) => h.dir === createHome) ? createHome : undefined
+          agentHome: createType !== "terminal" && createHome && homesFor(createType).some((h) => h.dir === createHome) ? createHome : undefined
         })
       });
       const data = await res.json().catch(() => ({} as { name?: string; displayName?: string; internalName?: string; error?: string }));
@@ -4114,7 +4115,7 @@ export const SessionSwitcher = ({
               // the agent there (refused while it is mid-turn).
               <>
                 <div className="switcher-sheet-note">
-                  Run {sheetSession.displayName} as another {sheetSession.agent === "codex" ? "Codex" : "Claude"} account.
+                  Run {sheetSession.displayName} as another {sheetSession.agent === "codex" ? "Codex" : sheetSession.agent === "antigravity" ? "Antigravity" : "Claude"} account.
                   The conversation comes along; the agent restarts.
                 </div>
                 {homesFor(sheetSession.agent).map((h) => {

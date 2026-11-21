@@ -19,7 +19,7 @@ export const describeAccount = (h: AgentHome, nowMs = Date.now()): string => {
   const hint = h.usage && nowMs - h.usage.at < 15 * 60_000 ? usageHint(h.usage.usage, nowMs) : "";
   return [name, h.login.email, hint].filter(Boolean).join(" · ");
 };
-export type AgentHomes = { claude: AgentHome[]; codex: AgentHome[] };
+export type AgentHomes = { claude: AgentHome[]; codex: AgentHome[]; antigravity?: AgentHome[] };
 
 // Tiered model for the mobile session switcher. Pure data shaping so it can be
 // unit-tested without the DOM: the component just renders what this returns.

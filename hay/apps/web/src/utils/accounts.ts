@@ -71,3 +71,64 @@ export const usageHint = (usage: AccountUsage | null | undefined, now: number): 
   const shown = meters.filter((m) => (!m.model && !m.models) || m.percent >= 80).slice(0, 3);
   return shown.map((m) => `${m.label} ${Math.min(100, Math.round(m.percent))}%`).join(" · ");
 };
+
+// ---- Signing accounts in (Settings → Agent accounts → Sign in to accounts) ----
+
+export const AGENT_TITLE: Record<AgentKind, string> = { claude: "Claude Code", codex: "Codex", antigravity: "Antigravity" };
+
+/** A sign-in the host is running: the agent's own CLI, in a terminal of the daemon's. */
+export type SignInJob = {
+  id: string; agent: AgentKind; dir: string; label: string; startedAt: number;
+  state: "running" | "done" | "failed" | "cancelled";
+  /** The link to sign in at, once the CLI has printed it. */
+  url: string | null;
+  /** The CLI is asking for the code a sign-in page shows. */
+  wantsCode: boolean;
+  /** Its last lines, for anyone who wants to see what it says. */
+  lines: string[];
+  email: string | null;
+  /** Another folder of the same agent holds this same login. */
+  duplicateOf: string | null;
+  message: string | null; endedAt: number | null;
+};
+
+/** Where a sign-in stands, in one line. */
+export const signInStatus = (job: SignInJob): string => {
+  if (job.state === "done") {
+    const who = job.email ? `Signed in as ${job.email}` : "Signed in";
+    return job.duplicateOf ? `${who} — the same login as ${job.duplicateOf}` : who;
+  }
+  if (job.state === "failed") return job.message || "The sign-in did not finish";
+  if (job.state === "cancelled") return "Cancelled";
+  if (job.wantsCode) return "Paste the code the sign-in page shows";
+  if (job.url) return "Waiting for you to finish in the browser";
+  return "Starting the sign-in…";
+};
+
+/** How many accounts are signed in, of how many. An account not yet read counts as not signed in. */
+export const setupProgress = (agents: Partial<Record<AgentKind, Account[]>>): { signedIn: number; total: number } => {
+  const all = Object.values(agents).flat().filter(Boolean) as Account[];
+  return { signedIn: all.filter((a) => a.login?.loggedIn === true).length, total: all.length };
+};
+
+/** Folders of one agent signed in to the same login as another: dir → the other's name. */
+export const sameLogins = (list: Account[]): Map<string, string> => {
+  const out = new Map<string, string>();
+  list.forEach((a, i) => {
+    const email = a.login?.loggedIn ? a.login.email?.toLowerCase() : null;
+    if (!email) return;
+    const first = list.findIndex((b) => b.login?.loggedIn && b.login.email?.toLowerCase() === email);
+    if (first !== i) out.set(a.dir, list[first].isDefault ? "default" : list[first].label);
+  });
+  return out;
+};
+
+/** What the host makes of a typed account name ("Work 2" → "work-2"); "" when nothing usable is left. */
+export const accountSlug = (raw: string): string => {
+  const s = raw.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
+  return s === "default" ? "" : s;
+};
+
+/** The folder a new account gets: "~/.codex_work", "~/.gemini_work". */
+export const accountFolder = (agent: AgentKind, slug: string): string =>
+  `~/.${agent === "antigravity" ? "gemini" : agent}_${slug}`;

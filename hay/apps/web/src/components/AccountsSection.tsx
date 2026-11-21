@@ -1,25 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import { relativeTime } from "../utils/switcherModel";
-import { accountLine, meterNote, waitingLine, type Account, type AccountsOverview, type AgentKind } from "../utils/accounts";
+import { accountLine, meterNote, setupProgress, waitingLine, type Account, type AccountsOverview, type AgentKind } from "../utils/accounts";
+import { AccountSetup } from "./AccountSetup";
 
 // Settings → Agent accounts: every login the agents have on this machine
-// (Claude Code and Codex keep one per folder; Antigravity one for the whole
-// Mac), how much of each one's limits is used — read from the agents' own
-// CLIs, which costs nothing — and the rotation: a session that stops at its
-// account's limit is moved to one with room and told to continue.
+// (one per folder: Claude Code's and Codex's own setting, and hop's for
+// Antigravity), how much of each one's limits is used — read from the
+// agents' own CLIs, which costs nothing — and the rotation: a session that
+// stops at its account's limit is moved to one with room and told to
+// continue. Signing in, and adding accounts, happen in Sign in to accounts
+// (AccountSetup).
 
 type Props = {
   onNotice: (text: string) => void;
-  /** Leave Settings for a session just made (a sign-in runs in one). */
-  onOpenNewSession: (name: string) => void;
+  /** (Kept for callers; sign-ins now run on the page itself.) */
+  onOpenNewSession?: (name: string) => void;
   now: number;
 };
 
-const AGENTS: Array<{ kind: AgentKind; title: string; note?: string; signIn: string }> = [
-  { kind: "claude", title: "Claude Code", signIn: "claude auth login" },
-  { kind: "codex", title: "Codex", signIn: "codex login" },
-  { kind: "antigravity", title: "Antigravity", signIn: "agy",
-    note: "One sign-in for this whole Mac: its usage is shown, but there is no second account to move a session to." }
+const AGENTS: Array<{ kind: AgentKind; title: string }> = [
+  { kind: "claude", title: "Claude Code" },
+  { kind: "codex", title: "Codex" },
+  { kind: "antigravity", title: "Antigravity" }
 ];
 
 const post = (url: string, body: unknown) =>
@@ -27,8 +29,10 @@ const post = (url: string, body: unknown) =>
     .then(async (r) => ({ ok: r.ok, data: await r.json().catch(() => ({})) as Record<string, unknown> }))
     .catch(() => ({ ok: false, data: {} as Record<string, unknown> }));
 
-export const AccountsSection = ({ onNotice, onOpenNewSession, now }: Props) => {
+export const AccountsSection = ({ onNotice, now }: Props) => {
   const [data, setData] = useState<AccountsOverview | null>(null);
+  // Sign in to accounts, open — on an account's sign-in, an agent's new account, or the whole list.
+  const [setup, setSetup] = useState<{ agent: AgentKind; dir?: string; add?: boolean } | "all" | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const alive = useRef(true);
@@ -61,24 +65,9 @@ export const AccountsSection = ({ onNotice, onOpenNewSession, now }: Props) => {
     const r = await post("/api/accounts/settings", { dir: a.dir, pooled });
     if (!r.ok) { onNotice("That didn't work"); void load(); }
   };
-  const signIn = async (a: Account, command: string) => {
-    const name = `sign-in-${a.agent === "antigravity" ? "agy" : a.agent}-${a.isDefault ? "default" : a.label}`.slice(0, 40);
-    const r = await post("/api/sessions", { name, type: "terminal", port: null, startup: command, agentHome: a.agent === "antigravity" ? undefined : a.dir });
-    const made = typeof r.data.name === "string" ? r.data.name : null;
-    if (!r.ok || !made) { onNotice(typeof r.data.error === "string" ? r.data.error : "Could not start the sign-in"); return; }
-    onOpenNewSession(made);
-  };
-  const addAccount = async (kind: AgentKind, title: string) => {
-    const name = window.prompt(`A short name for the new ${title} account (it becomes the folder's name):`, "");
-    if (!name || !name.trim()) return;
-    const r = await post("/api/accounts/add", { agent: kind, name });
-    if (!r.ok) { onNotice(typeof r.data.error === "string" ? r.data.error : "Could not add the account"); return; }
-    onNotice("Added — sign in to it to use it");
-    void load();
-  };
-
   const checked = data ? Math.max(0, ...Object.values(data.agents).flat().map((a) => a.usageAt || 0)) : 0;
   const waiting = data ? waitingLine(data.waiting, now) : "";
+  const progress = data ? setupProgress(data.agents) : null;
 
   return (
     <section className="set-section" aria-labelledby="set-accounts">
@@ -106,17 +95,28 @@ export const AccountsSection = ({ onNotice, onOpenNewSession, now }: Props) => {
           </div>
         </div>
 
+        <div className="set-row">
+          <div className="set-label">
+            <span className="set-title">Sign in to accounts</span>
+            <span className="set-note">
+              Add an account for each login you have, Claude Code, Codex or Antigravity, and sign each one in once.
+              {progress && progress.total > 0 ? ` ${progress.signedIn} of ${progress.total} signed in.` : ""}
+            </span>
+          </div>
+          <div className="set-control">
+            <button type="button" className="set-btn accent" onClick={() => setSetup("all")}>Sign in to accounts…</button>
+          </div>
+        </div>
+
         {!data && <div className="set-row"><span className="set-note">{failed ? "The accounts could not be read." : "Reading each account's usage…"}</span></div>}
 
-        {data && AGENTS.map(({ kind, title, note, signIn: command }) => {
+        {data && AGENTS.map(({ kind, title }) => {
           const list = data.agents[kind] || [];
           if (!list.length && kind === "antigravity") return null;
-          const rotates = kind !== "antigravity";
           return (
             <div key={kind} className="set-row wide">
               <div className="set-label">
                 <span className="set-title">{title}</span>
-                {note && <span className="set-note">{note}</span>}
               </div>
               <div className="set-control">
                 <div className="acct-list">
@@ -129,13 +129,13 @@ export const AccountsSection = ({ onNotice, onOpenNewSession, now }: Props) => {
                           <span className="acct-who">{accountLine(a)}</span>
                           <span className="acct-spacer" />
                           {a.sessions > 0 && <span className="acct-sessions">{a.sessions} {a.sessions === 1 ? "session" : "sessions"}</span>}
-                          {rotates && !out && list.length > 1 && (
+                          {!out && list.length > 1 && (
                             <label className="acct-pool" title="Whether a stopped session may be moved to this account">
                               <input type="checkbox" checked={a.pooled !== false} onChange={(e) => { void setPooled(a, e.target.checked); }} />
                               In rotation
                             </label>
                           )}
-                          {out && <button type="button" className="set-btn" onClick={() => { void signIn(a, command); }}>Sign in</button>}
+                          {out && <button type="button" className="set-btn" onClick={() => setSetup({ agent: a.agent, dir: a.dir })}>Sign in</button>}
                         </div>
                         {!out && a.usage && a.usage.meters.length > 0 && (
                           <div className="acct-meters">
@@ -167,9 +167,7 @@ export const AccountsSection = ({ onNotice, onOpenNewSession, now }: Props) => {
                   })}
                   {!list.length && <div className="acct-none">Not set up on this machine.</div>}
                 </div>
-                {rotates && (
-                  <button type="button" className="set-btn quiet acct-add" onClick={() => { void addAccount(kind, title); }}>Add a {title} account…</button>
-                )}
+                <button type="button" className="set-btn quiet acct-add" onClick={() => setSetup({ agent: kind, add: true })}>Add {kind === "antigravity" ? "an" : "a"} {title} account…</button>
               </div>
             </div>
           );
@@ -207,6 +205,10 @@ export const AccountsSection = ({ onNotice, onOpenNewSession, now }: Props) => {
           </div>
         )}
       </div>
+      {setup && (
+        <AccountSetup data={data} reload={(refresh) => load(refresh)} onNotice={onNotice}
+                      start={setup === "all" ? null : setup} onClose={() => { setSetup(null); void load(); }} />
+      )}
     </section>
   );
 };

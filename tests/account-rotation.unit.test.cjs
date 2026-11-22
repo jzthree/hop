@@ -85,8 +85,8 @@ const ROOMY = claudeUsage([row('weekly_all', 10)]);
 const account = (dir, usage, more = {}) => ({ dir, label: dir, login: { loggedIn: true, email: `${dir}@example.org` }, pooled: true, usage, usageAt: Date.now(), ...more });
 const live = (name, more = {}) => ({ internalName: name, displayName: name, live: true, agent: 'claude', agentModel: 'claude-opus-5-5', agentHome: { dir: 'a' }, ...more });
 
-function sweepEnv({ autoSwitch = true, entries, stops, accounts, working = [], pending = [], moveResult = { status: 200, body: { ok: true, restarted: true } } }) {
-  const calls = { moves: [], continues: [], actions: [], logs: [], listed: 0 };
+function sweepEnv({ autoSwitch = true, entries, stops, accounts, byAgent = null, working = [], pending = [], moveResult = { status: 200, body: { ok: true, restarted: true } } }) {
+  const calls = { moves: [], continues: [], actions: [], logs: [], listed: 0, listedAgents: [] };
   const state = { autoSwitch, excluded: [], actions: [] };
   const env = run(`let shuttingDown = false; const CYAN = '', YELLOW = '';
     const ACCOUNT_SWEEP_STUCK_MS = 600000, LIMIT_STOP_MAX_AGE_MS = 12 * 3600000;
@@ -98,7 +98,13 @@ function sweepEnv({ autoSwitch = true, entries, stops, accounts, working = [], p
     listAllSessionEntriesRuntimeFirst: async () => ({ entries }),
     agentPhaseFieldsForAll: async (list) => new Map(list.map((e) => [e.internalName, { agentPhase: working.includes(e.internalName) ? 'working' : 'idle' }])),
     sessionLimitStop: (name) => stops[name] || null,
-    listAccounts: async () => { calls.listed++; return { claude: accounts, codex: [], antigravity: [] }; },
+    agySessionLimitStop: async (name) => stops[name] || null,
+    // Like the real one: only the agents asked for.
+    listAccounts: async ({ agents }) => {
+      calls.listed++; calls.listedAgents.push(...agents);
+      const all = byAgent || { claude: accounts, codex: [], antigravity: [] };
+      return Object.fromEntries(agents.map((a) => [a, all[a] || []]));
+    },
     switchSessionAgentHome: async (name, dir) => { calls.moves.push([name, dir]); return moveResult; },
     continuePending: (name) => pending.includes(name),
     queueContinue: (name, message) => calls.continues.push([name, message]),
@@ -140,8 +146,8 @@ test('a crowd that stopped together moves one per sweep', async () => {
 
 test('a working session, a shell, and a notice from long ago are left alone', async () => {
   const env = sweepEnv({
-    entries: [live('s_busy'), live('s_old'), live('s_shell', { agent: null }), live('s_down', { live: false }), live('s_agy', { agent: 'antigravity' })],
-    stops: { s_busy: stopAt(1), s_old: stopAt(13 * 60), s_shell: stopAt(1), s_down: stopAt(1), s_agy: stopAt(1) },
+    entries: [live('s_busy'), live('s_old'), live('s_shell', { agent: null }), live('s_down', { live: false })],
+    stops: { s_busy: stopAt(1), s_old: stopAt(13 * 60), s_shell: stopAt(1), s_down: stopAt(1) },
     working: ['s_busy'], accounts: [account('a', FULL), account('b', ROOMY)]
   });
   await env.sweep();
@@ -178,4 +184,49 @@ test('with room nowhere it waits; when its own account has room again it continu
   assert.deepEqual(back.calls.moves, []);
   assert.match(back.calls.continues[0][1], /the usage limit this session stopped at has reset/);
   assert.deepEqual(back.calls.actions.map((a) => a.kind), ['resume']);
+});
+
+test('a session only ever moves to an account of its own agent: Claude to Claude, Codex to Codex, Antigravity to Antigravity', async () => {
+  // Every Claude account is full; the Codex and Antigravity ones have room.
+  const byAgent = {
+    claude: [account('/h/.claude', FULL), account('/h/.claude2', FULL)],
+    codex: [account('/h/.codex', FULL), account('/h/.codex_gpta', ROOMY)],
+    antigravity: [account('/h/.gemini', FULL), account('/h/.gemini_lab', ROOMY)]
+  };
+  const claude = sweepEnv({ entries: [live('s_c', { agentHome: { dir: '/h/.claude' } })], stops: { s_c: stopAt(1) }, byAgent });
+  await claude.sweep();
+  assert.deepEqual(claude.calls.listedAgents, ['claude']);
+  assert.deepEqual(claude.calls.moves, [], 'never to a Codex or Antigravity account');
+  assert.deepEqual(claude.waiting().map((w) => [w.session, w.reason]), [['s_c', 'no account in the rotation has room']]);
+
+  for (const [agent, from, to] of [['codex', '/h/.codex', '/h/.codex_gpta'], ['antigravity', '/h/.gemini', '/h/.gemini_lab']]) {
+    const env = sweepEnv({ entries: [live('s_x', { agent, agentModel: null, agentHome: { dir: from } })], stops: { s_x: stopAt(1) }, byAgent });
+    await env.sweep();
+    assert.deepEqual(env.calls.listedAgents, [agent]);
+    assert.deepEqual(env.calls.moves, [['s_x', to]]);
+  }
+});
+
+test("switching a session's account refuses a folder that belongs to another agent", async () => {
+  const homes = { claude: [{ dir: '/h/.claude', isDefault: true }, { dir: '/h/.claude2' }], codex: [{ dir: '/h/.codex_gpta' }], antigravity: [{ dir: '/h/.gemini_lab' }] };
+  const touched = [];
+  const sw = run(`${fnSource('switchSessionAgentHome')}; switchSessionAgentHome`, {
+    resolveSessionInternalName: (n) => n,
+    sessionAgentKind: () => 'claude',
+    listAgentHomes: (agent) => homes[agent],
+    // Anything past the check would come here.
+    getSessionConfig: () => { touched.push('config'); return {}; },
+    getEffectiveSessionConfig: () => { touched.push('config'); return {}; }
+  });
+  for (const dir of ['/h/.codex_gpta', '/h/.gemini_lab']) {
+    const r = await sw('s_c', dir);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, `No claude account at ${dir}`);
+  }
+  assert.deepEqual(touched, []);
+  // A Claude folder is never offered to Codex or Antigravity either.
+  const exists = () => true;
+  const entries = ['.claude', '.claude2', '.codex', '.codex_gpta', '.gemini', '.gemini_lab'];
+  assert.ok(agentHomesLib.discoverAgentHomes('codex', { homeDir: '/h', entries, exists, envDir: null }).every((h) => /\/\.codex/.test(h.dir)));
+  assert.ok(agentHomesLib.discoverAgentHomes('claude', { homeDir: '/h', entries, exists, envDir: null }).every((h) => /\/\.claude/.test(h.dir)));
 });

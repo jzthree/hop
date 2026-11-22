@@ -100,7 +100,12 @@ export const signInStatus = (job: SignInJob): string => {
   }
   if (job.state === "failed") return job.message || "The sign-in did not finish";
   if (job.state === "cancelled") return "Cancelled";
-  if (job.wantsCode) return "Paste the code the sign-in page shows";
+  if (job.wantsCode) {
+    // Antigravity always hands back a code; Claude's page only when it cannot reach this Mac.
+    if (job.agent === "antigravity") return "Waiting for the code Google shows: paste it below";
+    if (job.agent === "claude") return "Finish in the browser, or paste the code the page shows below";
+    return "Paste the code the sign-in page shows below";
+  }
   if (job.url) return "Waiting for you to finish in the browser";
   return "Starting the sign-in…";
 };

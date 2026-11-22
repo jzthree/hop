@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { createPortal } from "react-dom";
+import { RemoveAccountAsk, RemoveAccountButton } from "./AccountRemove";
 import {
   AGENT_TITLE, accountFolder, accountLine, accountSlug, sameLogins, setupProgress, signInStatus,
   type Account, type AccountsOverview, type AgentKind, type SignInJob
@@ -13,6 +14,11 @@ import {
 // the browser is signed in to someone else), takes the code a sign-in page
 // may hand back, and says who the account turned out to be — and when it is
 // a login another folder already has.
+//
+// The sign-in's steps open under the account being signed in, in view, and
+// the code box is where the cursor is when the person comes back from the
+// sign-in page (a paste anywhere on the sheet lands in it too): Antigravity's
+// Google page always hands back a code, and nothing else said where it goes.
 
 type Props = {
   data: AccountsOverview | null;
@@ -30,7 +36,7 @@ const ORDER: AgentKind[] = ["claude", "codex", "antigravity"];
 const HOW: Record<AgentKind, string> = {
   claude: "Signs in through claude.ai. If the page hands you a code, paste it below.",
   codex: "Signs in through ChatGPT and finishes in a browser on the Mac running hop.",
-  antigravity: "Signs in with Google. The page hands you a code to paste below."
+  antigravity: "Signs in with Google, whose page then shows a code to paste here."
 };
 
 const post = (url: string, body: unknown) =>
@@ -58,6 +64,9 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  // The account whose Remove is being asked about.
+  const [removing, setRemoving] = useState<string | null>(null);
+  const codeRef = useRef<HTMLInputElement | null>(null);
   const alive = useRef(true);
   const rootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => () => { alive.current = false; }, []);
@@ -130,6 +139,25 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
   const agents = data?.agents;
   const progress = agents ? setupProgress(agents) : null;
   const signingIn = (a: Account) => running && job?.dir === a.dir;
+  // The sign-in goes under its account's row; on top only when that row is not listed.
+  const jobRowShown = !!job && !!agents?.[job.agent]?.some((a) => a.dir === job.dir);
+  const card = job && (
+    <SignInCard job={job} code={code} setCode={setCode} copied={copied} codeRef={codeRef}
+                onCopy={async () => { if (job.url && await copyText(job.url)) { setCopied(true); window.setTimeout(() => setCopied(false), 2000); } else onNotice("Could not copy — select the link instead"); }}
+                onSend={() => { void sendCode(); }} onCancel={() => { void cancel(); }}
+                onAgain={() => { void signIn(job.agent, job.dir); }} onDismiss={() => setJob(null)} />
+  );
+  // A code pasted anywhere on the sheet (not into another box) is the code.
+  const onPaste = (e: React.ClipboardEvent) => {
+    if (!job || job.state !== "running" || !codeStepFor(job) || !codeRef.current) return;
+    const t = e.target as HTMLElement;
+    if (t === codeRef.current || t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    const text = e.clipboardData.getData("text").trim();
+    if (!text) return;
+    e.preventDefault();
+    setCode(text);
+    codeRef.current.focus({ preventScroll: true });
+  };
 
   // On the document itself: inside Settings, whose page makes its own frame
   // for fixed boxes, the sheet centred in that page and its left side went
@@ -138,6 +166,7 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
     <>
       <div className="acct-setup-backdrop" onClick={onClose} />
       <div className="acct-setup" role="dialog" aria-modal="true" aria-labelledby="acct-setup-title" tabIndex={-1} ref={rootRef}
+           onPaste={onPaste}
            onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } }}>
         <header className="acct-setup-head">
           <div>
@@ -157,12 +186,7 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
           </div>
         </header>
 
-        {job && (
-          <SignInCard job={job} code={code} setCode={setCode} copied={copied}
-                      onCopy={async () => { if (job.url && await copyText(job.url)) { setCopied(true); window.setTimeout(() => setCopied(false), 2000); } else onNotice("Could not copy — select the link instead"); }}
-                      onSend={() => { void sendCode(); }} onCancel={() => { void cancel(); }}
-                      onAgain={() => { void signIn(job.agent, job.dir); }} onDismiss={() => setJob(null)} />
-        )}
+        {job && !jobRowShown && card}
 
         {!agents && <p className="acct-setup-empty">Reading the accounts on this host…</p>}
 
@@ -182,26 +206,36 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
                   const dupe = dupes.get(a.dir);
                   const state = signingIn(a) ? "busy" : out ? "out" : dupe ? "dupe" : unknown ? "unknown" : "in";
                   return (
-                    <li key={a.dir} className={`acct-setup-row ${state}`}>
-                      <span className="acct-setup-mark" aria-hidden="true" />
-                      <span className="acct-setup-name">
-                        <b>{a.isDefault ? "default" : a.label}</b>
-                        <code title={a.dir}>{a.dir.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")}</code>
-                      </span>
-                      <span className="acct-setup-who">
-                        {state === "busy" ? "Signing in…"
-                          : out ? "Not signed in"
-                          : dupe ? `${accountLine(a)} — same login as ${dupe}`
-                          : unknown ? "Not checked yet"
-                          : accountLine(a) || "Signed in"}
-                      </span>
-                      {!signingIn(a) && (
-                        <button type="button" className={"set-btn" + (out || dupe ? " accent" : " quiet")} disabled={busy || running}
-                                onClick={() => { void signIn(agent, a.dir); }}>
-                          {out ? "Sign in" : dupe ? "Sign in as someone else" : "Sign in again"}
-                        </button>
-                      )}
-                    </li>
+                    <Fragment key={a.dir}>
+                      <li className={`acct-setup-row ${state}`}>
+                        <span className="acct-setup-mark" aria-hidden="true" />
+                        <span className="acct-setup-name">
+                          <b>{a.isDefault ? "default" : a.label}</b>
+                          <code title={a.dir}>{a.dir.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")}</code>
+                        </span>
+                        <span className="acct-setup-who">
+                          {state === "busy" ? "Signing in…"
+                            : out ? "Not signed in"
+                            : dupe ? `${accountLine(a)} — same login as ${dupe}`
+                            : unknown ? "Not checked yet"
+                            : accountLine(a) || "Signed in"}
+                        </span>
+                        {!signingIn(a) && removing !== a.dir && (
+                          <span className="acct-setup-acts">
+                            <button type="button" className={"set-btn" + (out || dupe ? " accent" : " quiet")} disabled={busy || running}
+                                    onClick={() => { void signIn(agent, a.dir); }}>
+                              {out ? "Sign in" : dupe ? "Sign in as someone else" : "Sign in again"}
+                            </button>
+                            <RemoveAccountButton account={a} disabled={busy || running} onAsk={() => setRemoving(a.dir)} />
+                          </span>
+                        )}
+                        {removing === a.dir && (
+                          <RemoveAccountAsk account={a} onNotice={onNotice} onCancel={() => setRemoving(null)}
+                                            onRemoved={() => { setRemoving(null); void reload(true); }} />
+                        )}
+                      </li>
+                      {job && job.dir === a.dir && <li className="acct-setup-signin">{card}</li>}
+                    </Fragment>
                   );
                 })}
                 {!list.length && <li className="acct-setup-row none">{agent === "antigravity" ? "Antigravity (agy) has not run on this host." : "None on this host yet."}</li>}
@@ -251,15 +285,73 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
 
 type CardProps = {
   job: SignInJob; code: string; setCode: (s: string) => void; copied: boolean;
+  codeRef: MutableRefObject<HTMLInputElement | null>;
   onCopy: () => void; onSend: () => void; onCancel: () => void; onAgain: () => void; onDismiss: () => void;
 };
 
-const SignInCard = ({ job, code, setCode, copied, onCopy, onSend, onCancel, onAgain, onDismiss }: CardProps) => {
+/** Whether this sign-in may hand back a code: Codex finishes in the browser on this Mac; the others can hand one back. */
+const codeStepFor = (job: SignInJob) => job.agent !== "codex" || job.wantsCode;
+
+// Where the code goes, said for each agent.
+const CODE_STEP: Record<AgentKind, { title: string; note: string }> = {
+  antigravity: {
+    title: "Copy the code Google shows, and paste it here",
+    note: "After you choose your Google account, the page shows an authorization code. Antigravity is waiting for it."
+  },
+  claude: {
+    title: "If the page shows a code, paste it here",
+    note: "It does when the page cannot reach this Mac, as when you sign in on a phone."
+  },
+  codex: { title: "Paste the code it asks for", note: "" }
+};
+
+const SignInCard = ({ job, code, setCode, copied, codeRef, onCopy, onSend, onCancel, onAgain, onDismiss }: CardProps) => {
   const running = job.state === "running";
-  // Codex finishes through the browser on this Mac; the others hand back a code.
-  const codeStep = job.agent !== "codex" || job.wantsCode;
+  const codeStep = codeStepFor(job);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  // Back from the sign-in page, or asked for the code: this is where to type.
+  const [lookHere, setLookHere] = useState(false);
+  const codeNow = running && codeStep && (job.agent === "antigravity" ? job.wantsCode || lookHere : lookHere);
+
+  // A new sign-in: in view, under its account.
+  useEffect(() => { cardRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }); }, [job.id]);
+
+  const focusCode = () => {
+    const el = codeRef.current;
+    if (!el) return;
+    const active = document.activeElement as HTMLElement | null;
+    // Not from a box someone is typing in.
+    if (active && active !== el && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))) return;
+    el.focus({ preventScroll: true });
+    el.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  };
+  // Antigravity asks for its code once the page is out: the cursor goes there.
+  useEffect(() => { if (running && job.wantsCode && job.agent === "antigravity") focusCode(); }, [running, job.wantsCode, job.agent]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Coming back to hop from the sign-in page (a tab, the browser): the box, lit.
+  useEffect(() => {
+    if (!running || !codeStep || !job.url) return;
+    let away = document.hidden || !document.hasFocus();
+    const leave = () => { away = true; };
+    const back = () => {
+      if (document.hidden || !away) return;
+      away = false;
+      setLookHere(true);
+      focusCode();
+    };
+    const vis = () => (document.hidden ? leave() : back());
+    window.addEventListener("blur", leave);
+    window.addEventListener("focus", back);
+    document.addEventListener("visibilitychange", vis);
+    return () => {
+      window.removeEventListener("blur", leave);
+      window.removeEventListener("focus", back);
+      document.removeEventListener("visibilitychange", vis);
+    };
+  }, [running, codeStep, job.url]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const step = CODE_STEP[job.agent];
   return (
-    <div className={`acct-signin ${job.state}${job.duplicateOf ? " dupe" : ""}`} aria-live="polite">
+    <div ref={cardRef} className={`acct-signin ${job.state}${job.duplicateOf ? " dupe" : ""}`} aria-live="polite">
       <div className="acct-signin-head">
         <span className="acct-signin-title">{AGENT_TITLE[job.agent]} · {job.label}</span>
         <span className="acct-signin-state">{signInStatus(job)}</span>
@@ -270,19 +362,21 @@ const SignInCard = ({ job, code, setCode, copied, onCopy, onSend, onCancel, onAg
             <span className="acct-signin-step-title">Open the sign-in page</span>
             {job.url ? (
               <span className="acct-signin-actions">
-                <a className="set-btn accent" href={job.url} target="_blank" rel="noreferrer">Open sign-in page</a>
+                <a className="set-btn accent" href={job.url} target="_blank" rel="noreferrer"
+                   onClick={() => { if (codeStep) window.setTimeout(() => codeRef.current?.focus({ preventScroll: true }), 0); }}>Open sign-in page</a>
                 <button type="button" className="set-btn" onClick={onCopy}>{copied ? "Copied" : "Copy link"}</button>
               </span>
             ) : <span className="set-note">Waiting for the sign-in link…</span>}
-            {job.url && job.agent !== "antigravity" && <span className="set-note">A browser tab may have opened on the host already.</span>}
+            {job.url && <span className="set-note">A browser tab may have opened on the host already.</span>}
           </li>
           {codeStep && (
-            <li className={job.wantsCode ? "now" : ""}>
-              <span className="acct-signin-step-title">{job.agent === "codex" ? "Paste the code it asks for" : "If the page shows a code, paste it here"}</span>
+            <li className={codeNow ? "now" : ""}>
+              <span className="acct-signin-step-title">{step.title}</span>
+              {step.note && <span className="set-note">{step.note}</span>}
               <form className="acct-signin-code" onSubmit={(e) => { e.preventDefault(); onSend(); }}>
-                <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Code from the sign-in page"
-                       autoComplete="off" spellCheck={false} aria-label="Code from the sign-in page" />
-                <button type="submit" className="set-btn" disabled={!code.trim()}>Send</button>
+                <input ref={codeRef} value={code} onChange={(e) => setCode(e.target.value)} placeholder="Paste the code here"
+                       autoComplete="off" autoCapitalize="off" spellCheck={false} aria-label="Code from the sign-in page" />
+                <button type="submit" className={"set-btn" + (code.trim() ? " accent" : "")} disabled={!code.trim()}>Send</button>
               </form>
             </li>
           )}

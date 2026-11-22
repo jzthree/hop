@@ -37,6 +37,7 @@ const claudeProcs = require('./lib/claude-procs');
 const agyRecovery = require('./lib/agy-recovery');
 const termInput = require('./lib/term-input');
 const agentSignin = require('./lib/agent-signin');
+const accountRemoval = require('./lib/account-removal');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const messages = require('./lib/messages');
@@ -7057,6 +7058,52 @@ function addAgentAccount(agent, rawName) {
     agentHomesCache.at = 0;
     log(`[account] new ${agent} account folder ${dir}`, CYAN);
     return { status: 200, body: { ok: true, home: agentHomesLib.describeAgentHome(dir, agent, os.homedir()) } };
+}
+
+/**
+ * Remove an account (lib/account-removal.js): out of the lists and the
+ * rotation, its login forgotten on this Mac, its folder — conversations and
+ * all — kept in removed-accounts/. Not the default, and not while a session
+ * runs on it or it is signing in.
+ */
+const REMOVED_ACCOUNTS_DIR = path.join(HOME_DIR, 'removed-accounts');
+async function removeAgentAccount(agent, dir) {
+    if (!['claude', 'codex', 'antigravity'].includes(agent)) return { status: 400, body: { error: 'Unknown agent' } };
+    agentHomesCache.at = 0;
+    const home = listAgentHomes(agent).find((h) => h.dir === dir) || null;
+    if (!home) return { status: 404, body: { error: 'There is no such account' } };
+    const snapshot = await listAllSessionEntriesRuntimeFirst();
+    if (!snapshot.runtimeAvailable) return { status: 503, body: { error: 'hop could not reach its terminals just now; try again in a moment' } };
+    const liveSessions = (snapshot.entries || []).filter((e) => e && e.live === true && e.agent === agent
+        && (e.agentHome?.dir || (agent === 'antigravity' ? GEMINI_HOME : null)) === home.dir).length;
+    const why = accountRemoval.whyNotRemovable({
+        agent, home, liveSessions,
+        signingIn: !!(signInJob && signInJob.state === 'running' && signInJob.dir === home.dir),
+        envDir: process.env[agentHomesLib.ENV_VAR[agent]] || null
+    });
+    if (why) return { status: 409, body: { error: why } };
+    let moved;
+    try {
+        moved = accountRemoval.moveAccountFolder(agent, home.dir, accountRemoval.removedFolderFor(home.dir, REMOVED_ACCOUNTS_DIR));
+    } catch (e) {
+        return { status: 500, body: { error: `Could not move ${tildePath(home.dir)} aside: ${e?.message || e}` } };
+    }
+    // Claude Code on a Mac keeps each folder's login in the keychain.
+    let keychain = false;
+    if (agent === 'claude' && process.platform === 'darwin') {
+        const service = accountRemoval.claudeKeychainService(home.dir);
+        for (let i = 0; i < 3; i++) {
+            try { execFileSync('/usr/bin/security', ['delete-generic-password', '-s', service], { stdio: 'ignore', timeout: 5000 }); keychain = true; }
+            catch (e) { break; }
+        }
+    }
+    const state = loadAccountsState();
+    if (state.excluded.includes(home.dir)) { state.excluded = state.excluded.filter((d) => d !== home.dir); saveAccountsState(); }
+    agentLoginCache.delete(`${agent}:${home.dir}`);
+    agentUsageCache.delete(`${agent}:${home.dir}`);
+    agentHomesCache.at = 0;
+    log(`[account] removed ${agent} account ${home.label}: ${home.dir} → ${moved.dest}${keychain || moved.droppedLogins.length ? ' (login forgotten)' : ''}`, CYAN);
+    return { status: 200, body: { ok: true, label: home.label, movedTo: tildePath(moved.dest) } };
 }
 
 // ---- Accounts: signing in (lib/agent-signin.js) -----------------------------
@@ -17072,6 +17119,21 @@ happens until someone clicks it.
                     job.pty.write(text);
                     setTimeout(() => { try { job.pty.write('\r'); } catch (e) { /* gone */ } }, 150);
                     return reply(200, { job: signInView(job) });
+                } catch (e) {
+                    reply(400, { error: e?.message || 'Invalid request' });
+                }
+            });
+            return;
+        }
+        if (parsedUrl.pathname === '/api/accounts/remove' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; if (body.length > 20_000) req.destroy(); });
+            req.on('end', async () => {
+                const reply = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+                try {
+                    const input = body ? JSON.parse(body) : {};
+                    const r = await removeAgentAccount(String(input.agent || ''), String(input.dir || ''));
+                    reply(r.status, r.body);
                 } catch (e) {
                     reply(400, { error: e?.message || 'Invalid request' });
                 }

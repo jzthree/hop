@@ -57,7 +57,9 @@ describe("signing accounts in", () => {
   it("says where a sign-in stands", () => {
     expect(signInStatus(job({}))).toBe("Starting the sign-in…");
     expect(signInStatus(job({ url: "https://auth.openai.com/oauth/authorize?x" }))).toBe("Waiting for you to finish in the browser");
-    expect(signInStatus(job({ url: "https://x", wantsCode: true }))).toBe("Paste the code the sign-in page shows");
+    expect(signInStatus(job({ url: "https://x", wantsCode: true }))).toBe("Paste the code the sign-in page shows below");
+    expect(signInStatus(job({ agent: "antigravity", url: "https://x", wantsCode: true }))).toBe("Waiting for the code Google shows: paste it below");
+    expect(signInStatus(job({ agent: "claude", url: "https://x", wantsCode: true }))).toBe("Finish in the browser, or paste the code the page shows below");
     expect(signInStatus(job({ state: "done", email: "b@example.org" }))).toBe("Signed in as b@example.org");
     expect(signInStatus(job({ state: "done", email: "a@example.org", duplicateOf: "default" }))).toBe("Signed in as a@example.org — the same login as default");
     expect(signInStatus(job({ state: "failed", message: "codex login stopped (exit 1)" }))).toBe("codex login stopped (exit 1)");

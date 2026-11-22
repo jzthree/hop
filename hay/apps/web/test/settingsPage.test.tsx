@@ -63,6 +63,7 @@ beforeEach(() => {
         email: null, duplicateOf: null, message: null, endedAt: null } });
     }
     if (url === "/api/accounts/add") return json({ ok: true, home: { dir: "/home/u/.codex_work", label: "work", isDefault: false } });
+    if (url === "/api/accounts/remove") return json({ ok: true, label: "fable", movedTo: "~/.hop2/removed-accounts/claude_fable-x" });
     if (url === "/api/sessions") return json({ ok: true, name: "sign-in-claude-spare" });
     return json({ ok: true });
   }));
@@ -267,12 +268,72 @@ describe("Settings › Signed in, when there are many", () => {
       expect(calls).toContainEqual({ url: "/api/accounts/signin", body: { agent: "claude", dir: "/home/u/.claude_spare" } });
       const sheet = within(screen.getByRole("dialog", { name: "Sign in to your accounts" }));
       expect(sheet.getByRole("link", { name: "Open sign-in page" }).getAttribute("href")).toBe("https://claude.ai/oauth/authorize?code=true&state=x");
-      expect(sheet.getByText("Paste the code the sign-in page shows")).toBeTruthy();
+      expect(sheet.getByText("Finish in the browser, or paste the code the page shows below")).toBeTruthy();
+      // The steps open under the account being signed in.
+      const row = sheet.getByText("spare").closest("li")!;
+      expect(row.nextElementSibling?.classList.contains("acct-setup-signin")).toBe(true);
+      expect(within(row.nextElementSibling as HTMLElement).getByRole("textbox", { name: "Code from the sign-in page" })).toBeTruthy();
       fireEvent.change(sheet.getByRole("textbox", { name: "Code from the sign-in page" }), { target: { value: " 4/0Ab-xyz " } });
       fireEvent.click(sheet.getByRole("button", { name: "Send" }));
       await settle();
       expect(calls).toContainEqual({ url: "/api/accounts/signin/input", body: { id: "j1", text: "4/0Ab-xyz" } });
       expect(p.onOpenNewSession).not.toHaveBeenCalled();
+    });
+
+    it("Antigravity's code: the box is where the cursor is, once it asks and when you come back from the page", async () => {
+      render(<SettingsPage {...base()} />);
+      await settle();
+      fireEvent.click(within(section()).getByRole("button", { name: "Sign in to accounts…" }));
+      await settle();
+      const sheetEl = screen.getByRole("dialog", { name: "Sign in to your accounts" });
+      const agy = within(within(sheetEl).getByRole("region", { name: "Antigravity" }));
+      fireEvent.click(agy.getByRole("button", { name: "Sign in again" }));
+      await settle();
+      const box = agy.getByRole("textbox", { name: "Code from the sign-in page" }) as HTMLInputElement;
+      expect(agy.getByText("Copy the code Google shows, and paste it here")).toBeTruthy();
+      expect(agy.getByText("Waiting for the code Google shows: paste it below")).toBeTruthy();
+      expect(document.activeElement).toBe(box);
+      expect(box.closest("li")?.classList.contains("now")).toBe(true);
+      // Away to the sign-in page, then back: the cursor is in the box again.
+      box.blur();
+      fireEvent.blur(window);
+      fireEvent.focus(window);
+      expect(document.activeElement).toBe(box);
+      // A paste anywhere on the sheet is the code.
+      box.blur();
+      fireEvent.paste(sheetEl.querySelector(".acct-setup-head")!, { clipboardData: { getData: () => "  4/0AQ-code " } });
+      expect(box.value).toBe("4/0AQ-code");
+      expect(document.activeElement).toBe(box);
+      fireEvent.click(agy.getByRole("button", { name: "Send" }));
+      await settle();
+      expect(calls).toContainEqual({ url: "/api/accounts/signin/input", body: { id: "j1", text: "4/0AQ-code" } });
+    });
+
+    it("removes an account after asking in its row; never the default, nor one sessions run on", async () => {
+      const p = base();
+      const before = accounts;
+      accounts = { ...accounts, agents: { ...accounts.agents, claude: accounts.agents.claude.map((a) => (a.label === "spare" ? { ...a, sessions: 1 } : a)) } };
+      try {
+        render(<SettingsPage {...p} />);
+        await settle();
+        const s = within(section());
+        expect(s.queryByRole("button", { name: "Remove default" })).toBeNull();
+        fireEvent.click(s.getByRole("button", { name: "Remove spare" }));
+        const busy = within(s.getByRole("group", { name: "Remove spare?" }));
+        expect(busy.getByText(/1 running session uses/)).toBeTruthy();
+        expect(busy.queryByRole("button", { name: "Remove spare" })).toBeNull();
+        fireEvent.click(busy.getByRole("button", { name: "OK" }));
+        fireEvent.click(s.getByRole("button", { name: "Remove fable" }));
+        const ask = within(s.getByRole("group", { name: "Remove fable?" }));
+        expect(ask.getByText("~/.claude_fable")).toBeTruthy();
+        fireEvent.click(ask.getByRole("button", { name: "Remove fable" }));
+        await settle();
+        expect(calls).toContainEqual({ url: "/api/accounts/remove", body: { agent: "claude", dir: "/home/u/.claude_fable" } });
+        expect(p.onNotice).toHaveBeenCalledWith("Removed fable. Its folder is kept in ~/.hop2/removed-accounts/claude_fable-x");
+        // Said on the page itself: the app's own notices sit under Settings.
+        expect(document.querySelector(".set-status")?.textContent).toBe("Removed fable. Its folder is kept in ~/.hop2/removed-accounts/claude_fable-x");
+        expect(calls.filter((c) => c.url === "/api/accounts?refresh=1").length).toBeGreaterThan(0);
+      } finally { accounts = before; }
     });
 
     it("adds an account by name, then signs it in", async () => {

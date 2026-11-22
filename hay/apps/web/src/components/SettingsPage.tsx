@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { relativeTime } from "../utils/switcherModel";
 import { setTipsOff, tipsAreOff } from "./TipCard";
 import type { UpdateInfo } from "./UpdateNotice";
@@ -150,6 +151,20 @@ export const SettingsPage = (p: Props) => {
     return () => window.removeEventListener("keydown", onKey);
   }, [p.onClose]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // What Settings has to say ("Passkey removed", "Removed work…"), shown
+  // here: the app's own notices sit under this page (and the drawer's only
+  // in the drawer), so on a desktop nothing Settings said was ever seen. On
+  // the document, so it shows over the sign-in sheet too.
+  const [note, setNote] = useState<string | null>(null);
+  const noteTimer = useRef<number | undefined>(undefined);
+  const say = (text: string) => {
+    setNote(text);
+    window.clearTimeout(noteTimer.current);
+    noteTimer.current = window.setTimeout(() => setNote(null), Math.min(9000, 2500 + text.length * 45));
+    p.onNotice(text);
+  };
+  useEffect(() => () => window.clearTimeout(noteTimer.current), []);
+
   const saveName = () => {
     const next = nameDraft.trim();
     setEditingName(false);
@@ -158,7 +173,7 @@ export const SettingsPage = (p: Props) => {
   const signOutLogin = async (l: AuthLogin) => {
     if (!window.confirm(`Sign out ${l.label || "this login"}? It will need to sign in again.`)) return;
     const r = await fetch("/api/auth/sessions/revoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: l.id }) }).catch(() => null);
-    p.onNotice(r?.ok ? `Signed out ${l.label || "that login"}` : "That didn't work");
+    say(r?.ok ? `Signed out ${l.label || "that login"}` : "That didn't work");
     loadLogins();
   };
   const signOutHere = async () => {
@@ -169,13 +184,13 @@ export const SettingsPage = (p: Props) => {
   const removePasskey = async (k: Passkey) => {
     if (!window.confirm(`Remove the passkey for ${k.rpID}? Sign-in there falls back to the password.`)) return;
     const r = await fetch("/api/passkeys/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: k.id }) }).catch(() => null);
-    p.onNotice(r?.ok ? "Passkey removed" : "That didn't work");
+    say(r?.ok ? "Passkey removed" : "That didn't work");
     loadPasskeys();
   };
   const copy = (text: string, what: string) => {
     const done = navigator.clipboard?.writeText(text);
-    if (!done) { p.onNotice("The browser would not copy here"); return; }
-    done.then(() => p.onNotice(`Copied ${what}`)).catch(() => p.onNotice("The browser would not copy here"));
+    if (!done) { say("The browser would not copy here"); return; }
+    done.then(() => say(`Copied ${what}`)).catch(() => say("The browser would not copy here"));
   };
 
   return (
@@ -236,7 +251,7 @@ export const SettingsPage = (p: Props) => {
           </Row>
         </Section>
 
-        <AccountsSection onNotice={p.onNotice} onOpenNewSession={p.onOpenNewSession} now={now} />
+        <AccountsSection onNotice={say} onOpenNewSession={p.onOpenNewSession} now={now} />
 
         <Section id="you" title="You">
           <Row title="Your name" note="Shown to anyone else watching the same session.">
@@ -310,6 +325,7 @@ export const SettingsPage = (p: Props) => {
           )}
         </Section>
       </div>
+      {note && createPortal(<div className="set-status" role="status" aria-live="polite">{note}</div>, document.body)}
     </div>
   );
 };

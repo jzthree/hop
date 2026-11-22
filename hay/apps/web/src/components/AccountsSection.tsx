@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { relativeTime } from "../utils/switcherModel";
 import { accountLine, meterNote, setupProgress, waitingLine, type Account, type AccountsOverview, type AgentKind } from "../utils/accounts";
+import { RemoveAccountAsk, RemoveAccountButton } from "./AccountRemove";
 import { AccountSetup } from "./AccountSetup";
 
 // Settings → Agent accounts: every login the agents have on this machine
@@ -9,7 +10,7 @@ import { AccountSetup } from "./AccountSetup";
 // agents' own CLIs, which costs nothing — and the rotation: a session that
 // stops at its account's limit is moved to one with room and told to
 // continue. Signing in, and adding accounts, happen in Sign in to accounts
-// (AccountSetup).
+// (AccountSetup); an account other than the default is removed here, or there.
 
 type Props = {
   onNotice: (text: string) => void;
@@ -35,6 +36,8 @@ export const AccountsSection = ({ onNotice, now }: Props) => {
   const [setup, setSetup] = useState<{ agent: AgentKind; dir?: string; add?: boolean } | "all" | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  // The account whose Remove is being asked about.
+  const [removing, setRemoving] = useState<string | null>(null);
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
 
@@ -136,7 +139,12 @@ export const AccountsSection = ({ onNotice, now }: Props) => {
                             </label>
                           )}
                           {out && <button type="button" className="set-btn" onClick={() => setSetup({ agent: a.agent, dir: a.dir })}>Sign in</button>}
+                          {removing !== a.dir && <RemoveAccountButton account={a} onAsk={() => setRemoving(a.dir)} />}
                         </div>
+                        {removing === a.dir && (
+                          <RemoveAccountAsk account={a} onNotice={onNotice} onCancel={() => setRemoving(null)}
+                                            onRemoved={() => { setRemoving(null); void load(true); }} />
+                        )}
                         {!out && a.usage && a.usage.meters.length > 0 && (
                           <div className="acct-meters">
                             {a.usage.meters.map((m) => {

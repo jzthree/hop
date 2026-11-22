@@ -3,6 +3,9 @@ import { relativeTime } from "../utils/switcherModel";
 import { menuIsOpen } from "./ContextMenu";
 import { SideHandle, SideToggle, keyStartsInside } from "./SideColumn";
 import { PdfReader } from "./PdfReader";
+import { ZoomFrame } from "./ZoomFrame";
+import { ZoomImage } from "./ZoomImage";
+import { typingIn, zoomKey, type ZoomCommand } from "../utils/zoom";
 
 // Views: the results an agent hands a human that a terminal cannot draw — a
 // plot, a PDF, a rendered write-up, a live dev server.
@@ -312,6 +315,8 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
   const asPage = placement === "page";
   const asSide = placement === "side";
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // The open document's, image's or PDF's zoom, for ⌘+ / ⌘− / ⌘0 pressed anywhere in the reader.
+  const zoomCmdRef = useRef<((c: ZoomCommand) => void) | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const now = Date.now();
@@ -520,6 +525,14 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
           event.preventDefault();
           event.stopPropagation();
           copyImage(open);
+          return;
+        }
+        // ⌘+ / ⌘− / ⌘0 (and + − 0 when no box has the keys): the open result's zoom.
+        const zc = event.altKey ? null : zoomKey(event.key);
+        if (zc && zoomCmdRef.current && (event.metaKey || event.ctrlKey || !typingIn(document.activeElement))) {
+          event.preventDefault();
+          event.stopPropagation();
+          zoomCmdRef.current(zc);
           return;
         }
         const dir = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
@@ -787,7 +800,8 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
   // pinch, selectable text — the iframed browser viewer can't zoom in the
   // Mac app and shows one still page on a phone). Documents are iframes — sandboxed
   // only for LIVE servers; our own files skip the sandbox, which would
-  // disable the browser's PDF viewer. A Nebula notebook reads here,
+  // disable the browser's PDF viewer. Images, documents and PDFs all zoom
+  // (ZoomImage, ZoomFrame, PdfReader); a live Nebula keeps its own. A Nebula notebook reads here,
   // read-only (hop's saved copy, refreshed from Nebula when it answers);
   // running it is the bar's one click into Nebula.
   // Running it: the live Nebula, in place, through hop's relay — when the
@@ -810,7 +824,7 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
         </div>
         {isLive
           ? <iframe className="views-frame" key={"live:" + open.path} src={liveSrc!} title={`${open.title || open.name} — Nebula`} allow="clipboard-read; clipboard-write" />
-          : <iframe className="views-frame" key={open.path} src={open.path.replace(/\/inline$/, "/notebook")} title={open.title || open.name} />}
+          : <ZoomFrame key={open.path} src={open.path.replace(/\/inline$/, "/notebook")} title={open.title || open.name} commandRef={zoomCmdRef} />}
       </div>
     ) : open.kind === "link" ? (
       <div className="views-link-card">
@@ -823,22 +837,25 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
         <div className="views-link-host">{(() => { try { return new URL(open.target || "").host; } catch { return ""; } })()}</div>
       </div>
     ) : open.kind !== "server" && isImage(open.name) ? (
-      <div className="views-media"><img src={open.path} alt={open.title || open.name} /></div>
+      <ZoomImage key={open.path} src={open.path} alt={open.title || open.name} commandRef={zoomCmdRef} />
     ) : open.kind !== "server" && isVideo(open.name) ? (
       <div className="views-media"><video src={open.path} controls autoPlay={false} /></div>
     ) : open.kind !== "server" && isAudio(open.name) ? (
       <div className="views-media audio"><audio src={open.path} controls /></div>
     ) : open.kind !== "server" && isPdf(open.name) && pdfFallback !== open.path ? (
-      <PdfReader key={open.path} src={open.path} title={open.title || open.name} onFail={() => setPdfFallback(open.path)} />
+      <PdfReader key={open.path} src={open.path} title={open.title || open.name} onFail={() => setPdfFallback(open.path)} commandRef={zoomCmdRef} />
     ) : (
-      <iframe
-        className="views-frame"
+      // A live server is an app: it starts at 100% and keeps its own bare keys.
+      <ZoomFrame
         key={open.path}
         src={previewSrc(open)}
         title={open.title || open.name}
         sandbox={open.kind === "server"
           ? "allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
           : undefined}
+        remember={open.kind !== "server"}
+        bareKeys={open.kind !== "server"}
+        commandRef={zoomCmdRef}
       />
     )
   );

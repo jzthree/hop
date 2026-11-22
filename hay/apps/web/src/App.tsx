@@ -10,6 +10,7 @@ import {
   type ClientMessage
 } from "hay-shared";
 import { activityLabel, sortPresence } from "./utils/presence";
+import { readerTakesZoomKeys } from "./utils/zoom";
 import { createOptimisticEcho, hasActiveOtherTypist } from "./utils/optimisticEcho";
 import { attachScrollFlywheel } from "./utils/scrollFlywheel";
 import { collectTerminalMatches, selectTerminalMatch } from "./utils/terminalSearch";
@@ -4773,6 +4774,8 @@ const App = () => {
         return;
       }
       if (isMacPlatform && !shifted) {
+        // A document, image or PDF open in Views zooms instead (ViewsPanel).
+        if ((key === "=" || key === "+" || key === "-" || key === "0") && readerTakesZoomKeys(event.target)) return;
         if (key === "=" || key === "+") { grab(); setFontSize((s) => Math.min(24, s + 1)); return; }
         if (key === "-") { grab(); setFontSize((s) => Math.max(8, s - 1)); return; }
         if (key === "0") { grab(); setFontSize(14); return; }

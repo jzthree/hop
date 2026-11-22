@@ -53,7 +53,8 @@ export const moreRows = (isMac: boolean): Row[] => [
   { keys: isMac ? "⌘⇧⏎" : "Ctrl+Shift+⏎", what: "zoom the focused pane (again to restore)" },
   { keys: isMac ? "⌘⇧E" : "Ctrl+Shift+E", what: "swap pane with primary (with a pane open)" },
   { keys: isMac ? "⌘⇧K" : "Ctrl+Shift+K", what: "close focused pane (with a pane open)" },
-  ...(isMac ? [{ keys: "⌘+ / ⌘− / ⌘0", what: "terminal font size" }] : []),
+  ...(isMac ? [{ keys: "⌘+ / ⌘− / ⌘0", what: "terminal font size — in Views, zoom the document, image or PDF (or pinch)" }]
+    : [{ keys: "Ctrl++ / Ctrl+− / Ctrl+0", what: "in Views, zoom the document, image or PDF (or pinch)" }]),
   { keys: "Ctrl+Shift+C / V", what: "copy / paste" },
   { keys: "Shift+PgUp / PgDn", what: "scrollback" },
   { keys: "⌥↑ / ⌥↓", what: "move a session in Manual order" }

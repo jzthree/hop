@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
+import { attachZoomGestures, clampWithin, stepWithin, wheelFactor, zoomKey, type ZoomCommand } from "../utils/zoom";
 
 /**
  * hop's own PDF reader. The browser's PDF viewer, iframed, can't be zoomed
@@ -26,7 +27,6 @@ export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 6;
 // Opening, and "Fit": the page across the pane, but no bigger than this.
 const FIT_MAX = 1.5;
-const STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5, 6];
 const PAD = 16; // px around the pages
 const GAP = 12; // px between pages
 // A canvas this many pixels or more is drawn coarser (memory; Safari caps one).
@@ -34,16 +34,9 @@ const MAX_CANVAS_PX = typeof navigator !== "undefined" && /iPhone|iPad|Android/.
 // Sharp pages this long after the zoom stops (until then the last drawing stretches).
 const SETTLE_MS = 160;
 
-export const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
-export const stepZoom = (z: number, dir: 1 | -1) => {
-  const next = dir > 0 ? STEPS.find((s) => s > z + 0.001) : [...STEPS].reverse().find((s) => s < z - 0.001);
-  return next ?? (dir > 0 ? MAX_ZOOM : MIN_ZOOM);
-};
-/** A wheel event's zoom factor: a pinch's small deltas follow the fingers; a mouse notch is one modest step. */
-export const wheelFactor = (deltaY: number, deltaMode: number) => {
-  const d = deltaMode === 1 ? deltaY * 33 : deltaMode === 2 ? deltaY * 400 : deltaY;
-  return Math.exp(-Math.max(-25, Math.min(25, d)) / 100);
-};
+export const clampZoom = (z: number) => clampWithin(z, MIN_ZOOM, MAX_ZOOM);
+export const stepZoom = (z: number, dir: 1 | -1) => stepWithin(z, dir, MIN_ZOOM, MAX_ZOOM);
+export { wheelFactor };
 
 type Size = { w: number; h: number };
 type Anchor = { page: number; fx: number; fy: number; cx: number; cy: number };
@@ -53,9 +46,11 @@ type Props = {
   title?: string;
   /** pdf.js could not read it: the caller shows the browser's own viewer. */
   onFail?: () => void;
+  /** Where the reader takes zoom keys pressed outside it (Views' ⌘+ / ⌘− / ⌘0). */
+  commandRef?: MutableRefObject<((c: ZoomCommand) => void) | null>;
 };
 
-export const PdfReader = ({ src, title, onFail }: Props) => {
+export const PdfReader = ({ src, title, onFail, commandRef }: Props) => {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [lib, setLib] = useState<Pdfjs | null>(null);
@@ -171,58 +166,11 @@ export const PdfReader = ({ src, title, onFail }: Props) => {
     el.scrollTop = page.offsetTop + a.fy * page.offsetHeight - a.cy;
   }, [zoom]);
 
-  // The gestures. Listeners are native (non-passive): a pinch must not
-  // also zoom the page around the reader, or the Mac app's whole window.
+  // The gestures (utils/zoom.ts), about the point under the fingers.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    let gestureFrom: number | null = null; // Safari / the Mac app: a trackpad pinch
-    let touchFrom: { d: number; z: number } | null = null; // a phone: two fingers
-    const onWheel = (e: WheelEvent) => {
-      // Chrome and Firefox report a trackpad pinch as a ⌃-wheel.
-      if (!(e.ctrlKey || e.metaKey)) return;
-      e.preventDefault();
-      if (gestureFrom !== null) return;
-      zoomTo(zoomRef.current * wheelFactor(e.deltaY, e.deltaMode), { x: e.clientX, y: e.clientY });
-    };
-    type Gesture = Event & { scale: number; clientX: number; clientY: number };
-    const onGestureStart = (e: Event) => { e.preventDefault(); if (!touchFrom) gestureFrom = zoomRef.current; };
-    const onGestureChange = (e: Event) => {
-      e.preventDefault();
-      const g = e as Gesture;
-      if (gestureFrom === null || touchFrom) return;
-      zoomTo(gestureFrom * g.scale, { x: g.clientX, y: g.clientY });
-    };
-    const onGestureEnd = (e: Event) => { e.preventDefault(); gestureFrom = null; };
-    const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) { touchFrom = { d: dist(e.touches), z: zoomRef.current }; gestureFrom = null; }
-    };
-    const onTouchMove = (e: TouchEvent) => {
-      if (!touchFrom || e.touches.length !== 2) return;
-      e.preventDefault();
-      const [a, b] = [e.touches[0], e.touches[1]];
-      zoomTo(touchFrom.z * (dist(e.touches) / touchFrom.d), { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
-    };
-    const onTouchEnd = (e: TouchEvent) => { if (e.touches.length < 2) touchFrom = null; };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    el.addEventListener("gesturestart", onGestureStart, { passive: false } as AddEventListenerOptions);
-    el.addEventListener("gesturechange", onGestureChange, { passive: false } as AddEventListenerOptions);
-    el.addEventListener("gestureend", onGestureEnd, { passive: false } as AddEventListenerOptions);
-    el.addEventListener("touchstart", onTouchStart, { passive: true });
-    el.addEventListener("touchmove", onTouchMove, { passive: false });
-    el.addEventListener("touchend", onTouchEnd);
-    el.addEventListener("touchcancel", onTouchEnd);
-    return () => {
-      el.removeEventListener("wheel", onWheel);
-      el.removeEventListener("gesturestart", onGestureStart);
-      el.removeEventListener("gesturechange", onGestureChange);
-      el.removeEventListener("gestureend", onGestureEnd);
-      el.removeEventListener("touchstart", onTouchStart);
-      el.removeEventListener("touchmove", onTouchMove);
-      el.removeEventListener("touchend", onTouchEnd);
-      el.removeEventListener("touchcancel", onTouchEnd);
-    };
+    return attachZoomGestures(el, { get: () => zoomRef.current, zoomTo });
   }, [zoomTo]);
 
   // Drag on the paper (not on its words, which select) to pan.
@@ -252,12 +200,20 @@ export const PdfReader = ({ src, title, onFail }: Props) => {
     window.addEventListener("mouseup", up);
   };
 
+  const command = useCallback((c: ZoomCommand) => {
+    if (c === "reset") setFit(true);
+    else zoomTo(stepZoom(zoomRef.current, c === "in" ? 1 : -1));
+  }, [zoomTo]);
+  useEffect(() => {
+    if (!commandRef) return;
+    commandRef.current = command;
+    return () => { if (commandRef.current === command) commandRef.current = null; };
+  }, [commandRef, command]);
   const onKeyDown = (e: React.KeyboardEvent) => {
     const t = e.target as HTMLElement;
-    if (t.closest("input, textarea, [contenteditable='true']")) return;
-    if (e.key === "+" || e.key === "=") { e.preventDefault(); zoomTo(stepZoom(zoomRef.current, 1)); }
-    else if (e.key === "-" || e.key === "_") { e.preventDefault(); zoomTo(stepZoom(zoomRef.current, -1)); }
-    else if (e.key === "0" && !e.altKey) { e.preventDefault(); setFit(true); }
+    if (t.closest("input, textarea, [contenteditable='true']") || e.altKey) return;
+    const c = zoomKey(e.key);
+    if (c) { e.preventDefault(); command(c); }
   };
 
   // Which page is in view.
@@ -274,7 +230,7 @@ export const PdfReader = ({ src, title, onFail }: Props) => {
   if (failed) return null;
   const pct = Math.round(zoom * 100);
   return (
-    <div className="pdf-reader" onKeyDown={onKeyDown}>
+    <div className="pdf-reader" data-zoomable="" onKeyDown={onKeyDown}>
       <div
         ref={scrollRef}
         className={"pdf-scroll" + (dragging ? " dragging" : "")}

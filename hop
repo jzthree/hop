@@ -7267,7 +7267,6 @@ function currentSignIn() {
 // session per sweep, so a crowd that stopped together moves in a file.
 const ACCOUNT_SWEEP_MS = 30_000;
 const ACCOUNT_SWEEP_STUCK_MS = 10 * 60_000;
-const LIMIT_STOP_MAX_AGE_MS = 12 * 3600_000;
 let accountSweepBusy = false;
 let accountSweepStartedAt = 0;
 let accountSweepGen = 0;
@@ -7383,8 +7382,10 @@ async function runAccountSweep() {
         for (const entry of entries) {
             if (phases.get(entry.internalName)?.agentPhase === 'working') continue;
             const stop = entry.agent === 'antigravity' ? await agySessionLimitStop(entry.internalName) : sessionLimitStop(entry.internalName, entry.agent);
-            // A notice from long ago is its person's to pick up, not hop's.
-            if (!stop || now - stop.at > LIMIT_STOP_MAX_AGE_MS) continue;
+            // However long ago it stopped: a session is kept running as long as
+            // any account can run it (Jian, 2026-11-22). A conversation that
+            // has carried on since does not end on the notice, so is not here.
+            if (!stop) continue;
             // A notice on a screen stays there after hop has dealt with it.
             if (stop.screen && loadAccountsState().actions.some((a) => a.session === entry.internalName && a.at >= stop.at)) continue;
             stopped.push({ entry, stop });

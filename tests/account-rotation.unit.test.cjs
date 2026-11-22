@@ -89,7 +89,7 @@ function sweepEnv({ autoSwitch = true, entries, stops, accounts, byAgent = null,
   const calls = { moves: [], continues: [], actions: [], logs: [], listed: 0, listedAgents: [] };
   const state = { autoSwitch, excluded: [], actions: [] };
   const env = run(`let shuttingDown = false; const CYAN = '', YELLOW = '';
-    const ACCOUNT_SWEEP_STUCK_MS = 600000, LIMIT_STOP_MAX_AGE_MS = 12 * 3600000;
+    const ACCOUNT_SWEEP_STUCK_MS = 600000;
     let accountSweepBusy = false, accountSweepStartedAt = 0, accountSweepGen = 0, accountWaiting = [];
     ${fnSource('runAccountSweep')}; ({ sweep: runAccountSweep, waiting: () => accountWaiting })`, {
     os, agentUsage, agentHomesLib,
@@ -144,10 +144,10 @@ test('a crowd that stopped together moves one per sweep', async () => {
   assert.deepEqual(env.calls.moves, [['s_1', 'b'], ['s_2', 'b']]);
 });
 
-test('a working session, a shell, and a notice from long ago are left alone', async () => {
+test('a working session, a shell, and a stopped session that is not running are left alone', async () => {
   const env = sweepEnv({
-    entries: [live('s_busy'), live('s_old'), live('s_shell', { agent: null }), live('s_down', { live: false })],
-    stops: { s_busy: stopAt(1), s_old: stopAt(13 * 60), s_shell: stopAt(1), s_down: stopAt(1) },
+    entries: [live('s_busy'), live('s_shell', { agent: null }), live('s_down', { live: false })],
+    stops: { s_busy: stopAt(1), s_shell: stopAt(1), s_down: stopAt(1) },
     working: ['s_busy'], accounts: [account('a', FULL), account('b', ROOMY)]
   });
   await env.sweep();
@@ -229,4 +229,42 @@ test("switching a session's account refuses a folder that belongs to another age
   const entries = ['.claude', '.claude2', '.codex', '.codex_gpta', '.gemini', '.gemini_lab'];
   assert.ok(agentHomesLib.discoverAgentHomes('codex', { homeDir: '/h', entries, exists, envDir: null }).every((h) => /\/\.codex/.test(h.dir)));
   assert.ok(agentHomesLib.discoverAgentHomes('claude', { homeDir: '/h', entries, exists, envDir: null }).every((h) => /\/\.claude/.test(h.dir)));
+});
+
+test('a session stopped a day ago is still moved: sessions are kept running as long as any account can', async () => {
+  const env = sweepEnv({ entries: [live('s_old')], stops: { s_old: stopAt(25 * 60) }, accounts: [account('a', FULL), account('b', ROOMY)] });
+  await env.sweep();
+  assert.deepEqual(env.calls.moves, [['s_old', 'b']]);
+  assert.equal(env.calls.continues.length, 1);
+});
+
+// The Fable week is its own limit: a Fable session can stop on it while its
+// account has room for everything else.
+const fableRow = (percent) => ({ kind: 'weekly_scoped', group: 'weekly', percent, resets_at: LATER, scope: { model: { display_name: 'Fable' } } });
+const fableStop = (minutesAgo) => ({ at: Date.now() - minutesAgo * 60_000, text: "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model." });
+
+test('only the Fable limit hit: a Fable session moves to an account with Fable left, even past one with more room overall', async () => {
+  const accounts = [
+    account('a', claudeUsage([row('weekly_all', 50), fableRow(100)])),   // its own: Fable spent
+    account('opus-roomy', claudeUsage([row('weekly_all', 5), fableRow(100)])),
+    account('fable-left', claudeUsage([row('weekly_all', 60), fableRow(20)]))
+  ];
+  const env = sweepEnv({ entries: [live('s_f', { agentModel: 'claude-fable-5-2' })], stops: { s_f: fableStop(1) }, accounts });
+  await env.sweep();
+  assert.deepEqual(env.calls.moves, [['s_f', 'fable-left']]);
+  assert.match(env.calls.continues[0][1], /^Continue where you left off/);
+});
+
+test('only the Fable limit hit and no account has Fable left: it waits for the first Fable reset, then moves', async () => {
+  const soon = new Date(Date.now() + 3 * 3600_000).toISOString();
+  const spentFor5h = claudeUsage([{ kind: 'session', group: 'session', percent: 100, resets_at: soon, scope: null }, row('weekly_all', 45), fableRow(70)]);
+  const accounts = [account('a', claudeUsage([row('weekly_all', 74), fableRow(100)])), account('b', spentFor5h)];
+  const env = sweepEnv({ entries: [live('s_f', { agentModel: 'claude-fable-5-2' })], stops: { s_f: fableStop(25 * 60) }, accounts });
+  await env.sweep();
+  assert.deepEqual(env.calls.moves, []);
+  assert.deepEqual(env.waiting().map((w) => [w.session, w.reason, w.until]), [['s_f', 'no account in the rotation has room', Date.parse(soon)]]);
+  // b's five hours are up: now it goes.
+  accounts[1] = account('b', claudeUsage([row('weekly_all', 45), fableRow(70)]));
+  await env.sweep();
+  assert.deepEqual(env.calls.moves, [['s_f', 'b']]);
 });

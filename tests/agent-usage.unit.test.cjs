@@ -193,11 +193,17 @@ test('a session is left alone after an action, and not passed around all day', (
   const at = (minutesAgo, kind) => ({ at: NOW - minutesAgo * 60_000, kind });
   assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts, history: [at(3, 'move')] }).action, 'none');
   assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts, history: [at(30, 'move')] }).action, 'move');
+  // Kept running as long as any account can: a few moves a day are fine…
   const four = [at(30, 'move'), at(90, 'move'), at(200, 'move'), at(400, 'move')];
-  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts, history: four }).action, 'wait');
+  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts, history: four }).action, 'move');
+  // …only a move that keeps failing to help is stopped from looping all day.
+  const twelve = Array.from({ length: 12 }, (_, i) => at(30 + i * 60, 'move'));
+  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts, history: twelve }).action, 'wait');
   // Yesterday's moves no longer count.
-  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts, history: four.map((h) => ({ ...h, at: h.at - 25 * 3600_000 })) }).action, 'move');
+  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts, history: twelve.map((h) => ({ ...h, at: h.at - 25 * 3600_000 })) }).action, 'move');
   const roomy = [account('a', [row('weekly_all', 5)])];
   const six = [20, 60, 100, 140, 180, 220].map((m) => at(m, 'resume'));
-  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts: roomy, history: six }).action, 'wait');
+  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts: roomy, history: six }).action, 'resume');
+  const manyResumes = Array.from({ length: 12 }, (_, i) => at(20 + i * 40, 'resume'));
+  assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts: roomy, history: manyResumes }).action, 'wait');
 });

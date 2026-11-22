@@ -3302,6 +3302,18 @@ const CLAUDE_UI_RE = /bypass permissions on|shift\+tab to cycle|Welcome back|esc
 const TRUST_PROMPT_RE = /Quick\s*safety\s*check|Yes,?\s*I\s*trust\s*this\s*folder|Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust/i;
 // Trust-dialog reading lives in lib/trust-dialog.js so it can be unit-tested.
 const { trustDialogWorkspace, trustDialogAnswer, samePath } = require('./lib/trust-dialog.js');
+// Claude Code's input box at the foot of the screen, with no startup question
+// (workspace trust, the resume choice) open beneath it: a relaunched claude
+// with nothing left to answer. A dialog's text further up the screen is an old
+// one, scrolled away by the conversation that followed.
+const CLAUDE_FOOTER_RE = /shift\+tab to cycle|\? for shortcuts|bypass permissions on|auto mode on|accept edits on|plan mode on/i;
+function claudeInputReady(screen) {
+    const lines = String(screen || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return false;
+    const foot = lines.slice(-12).join('\n');
+    if (TRUST_PROMPT_RE.test(foot) || RESUME_PROMPT_RE.test(foot)) return false;
+    return CLAUDE_FOOTER_RE.test(lines.slice(-4).join('\n')) && lines.slice(-8).some((l) => /^[❯>](\s|$)/.test(l));
+}
 // The transport cloudflared uses to reach Cloudflare's edge. Its default is
 // QUIC (UDP): on networks that shape or drop UDP — campus networks often do —
 // a lost packet stalls every request in flight on that connection for a
@@ -7318,14 +7330,38 @@ function recordAccountAction(action) {
     saveAccountsState();
 }
 /** hop's own "continue" for a session, still waiting to be typed. */
-function continuePending(internalName) {
-    return loadCheckbacks().items.some((c) => c.session === internalName && c.status === 'pending' && c.queued === true && c.from === 'hop' && c.createdBy === 'system');
+// Is hop's "continue" for this stop still waiting to be typed? One queued
+// before this stop (stopAt) was for an earlier one: it goes.
+function continuePending(internalName, stopAt = 0) {
+    let pending = false, dirty = false;
+    for (const c of loadCheckbacks().items) {
+        if (c.session !== internalName || c.status !== 'pending' || c.queued !== true || c.from !== 'hop' || c.createdBy !== 'system') continue;
+        if (stopAt && Number(c.createdAt) < stopAt) {
+            Object.assign(c, { status: 'cancelled', cancelledAt: Date.now(), lastError: 'it was for an earlier stop' });
+            dirty = true;
+            continue;
+        }
+        pending = true;
+    }
+    if (dirty) saveCheckbacks();
+    return pending;
 }
+// The "continue" goes only to a conversation still stopped at the limit
+// (sessionStillAtLimit, checked just before it is typed).
 function queueContinue(internalName, message) {
     const cb = checkbacks.normalizeCheckback({ session: internalName, message, idle: true, queued: true, from: 'hop', createdBy: 'system' }, Date.now());
+    cb.ifStopped = true;
     loadCheckbacks().items.push(cb);
     saveCheckbacks();
     return cb;
+}
+// Does the conversation still end on the usage-limit notice? Not once anything
+// got it going again — the person's own "continue", say. Antigravity's notice
+// lives only on its screen, which a relaunch clears: assume it still waits.
+function sessionStillAtLimit(internalName) {
+    const agent = sessionAgentKind(internalName);
+    if (agent !== 'claude' && agent !== 'codex') return true;
+    return !!sessionLimitStop(internalName, agent);
 }
 async function runAccountSweep() {
     if (shuttingDown) return;
@@ -7360,7 +7396,7 @@ async function runAccountSweep() {
             const name = entry.displayName || entry.internalName;
             // Its "continue" from an earlier sweep has not been typed yet
             // (the agent is still coming back): one is enough.
-            if (continuePending(entry.internalName)) continue;
+            if (continuePending(entry.internalName, stop.at)) continue;
             if (acted) { waiting.push({ session: entry.internalName, name, agent: entry.agent, reason: 'next in line', until: null }); continue; }
             const agent = entry.agent;
             if (!accountsBy[agent]) {
@@ -8976,6 +9012,14 @@ async function runCheckbackSweep() {
                     if (cb.lastError !== ready.reason) { cb.lastError = ready.reason; dirty = true; }
                     continue;
                 }
+                // hop's "continue" after a usage limit, for a conversation that
+                // has carried on since: typing it would only start a stray turn.
+                if (cb.ifStopped && !sessionStillAtLimit(cb.session)) {
+                    Object.assign(cb, { status: 'cancelled', cancelledAt: now, lastError: 'not needed: it had already carried on' });
+                    log(`[checkback] ${cb.id} → ${entry.displayName || cb.session}: not sent — it had already carried on past the usage limit`, DIM);
+                    dirty = true;
+                    continue;
+                }
                 const r = await deliverIntoAgent(cb, entry, phase);
                 if (applyDelivery(cb, r, now, entry.displayName || cb.session)) dirty = true;
             } catch (e) {
@@ -10241,6 +10285,14 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                         finish('trust-prompt');
                     }
                     continue;
+                }
+                // A session moved to another account waits on its "continue"
+                // (runAccountSweep): once the fresh claude shows its input box
+                // with no question open, there is nothing left to answer —
+                // say so now rather than when this watch runs out (~45s).
+                if (replaceIdleAgent && Date.now() - job.since >= 8000 && claudeInputReady(screen)) {
+                    const recId = readClaudeSessionRecord(job.plan.internalName)?.sessionId;
+                    if (recId && claudeProcessRunning(recId)) { finish('resumed'); continue; }
                 }
                 if (!RESUME_PROMPT_RE.test(screen)) continue;
                 const key = resumeChoiceKey(getResumeMode());

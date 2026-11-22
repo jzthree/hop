@@ -9,10 +9,40 @@ type Key = { key: string; shiftKey?: boolean; altKey?: boolean; ctrlKey?: boolea
 /** Agents whose own Tab does not queue: hop's does, while they work. */
 const TAB_QUEUES_FOR = new Set(["claude", "antigravity"]);
 
-/** Is this Tab hop's "queue it" (a bare Tab, in a Claude or Antigravity session that is working)? */
-export const tabQueues = (ev: Key, agent: string | null | undefined, working: boolean): boolean =>
+/**
+ * Is this Tab hop's "queue it" (a bare Tab, in a Claude or Antigravity session
+ * that is working)? `working` may be a function: it is asked only for a Tab.
+ */
+export const tabQueues = (ev: Key, agent: string | null | undefined, working: boolean | (() => boolean)): boolean =>
   ev.key === "Tab" && !ev.shiftKey && !ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.isComposing
-  && working && !!agent && TAB_QUEUES_FOR.has(agent);
+  && !!agent && TAB_QUEUES_FOR.has(agent) && (typeof working === "function" ? working() : working);
+
+/**
+ * A turn in flight, by the foot of the terminal itself — fresher than the
+ * session list, which is read every few seconds (a Tab in a turn's first
+ * seconds went to the agent as a plain Tab, and did nothing). Claude's footer
+ * says "esc to interrupt" only while it works; agy shows a braille spinner
+ * over its box (as the daemon's lib/agent-phase.js reads them). Only the foot:
+ * the conversation above may quote either.
+ */
+export const footSaysWorking = (lines: string[]): boolean => {
+  const shown = lines.map((l) => l.trimEnd());
+  while (shown.length && !shown[shown.length - 1].trim()) shown.pop();
+  if (/esc to interrupt/i.test(shown.slice(-3).join("\n"))) return true;
+  return /^[ \t]*[\u2801-\u28ff][ \t]+\S[^\n]*?(?:\.\.\.|…)/m.test(shown.slice(-12).join("\n"));
+};
+
+type TermLike = { rows: number; buffer: { active: { baseY: number; getLine: (i: number) => { translateToString: (trim?: boolean) => string } | undefined } } };
+/** footSaysWorking, on what an xterm terminal shows now. */
+export const terminalSaysWorking = (t: TermLike | null | undefined): boolean => {
+  if (!t) return false;
+  try {
+    const buf = t.buffer.active;
+    const lines: string[] = [];
+    for (let i = buf.baseY; i < buf.baseY + t.rows; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+    return footSaysWorking(lines);
+  } catch { return false; }
+};
 
 /** Queue what is typed in `room`'s input box; says what happened in a notice. Resolves the status. */
 export async function queueTypedInput(room: string, opts: { viaTab?: boolean; notice: (m: string) => void; fetchImpl?: typeof fetch }): Promise<string | null> {

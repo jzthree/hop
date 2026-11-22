@@ -43,7 +43,7 @@ import {
   meaningfulTailIndices, shortRelativeTime, phoneAttentionLabel, fleetSummaryCompact } from "../utils/switcherModel";
 import { scanKeyboardProtocol } from "../utils/keyboardProtocol";
 import { IS_MAC, isAppCtrlEnter, isFullscreenChord, isQueueChord } from "../utils/fullscreenChord";
-import { queueTypedInput, tabQueues } from "../utils/queueInput";
+import { queueTypedInput, tabQueues, terminalSaysWorking } from "../utils/queueInput";
 import { TipCard } from "./TipCard";
 import { chipWhen } from "../utils/checkbackText";
 import { currentWsBase, noteSocketClosed } from "../utils/localLink";
@@ -840,7 +840,7 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
       }
       // ⌘⌥⏎, or Tab while Claude or Antigravity works: what is typed goes
       // when the turn ends (Codex does Tab itself).
-      if (isQueueChord(ev) || tabQueues(ev, tabQueueRef.current.agent, tabQueueRef.current.working)) {
+      if (isQueueChord(ev) || tabQueues(ev, tabQueueRef.current.agent, () => tabQueueRef.current.working || terminalSaysWorking(termRef.current as never))) {
         if (ev.type === "keydown") {
           ev.preventDefault();
           void queueTypedInput(tabQueueRef.current.room, { viaTab: ev.key === "Tab", notice: (m) => onNoticeRef.current?.(m) });

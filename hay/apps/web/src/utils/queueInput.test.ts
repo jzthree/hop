@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { queueTypedInput, tabQueues } from "./queueInput";
+import { footSaysWorking, queueTypedInput, tabQueues, terminalSaysWorking } from "./queueInput";
 
 const tab = { key: "Tab" };
 
@@ -30,5 +30,36 @@ describe("Tab queues in Claude and Antigravity while they work", () => {
     f = reply(409, { error: "A pasted block or image can't be moved out of the input box." });
     expect(await queueTypedInput("room", { notice, fetchImpl: f })).toBeNull();
     expect(notice).toHaveBeenLastCalledWith("A pasted block or image can't be moved out of the input box.");
+  });
+});
+
+describe("a turn in flight, by the foot of the terminal", () => {
+  const claudeBusy = ["⏺ Reading the log", "✶ Flummoxing… (8m 21s)", "────", "❯ later please", "────", "⏵⏵ bypass permissions on", " (shift+tab to cycle) · esc to interrupt · ← 1 agent", "", ""];
+  const claudeIdle = ["  the footer said esc to interrupt back then", "────", "❯ later please", "────", "⏵⏵ bypass permissions on", " (shift+tab to cycle)", ""];
+  const agyBusy = ["> earlier prompt", "⣾  Thinking...", "────", "> later please", "────", "? for shortcuts", "auto"];
+  const agyIdle = ["Press Shift+Tab to switch agent modes.", "esc to dismiss", "────", ">", "────", "? for shortcuts", "auto"];
+
+  it("reads Claude's footer and agy's spinner, not the conversation above", () => {
+    expect(footSaysWorking(claudeBusy)).toBe(true);
+    expect(footSaysWorking(claudeIdle)).toBe(false);
+    expect(footSaysWorking(agyBusy)).toBe(true);
+    expect(footSaysWorking(agyIdle)).toBe(false);
+    expect(footSaysWorking([])).toBe(false);
+  });
+
+  it("asks the screen only for a Tab, and only when the list does not already say working", () => {
+    const screen = vi.fn(() => true);
+    expect(tabQueues(tab, "claude", screen)).toBe(true);
+    expect(tabQueues({ key: "a" }, "claude", screen)).toBe(false);
+    expect(tabQueues(tab, "codex", screen)).toBe(false);
+    expect(screen).toHaveBeenCalledTimes(1);
+    expect(tabQueues(tab, "claude", () => false)).toBe(false);
+  });
+
+  it("reads what an xterm terminal shows", () => {
+    const term = (lines: string[]) => ({ rows: lines.length, buffer: { active: { baseY: 0, getLine: (i: number) => ({ translateToString: () => lines[i] }) } } });
+    expect(terminalSaysWorking(term(claudeBusy))).toBe(true);
+    expect(terminalSaysWorking(term(claudeIdle))).toBe(false);
+    expect(terminalSaysWorking(null)).toBe(false);
   });
 });

@@ -71,7 +71,7 @@ import { sendToSession } from "./utils/quickReply";
 import { agyCursorAt, agyWalkTo, boxIndexAt, clickTargetAfter, hasWideChars, inputBoxRows, mouseClick, selectedCharCount, selectionInBox, type Selection } from "./utils/inputBox";
 import type { ViewsSummary } from "./utils/switcherModel";
 import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscreenChord";
-import { queueTypedInput, tabQueues } from "./utils/queueInput";
+import { queueTypedInput, tabQueues, terminalSaysWorking } from "./utils/queueInput";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
 import { watchLiveness } from "./utils/socketLiveness";
 
@@ -2924,7 +2924,9 @@ const App = () => {
         return false;
       }
       // Tab, while Claude or Antigravity works: the same, as Codex's own Tab.
-      if (tabQueues(event, tabQueueRef.current.agent, tabQueueRef.current.working)) {
+      // Working by the session list, or by the terminal's own foot (the list
+      // lags a turn's first seconds).
+      if (tabQueues(event, tabQueueRef.current.agent, () => tabQueueRef.current.working || terminalSaysWorking(termRef.current as never))) {
         if (event.type === 'keydown') {
           event.preventDefault();
           queueInputRef.current(true);

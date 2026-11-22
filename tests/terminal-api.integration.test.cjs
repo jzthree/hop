@@ -2075,13 +2075,39 @@ test('a message for an agent is typed only into an empty input box, waits out a 
   assert.equal((await got()).filter((l) => l === 'stranded copy').length, 1, 'sent once, not typed twice');
   assert.equal(await box(), '');
 
+  // 7. Tab (the page's, in a Claude or Antigravity session it sees working):
+  //    mid-turn it queues; if the turn ended before hop got the key, what was
+  //    typed goes now; an empty box gets a plain Tab.
+  const tab = () => requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/queue-input', { internalName: internal, key: 'tab' }, userHeaders);
+  await fs.writeFile(path.join(dir, 'BUSY'), '1');
+  await stamp('prompt', Date.now() + 2000);
+  await typeIn('tabbed mid-turn');
+  await until(async () => (await box()) === 'tabbed mid-turn', 5000, 'the typed text');
+  await delay(2500);
+  const tabbed = await tab();
+  assert.equal(tabbed.data.status, 'queued', JSON.stringify(tabbed.data));
+  assert.equal(await box(), '');
+  await fs.rm(path.join(dir, 'BUSY'));
+  await stamp('turn', Date.now() + 3000);
+  await until(async () => (await got()).includes('tabbed mid-turn'), 20000, 'the tabbed message to go');
+  await delay(3500);
+  await typeIn('tabbed just after');
+  await until(async () => (await box()) === 'tabbed just after', 5000, 'the typed text');
+  const late = await tab();
+  assert.equal(late.data.status, 'sent', JSON.stringify(late.data));
+  await until(async () => (await got()).includes('tabbed just after'), 5000, 'sent at once');
+  assert.equal(await box(), '');
+  const plain = await tab();
+  assert.equal(plain.data.status, 'passed', JSON.stringify(plain.data));
+
   // Agents reach only sessions they may; a shell gets the line as typed.
   const denied = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: internal, text: 'x' }, agentHeaders);
   assert.equal(denied.status, 403);
   const notAgent = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'qshell', cwd: tempDir }, userHeaders);
   const shellInternal = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions')).data.sessions.find((s) => s.displayName === 'qshell').internalName;
+  await until(async () => (await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions')).data.sessions.find((s) => s.internalName === shellInternal)?.live === true, 15000, 'the shell to start');
   const asAgentOnly = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: shellInternal, text: 'echo hi', agentOnly: true }, userHeaders);
-  assert.equal(asAgentOnly.data.status, 'not-agent');
+  assert.equal(asAgentOnly.data.status, 'not-agent', JSON.stringify(asAgentOnly));
   assert.ok(notAgent.data.id);
 });
 

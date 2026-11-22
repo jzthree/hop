@@ -17801,9 +17801,11 @@ happens until someone clicks it.
                     if (!entry || entry.live !== true) return reply(409, { error: 'The session is not running' });
                     const agent = (entry.agent === 'antigravity' ? entry.agent : null) || readTurnInfo(target)?.agent || entry.agent || null;
                     // key "tab": the web's Tab in a Claude or Antigravity
-                    // session, Codex's own Tab for apps without one. It only
-                    // ever queues: anything else (the agent is free, the box
-                    // is empty, not such an app) is a plain Tab, passed on.
+                    // session, Codex's own Tab for apps without one. With
+                    // text in the box it queues — or, when the turn ended
+                    // between the key and now, sends: what Tab promised ("it
+                    // goes when the turn ends") is now. An empty box, no box,
+                    // or not such an app: a plain Tab, passed on.
                     const viaTab = input.key === 'tab';
                     const passTab = async () => {
                         const e3 = await attachTerminalApiClient(target, entry.displayName || target, { actor: 'system', label: 'tab', typeOnly: true });
@@ -17818,7 +17820,7 @@ happens until someone clicks it.
                     const r = await readRoomComposer(target, agent);
                     if (!r) return viaTab ? passTab() : reply(503, { error: "Couldn't read the screen" });
                     if (!r.state.found) return viaTab ? passTab() : reply(409, { error: "Couldn't find the agent's input box on screen" });
-                    if (viaTab && (r.state.isEmpty || (phase !== 'working' && !r.working))) return passTab();
+                    if (viaTab && r.state.isEmpty) return passTab();
                     if (r.state.isEmpty) return reply(200, { ok: true, status: 'empty' });
                     const e2 = await attachTerminalApiClient(target, entry.displayName || target, { actor: 'system', label: 'queue', typeOnly: true });
                     try {

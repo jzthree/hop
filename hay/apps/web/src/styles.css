@@ -2868,6 +2868,9 @@ button.primary {
     padding: 0 14px 0 12px;
     height: 46px;
     gap: 14px;
+    /* One row: the narrow-window column (max-width: 960px) cannot fit in 46px. */
+    flex-direction: row;
+    align-items: center;
     background: var(--panel);
     backdrop-filter: none;
     flex-shrink: 0;
@@ -2894,6 +2897,13 @@ button.primary {
   .presence-name { font-size: 11px; }
   .presence-status { font-size: 9px; }
   .presence-empty { font-size: 11px; }
+  /* One row in this fixed-height bar, however many are here: a second
+     viewer (or an agent attaching to type) used to wrap under the first
+     and spill out of the bar. Crowded, names shorten instead. */
+  .topbar .presence-strip { flex: 0 0 auto; flex-wrap: nowrap; min-width: 0; overflow: hidden; }
+  .topbar .presence-chip { min-width: 0; flex-shrink: 1; white-space: nowrap; }
+  .topbar .presence-name { min-width: 0; max-width: 9em; overflow: hidden; text-overflow: ellipsis; }
+  .topbar .presence-dot, .topbar .presence-status, .topbar .presence-control { flex-shrink: 0; }
 
   .topbar-actions { gap: 6px; }
   .topbar-sessions-btn {
@@ -5971,6 +5981,10 @@ body.rail-resizing iframe, body.rail-resizing .xterm { pointer-events: none; }
 /* Docked, the session's bar is its header: the session's name, set like
    the notebook's specimen labels' bigger sibling. */
 .topbar.channel { padding: 10px 20px; gap: 16px; }
+/* The session's name comes first. Who else is here is a short row beside
+   it: names, and "typing" while someone types (hover a chip for the rest). */
+.topbar.channel .presence-strip { flex: 0 0 auto; max-width: 20%; gap: 2px; }
+.topbar.channel .presence-status:not(.typing) { display: none; }
 .channel-title { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 0 1 auto; }
 .channel-name {
   font: 700 15px/1.2 var(--font-mono); letter-spacing: -0.01em; min-width: 0; flex: 0 1 auto;

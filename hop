@@ -9718,7 +9718,11 @@ function restorePlanForSession(entry) {
             const cwd = metaCwd || entry.cwd;
             // The hook may have named a sub-agent's thread; resume the root.
             const rootId = codexRootThreadId(turn.sessionId);
-            if (!findCodexRolloutById(rootId)) {
+            // Codex compresses a conversation it has not used for a while
+            // (rollout-….jsonl.zst) and resumes it all the same: one that is
+            // only compressed is still there. Looking for .jsonl alone left
+            // such sessions as plain shells after a restart.
+            if (!findCodexRolloutById(rootId) && !codexRolloutCopies(rootId).length) {
                 return {
                     command: null,
                     cwd,

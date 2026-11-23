@@ -9017,7 +9017,8 @@ async function readRoomComposer(internalName, agent = sessionAgentKind(internalN
         // phase (whose screen check is cached for seconds).
         const text = stripAnsiForSearch(d.data);
         // The welcome on the screen as it is now (not in scrollback), with its picker up.
-        const now = text.split('\n').slice(-Math.max(1, Number(d.rows) || 50)).join('\n');
+        // (Rows of the raw screen: stripped, each \r\n is two line breaks.)
+        const now = stripAnsiForSearch(String(d.data).split('\n').slice(-Math.max(1, Number(d.rows) || 50)).join('\n'));
         const agyWelcome = agy && !!r && !r.state.found && AGY_WELCOME_RE.test(now) && /enter Confirm/.test(now);
         return r ? { ...r, working: screenSaysWorking(text), agyWelcome } : null;
     } catch (e) { return null; }

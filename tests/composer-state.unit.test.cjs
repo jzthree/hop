@@ -100,3 +100,21 @@ test('bottom-up fallback skips the bypass-permissions line when the cursor is el
   assert.equal(composer.isEmpty, true, 'fallback must land on `❯ `, skipping the ⏵⏵ status line');
   assert.equal(composer.text, '');
 });
+
+test("agy's grey box hint is no text typed in it; what was typed still is", async (t) => {
+  const composer = require('../lib/composer');
+  if (!composer.loadHeadlessTerminal()) { t.skip('xterm-headless unavailable'); return; }
+  const rule = '\x1b[90m' + '─'.repeat(60) + '\x1b[0m';
+  const screen = (box) => `${rule}\r\n\x1b[94m>\x1b[0m ${box}\r\n${rule}\r\n? for shortcuts\x1b[2;3H`;
+  const hint = '\x1b[90mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\x1b[0m';
+  const empty = await composer.readComposerFromSerialized(screen(hint), 100, 10, { cursorGhost: false, greyGhost: true });
+  assert.equal(empty.state.found, true);
+  assert.equal(empty.state.isEmpty, true, 'the hint is a placeholder');
+  assert.equal(empty.full.text, '');
+  const claudeRules = await composer.readComposerFromSerialized(screen(hint), 100, 10, { cursorGhost: false });
+  assert.equal(claudeRules.state.isEmpty, false, 'only where asked: grey stays text for other agents');
+  const typed = await composer.readComposerFromSerialized(screen('continue') + '\x1b[2;11H', 100, 10, { cursorGhost: false, greyGhost: true });
+  assert.equal(typed.state.isEmpty, false);
+  assert.equal(typed.state.text, 'continue');
+  assert.equal(typed.full.text, 'continue');
+});

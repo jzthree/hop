@@ -102,3 +102,29 @@ test('an `agy -p` run inside the room never takes over its record or its turns',
         if (prev === undefined) delete process.env.HOP_HOME; else process.env.HOP_HOME = prev;
     }
 });
+
+test("a launch hop could not read is not filed, and agy's command is read once", () => {
+    const { main } = require(SCRIPT);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agyhook-'));
+    const env = { HOP_HOME: home, HOP_SESSION: 's_cccccccccc' };
+    const prev = process.env.HOP_HOME;
+    process.env.HOP_HOME = home;
+    try {
+        // `ps` failed the first time under load and answered the second: the
+        // check passed and the record named a judge's `agy -p` (2026-11-22).
+        let asked = 0;
+        const flaky = () => (asked++ ? '/Users/j/.local/bin/agy -p You are an expert reader of Nature' : null);
+        main('SessionStart', JSON.stringify({ conversationId: 'e1b2c3d4-e5f6-7890-abcd-ef1234567890' }), env, flaky);
+        assert.strictEqual(asked, 1);
+        assert.strictEqual(read(home, 'agy', 's_cccccccccc'), null);
+        main('PreInvocation', JSON.stringify({ conversationId: 'e1b2c3d4-e5f6-7890-abcd-ef1234567890', invocationNum: 0 }), env, () => null);
+        assert.strictEqual(read(home, 'agy', 's_cccccccccc'), null);
+        // The room's own agy, read fine on its next call, is filed then.
+        main('PreInvocation', JSON.stringify({ conversationId: 'f1b2c3d4-e5f6-7890-abcd-ef1234567890', invocationNum: 0 }), env, () => 'agy --conversation f1b2c3d4');
+        const rec = read(home, 'agy', 's_cccccccccc');
+        assert.strictEqual(rec.sessionId, 'f1b2c3d4-e5f6-7890-abcd-ef1234567890');
+        assert.strictEqual(rec.launchCmd, 'agy --conversation f1b2c3d4');
+    } finally {
+        if (prev === undefined) delete process.env.HOP_HOME; else process.env.HOP_HOME = prev;
+    }
+});

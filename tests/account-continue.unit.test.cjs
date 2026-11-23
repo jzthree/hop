@@ -142,12 +142,16 @@ test('carried on since (the person typed "continue"): it is dropped, not typed',
   assert.match(cb.lastError, /already carried on/);
 });
 
-test('whether it is still stopped: read from Claude and Codex conversations; Antigravity is assumed to wait', () => {
+test('whether it is still stopped: read from Claude and Codex conversations; Antigravity by a turn begun since', () => {
   const stops = { c_stopped: { at: 1, text: 'limit' }, x_stopped: { at: 1, text: 'limit' } };
-  const kinds = { c_stopped: 'claude', c_going: 'claude', x_stopped: 'codex', x_going: 'codex', g: 'antigravity' };
+  const kinds = { c_stopped: 'claude', c_going: 'claude', x_stopped: 'codex', x_going: 'codex', g: 'antigravity', g_typed: 'antigravity' };
+  // The move at 1000; the person typed into g_typed at 1060 (2026-11-22).
+  const prompts = { g: 900, g_typed: 1060 };
   const still = run(`${fnSource('sessionStillAtLimit')}; sessionStillAtLimit`, {
     sessionAgentKind: (n) => kinds[n],
-    sessionLimitStop: (n, agent) => { assert.equal(agent, kinds[n]); return stops[n] || null; }
+    sessionLimitStop: (n, agent) => { assert.equal(agent, kinds[n]); return stops[n] || null; },
+    readPromptAt: (n) => prompts[n] || 0
   });
-  assert.deepEqual(['c_stopped', 'c_going', 'x_stopped', 'x_going', 'g'].map(still), [true, false, true, false, true]);
+  assert.deepEqual(['c_stopped', 'c_going', 'x_stopped', 'x_going', 'g', 'g_typed'].map((n) => still(n, 1000)), [true, false, true, false, true, false]);
+  assert.equal(still('g_typed'), true, 'with no time to go by, it is assumed to wait');
 });

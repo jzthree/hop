@@ -6596,6 +6596,14 @@ async function runAgyArchiveSweep() {
             if (!rec) continue;
             const r = await agyArchive.archiveConversation({ dataDir: AGY_DATA_DIR, archiveRoot: AGY_ARCHIVE_DIR, id: rec.sessionId });
             if (r === 'failed') log(`[agy] could not copy conversation ${rec.sessionId.slice(0, 8)}… of ${e.displayName || e.internalName}`, YELLOW);
+            // Deleted under a session still open (agy prunes idle ones, open or
+            // not — a judge batch's `agy -p` runs made that every ~15 minutes on
+            // 2026-11-22): back now, so the session's next turn writes into the
+            // whole conversation, not into nothing.
+            else if (r === 'missing' && agyArchive.hasCopy(AGY_ARCHIVE_DIR, rec.sessionId)
+                && agyArchive.restoreConversation({ dataDir: AGY_DATA_DIR, archiveRoot: AGY_ARCHIVE_DIR, id: rec.sessionId })) {
+                log(`[agy] put conversation ${rec.sessionId.slice(0, 8)}… of ${e.displayName || e.internalName} back from hop's copy (agy had deleted it while the session was open)`, CYAN);
+            }
         }
         for (const id of agyArchive.staleCopies(AGY_ARCHIVE_DIR, wanted)) fs.rmSync(path.join(AGY_ARCHIVE_DIR, id), { recursive: true, force: true });
     } catch (e) {
@@ -7424,9 +7432,12 @@ function queueContinue(internalName, message) {
 }
 // Does the conversation still end on the usage-limit notice? Not once anything
 // got it going again — the person's own "continue", say. Antigravity's notice
-// lives only on its screen, which a relaunch clears: assume it still waits.
-function sessionStillAtLimit(internalName) {
+// lives only on its screen, which a relaunch clears: a turn begun after
+// `since` (its hook's .prompt) is the sign it carried on — the person typed
+// into it right after a move on 2026-11-22, and hop's continue still waited.
+function sessionStillAtLimit(internalName, since = 0) {
     const agent = sessionAgentKind(internalName);
+    if (agent === 'antigravity') return !(since > 0 && readPromptAt(internalName) > since);
     if (agent !== 'claude' && agent !== 'codex') return true;
     return !!sessionLimitStop(internalName, agent);
 }
@@ -8959,6 +8970,38 @@ async function composerStillHolds(internalName, message) {
 // The agents whose input box hop can read, and so type into safely (only an
 // empty one), verify, and take its own text back out of.
 const BOX_AGENTS = new Set(['claude', 'codex', 'antigravity']);
+// agy's first-run welcome. An account folder agy had not opened before
+// showed it to the first session moved there ("Welcome to Antigravity CLI!
+// Choose your color scheme: … [Next] ↑/↓ Navigate · enter Confirm"), and the
+// session sat there with hop's "continue" waiting for an input box.
+const AGY_WELCOME_RE = /Welcome to Antigravity CLI!/;
+/**
+ * Step through it with Enter, as the person would: the colour scheme agy
+ * offers first is kept. Only while that banner is up — never into another
+ * of agy's pickers (a permission question is one too). → presses made.
+ */
+async function stepPastAgyWelcome(internalName, displayName) {
+    let pressed = 0;
+    let e2 = null;
+    try {
+        for (let i = 0; i < 6; i++) {
+            const c = await readRoomComposer(internalName, 'antigravity');
+            if (!c || !c.agyWelcome) break;
+            if (!e2) {
+                e2 = await attachTerminalApiClient(internalName, displayName || internalName, { actor: 'system', label: 'agy welcome', typeOnly: true });
+                try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+                await sleepMs(300);
+            }
+            await sendTerminalInput(e2, '\r');
+            pressed++;
+            await sleepMs(1500);
+        }
+    } finally {
+        if (e2) { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
+    }
+    if (pressed) log(`[agy] ${displayName || internalName}: stepped past agy's first-run welcome (${pressed}× Enter)`, CYAN);
+    return pressed;
+}
 async function readRoomComposer(internalName, agent = sessionAgentKind(internalName)) {
     try {
         const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
@@ -8967,11 +9010,16 @@ async function readRoomComposer(internalName, agent = sessionAgentKind(internalN
         // agy shows no ghost suggestions, and its cursor is no boundary: 1.5
         // parked it ON the last character typed (1.5.9 shows the insertion
         // point). The rule that text from the cursor on is a suggestion
-        // would drop a real letter.
-        const r = await composerLib.readComposerFromSerialized(d.data, d.cols, d.rows, { cursorGhost: agent !== 'antigravity' });
+        // would drop a real letter. Its box hint is grey, not dim.
+        const agy = agent === 'antigravity';
+        const r = await composerLib.readComposerFromSerialized(d.data, d.cols, d.rows, { cursorGhost: !agy, greyGhost: agy });
         // The same screen says whether a turn is in flight — fresher than the
         // phase (whose screen check is cached for seconds).
-        return r ? { ...r, working: screenSaysWorking(stripAnsiForSearch(d.data)) } : null;
+        const text = stripAnsiForSearch(d.data);
+        // The welcome on the screen as it is now (not in scrollback), with its picker up.
+        const now = text.split('\n').slice(-Math.max(1, Number(d.rows) || 50)).join('\n');
+        const agyWelcome = agy && !!r && !r.state.found && AGY_WELCOME_RE.test(now) && /enter Confirm/.test(now);
+        return r ? { ...r, working: screenSaysWorking(text), agyWelcome } : null;
     } catch (e) { return null; }
 }
 const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim();
@@ -9047,6 +9095,8 @@ async function deliverIntoAgent(cb, entry, phase) {
         // own record or its process, is what runs there now.)
         const agent = (entry.agent === 'antigravity' ? entry.agent : null) || readTurnInfo(cb.session)?.agent || entry.agent || null;
         const gated = BOX_AGENTS.has(agent);
+        // The conversation agy is about to write to, put back first if agy deleted it.
+        if (agent === 'antigravity') { const rec = readAgyRecord(cb.session); if (rec) agyConversationExists(rec); }
         // A shell gets its command as written; an agent hears who sent it.
         const typed = gated ? messages.typedText(cb) : cb.message;
         let alreadyTyped = false;
@@ -9055,6 +9105,8 @@ async function deliverIntoAgent(cb, entry, phase) {
             if (a) {
                 // A turn just started (the phase had not caught up): wait it out.
                 if (a.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
+                // Past agy's first-run welcome first; the message goes on the next pass.
+                if (a.agyWelcome && await stepPastAgyWelcome(cb.session, entry.displayName)) return { ok: false, reason: "waiting: hop stepped past Antigravity's first-run welcome" };
                 if (!a.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
                 // This very message, already sitting in the box typed and never
                 // sent (an earlier delivery, an agent's `hopa send` before it
@@ -9231,7 +9283,7 @@ async function runCheckbackSweep() {
                 }
                 // hop's "continue" after a usage limit, for a conversation that
                 // has carried on since: typing it would only start a stray turn.
-                if (cb.ifStopped && !sessionStillAtLimit(cb.session)) {
+                if (cb.ifStopped && !sessionStillAtLimit(cb.session, Number(cb.createdAt) || 0)) {
                     Object.assign(cb, { status: 'cancelled', cancelledAt: now, lastError: 'not needed: it had already carried on' });
                     log(`[checkback] ${cb.id} → ${entry.displayName || cb.session}: not sent — it had already carried on past the usage limit`, DIM);
                     dirty = true;
@@ -10129,7 +10181,8 @@ async function roomIsRedoable(entry) {
     // IS safe to restart on purpose (an account switch): `agentIdle` says so
     // — the screen shows no turn in flight ("esc to interrupt").
     const agentIdle = !screenSaysWorking(text);
-    if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: 'claude is running', agentIdle };
+    // (agy's screen has Claude's "? for shortcuts" too: name whichever runs.)
+    if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: `${/^(agy|codex)$/.test(fg.split('/').pop()) ? fg.split('/').pop() : 'claude'} is running`, agentIdle };
     if (fg && !isShellProcName(fg)) return { ok: false, reason: `${fg} is running`, agentIdle: agentIdle && /^(claude|codex|agy|node)$/.test(fg.split('/').pop()) };
     // The grid text can carry stray control bytes a shell left on: ESC c
     // (reset), CSI sequences, and a trailing SGR mouse-report fragment
@@ -10237,7 +10290,7 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 onlySet.delete(internalName);
                 continue;
             }
-            log(`  ${display}: closed the ${verdict.reason} left by the last restore`, DIM);
+            log(`  ${display}: closed it to restart it (${verdict.reason})`, DIM);
             live.delete(internalName);
             closedAny = true;
         }

@@ -41,11 +41,16 @@ const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8
 // The command line of the agy this hook runs under (its parent), so restore
 // can keep the flags it was started with.
 function agyLaunchCmd() {
-  try {
-    const { execFileSync } = require("node:child_process");
-    const cmd = execFileSync("ps", ["-o", "args=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2000 }).trim();
-    return /(^|\/)agy(\s|$)|antigravity/.test(cmd) ? cmd : null;
-  } catch { return null; }
+  const { execFileSync } = require("node:child_process");
+  // Twice: a judge batch's dozens of agy runs a minute can keep `ps` past
+  // its timeout once.
+  for (const timeout of [2000, 4000]) {
+    try {
+      const cmd = execFileSync("ps", ["-o", "args=", "-p", String(process.ppid)], { encoding: "utf8", timeout }).trim();
+      return /(^|\/)agy(\s|$)|antigravity/.test(cmd) ? cmd : null;
+    } catch { /* again */ }
+  }
+  return null;
 }
 
 // The conversation's own directory: the first workspace path, else where agy runs.
@@ -54,16 +59,16 @@ function workspaceOf(payload) {
   return w || process.cwd();
 }
 
-function recordSession(dir, hopSession, payload) {
+function recordSession(dir, hopSession, payload, launchCmd) {
   const conversationId = typeof payload.conversationId === "string" ? payload.conversationId : "";
-  if (!conversationId) return;
+  if (!conversationId || !launchCmd || isPrintMode(launchCmd)) return;
   writeDurable(path.join(dir, `${hopSession}.agy`), JSON.stringify({
     sessionId: conversationId,
     agent: AGENT,
     cwd: workspaceOf(payload),
     source: "startup",
     configDir: null,
-    launchCmd: agyLaunchCmd(),
+    launchCmd,
     transcriptPath: typeof payload.transcriptPath === "string" ? payload.transcriptPath : null,
     // The model hop shows beside the session (every hook payload names it).
     model: modelOf(payload),
@@ -168,16 +173,21 @@ function main(event, raw, env = process.env, launchCmd = agyLaunchCmd) {
   let payload;
   try { payload = JSON.parse(raw || "{}"); } catch { return; }
   if (!payload || typeof payload !== "object") return;
-  if (isPrintMode(launchCmd())) return;
+  // Asked once, and used for the record too. It was asked twice: when the
+  // first `ps` failed under load the print-mode check passed, and the
+  // second filed a judge's `agy -p` as the room's agent (2026-11-22).
+  // Not known is not filed: the next hook event of a real session files it.
+  const cmd = launchCmd();
+  if (!cmd || isPrintMode(cmd)) return;
   const dir = sessionsDir();
-  if (event === "SessionStart") recordSession(dir, hopSession, payload);
+  if (event === "SessionStart") recordSession(dir, hopSession, payload, cmd);
   else if (event === "PreInvocation") {
     // A turn begins with its first model call; later calls are the same turn.
     if (!Number(payload.invocationNum)) notePrompt(dir, hopSession, payload);
     // A resumed conversation has no SessionStart of its own in some builds:
     // the first call also files the record when none names this conversation.
     const rec = readJson(path.join(dir, `${hopSession}.agy`));
-    if (!rec || rec.sessionId !== payload.conversationId) recordSession(dir, hopSession, payload);
+    if (!rec || rec.sessionId !== payload.conversationId) recordSession(dir, hopSession, payload, cmd);
     else noteModel(dir, hopSession, payload);
   } else if (event === "Stop") {
     // Done only when agy says it is fully idle (not between sub-steps).

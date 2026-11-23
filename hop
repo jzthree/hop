@@ -10187,7 +10187,10 @@ async function roomIsRedoable(entry) {
     // An agent at its prompt is not redoable for a repair restore, but it
     // IS safe to restart on purpose (an account switch): `agentIdle` says so
     // — the screen shows no turn in flight ("esc to interrupt").
-    const agentIdle = !screenSaysWorking(text);
+    // Not with a message waiting in the agent's own queue: agy holds those
+    // in the process ("Press up to edit queued messages"), and a restart
+    // between two turns would drop it.
+    const agentIdle = !screenSaysWorking(text) && !/Press up to edit queued messages/i.test(text);
     // (agy's screen has Claude's "? for shortcuts" too: name whichever runs.)
     if (CLAUDE_UI_RE.test(text)) return { ok: false, reason: `${/^(agy|codex)$/.test(fg.split('/').pop()) ? fg.split('/').pop() : 'claude'} is running`, agentIdle };
     if (fg && !isShellProcName(fg)) return { ok: false, reason: `${fg} is running`, agentIdle: agentIdle && /^(claude|codex|agy|node)$/.test(fg.split('/').pop()) };

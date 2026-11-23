@@ -7,17 +7,32 @@ export type UsageMeter = {
   id: string; label: string; window: string; percent: number; resetsAt: number | null;
   model?: string | null; models?: string[] | null; idle?: boolean;
 };
-export type AccountUsage = { plan?: string | null; available?: boolean; meters: UsageMeter[]; resets?: number | null };
+export type AccountUsage = {
+  plan?: string | null; available?: boolean; meters: UsageMeter[];
+  /** Codex's banked "full resets", and when they expire (ms, soonest first). */
+  resets?: number | null; resetsExpire?: number[] | null;
+  /** Codex: whether the plan's own usage may be used now; its paid credits past the limit. */
+  ordinaryAllowed?: boolean | null; reached?: string | null;
+  credits?: { has: boolean; unlimited: boolean; balance: number | null } | null;
+  /** Claude: extra usage, paid for past the plan's limits. */
+  extra?: { enabled: boolean; reached: boolean } | null;
+};
 export type Account = {
   agent: AgentKind; dir: string; label: string; isDefault: boolean;
   login: { loggedIn: boolean; email: string | null } | null;
   plan: string | null; usage: AccountUsage | null; usageAt: number | null;
   /** Whether a stopped session may be moved here; null where there is no rotation. */
   pooled: boolean | null;
+  /** Its usage and banked resets go before the others' (a plan about to end). */
+  spendFirst?: boolean;
   sessions: number;
 };
 export type AccountWaiting = { session: string; name: string; agent: string; reason: string; until: number | null };
-export type AccountAction = { at: number; kind: "move" | "resume"; name: string; agent: string; from: string; to: string; why: string | null };
+export type AccountAction = {
+  at: number; kind: "move" | "resume" | "reset"; name: string; agent: string; from: string; to: string; why: string | null;
+  /** Moved off an account that was spending paid usage (not stopped). */
+  paid?: boolean;
+};
 export type AccountsOverview = {
   autoSwitch: boolean;
   agents: Record<AgentKind, Account[]>;
@@ -61,6 +76,39 @@ export const waitingLine = (waiting: AccountWaiting[], now: number): string => {
   const untils = waiting.map((w) => w.until || 0).filter((t) => t > now);
   const first = untils.length ? Math.min(...untils) : 0;
   return `${who} stopped at a limit with no account to move to${first ? ` — the first limit resets ${resetTime(first, now)}` : ""}.`;
+};
+
+/** "3 banked resets · the first expires Nov 30"; "" with none. */
+export const resetsLine = (usage: AccountUsage | null | undefined, now: number): string => {
+  const n = typeof usage?.resets === "number" ? usage.resets : 0;
+  if (n <= 0) return "";
+  const first = (usage?.resetsExpire || []).find((t) => t > now);
+  const base = `${n} banked ${n === 1 ? "reset" : "resets"}`;
+  if (!first) return base;
+  return `${base} · ${n === 1 ? "it expires" : "the first expires"} ${resetTime(first, now)}`;
+};
+
+/** Whether the account is past its plan's limit now. */
+const pastLimit = (usage: AccountUsage, now: number): boolean =>
+  usage.ordinaryAllowed === false || !!usage.reached ||
+  usage.meters.some((m) => !m.idle && (m.resetsAt === null || m.resetsAt > now) && m.percent >= 100);
+
+/** Past its limit and still running sessions on paid usage: what that line says, else "". */
+export const paidLine = (usage: AccountUsage | null | undefined, now: number): string => {
+  if (!usage || !pastLimit(usage, now)) return "";
+  if (usage.credits?.has && !usage.credits.unlimited) {
+    const left = typeof usage.credits.balance === "number" ? ` (${Math.round(usage.credits.balance).toLocaleString()} left)` : "";
+    return `Past its limit: its sessions run on paid credits${left}.`;
+  }
+  if (usage.extra?.enabled && !usage.extra.reached) return "Past its limit: its sessions run on paid extra usage.";
+  return "";
+};
+
+/** One line of the rotation's log. */
+export const actionText = (x: AccountAction): { lead: string; name: string; rest: string } => {
+  if (x.kind === "reset") return { lead: "Spent a banked reset on", name: x.to, rest: ` for ${x.name}` };
+  if (x.kind === "move") return { lead: "Moved", name: x.name, rest: ` from ${x.from} to ${x.to}${x.paid ? ` — ${x.from} was spending paid credits` : ""}` };
+  return { lead: "Told", name: x.name, rest: ` to continue on ${x.to}` };
 };
 
 /** For a menu that lists accounts: " · 5-hour 42% · Week 12%" from a reading hop already has. */

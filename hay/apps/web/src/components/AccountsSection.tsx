@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { relativeTime } from "../utils/switcherModel";
-import { accountLine, meterNote, setupProgress, waitingLine, type Account, type AccountsOverview, type AgentKind } from "../utils/accounts";
+import { accountLine, actionText, meterNote, paidLine, resetsLine, setupProgress, waitingLine, type Account, type AccountsOverview, type AgentKind } from "../utils/accounts";
 import { RemoveAccountAsk, RemoveAccountButton } from "./AccountRemove";
 import { AccountSetup } from "./AccountSetup";
 
@@ -68,6 +68,11 @@ export const AccountsSection = ({ onNotice, now }: Props) => {
     const r = await post("/api/accounts/settings", { dir: a.dir, pooled });
     if (!r.ok) { onNotice("That didn't work"); void load(); }
   };
+  const setSpendFirst = async (a: Account, spendFirst: boolean) => {
+    setData((d) => (d ? { ...d, agents: { ...d.agents, [a.agent]: d.agents[a.agent].map((x) => (x.dir === a.dir ? { ...x, spendFirst } : x)) } } : d));
+    const r = await post("/api/accounts/settings", { dir: a.dir, spendFirst });
+    if (!r.ok) { onNotice("That didn't work"); void load(); }
+  };
   const checked = data ? Math.max(0, ...Object.values(data.agents).flat().map((a) => a.usageAt || 0)) : 0;
   const waiting = data ? waitingLine(data.waiting, now) : "";
   const progress = data ? setupProgress(data.agents) : null;
@@ -81,7 +86,10 @@ export const AccountsSection = ({ onNotice, now }: Props) => {
             <span className="set-title">Keep going past a limit</span>
             <span className="set-note">
               When a session stops at its account's usage limit, hop moves it to an account with room and tells it to
-              continue. With no room anywhere, it continues when a limit resets.
+              continue; an idle session on an account that has gone on to paid credits is moved before its next turn.
+              Accounts marked "Use up first" get sessions first, and their banked resets are spent as soon as they are
+              full. Other banked resets are spent only when no account has room. With nothing left, it continues when a
+              limit resets.
             </span>
             {data?.autoSwitch && waiting && <span className="set-note acct-waiting">{waiting}</span>}
           </div>
@@ -138,6 +146,12 @@ export const AccountsSection = ({ onNotice, now }: Props) => {
                               In rotation
                             </label>
                           )}
+                          {!out && list.length > 1 && a.pooled !== false && (
+                            <label className="acct-pool" title="Give sessions to this account before the others, and spend its banked resets first: for a plan you are about to cancel">
+                              <input type="checkbox" checked={a.spendFirst === true} onChange={(e) => { void setSpendFirst(a, e.target.checked); }} />
+                              Use up first
+                            </label>
+                          )}
                           {out && <button type="button" className="set-btn" onClick={() => setSetup({ agent: a.agent, dir: a.dir })}>Sign in</button>}
                           {removing !== a.dir && <RemoveAccountButton account={a} onAsk={() => setRemoving(a.dir)} />}
                         </div>
@@ -167,9 +181,8 @@ export const AccountsSection = ({ onNotice, now }: Props) => {
                             {a.usage && a.usage.available === false ? "No plan limits on this sign-in (an API key, or no subscription)." : "Its usage could not be read."}
                           </div>
                         )}
-                        {!out && typeof a.usage?.resets === "number" && a.usage.resets > 0 && (
-                          <div className="acct-none">{a.usage.resets} banked {a.usage.resets === 1 ? "reset" : "resets"}</div>
-                        )}
+                        {!out && resetsLine(a.usage, now) && <div className="acct-none">{resetsLine(a.usage, now)}</div>}
+                        {!out && paidLine(a.usage, now) && <div className="acct-none acct-paid">{paidLine(a.usage, now)}</div>}
                       </div>
                     );
                   })}
@@ -186,14 +199,15 @@ export const AccountsSection = ({ onNotice, now }: Props) => {
             <div className="set-label"><span className="set-title">Lately</span></div>
             <div className="set-control">
               <div className="acct-log">
-                {data.actions.map((x, i) => (
+                {data.actions.map((x, i) => {
+                  const t = actionText(x);
+                  return (
                   <div key={`${x.at}-${i}`} className="acct-log-row" title={x.why || undefined}>
-                    <span className="acct-log-what">
-                      {x.kind === "move" ? <>Moved <b>{x.name}</b> from {x.from} to {x.to}</> : <>Told <b>{x.name}</b> to continue on {x.to}</>}
-                    </span>
+                    <span className="acct-log-what">{t.lead} <b>{t.name}</b>{t.rest}</span>
                     <span className="acct-log-when">{relativeTime(x.at, now)}</span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>

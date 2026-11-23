@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountFolder, accountLine, accountSlug, meterNote, planName, sameLogins, setupProgress, signInStatus, usageHint, waitingLine, type Account, type SignInJob, type UsageMeter } from "./accounts";
+import { accountFolder, accountLine, accountSlug, actionText, meterNote, paidLine, planName, resetsLine, sameLogins, setupProgress, signInStatus, usageHint, waitingLine, type Account, type SignInJob, type UsageMeter } from "./accounts";
 
 const NOW = new Date(2026, 10, 18, 12, 0, 0).getTime();
 const at = (d: number, h: number, min = 0) => new Date(2026, 10, d, h, min, 0).getTime();
@@ -79,5 +79,31 @@ describe("signing accounts in", () => {
     expect(accountSlug("!!!")).toBe("");
     expect(accountFolder("antigravity", "work")).toBe("~/.gemini_work");
     expect(accountFolder("codex", "lab")).toBe("~/.codex_lab");
+  });
+});
+
+describe("banked resets, paid credits and the rotation's log", () => {
+  const now = Date.parse("2026-11-22T18:00:00");
+  const day = 86400_000;
+  const week = (percent: number) => ({ id: "codex:10080", label: "Week", window: "week", percent, resetsAt: now + 2 * day });
+  it("says how many resets are banked and when the first expires", () => {
+    expect(resetsLine({ meters: [], resets: 3, resetsExpire: [now + 8 * day, now + 9 * day] }, now)).toMatch(/^3 banked resets · the first expires /);
+    expect(resetsLine({ meters: [], resets: 1, resetsExpire: null }, now)).toBe("1 banked reset");
+    expect(resetsLine({ meters: [], resets: 0 }, now)).toBe("");
+    expect(resetsLine(null, now)).toBe("");
+  });
+  it("warns when an account past its limit is running its sessions on paid credits", () => {
+    expect(paidLine({ meters: [week(100)], credits: { has: true, unlimited: false, balance: 500.4 } }, now)).toBe("Past its limit: its sessions run on paid credits (500 left).");
+    expect(paidLine({ meters: [week(40)], credits: { has: true, unlimited: false, balance: 5 } }, now)).toBe("");
+    expect(paidLine({ meters: [week(100)], credits: null }, now)).toBe("");
+    expect(paidLine({ meters: [week(10)], ordinaryAllowed: false, credits: { has: true, unlimited: false, balance: null } }, now)).toBe("Past its limit: its sessions run on paid credits.");
+  });
+  it("tells a reset, a move off paid credits and a continue apart", () => {
+    const base = { at: now, name: "my-session", agent: "codex", from: "default", to: "spare1", why: null };
+    const line = (x: Parameters<typeof actionText>[0]) => { const t = actionText(x); return `${t.lead} ${t.name}${t.rest}`; };
+    expect(line({ ...base, kind: "reset" })).toBe("Spent a banked reset on spare1 for my-session");
+    expect(line({ ...base, kind: "move", paid: true })).toBe("Moved my-session from default to spare1 — default was spending paid credits");
+    expect(line({ ...base, kind: "move" })).toBe("Moved my-session from default to spare1");
+    expect(line({ ...base, kind: "resume", from: "spare1" })).toBe("Told my-session to continue on spare1");
   });
 });

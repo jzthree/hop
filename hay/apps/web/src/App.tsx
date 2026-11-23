@@ -533,6 +533,10 @@ const App = () => {
   const [canonicalRoomId, setCanonicalRoomId] = useState<string | null>(null);
   const [liveCwd, setLiveCwd] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("idle");
+  // A move to another account (the rotation past a usage limit, or Switch
+  // account) closes the terminal to relaunch the agent there. Shown as that —
+  // never as "Session ended" — until the relaunched terminal is back.
+  const [accountMove, setAccountMove] = useState<{ room: string; to: string; agent: string; why: string | null } | null>(null);
   // What the CHROME shows. Most drops (a tunnel restart, a laptop waking, an
   // edge blip) are healed by the immediate reconnect before a human could
   // read a banner — surfacing them bought nothing but flicker. Once a session
@@ -573,6 +577,13 @@ const App = () => {
       setVisibleStatus(statusForChromeRef.current);
     }, OUTAGE_GRACE_MS);
   }, [status]);
+  // Back on the relaunched terminal: say where it runs now.
+  useEffect(() => {
+    if (status !== "connected" || !accountMove) return;
+    if (activeSessionRoomRef.current === accountMove.room) pushNotice(`Now on the ${accountMove.to} ${accountMove.agent} account — the conversation carried over`);
+    setAccountMove(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, accountMove]);
   const [presence, setPresence] = useState<PresenceClient[]>([]);
   const [collabMode, setCollabMode] = useState(true);
   const [controllerId, setControllerId] = useState<string | null>(null);
@@ -2167,6 +2178,28 @@ const App = () => {
     });
   };
 
+  // What hop says about a session being moved to another account (null: it is not).
+  const fetchAccountMove = (name: string) =>
+    fetch(`/api/sessions/account-switch?name=${encodeURIComponent(name)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => (d && d.switching ? (d.switching as { to: string; agent: string; why: string | null }) : null))
+      .catch(() => null);
+  // Until the relaunch is done (two minutes at most), then onto the new terminal.
+  const waitForAccountMove = (name: string, room: string) => {
+    const started = Date.now();
+    const tick = () => {
+      if (activeSessionRoomRef.current !== room) { setAccountMove(null); return; }
+      void fetchAccountMove(name).then((move) => {
+        if (activeSessionRoomRef.current !== room) { setAccountMove(null); return; }
+        if (move && Date.now() - started < 120_000) { window.setTimeout(tick, 1000); return; }
+        shouldReconnectRef.current = true;
+        reconnectAttemptRef.current = 0;
+        setReconnectToken((value) => value + 1);
+      });
+    };
+    window.setTimeout(tick, 1000);
+  };
+
   const scheduleReconnect = (nextSession: { name: string; room: string }) => {
     if (!shouldReconnectRef.current) return;
 
@@ -2546,18 +2579,30 @@ const App = () => {
             }
           }
           break;
-        case "session_ended":
+        case "session_ended": {
           shouldReconnectRef.current = false;
-          pushNotice(message.by ? `${message.message} (by ${message.by})` : message.message);
           ws.close();
-          setStatus("ended");
-          // A dead screen is a dead end — bring up the switcher so the next
-          // session is one keystroke away. Delayed a beat so the ended notice
-          // registers before the overlay covers it. Refresh the list so the
-          // dead session isn't still presented as a live/current entry.
-          fetchSessionsRef.current?.({ showLoading: false });
-          window.setTimeout(() => setSwitcherOpen(true), 400);
+          const endedMessage = message.by ? `${message.message} (by ${message.by})` : message.message;
+          const reallyEnded = () => {
+            pushNotice(endedMessage);
+            setStatus("ended");
+            // A dead screen is a dead end — bring up the switcher so the next
+            // session is one keystroke away. Delayed a beat so the ended notice
+            // registers before the overlay covers it. Refresh the list so the
+            // dead session isn't still presented as a live/current entry.
+            fetchSessionsRef.current?.({ showLoading: false });
+            window.setTimeout(() => setSwitcherOpen(true), 400);
+          };
+          // Ended, or closed to be relaunched on another account?
+          void fetchAccountMove(nextSession.name).then((move) => {
+            if (activeSessionRoomRef.current !== targetRoom) return;
+            if (!move) { reallyEnded(); return; }
+            setAccountMove({ room: targetRoom, to: move.to, agent: move.agent, why: move.why });
+            setStatus("disconnected");
+            waitForAccountMove(nextSession.name, targetRoom);
+          });
           break;
+        }
         case "session_renamed":
           setSessionLabel(message.displayName);
           pushNotice(`Session renamed to ${message.displayName}`);
@@ -5715,7 +5760,14 @@ const App = () => {
           {/* Not while the wall is up: the wall holds this session's socket
               then, so it always read "disconnected" — and docked, the
               strip showed over the sidebar as a bare grey band. */}
-          {visibleStatus !== "connected" && visibleStatus !== "idle" && !switcherOpen && (
+          {accountMove && status !== "connected" && !switcherOpen ? (
+            <div className="connection-banner moving" role="status" aria-live="polite">
+              <span>
+                Moving to the {accountMove.to} {accountMove.agent} account{accountMove.why ? ` (${accountMove.why})` : ""} — {accountMove.agent} is
+                restarting there and picks up the same conversation.
+              </span>
+            </div>
+          ) : visibleStatus !== "connected" && visibleStatus !== "idle" && !switcherOpen && (
             <div
               className={`connection-banner${visibleStatus === "ended" ? " ended" : ""}`}
               role="status"
@@ -6173,7 +6225,7 @@ const App = () => {
                   ) : (
                     <>
                       <span className="reconnecting">
-                        ⟳ {visibleStatus === "connecting" ? "Connecting…" : "Reconnecting…"}
+                        ⟳ {accountMove ? `Moving to ${accountMove.to}…` : visibleStatus === "connecting" ? "Connecting…" : "Reconnecting…"}
                       </span>
                       <button
                         type="button"

@@ -7895,6 +7895,31 @@ function codexRolloutCopies(threadId) {
     }
     return out;
 }
+/** Every copy of a Codex thread's history segments (rollout-…-<thread>_<segment>.jsonl[.zst]), in every Codex folder. */
+function codexRolloutSegments(threadId) {
+    if (!threadId || !/^[A-Za-z0-9-]{8,}$/.test(threadId)) return [];
+    const out = [];
+    for (const root of codexRolloutRoots()) {
+        const sessions = path.join(root, 'sessions');
+        let years = [];
+        try { years = fs.readdirSync(sessions); } catch (e) { continue; }
+        for (const y of years) {
+            let months = [];
+            try { months = fs.readdirSync(path.join(sessions, y)); } catch (e) { continue; }
+            for (const mo of months) {
+                let days = [];
+                try { days = fs.readdirSync(path.join(sessions, y, mo)); } catch (e) { continue; }
+                for (const d of days) {
+                    const dir = path.join(sessions, y, mo, d);
+                    let names = [];
+                    try { names = fs.readdirSync(dir); } catch (e) { continue; }
+                    for (const n of names) if (n.includes(`-${threadId}_`) && /\.jsonl(\.zst)?$/.test(n)) out.push(path.join(dir, n));
+                }
+            }
+        }
+    }
+    return out;
+}
 /** Every copy of a Claude conversation's transcript: [{ file, root }], one per Claude folder that has it. */
 function claudeTranscriptCopies(sessionId) {
     if (!sessionId) return [];
@@ -9623,11 +9648,18 @@ async function switchSessionAgentHome(name, homeDir, { why = null } = {}) {
         if (!file) return { status: 409, body: { error: 'No recorded Codex conversation to move' } };
         const rootOf = (f) => codexRolloutRoots().find((r) => f.startsWith(r + path.sep));
         // `codex resume` reads every conversation this one was forked from.
-        const lineage = await accountMove.codexForkLineage(file, codexRolloutCopies);
+        const lineage = await accountMove.codexForkLineage(file, codexRolloutCopies, codexRolloutSegments);
         const lost = lineage.find((x) => !x.file);
         if (lost) return { status: 409, body: { error: `Conversation ${rootId.slice(0, 8)}… was forked from ${lost.id.slice(0, 8)}…, which is no longer on this host` } };
         for (const x of lineage) copyInto(x.file, rootOf(x.file));
         moved = copyInto(file, rootOf(file));
+        // Its goal ("Pursuing goal"), from the folder it ran in.
+        const fromHome = current?.dir || agentHomesLib.defaultHome('codex', os.homedir());
+        try {
+            const g = accountMove.copyCodexGoal(path.join(fromHome, 'goals_1.sqlite'), path.join(home.dir, 'goals_1.sqlite'), rootId);
+            if (g === 'copied' || g === 'replaced') log(`[account] ${internalName}: its Codex goal goes along to ${home.label}`, DIM);
+            else if (g === 'no-target') log(`[account] ${internalName}: ${home.label} has no goals database yet — its goal stays behind`, YELLOW);
+        } catch (e) { log(`[account] ${internalName}: could not carry its goal over: ${e?.message || e}`, YELLOW); }
         // The person's trust of hop's own hook, as in the default folder.
         try {
             const n = accountMove.ensureCodexHookTrust(agentHomesLib.defaultHome('codex', os.homedir()), home.dir);

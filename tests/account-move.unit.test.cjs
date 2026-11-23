@@ -115,3 +115,47 @@ test("a session's account comes back from its durable meta after a daemon restar
   const early = vm.runInNewContext(`${fnSource('withDurableAccountEnv')}; withDurableAccountEnv`, { Object, String, readDurableIdentity: () => { throw new ReferenceError('not yet'); } });
   assert.deepEqual(JSON.parse(JSON.stringify(early('moved', { env: { A: 'b' } }))), { env: { A: 'b' } });
 });
+
+test("a thread's goal goes along to the new account folder, unless that holds as recent a one", () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const d = tmp();
+  const make = (f) => {
+    const db = new DatabaseSync(f);
+    db.exec(`CREATE TABLE thread_goals (thread_id TEXT PRIMARY KEY NOT NULL, goal_id TEXT NOT NULL, objective TEXT NOT NULL,
+      status TEXT NOT NULL, token_budget INTEGER, tokens_used INTEGER NOT NULL DEFAULT 0, time_used_seconds INTEGER NOT NULL DEFAULT 0,
+      created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+      CREATE TABLE thread_goal_continuation_deferrals (thread_id TEXT PRIMARY KEY NOT NULL REFERENCES thread_goals(thread_id) ON DELETE CASCADE);`);
+    return db;
+  };
+  const from = path.join(d, 'from.sqlite'), to = path.join(d, 'to.sqlite');
+  const a = make(from); make(to).close();
+  a.prepare('INSERT INTO thread_goals VALUES (?,?,?,?,?,?,?,?,?)').run('t1', 'g1', 'finish the analysis', 'active', null, 900, 3600, 1, 200);
+  a.prepare('INSERT INTO thread_goal_continuation_deferrals VALUES (?)').run('t1');
+  a.close();
+  assert.equal(m.copyCodexGoal(from, to, 't1'), 'copied');
+  const b = new DatabaseSync(to, { readOnly: true });
+  const row = b.prepare('SELECT * FROM thread_goals WHERE thread_id = ?').get('t1');
+  assert.equal(row.status, 'active');
+  assert.equal(row.objective, 'finish the analysis');
+  assert.equal(row.time_used_seconds, 3600);
+  assert.ok(b.prepare('SELECT 1 FROM thread_goal_continuation_deferrals WHERE thread_id = ?').get('t1'));
+  b.close();
+  assert.equal(m.copyCodexGoal(from, to, 't1'), 'kept');
+  assert.equal(m.copyCodexGoal(from, to, 'other'), 'none');
+  assert.equal(m.copyCodexGoal(from, path.join(d, 'missing.sqlite'), 't1'), 'no-target');
+});
+
+test("each thread's history segments come along with it", async () => {
+  const d = tmp();
+  const root = path.join(d, 'rollout-2026-10-20T10-46-22-aaaaaaaa-0000-0000-0000-000000000001.jsonl');
+  const parent = path.join(d, 'rollout-2026-09-05T17-43-24-bbbbbbbb-0000-0000-0000-000000000002.jsonl.zst');
+  const segment = path.join(d, 'rollout-2026-10-06T11-18-06-bbbbbbbb-0000-0000-0000-000000000002_cccccccc-0000-0000-0000-000000000003.jsonl.zst');
+  fs.writeFileSync(root, meta('aaaaaaaa-0000-0000-0000-000000000001', { forked_from_id: 'bbbbbbbb-0000-0000-0000-000000000002' }));
+  fs.writeFileSync(parent, zlib.zstdCompressSync(Buffer.from(meta('bbbbbbbb-0000-0000-0000-000000000002'))));
+  fs.writeFileSync(segment, zlib.zstdCompressSync(Buffer.from(meta('cccccccc-0000-0000-0000-000000000003'))));
+  const copies = { 'bbbbbbbb-0000-0000-0000-000000000002': [parent] };
+  const segments = { 'bbbbbbbb-0000-0000-0000-000000000002': [segment] };
+  const lineage = await m.codexForkLineage(root, (id) => copies[id] || [], (id) => segments[id] || []);
+  assert.deepEqual(lineage.map((x) => x.file), [parent, segment]);
+  assert.equal(lineage[1].id, 'bbbbbbbb-0000-0000-0000-000000000002_cccccccc-0000-0000-0000-000000000003');
+});

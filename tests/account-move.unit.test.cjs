@@ -171,3 +171,35 @@ test('every agy hop starts allows everything, whatever its recorded launch said'
   assert.deepEqual(flags({}, null), ['--dangerously-skip-permissions']);
   assert.deepEqual(flags({ HOP_AGY_ASK_PERMISSIONS: '1' }, 'agy -i hi'), [], 'left to the recorded launch when asked');
 });
+
+test("a moved Codex session is read from the copy it writes, not the one it left behind", () => {
+  const home = tmp();
+  const day = (root, d) => { const p = path.join(home, root, 'sessions', '2026', '11', d); fs.mkdirSync(p, { recursive: true }); return p; };
+  const id = '01a159fe-0000-7000-8000-000000000001';
+  // The default folder (searched first) keeps the pre-move copy; the account folder has grown on.
+  fs.writeFileSync(path.join(day('.codex', '20'), `rollout-2026-11-20T10-00-00-${id}.jsonl`), meta(id) + 'old\n');
+  const live = path.join(day('.codex_b', '20'), `rollout-2026-11-20T10-00-00-${id}.jsonl`);
+  fs.writeFileSync(live, meta(id) + 'old\n' + 'turns since the move\n'.repeat(20));
+  // A history segment of the thread, newer, is not the thread's file.
+  fs.writeFileSync(path.join(day('.codex_b', '22'), `rollout-2026-11-22T10-00-00-${id}_01a2-seg.jsonl`), 'x'.repeat(5000));
+  const roots = ['.codex', '.codex_b', '.codex_none'].map((r) => path.join(home, r));
+  const find = vm.runInNewContext(`${fnSource('findCodexRolloutById')}; findCodexRolloutById`, {
+    fs, path, Date, accountMove: m, codexRolloutRoots: () => roots, codexRolloutFindCache: new Map(), CODEX_ROLLOUT_FIND_TTL_MS: 0
+  });
+  assert.equal(find(id), live);
+  assert.equal(find('ffffffff-0000-7000-8000-00000000ffff'), null);
+});
+
+test("a goal stopped at the usage limit is read from the thread's goals file", () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const f = path.join(tmp(), 'goals_1.sqlite');
+  const db = new DatabaseSync(f);
+  db.exec(`CREATE TABLE thread_goals (thread_id TEXT PRIMARY KEY NOT NULL, goal_id TEXT NOT NULL, objective TEXT NOT NULL,
+    status TEXT NOT NULL, token_budget INTEGER, tokens_used INTEGER NOT NULL DEFAULT 0, time_used_seconds INTEGER NOT NULL DEFAULT 0,
+    created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`);
+  db.prepare('INSERT INTO thread_goals VALUES (?,?,?,?,?,?,?,?,?)').run('t1', 'g1', 'close the project', 'usage_limited', null, 0, 0, 1, 2);
+  db.close();
+  assert.equal(m.codexGoalStatus(f, 't1'), 'usage_limited');
+  assert.equal(m.codexGoalStatus(f, 't2'), null);
+  assert.equal(m.codexGoalStatus(path.join(tmp(), 'none.sqlite'), 't1'), null);
+});

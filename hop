@@ -7427,10 +7427,23 @@ function continuePending(internalName, stopAt = 0) {
     if (dirty) saveCheckbacks();
     return pending;
 }
+// A Codex thread pursuing a goal stops with the goal marked usage_limited
+// ("Goal hit usage limits (/goal resume)"). A plain "continue" runs one turn
+// and leaves the goal stopped; /goal resume picks the goal up again.
+function continueMessageFor(internalName, message) {
+    if (sessionAgentKind(internalName) !== 'codex') return message;
+    try {
+        const turn = readTurnInfo(internalName);
+        const cfg = getSessionConfig(internalName) || getEffectiveSessionConfig(internalName) || {};
+        const home = cfg.env?.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+        if (turn?.sessionId && accountMove.codexGoalStatus(path.join(home, 'goals_1.sqlite'), turn.sessionId) === 'usage_limited') return '/goal resume';
+    } catch (e) { /* no goal to read: the plain continue */ }
+    return message;
+}
 // The "continue" goes only to a conversation still stopped at the limit
 // (sessionStillAtLimit, checked just before it is typed).
 function queueContinue(internalName, message) {
-    const cb = checkbacks.normalizeCheckback({ session: internalName, message, idle: true, queued: true, from: 'hop', createdBy: 'system' }, Date.now());
+    const cb = checkbacks.normalizeCheckback({ session: internalName, message: continueMessageFor(internalName, message), idle: true, queued: true, from: 'hop', createdBy: 'system' }, Date.now());
     cb.ifStopped = true;
     loadCheckbacks().items.push(cb);
     saveCheckbacks();
@@ -7862,29 +7875,48 @@ function sessionAgentKind(internalName, foregroundProcess = getRuntimeSessionMet
 }
 
 /** A codex rollout by its session id: the id is in the file's name. */
+// A conversation moved to another account folder leaves its older copy in
+// the folder it came from. The first copy found was that one — the default
+// folder is searched first — so a session moved to gptb was read from its
+// pre-move copy: its usage-limit stop there was never seen and nothing was
+// done about it (2026-11-23). Every folder's copy is weighed; the most
+// complete (a conversation only grows) is the one the session writes.
+const codexRolloutFindCache = new Map(); // id -> { file, at }
+const CODEX_ROLLOUT_FIND_TTL_MS = 15_000;
 function findCodexRolloutById(sessionId) {
     if (!sessionId || !/^[A-Za-z0-9-]{8,}$/.test(sessionId)) return null;
+    const hit = codexRolloutFindCache.get(sessionId);
+    if (hit && Date.now() - hit.at < CODEX_ROLLOUT_FIND_TTL_MS && (!hit.file || fs.existsSync(hit.file))) return hit.file;
+    const copies = [];
     for (const root of codexRolloutRoots()) {
         const sessions = path.join(root, 'sessions');
         let years = [];
         try { years = fs.readdirSync(sessions).sort().reverse(); } catch (e) { continue; }
+        let found = null;
         for (const y of years) {
+            if (found) break;
             let months = [];
             try { months = fs.readdirSync(path.join(sessions, y)).sort().reverse(); } catch (e) { continue; }
             for (const m of months) {
+                if (found) break;
                 let days = [];
                 try { days = fs.readdirSync(path.join(sessions, y, m)).sort().reverse(); } catch (e) { continue; }
                 for (const d of days) {
                     const dir = path.join(sessions, y, m, d);
                     let names = [];
                     try { names = fs.readdirSync(dir); } catch (e) { continue; }
-                    const hit = names.find((n) => n.endsWith('.jsonl') && n.includes(sessionId));
-                    if (hit) return path.join(dir, hit);
+                    // Not a history segment (rollout-…-<thread>_<segment>.jsonl).
+                    const name = names.find((n) => n.endsWith('.jsonl') && n.includes(sessionId) && !n.includes(`${sessionId}_`));
+                    if (name) { found = path.join(dir, name); break; }
                 }
             }
         }
+        if (found) copies.push(found);
     }
-    return null;
+    const file = copies.length > 1 ? accountMove.newestCopy(copies) : (copies[0] || null);
+    if (codexRolloutFindCache.size > 2000) codexRolloutFindCache.clear();
+    codexRolloutFindCache.set(sessionId, { file, at: Date.now() });
+    return file;
 }
 
 /** Every copy of a Codex thread's rollout, in every Codex folder, plain or compressed. */
@@ -9489,7 +9521,8 @@ function resolveRgRunner() {
 const codexRolloutPathCache = new Map();
 function cachedCodexRolloutById(id) {
     const hit = codexRolloutPathCache.get(id);
-    if (hit && hit.path && fs.existsSync(hit.path)) return hit.path;
+    // (Looked up again after a while: a move puts the live copy in another folder.)
+    if (hit && hit.path && fs.existsSync(hit.path) && Date.now() - hit.at < 5 * 60_000) return hit.path;
     // A miss is remembered for a minute, so search does not re-walk for it
     // on every keystroke.
     if (hit && !hit.path && Date.now() - hit.at < 60_000) return null;

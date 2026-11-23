@@ -69,14 +69,27 @@ test('a dialog answered long ago, scrolled up by the conversation, does not coun
 
 // ---- queued once per stop, marked "only if still stopped" --------------------
 
-function continueEnv(items) {
+function continueEnv(items, { goals = {} } = {}) {
   const store = { items };
   let saved = 0;
-  const env = run(`${fnSource('continuePending')}; ${fnSource('queueContinue')}; ({ continuePending, queueContinue })`, {
-    checkbacks, loadCheckbacks: () => store, saveCheckbacks: () => { saved++; }
+  const env = run(`${fnSource('continuePending')}; ${fnSource('continueMessageFor')}; ${fnSource('queueContinue')}; ({ continuePending, queueContinue })`, {
+    checkbacks, loadCheckbacks: () => store, saveCheckbacks: () => { saved++; },
+    sessionAgentKind: (n) => (n.startsWith('x_') ? 'codex' : 'claude'),
+    readTurnInfo: (n) => ({ sessionId: `thread-${n}` }),
+    getSessionConfig: () => ({ env: { CODEX_HOME: '/h/.codex_b' } }), getEffectiveSessionConfig: () => null,
+    process: { env: {} }, path: require('node:path'), os: { homedir: () => '/h' },
+    accountMove: { codexGoalStatus: (file, thread) => { assert.equal(file, '/h/.codex_b/goals_1.sqlite'); return goals[thread] || null; } }
   });
   return { ...env, store, saved: () => saved };
 }
+
+test("a Codex goal stopped at the limit is picked up again with /goal resume", () => {
+  const env = continueEnv([], { goals: { 'thread-x_goal': 'usage_limited', 'thread-x_done': 'complete' } });
+  assert.equal(env.queueContinue('x_goal', 'Continue where you left off.').message, '/goal resume');
+  assert.equal(env.queueContinue('x_done', 'Continue where you left off.').message, 'Continue where you left off.');
+  assert.equal(env.queueContinue('x_none', 'Continue where you left off.').message, 'Continue where you left off.');
+  assert.equal(env.queueContinue('burrow', 'Continue where you left off.').message, 'Continue where you left off.', 'Claude has no goals file');
+});
 
 test('the continue is marked to go only to a conversation still stopped at the limit', () => {
   const env = continueEnv([]);

@@ -159,3 +159,15 @@ test("each thread's history segments come along with it", async () => {
   assert.deepEqual(lineage.map((x) => x.file), [parent, segment]);
   assert.equal(lineage[1].id, 'bbbbbbbb-0000-0000-0000-000000000002_cccccccc-0000-0000-0000-000000000003');
 });
+
+test('every agy hop starts allows everything, whatever its recorded launch said', () => {
+  const allow = /^const AGY_ALLOW_ALL = .*$/m.exec(SRC);
+  assert.ok(allow, 'hop defines AGY_ALLOW_ALL');
+  const flags = (env, cmd) => JSON.parse(JSON.stringify(vm.runInNewContext(`${allow[0]}; ${fnSource('agyResumeFlags')}; agyResumeFlags(cmd)`, { process: { env }, cmd })));
+  // hop's own recover started `agy -i …` without it, and every move after kept it so.
+  assert.deepEqual(flags({}, 'agy -i Read the ENTIRE file /x/agy-recovery.md first.'), ['--dangerously-skip-permissions']);
+  assert.deepEqual(flags({}, 'agy --dangerously-skip-permissions --conversation=abc --dangerously-skip-permissions'), ['--dangerously-skip-permissions']);
+  assert.deepEqual(flags({}, 'agy --conversation x --model gemini-4-carbon-high'), ['--dangerously-skip-permissions', '--model gemini-4-carbon-high']);
+  assert.deepEqual(flags({}, null), ['--dangerously-skip-permissions']);
+  assert.deepEqual(flags({ HOP_AGY_ASK_PERMISSIONS: '1' }, 'agy -i hi'), [], 'left to the recorded launch when asked');
+});

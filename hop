@@ -6532,9 +6532,15 @@ function agyRecordIsCurrent(internalName) {
     return agy;
 }
 /** The flags of the agy launch worth keeping on a resume (permissions, mode, model, effort). */
+// Every agy hop starts allows everything, as the person's Claude and Codex
+// sessions do. Kept from the recorded launch only, a session hop had once
+// started without it (a recover's `agy -i …`, an account move after that)
+// came back asking for permission (2026-11-22). HOP_AGY_ASK_PERMISSIONS=1
+// leaves it to the recorded launch.
+const AGY_ALLOW_ALL = process.env.HOP_AGY_ASK_PERMISSIONS === '1' ? [] : ['--dangerously-skip-permissions'];
 function agyResumeFlags(launchCmd) {
     const argv = String(launchCmd || '').split(/\s+/).filter(Boolean);
-    const keep = [];
+    const keep = [...AGY_ALLOW_ALL];
     const withValue = new Set(['--mode', '--model', '--effort', '--agent', '--project']);
     const alone = new Set(['--dangerously-skip-permissions', '--sandbox']);
     for (let i = 0; i < argv.length; i++) {
@@ -16183,7 +16189,7 @@ happens until someone clicks it.
                         // flags) when the receiver is the same tool. agy takes
                         // its first prompt with -i (interactive, not --print).
                         if (receiver === 'antigravity') {
-                            const flags = sourceKind === 'antigravity' ? agyResumeFlags(agyRec.launchCmd) : [];
+                            const flags = agyResumeFlags(sourceKind === 'antigravity' ? agyRec.launchCmd : null);
                             // Restore, recover and working/done need hop's hooks in agy's config.
                             try { installAgyHook(); } catch (e) { /* the fork still starts */ }
                             command = [AGY_BIN, ...flags, '-i', shq(prompt)].join(' ');

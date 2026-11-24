@@ -10116,10 +10116,28 @@ async function sweepRestoreReconcile() {
                 const trust = trustDialogAnswer(text, exp.cwd);
                 if (trust.ours) {
                     if (!exp.trustAnsweredAt || now - exp.trustAnsweredAt > 20_000) {
+                        // Answers that changed nothing: stop pressing keys into
+                        // it. (The keys never arrived — the connection was
+                        // closed before it opened — and this answered two
+                        // sessions every 30 s for hours, 2026-11-23.)
+                        if ((exp.trustAnswers || 0) >= 3) {
+                            exp.status = 'needs-attention';
+                            changed = true;
+                            log(`[reconcile] ${exp.displayName}: the trust question is still up after ${exp.trustAnswers} answers — left for you`, YELLOW);
+                            continue;
+                        }
                         try {
                             const e2 = await attachTerminalApiClient(name, exp.displayName, { actor: 'system', label: 'reconcile' });
-                            try { sendTerminalInput(e2, trust.input); } finally { try { closeTerminalApiEntry(e2.id); } catch (e) {} }
+                            try {
+                                // Type only once the connection is open, and
+                                // close it only once the keys have gone.
+                                try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+                                await sleepMs(300);
+                                await sendTerminalInput(e2, trust.input);
+                                await sleepMs(500);
+                            } finally { try { closeTerminalApiEntry(e2.id); } catch (e) {} }
                             exp.trustAnsweredAt = now;
+                            exp.trustAnswers = (exp.trustAnswers || 0) + 1;
                             changed = true;
                             log(`[reconcile] ${exp.displayName}: accepted ${trust.preapproval ? 'pre-approved permissions' : 'workspace trust'} (${trust.how})`, DIM);
                         } catch (e) { /* try again next tick */ }

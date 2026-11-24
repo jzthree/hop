@@ -6,6 +6,7 @@ import { PdfReader } from "./PdfReader";
 import { ZoomFrame } from "./ZoomFrame";
 import { ZoomImage } from "./ZoomImage";
 import { typingIn, zoomKey, type ZoomCommand } from "../utils/zoom";
+import { inMacApp, newPlace } from "../utils/nativeApp";
 
 // Views: the results an agent hands a human that a terminal cannot draw — a
 // plot, a PDF, a rendered write-up, a live dev server.
@@ -832,7 +833,7 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
         <div className="views-link-title">{open.title || open.name}</div>
         {linkFile && <code className="views-link-path">{linkFile}</code>}
         <a className="views-link-open" href={open.target} target="_blank" rel="noopener">
-          Open in {open.app === "nebula" ? "Nebula" : "a new tab"} ↗
+          Open in {open.app === "nebula" ? "Nebula" : inMacApp() ? "your browser" : "a new tab"} ↗
         </a>
         <div className="views-link-host">{(() => { try { return new URL(open.target || "").host; } catch { return ""; } })()}</div>
       </div>
@@ -883,7 +884,7 @@ export const ViewsPanel = ({ session, item, found: foundId, sessions = [], place
             <button type="button" className="views-act" title="Download" aria-label={`Download ${open.name}`}
                     onClick={() => triggerDownload(open)}>⤓</button>
           )}
-          <button type="button" className="views-act" title="Open in a new tab" aria-label="Open in a new tab"
+          <button type="button" className="views-act" title={`Open in a ${newPlace()}`} aria-label={`Open in a ${newPlace()}`}
                   onClick={() => window.open(hrefFor(open), "_blank", "noopener")}>↗</button>
           {open.kind !== "server" && open.kind !== "link" && isImage(open.name) && (
             <button type="button" className="views-act views-copy-img"

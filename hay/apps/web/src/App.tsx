@@ -427,6 +427,16 @@ type SessionInfo = {
   views?: ViewsSummary;
 };
 
+// Unpark a session: what opening one means. A session stopped with "Stop &
+// park" stays stopped until then — the daemon refuses to bring it back for a
+// mere reconnect — so this goes first, and is waited for.
+const unparkSession = (key: string): Promise<void> =>
+  fetch("/api/sessions/park", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ internalName: key, parked: false })
+  }).then(() => undefined).catch(() => undefined);
+
 // Check if embedded in Hop
 const getHopSession = () =>
   (window as unknown as { __HOP_SESSION__?: { room?: string; wsUrl?: string; name?: string } }).__HOP_SESSION__;
@@ -4978,6 +4988,34 @@ const App = () => {
   // The room can still be the name from the URL; lists key by internalName.
   const currentKey = session ? sessionKeyOf(session.room) : null;
   const currentInfo = currentKey ? sessions.find((x) => (x.internalName || x.name) === currentKey) : undefined;
+  // This session was stopped with "Stop & park" and is not running.
+  const parkedHere = !!currentKey && !!currentInfo && !!(currentInfo.parked || currentInfo.archived) && !currentInfo.active;
+  // A session picked in the sidebar, opened where the page is.
+  const openPicked = (next: SessionInfo) => {
+    // From a place or Views, a session in the sidebar is that session on
+    // the same kind of tab.
+    if (place === "settings" || place === "messages" || (place === "answers" && !placePage)) setPlace(null);
+    else if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
+    if (viewsPage) { openSessionTab(next.internalName || next.name, "views"); return; }
+    // Side by side, the column follows: switch, and show the new
+    // session's results beside it.
+    if (viewsSideNow) setViewsOpen({ session: next.internalName || next.name });
+    if (!railDocked) setRailOpen(false);
+    // The hub page has no terminal: a session is its own page.
+    if (!session) {
+      const path = buildSessionPath(next.displayName || next.name);
+      carryTypeaheadTo(path);
+      window.location.href = path;
+      return;
+    }
+    paneTargetRef.current = null;
+    setSwitcherOpen(false);
+    switchSession(next as SessionInfo);
+    // The picked row goes away with the rail; keys typed next are
+    // the session's, not nobody's (on another tab, that tab has them).
+    if (!schedTabNow && !feedTabNow) termRef.current?.focus();
+  };
+
   // This session answered a question of yours that you haven't read. Where
   // the session has tabs, its Answers tab carries the count; elsewhere (a
   // phone, no sidebar) a pill in its header, there however much it has done
@@ -5767,6 +5805,21 @@ const App = () => {
                 restarting there and picks up the same conversation.
               </span>
             </div>
+          ) : visibleStatus !== "connected" && visibleStatus !== "idle" && !switcherOpen && parkedHere ? (
+            // Stopped with "Stop & park": the daemon will not bring it back
+            // for a reconnect, so "reconnecting…" would wait forever. Opening
+            // it means unparking it, which is this button.
+            <div className="connection-banner ended" role="status" aria-live="polite">
+              <span>Stopped and parked</span>
+              <button type="button" onClick={() => {
+                void unparkSession(currentKey!).then(() => {
+                  void fetchSessions({ showLoading: false });
+                  setReconnectToken((value) => value + 1);
+                });
+              }}>
+                Resume
+              </button>
+            </div>
           ) : visibleStatus !== "connected" && visibleStatus !== "idle" && !switcherOpen && (
             <div
               className={`connection-banner${visibleStatus === "ended" ? " ended" : ""}`}
@@ -6483,28 +6536,19 @@ const App = () => {
           actionContext={{ notice: pushNotice, refresh: () => { void fetchSessions({ showLoading: false }); } }}
           onOpenPlace={railDocked ? (s, which) => openSessionTab(s.internalName || s.name, which) : undefined}
           onPick={(next) => {
-            // From a place or Views, a session in the sidebar is that
-            // session on the same kind of tab.
-            if (place === "settings" || place === "messages" || (place === "answers" && !placePage)) setPlace(null);
-            else if (placePage && place) { openSessionTab(next.internalName || next.name, place); return; }
-            if (viewsPage) { openSessionTab(next.internalName || next.name, "views"); return; }
-            // Side by side, the column follows: switch, and show the new
-            // session's results beside it.
-            if (viewsSideNow) setViewsOpen({ session: next.internalName || next.name });
-            if (!railDocked) setRailOpen(false);
-            // The hub page has no terminal: a session is its own page.
-            if (!session) {
-              const path = buildSessionPath(next.displayName || next.name);
-              carryTypeaheadTo(path);
-              window.location.href = path;
+            // Opening a parked session unparks it, as the wall does: picked
+            // from the sidebar it was opened as it stood, and one stopped
+            // with "Stop & park" could not be brought back (the daemon
+            // refused the attach; the page sat reconnecting).
+            if (next.parked || next.archived) {
+              if (next.archived && !next.active) pushNotice(`Resuming ${next.displayName || next.name}…`);
+              void unparkSession(next.internalName || next.name).then(() => {
+                void fetchSessions({ showLoading: false });
+                openPicked({ ...next, parked: false, archived: false } as SessionInfo);
+              });
               return;
             }
-            paneTargetRef.current = null;
-            setSwitcherOpen(false);
-            switchSession(next as SessionInfo);
-            // The picked row goes away with the rail; keys typed next are
-            // the session's, not nobody's (on another tab, that tab has them).
-            if (!schedTabNow && !feedTabNow) termRef.current?.focus();
+            openPicked(next as SessionInfo);
           }}
           onAllSessions={() => {
             setRailOpen(false);

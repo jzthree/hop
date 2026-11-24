@@ -2,6 +2,7 @@ import type { MenuItem } from "./ContextMenu";
 import * as actions from "../utils/sessionActions";
 import type { AgentHomes } from "../utils/switcherModel";
 import { describeAccount } from "../utils/switcherModel";
+import { newPlace } from "../utils/nativeApp";
 
 // The sidebar's right-click on a session: everything the wall's tile sheet
 // offers, in the same words (utils/sessionActions.ts does the work), plus what
@@ -65,7 +66,7 @@ export const sessionMenuItems = (s: MenuSession, d: SessionMenuDeps): MenuItem[]
   const items: MenuItem[] = [];
   if (lead?.length) items.push(...lead, sep);
   if (!isCurrent(s)) items.push({ label: "Open full screen", onSelect: () => onOpen(s) });
-  items.push({ label: "Open in new tab", onSelect: () => { window.open(linkTo(s), "_blank", "noopener"); } });
+  items.push({ label: `Open in ${newPlace()}`, onSelect: () => { window.open(linkTo(s), "_blank", "noopener"); } });
   if (onOpenPlace && terminal) {
     items.push({ label: "Show", items: [
       { label: `Views${s.views?.count ? ` (${s.views.count})` : ""}`, onSelect: () => onOpenPlace(s, "views") },

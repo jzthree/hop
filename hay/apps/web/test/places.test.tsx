@@ -48,8 +48,30 @@ describe("BriefingPage", () => {
     render(<BriefingPage {...base} session="orion" />);
     // The same story cards as the front page: the latest under its slot, then Earlier.
     expect([...document.querySelectorAll(".brief-story .brief-headline")].map((h) => h.textContent)).toEqual(["Ship the fix?", "Started the fix"]);
-    expect([...document.querySelectorAll(".brief-slot-head")].map((h) => h.firstChild!.textContent)).toEqual(["Decide", "Earlier"]);
+    expect([...document.querySelectorAll(".brief-slot-head")].map((h) => h.firstChild!.textContent)).toEqual(["From the briefing", "Decide", "Earlier"]);
     expect(screen.getAllByText("Ship")).toHaveLength(1);
+  });
+
+  it("with a session, its latest reply leads, in its own words, above what the briefing said", async () => {
+    const reply = "Step 37 is done.\n\n**Mechanism status:** the decay term holds across a tenfold range.";
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).startsWith("/api/sessions/last-words")) {
+        expect(String(url)).toContain("name=s_orion");
+        return { ok: true, json: async () => ({ at: new Date(Date.now() - 5 * 60_000).toISOString(), text: reply }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      render(<BriefingPage {...base} inSession session="s_orion" />);
+      await waitFor(() => expect(screen.getByText("Where it stands")).toBeTruthy());
+      expect(screen.getByText(/Step 37 is done/)).toBeTruthy();
+      expect(screen.getByText(/last reply 5m ago/)).toBeTruthy();
+      // Above the briefing's notes, which still follow.
+      expect([...document.querySelectorAll(".brief-slot-head")].map((h) => h.firstChild!.textContent)).toEqual(["Where it stands", "From the briefing", "Decide", "Earlier"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("an ask can be skipped: nothing is sent, it reads as handled, and it folds away (undoable)", () => {

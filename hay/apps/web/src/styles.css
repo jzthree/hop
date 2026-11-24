@@ -6816,6 +6816,13 @@ button.views-notebook-open { border: 0; cursor: pointer; transform: none; }
 .brief-headline { margin: 0 0 4px; font: 650 16px/1.38 var(--font-sans); letter-spacing: -0.01em; color: var(--ink); }
 .brief-story:not(.unread) .brief-headline { font-weight: 560; }
 .brief-why { color: var(--ink-muted); font-size: 14px; line-height: 1.5; }
+/* A session's Briefing tab: its latest reply, folded to a screenful. */
+.brief-words { font-size: 14px; line-height: 1.55; color: var(--ink); }
+.brief-words.clamped { max-height: 22em; overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 78%, transparent);
+  mask-image: linear-gradient(to bottom, #000 78%, transparent); }
+.brief-words-card .brief-more { align-self: flex-start; margin-top: 4px; }
+.brief-thread-head { margin-top: 26px; }
 .brief-reco {
   margin-top: 10px; padding: 8px 12px; border-radius: 8px;
   background: color-mix(in srgb, #7c3aed 7%, transparent); font-size: 14px; line-height: 1.5;

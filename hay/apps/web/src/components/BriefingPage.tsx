@@ -3,7 +3,9 @@ import { currentNames, renamer, threadFor, type BriefingItem, type Edition } fro
 import { createReadWitness, wordCount } from "../utils/readWitness";
 import { Prose } from "../utils/prose";
 import { useSavedScroll } from "../utils/savedScroll";
-type SessionInfo = { name: string; displayName?: string; internalName?: string };
+type SessionInfo = { name: string; displayName?: string; internalName?: string; tagline?: string; agentPhase?: string | null };
+/** A session's latest reply, in its agent's own words (/api/sessions/last-words). */
+type LastWords = { at: string | null; text: string };
 import { menuIsOpen } from "./ContextMenu";
 import { SideHandle, SideScope, SideToggle, keyStartsInside } from "./SideColumn";
 
@@ -11,7 +13,11 @@ import { SideHandle, SideScope, SideToggle, keyStartsInside } from "./SideColumn
 // like the front page of a lab notebook — the summary as its lede, then
 // what wants a decision, what to watch, what finished, and a roll-up of the
 // rest. Earlier editions are a step back (‹ ›, ← →). With a session — its
-// Briefing tab — the page is that session's thread across editions.
+// Briefing tab — the page is that session's front page, laid out the same:
+// a dateline and a lede (what it is about), where it stands in its agent's
+// own words (its latest reply), then everything the briefing said about it.
+// The briefing alone was too thin there: most sessions are a one-line "Also"
+// in most editions.
 //
 // A story opens its session; a reply chip types that answer into it (and
 // presses Enter) without leaving the page. Reading is witnessed as on the
@@ -90,6 +96,8 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
   // Answers hop is holding until the agent's turn ends (shown ⧗, not ✓).
   const [queued, setQueued] = useState<Set<string>>(new Set());
   const [allEarlier, setAllEarlier] = useState(false);
+  const [words, setWords] = useState<LastWords | null | undefined>(undefined);
+  const [allWords, setAllWords] = useState(false);
   const [skipped, setSkipped] = useState<Set<string>>(loadSkipped);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const witnessRef = useRef<ReturnType<typeof createReadWitness> | null>(null);
@@ -153,6 +161,18 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
 
   // The sidebar's session: its thread, newest first, across every edition.
   const sessionKey = session ? keyOf(session) : null;
+  const info = sessionKey ? find(sessionKey) : undefined;
+  // Its latest reply, again whenever a turn ends (working → done).
+  const turnStamp = info?.agentPhase ?? null;
+  useEffect(() => {
+    if (!sessionKey) return;
+    let live = true;
+    fetch(`/api/sessions/last-words?name=${encodeURIComponent(sessionKey)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (live) setWords(d && typeof d.text === "string" && d.text ? { at: d.at || null, text: d.text } : null); })
+      .catch(() => { if (live) setWords(null); });
+    return () => { live = false; };
+  }, [sessionKey, turnStamp]);
   const thread = useMemo(() => {
     if (!sessionKey) return [];
     return threadFor(editions, (id) => keyOf(id) === sessionKey);
@@ -320,7 +340,36 @@ export const BriefingPage = ({ editions, read, sessions, session, inSession = fa
           </div>
         ) : sessionKey ? (
           <>
-            <p className="place-dateline">Everything the briefing said about {label(sessionKey)} · {thread.length} {thread.length === 1 ? "note" : "notes"}</p>
+            <p className="place-dateline">
+              {label(sessionKey)}
+              {info?.agentPhase === "working" ? " · working now" : words?.at ? ` · last reply ${ago(words.at)}` : ""}
+            </p>
+            {info?.tagline && <p className="place-lede">{info.tagline}</p>}
+            {words && (
+              <section className="brief-slot slot-standing">
+                <h2 className="brief-slot-head"><span>Where it stands</span><span className="brief-slot-hint">Its latest reply, in its own words</span></h2>
+                <article className="brief-story brief-words-card">
+                  {words.at && (
+                    <div className="brief-story-head">
+                      <span className="brief-thread-when" title={editionWhen(words.at)}>{ago(words.at)}</span>
+                    </div>
+                  )}
+                  <div className={"brief-words" + (allWords ? "" : " clamped")}>
+                    <Prose text={say(words.text)} />
+                  </div>
+                  {words.text.length > 900 && (
+                    <button type="button" className="brief-more" onClick={() => setAllWords((v) => !v)}>
+                      {allWords ? "Show less" : "Show all"}
+                    </button>
+                  )}
+                </article>
+              </section>
+            )}
+            <h2 className="brief-slot-head brief-thread-head">
+              <span>From the briefing</span>
+              <span className="brief-slot-n">{thread.length}</span>
+              <span className="brief-slot-hint">{thread.length === 1 ? "note" : "notes"} across editions</span>
+            </h2>
             {!thread.length && <p className="place-empty-line">The briefing hasn't mentioned this session.</p>}
             {thread.length > 0 && (() => {
               const newest = editions[0]?.generated_at || "";

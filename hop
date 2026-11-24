@@ -17981,6 +17981,20 @@ happens until someone clicks it.
         // mid-turn); a plain shell just gets the line.
         // API: Answers — the person's questions and their replies. The
         // person's: an agent reads its own replies in its own session.
+        // A session's latest reply (its agent's last words, kept by the hooks
+        // in <session>.answer): where the session stands, for its Briefing tab.
+        if (parsedUrl.pathname === '/api/sessions/last-words' && req.method === 'GET') {
+            const key = typeof parsedUrl.query.name === 'string' ? parsedUrl.query.name : '';
+            const internal = key ? resolveSessionInternalName(key, key) : null;
+            const reply = (code, body) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
+            if (!internal || !SESSION_NAME_RE.test(internal)) return reply(404, { error: 'No such session' });
+            if (!canActorAccessSession(resolveActor(req), getEffectiveSessionConfig(internal))) return reply(403, { error: 'Agent access not permitted' });
+            let rec = null;
+            try { rec = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, `${internal}.answer`), 'utf8')); } catch (e) { /* none yet */ }
+            const text = rec && typeof rec.text === 'string' ? rec.text.trim() : '';
+            if (!text) return reply(200, { text: null });
+            return reply(200, { at: typeof rec.at === 'string' ? rec.at : null, agent: rec.agent || sessionAgentKind(internal) || null, text: text.slice(0, 20000), truncated: text.length > 20000 });
+        }
         if (parsedUrl.pathname === '/api/answers' && req.method === 'GET') {
             if (resolveActor(req) === 'agent') {
                 res.writeHead(403, { 'Content-Type': 'application/json' });

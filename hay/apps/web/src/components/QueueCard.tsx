@@ -52,6 +52,8 @@ const stateLine = (q: QueuedMessage, agentLabel: string): string => {
   if (q.sending) return "typing it now…";
   if (q.failed) return q.note || "it would not send";
   if (q.paused === "mixed") return "typing joined it in the input box, so it was not sent. Check the box.";
+  // Held: hop is not trying it (an old error is not what is happening now).
+  if (q.paused === "held") return "on hold — it will not send by itself; Send now or Cancel";
   return q.note || `sends when ${agentLabel}'s turn ends`;
 };
 

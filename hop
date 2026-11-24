@@ -8854,7 +8854,9 @@ function queuedMessagesFor(internalName, now = Date.now()) {
         out.push({
             id: c.id, from: firedCheckback ? 'a check-back' : (c.from || null), message: c.message, createdAt: c.createdAt,
             ...(c.lastError ? { note: c.lastError } : {}),
-            ...(c.paused ? { paused: c.paused } : {}),
+            // Held (paused: true, with its reason): hop is not trying it, so
+            // its last error from back then is not what is happening now.
+            ...(c.paused === true ? { paused: 'held', note: 'on hold — it will not send by itself; Send now or Cancel' } : c.paused ? { paused: c.paused } : {}),
             ...(c.status === 'failed' ? { failed: true } : {}),
             ...(deliveriesInFlight.has(c.id) ? { sending: true } : {})
         });

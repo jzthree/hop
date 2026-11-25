@@ -1,7 +1,7 @@
 // Check-backs: when they fire, when they may be typed, what happens after.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseDuration, parseWhen, normalizeCheckback, triggerFired, mayDeliver, afterDelivery, cmdDue, describe } = require('../lib/checkbacks');
+const { parseDuration, parseWhen, normalizeCheckback, triggerFired, mayDeliver, afterDelivery, cmdDue, describe, heldExpired } = require('../lib/checkbacks');
 
 const NOW = Date.parse('2026-10-01T10:00:00.000Z');
 const M = 60_000, H = 3_600_000;
@@ -84,4 +84,15 @@ test('describe is one readable line', () => {
   const cb = normalizeCheckback({ session: 'surf', message: 'Report the AF numbers', in: '2h' }, NOW);
   const line = describe(cb, NOW);
   assert.match(line, /surf/); assert.match(line, /in 2\.0h/); assert.match(line, /pending/); assert.match(line, /Report the AF/);
+});
+
+test('a message on hold is dropped after a day, counted from when it was held', () => {
+  const cb = { ...normalizeCheckback({ session: 's', message: 'm', in: '1m' }, NOW), paused: 'mixed', pausedAt: NOW };
+  assert.equal(heldExpired(cb, NOW + 23 * H), false);
+  assert.equal(heldExpired(cb, NOW + 24 * H), true);
+  assert.equal(heldExpired({ ...cb, paused: undefined }, NOW + 48 * H), false, 'not held: not dropped');
+  assert.equal(heldExpired({ ...cb, status: 'delivered' }, NOW + 48 * H), false);
+  const old = { ...cb, paused: true, pausedAt: undefined, firedAt: NOW - 2 * H, createdAt: NOW - 30 * H };
+  assert.equal(heldExpired(old, NOW + 21 * H), false, 'no pausedAt: counts from when it fired');
+  assert.equal(heldExpired(old, NOW + 22 * H), true);
 });

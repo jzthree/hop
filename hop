@@ -8856,7 +8856,7 @@ function queuedMessagesFor(internalName, now = Date.now()) {
             ...(c.lastError ? { note: c.lastError } : {}),
             // Held (paused: true, with its reason): hop is not trying it, so
             // its last error from back then is not what is happening now.
-            ...(c.paused === true ? { paused: 'held', note: 'on hold — it will not send by itself; Send now or Cancel' } : c.paused ? { paused: c.paused } : {}),
+            ...(c.paused === true ? { paused: 'held', note: 'on hold — it will not send by itself; Send now, or Cancel (hop drops it after a day)' } : c.paused ? { paused: c.paused } : {}),
             ...(c.status === 'failed' ? { failed: true } : {}),
             ...(deliveriesInFlight.has(c.id) ? { sending: true } : {})
         });
@@ -9223,7 +9223,7 @@ function applyDelivery(cb, r, now, displayName) {
     }
     if (cb.lastError === r.reason && !r.mixed && !r.unsent) return false;
     cb.lastError = r.reason;
-    if (r.mixed) cb.paused = 'mixed';
+    if (r.mixed) { cb.paused = 'mixed'; cb.pausedAt = now; }
     if (r.unsent) {
         cb.failures = (cb.failures || 0) + 1;
         if (cb.failures >= 3) { cb.status = 'failed'; cb.failedAt = now; }
@@ -9283,7 +9283,15 @@ async function runCheckbackSweep() {
         } catch (e) { /* host busy: timers and files still evaluate; idle waits */ }
         let dirty = false;
         for (const cb of pending) {
-            if (cb.paused) continue; // typing joined it: the person decides
+            if (cb.paused) {
+                // On hold: the person decides — for a day. Then it is stale.
+                if (checkbacks.heldExpired(cb, now)) {
+                    cb.status = 'cancelled'; cb.cancelledAt = now; cb.lastError = 'on hold for a day, so hop dropped it';
+                    log(`[checkback] ${cb.id} → ${cb.session}: on hold for a day — dropped`, DIM);
+                    dirty = true;
+                }
+                continue;
+            }
             // Sent (or cancelled) since this sweep began — by a queued send,
             // or a sweep left running behind this one.
             if (cb.status !== 'pending') continue;

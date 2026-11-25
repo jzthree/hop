@@ -27,7 +27,7 @@ import { ContextMenu, menuIsOpen, type MenuRequest } from "./ContextMenu";
 import * as actions from "../utils/sessionActions";
 import { CwdField } from "./CwdField";
 import { UpdateNotice } from "./UpdateNotice";
-import { pasteableUploadPaths } from "../utils/fileDrop";
+import { locateDroppedFiles, pasteableUploadPaths } from "../utils/fileDrop";
 import { collectTerminalMatches, selectTerminalMatch } from "../utils/terminalSearch";
 import { createVoiceHold, isClaudeSurface } from "../utils/voiceHold";
 import {
@@ -1664,14 +1664,19 @@ export const SessionSwitcher = ({
   const uploadFilesTo = async (s: SwitcherSession, files: File[]) => {
     if (files.length === 0) return;
     const key = sessionKey(s);
-    onNotice(files.length === 1 ? `Uploading ${files[0].name} to ${s.displayName}…` : `Uploading ${files.length} files to ${s.displayName}…`);
+    onNotice(files.length === 1 ? `Adding ${files[0].name} to ${s.displayName}…` : `Adding ${files.length} files to ${s.displayName}…`);
     const landed: string[] = [];
-    for (const file of files) {
+    // Files already on this machine: their own paths, nothing copied.
+    const located = await locateDroppedFiles(key, files);
+    let uploaded = 0;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (located[i]) { landed.push(String(located[i])); continue; }
       try {
         const res = await fetch(`/api/sessions/upload?name=${encodeURIComponent(key)}&filename=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
         const data = await res.json().catch(() => null) as { path?: string; error?: string } | null;
         if (!res.ok) { onNotice(data?.error || `Upload failed (${res.status})`); return; }
-        if (data?.path) landed.push(String(data.path));
+        if (data?.path) { landed.push(String(data.path)); uploaded += 1; }
       } catch {
         onNotice("Upload failed");
         return;
@@ -1682,10 +1687,11 @@ export const SessionSwitcher = ({
     const send = tileSendersRef.current.get(key);
     if (send) {
       send(paste);
-      onNotice(landed.length === 1 ? `Uploaded to ${landed[0]}` : `Uploaded ${landed.length} files — paths pasted`);
+      onNotice(uploaded === 0 ? (landed.length === 1 ? `Pasted ${landed[0]}` : `${landed.length} paths pasted`)
+        : landed.length === 1 ? `Uploaded to ${landed[0]}` : `${uploaded} of ${landed.length} uploaded — paths pasted`);
     } else {
       try { await navigator.clipboard?.writeText(paste); } catch { /* no clipboard: the notice still names the path */ }
-      onNotice(`Uploaded to ${landed.join(", ")} — path copied; open ${s.displayName} to paste it`);
+      onNotice(`${uploaded === 0 ? "" : "Uploaded — "}${landed.join(", ")} — path copied; open ${s.displayName} to paste it`);
     }
   };
   const [menu, setMenu] = useState<MenuRequest>(null);
@@ -3171,7 +3177,9 @@ export const SessionSwitcher = ({
           if (isFileDrag(e.dataTransfer)) {
             e.preventDefault();
             setFileDropKey(null);
-            suppressTapRef.current = true;
+            // No suppressTapRef here: a file dragged in from outside ends
+            // with no release click to swallow, so the flag would eat the
+            // person's NEXT click on a card instead.
             void uploadFilesTo(s, filesFrom(e.dataTransfer));
             return;
           }

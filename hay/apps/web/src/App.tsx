@@ -22,7 +22,7 @@ import { enableMathHover } from "./utils/mathLinkProvider";
 import { enablePathLinks } from "./utils/pathLinks";
 import { getMathTip } from "./utils/mathTooltip";
 import { scanKeyboardProtocol } from "./utils/keyboardProtocol";
-import { originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
+import { locateDroppedFiles, originalPathHint, pasteableUploadPaths } from "./utils/fileDrop";
 import { claimOnAttach, claimOnClick, isPlainClick } from "./utils/sizeClaim";
 import { installDragSelect } from "./utils/dragSelect";
 import { enableViewBlocks } from "./utils/viewBlocks";
@@ -1592,29 +1592,10 @@ const App = () => {
     const room = activeSessionRoomRef.current;
     if (!room) return;
     setUploading({ done: 0, total: files.length });
-    // Where hop runs on the machine the files are on, pass their own paths:
-    // the daemon finds each one (the Mac app hands over the real path; a
-    // browser only knows name, size and modified time). Only what is not
-    // found is uploaded — copying is what made a drop feel frozen.
-    const native = (window as { __hopDragPaths?: string[] }).__hopDragPaths;
-    (window as { __hopDragPaths?: string[] }).__hopDragPaths = undefined;
-    let located: Array<string | null> = files.map(() => null);
-    try {
-      const res = await fetch("/api/files/locate", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: room,
-          files: files.map((f) => ({
-            name: f.name, size: f.size, lastModified: f.lastModified,
-            path: native?.find((p) => p.split("/").pop() === f.name)
-          }))
-        })
-      });
-      if (res.ok) {
-        const d = await res.json().catch(() => null) as { paths?: Array<string | null> } | null;
-        if (Array.isArray(d?.paths) && d!.paths.length === files.length) located = d!.paths;
-      }
-    } catch { /* an older daemon, or none reachable: upload */ }
+    // Where hop runs on the machine the files are on, their own paths are
+    // pasted; only what is not found is uploaded — copying is what made a
+    // drop feel frozen.
+    const located = await locateDroppedFiles(room, files);
     const landed: string[] = [];
     let uploaded = 0;
     try {

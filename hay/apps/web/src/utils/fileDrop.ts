@@ -31,3 +31,37 @@ export const originalPathHint = (platform: string): string => {
   }
   return "Browsers can't see file paths — copy the path in your file manager, then paste here.";
 };
+
+/** Where each dropped file already is on the hop machine, or null to upload
+ *  it. The Mac app hands over the real paths as the files are dragged over
+ *  its window (window.__hopDragPaths, taken once here); a browser only has
+ *  name, size and modified time, which the daemon searches for. Bounded: a
+ *  slow or absent daemon means "upload", never a drop that hangs. */
+export const locateDroppedFiles = async (session: string, files: File[], timeoutMs = 8000): Promise<Array<string | null>> => {
+  const w = window as { __hopDragPaths?: string[] };
+  const native = w.__hopDragPaths;
+  w.__hopDragPaths = undefined;
+  const none = files.map(() => null);
+  const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = ctl ? window.setTimeout(() => ctl.abort(), timeoutMs) : 0;
+  try {
+    const res = await fetch("/api/files/locate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      signal: ctl?.signal,
+      body: JSON.stringify({
+        name: session,
+        files: files.map((f) => ({
+          name: f.name, size: f.size, lastModified: f.lastModified,
+          path: native?.find((p) => p.split("/").pop() === f.name)
+        }))
+      })
+    });
+    if (!res.ok) return none;
+    const d = await res.json().catch(() => null) as { paths?: Array<string | null> } | null;
+    return Array.isArray(d?.paths) && d!.paths.length === files.length ? d!.paths : none;
+  } catch {
+    return none; // an older daemon, none reachable, or too slow: upload
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
+};

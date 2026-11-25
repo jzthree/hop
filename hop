@@ -16817,8 +16817,9 @@ happens until someone clicks it.
                     const internalName = input.name ? resolveSessionInternalName(String(input.name), String(input.name)) : null;
                     const cfg = internalName ? getEffectiveSessionConfig(internalName) : null;
                     const cwd = cfg && typeof cfg.cwd === 'string' ? cfg.cwd : null;
-                    const paths = [];
-                    for (const f of files) paths.push(await fileLocate.locateDropped(f || {}, { cwd }));
+                    // Side by side: each may wait on Spotlight, and a drop of
+                    // several files should wait once, not once per file.
+                    const paths = await Promise.all(files.map((f) => fileLocate.locateDropped(f || {}, { cwd }).catch(() => null)));
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ paths }));
                 } catch (e) {

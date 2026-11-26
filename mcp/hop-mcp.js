@@ -2034,6 +2034,9 @@ function requestJson(method, baseUrl, endpoint, token, actor, body) {
       [DEFAULT_ACTOR_HEADER]: actor || DEFAULT_ACTOR,
       [VIA_HEADER]: DEFAULT_VIA()
     };
+    // The session this agent runs in, when known: an attach is shown under
+    // its name, and one agent keeps one attach per session it looks at.
+    try { const who = callerSession(); if (who && who.ok && who.session) headers['X-Hop-From'] = who.session; } catch { /* unknown: unnamed */ }
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }

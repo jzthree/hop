@@ -311,7 +311,12 @@ async function resolveTerminalRef(server, ref) {
     : terminals.filter((t) => t && (foldsTo(t.sessionName) || foldsTo(t.displayName) || foldsTo(t.id)));
   if (matches.length === 1) return matches[0].id;
   if (matches.length > 1) {
-    fail(`"${ref}" matches ${matches.length} terminals: ${matches.map((t) => t.id).join(', ')}`, 2);
+    // Several agents look at one session: this agent's own attach, else
+    // the name itself (the tool attaches anew) — never a refusal.
+    const me = process.env.HOP_SESSION || null;
+    const own = me ? matches.filter((t) => t.fromSession === me) : [];
+    if (own.length >= 1) return own[0].id;
+    return ref;
   }
   return ref; // not found: let the tool report it (may be a user session needing attach/permit)
 }

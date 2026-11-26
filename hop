@@ -18454,6 +18454,7 @@ happens until someone clicks it.
                     createdAt: entry.createdAt,
                     // How live it is: what presence counts it as.
                     lastTouchedAt: entry.lastTouchedAt || null,
+                    fromSession: entry.fromSession || null,
                     streaming: terminalApiStreams.has(entry.id) ? terminalApiStreams.get(entry.id).size || 1 : 0
                 }));
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -18639,12 +18640,28 @@ happens until someone clicks it.
                     if (isExternalTerminalBackend()) {
                         await ensureExternalHayHostReady();
                     }
+                    // Which session the agent runs in (its hop tools say so):
+                    // its attach is named after it, and it keeps ONE per
+                    // session it looks at. Unnamed attaches piled up — four
+                    // "agent"s on one session could be one agent's handles,
+                    // or anyone's read in the last quarter hour.
+                    const fromRaw = String(req.headers['x-hop-from'] || '');
+                    const from = SESSION_NAME_RE.test(fromRaw) ? fromRaw : null;
+                    const mine = from ? [...terminalApiSessions.values()].find((e) => e.sessionName === target && e.fromSession === from && e.actor === actor) : null;
+                    if (mine) {
+                        mine.lastTouchedAt = Date.now();
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: true, id: mine.id, sessionName: mine.sessionName, displayName: mine.displayName, reused: true }));
+                        return;
+                    }
+                    const fromName = from ? (getSessionDisplayName(from) || from) : null;
                     const entry = await attachTerminalApiClient(target, config?.displayName, {
                         actor,
                         cols: payload.cols,
                         rows: payload.rows,
-                        label: actor
+                        label: fromName ? `${fromName} (${actor})` : actor
                     });
+                    if (from) entry.fromSession = from;
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
                         ok: true,

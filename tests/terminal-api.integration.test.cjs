@@ -1384,7 +1384,8 @@ test('antigravity conversations continue in any CLI, and any continue in antigra
   assert.match(toAgy.data.name, /^claude2agy-antigravity\d*$/);
   argv = '';
   for (let i = 0; i < 40 && !argv; i++) { await delay(150); argv = await fs.readFile(argvFile, 'utf8').catch(() => ''); }
-  assert.match(argv, /^-i\nRead the ENTIRE file [\s\S]*previous Claude Code conversation/, `plain agy -i, got ${JSON.stringify(argv)}`);
+  // Every agy hop starts allows everything, as Claude and Codex sessions do (AGY_ALLOW_ALL).
+  assert.match(argv, /^--dangerously-skip-permissions\n-i\nRead the ENTIRE file [\s\S]*previous Claude Code conversation/, `agy -i, got ${JSON.stringify(argv)}`);
   assert.match(await fs.readFile(toAgy.data.extract.path, 'utf8'), /shard the eval set/);
 
   const bad = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/fork', { internalName: internal, target: 'cursor' });
@@ -2666,4 +2667,29 @@ test('a new session in a missing folder is refused, and the form can create the 
   const agentRefused = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'FolderGateAgent', cwd: path.join(tempDir, 'nope') }, agentHeaders);
   assert.equal(agentRefused.status, 400);
   assert.equal(agentRefused.data.code, 'cwd-missing');
+});
+
+test('an agent attach is named after the session it comes from, and one agent keeps one per session', async () => {
+  const mk = async (name, headers) => {
+    const r = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name, cwd: tempDir, autoStart: true }, headers);
+    assert.equal(r.status, 200);
+    const s = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions')).data.sessions.find((x) => x.displayName === name);
+    assert.ok(s);
+    return s.internalName;
+  };
+  const watcher = await mk('watcher1', agentHeaders);
+  await mk('watched1', agentHeaders);
+  const from = { ...agentHeaders, 'X-Hop-From': watcher };
+  const a = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals/attach', { name: 'watched1' }, from);
+  const b = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals/attach', { name: 'watched1' }, from);
+  assert.equal(a.status, 200); assert.equal(b.status, 200);
+  assert.equal(b.data.id, a.data.id, 'the same agent attaching again gets its own attach back');
+  assert.equal(b.data.reused, true);
+  // Another caller, or one that does not say, gets its own.
+  const c = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals/attach', { name: 'watched1' }, agentHeaders);
+  assert.notEqual(c.data.id, a.data.id);
+  const listed = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/terminals')).data.terminals;
+  const mine = listed.find((t) => t.id === a.data.id);
+  assert.equal(mine.fromSession, watcher);
+  assert.equal(listed.filter((t) => t.displayName === 'watched1' && t.fromSession === watcher).length, 1);
 });

@@ -49,6 +49,7 @@ const accountRemoval = require('./lib/account-removal');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
 const claudeFirstRunLib = require('./lib/claude-firstrun');
+const agyHook = require('./scripts/antigravity-hook.js');
 const messages = require('./lib/messages');
 const sessionFiles = require('./lib/session-files');
 const viewShares = require('./lib/view-shares');
@@ -6528,6 +6529,9 @@ function readAgyRecord(internalName) {
 function agyRecordIsCurrent(internalName) {
     const agy = readAgyRecord(internalName);
     if (!agy) return null;
+    // A record an older hook filed for a non-interactive agy (`agy -p`, an
+    // app's `agy acp`) is not the room's conversation.
+    if (agy.launchCmd && agyHook.notInteractive(agy.launchCmd)) return null;
     const claude = readClaudeSessionRecord(internalName);
     if (claude && Date.parse(claude.updatedAt || 0) > Date.parse(agy.updatedAt || 0)) return null;
     return agy;

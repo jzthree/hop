@@ -61,7 +61,7 @@ function workspaceOf(payload) {
 
 function recordSession(dir, hopSession, payload, launchCmd) {
   const conversationId = typeof payload.conversationId === "string" ? payload.conversationId : "";
-  if (!conversationId || !launchCmd || isPrintMode(launchCmd)) return;
+  if (!conversationId || !launchCmd || notInteractive(launchCmd)) return;
   writeDurable(path.join(dir, `${hopSession}.agy`), JSON.stringify({
     sessionId: conversationId,
     agent: AGENT,
@@ -166,6 +166,21 @@ function reply(event) {
 function isPrintMode(cmd) {
   return typeof cmd === "string" && /(^|\s)(-p|--print|--prompt)(=\S*)?(\s|$)/.test(cmd);
 }
+// agy's subcommands — `agy acp` is the protocol server an app (nebula-writer)
+// runs from a session's shell; the others list, install or update. None is
+// the session's own conversation: filing `agy acp` made a Claude session read
+// as agy (Tab, Answers, and what a restore would bring back), 2026-11-26.
+const AGY_SUBCOMMANDS = new Set(["acp", "agent", "agents", "changelog", "help", "install", "mcp", "mic-serve", "models", "plugin", "plugins", "update"]);
+function isSubcommand(cmd) {
+  if (typeof cmd !== "string") return false;
+  // Right after the program: `agy -i update the docs` is a prompt, not `agy update`.
+  const argv = cmd.trim().split(/\s+/);
+  return argv.length > 1 && AGY_SUBCOMMANDS.has(argv[1]);
+}
+/** Only agy's interactive TUI is a session's conversation. */
+function notInteractive(cmd) {
+  return isPrintMode(cmd) || isSubcommand(cmd);
+}
 
 function main(event, raw, env = process.env, launchCmd = agyLaunchCmd) {
   const hopSession = env.HOP_SESSION;
@@ -178,7 +193,7 @@ function main(event, raw, env = process.env, launchCmd = agyLaunchCmd) {
   // second filed a judge's `agy -p` as the room's agent (2026-11-22).
   // Not known is not filed: the next hook event of a real session files it.
   const cmd = launchCmd();
-  if (!cmd || isPrintMode(cmd)) return;
+  if (!cmd || notInteractive(cmd)) return;
   const dir = sessionsDir();
   if (event === "SessionStart") recordSession(dir, hopSession, payload, cmd);
   else if (event === "PreInvocation") {
@@ -204,4 +219,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { main, reply, isPrintMode, AGENT };
+module.exports = { main, reply, isPrintMode, notInteractive, AGENT };

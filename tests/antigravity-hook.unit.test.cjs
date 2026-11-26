@@ -128,3 +128,20 @@ test("a launch hop could not read is not filed, and agy's command is read once",
         if (prev === undefined) delete process.env.HOP_HOME; else process.env.HOP_HOME = prev;
     }
 });
+
+test('agy subcommands (an app\'s `agy acp` server) never take over a room\'s record', () => {
+    const { main, notInteractive } = require(SCRIPT);
+    assert.ok(notInteractive('/Users/j/.local/bin/agy acp'));
+    assert.ok(notInteractive('agy models'));
+    assert.ok(notInteractive('agy -p hi'));
+    assert.ok(!notInteractive('agy --dangerously-skip-permissions --conversation=abc'));
+    assert.ok(!notInteractive('agy -i update the docs'), 'a prompt that starts with a subcommand word');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agyhook-'));
+    const env = { HOP_HOME: home, HOP_SESSION: 's_cccccccccc' };
+    const prev = process.env.HOP_HOME;
+    process.env.HOP_HOME = home;
+    try {
+        main('SessionStart', JSON.stringify({ conversationId: 'd1b2c3d4-e5f6-7890-abcd-ef1234567890' }), env, () => '/Users/j/.local/bin/agy acp');
+        assert.ok(!fs.existsSync(path.join(home, 'claude-sessions', 's_cccccccccc.agy')));
+    } finally { if (prev === undefined) delete process.env.HOP_HOME; else process.env.HOP_HOME = prev; }
+});

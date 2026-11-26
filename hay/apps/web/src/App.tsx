@@ -4500,6 +4500,13 @@ const App = () => {
 
   const handleKeyboardInput = useCallback(
     (data: string) => {
+      // The on-screen Tab key, while Claude or Antigravity works: queue what
+      // is typed, as a hardware Tab does (it went to the agent as a plain
+      // Tab, and nothing happened).
+      if (data === "\t" && tabQueues({ key: "Tab" }, tabQueueRef.current.agent, () => tabQueueRef.current.working || terminalSaysWorking(termRef.current as never))) {
+        queueInputRef.current(true);
+        return;
+      }
       handleUserInput(data);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps

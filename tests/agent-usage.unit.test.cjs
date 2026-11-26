@@ -207,3 +207,10 @@ test('a session is left alone after an action, and not passed around all day', (
   const manyResumes = Array.from({ length: 12 }, (_, i) => at(20 + i * 40, 'resume'));
   assert.equal(u.planForStop({ stop: STOP, session, now: NOW, accounts: roomy, history: manyResumes }).action, 'wait');
 });
+
+test('Claude: background-task notices a relaunch appends are not a turn — still stopped', () => {
+  const notice = (id) => ({ type: 'user', message: { content: `<task-notification>\n<task-id>${id}</task-id>\n<status>killed</status>\n<note>The previous session ended before this task landed.</note>\n</task-notification>` } });
+  assert.ok(u.claudeLimitStop(jsonl(limitNotice(), notice('a1'), notice('a2'))));
+  // Words of a person or agent after it still mean someone has it in hand.
+  assert.equal(u.claudeLimitStop(jsonl(limitNotice(), notice('a1'), { type: 'user', message: { content: 'carry on' } })), null);
+});

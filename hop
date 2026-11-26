@@ -18451,7 +18451,10 @@ happens until someone clicks it.
                     sessionName: entry.sessionName,
                     displayName: entry.displayName,
                     actor: entry.actor,
-                    createdAt: entry.createdAt
+                    createdAt: entry.createdAt,
+                    // How live it is: what presence counts it as.
+                    lastTouchedAt: entry.lastTouchedAt || null,
+                    streaming: terminalApiStreams.has(entry.id) ? terminalApiStreams.get(entry.id).size || 1 : 0
                 }));
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ terminals: sessions }));

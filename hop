@@ -8975,6 +8975,9 @@ async function agentScreenReady(entry) {
     // roomIsRedoable says "not redoable, and here is whether the agent is
     // idle" exactly when an agent's UI owns the screen.
     if (!verdict.ok && verdict.agentIdle !== undefined) return { ok: true };
+    // A live claude at its trust question: the delivery reads the question
+    // and answers it by the own-folder rule (or leaves it), never types into it.
+    if (verdict.ok && /workspace-trust/.test(verdict.reason) && entry.foregroundProcess && !isShellProcName(entry.foregroundProcess)) return { ok: true };
     return { ok: false, reason: `waiting: no agent on screen (${verdict.reason})` };
 }
 

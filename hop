@@ -9079,6 +9079,33 @@ async function stepPastClaudeFirstRun(internalName, displayName) {
     if (steps.length) log(`[account] ${displayName || internalName}: stepped past Claude Code's first-run setup (${steps.join(', ')})`, CYAN);
     return steps.length;
 }
+// The trust question a relaunched claude asks — for the folder it runs in,
+// with that folder's pre-approved permissions — after first-run screens kept
+// the restart's own answer from landing (its window is short). The same rule
+// as the restore reconciler: hop answers only for the session's own folder,
+// at most three times; any other folder is the person's.
+const claudeTrustAnswers = new Map(); // internalName → { n, at }
+async function answerClaudeTrust(internalName, displayName, trust) {
+    const name = displayName || internalName;
+    if (!trust.ours) return { ok: false, reason: `waiting: Claude Code is asking to trust ${trust.asked || 'a folder'} — that one is yours to answer` };
+    const now = Date.now();
+    const seen = claudeTrustAnswers.get(internalName) || { n: 0, at: 0 };
+    if (now - seen.at < 20_000) return { ok: false, reason: 'waiting: hop answered Claude Code\'s trust question for this folder' };
+    if (seen.n >= 3) return { ok: false, reason: "waiting: Claude Code's trust question is still up after hop answered it three times — yours to answer" };
+    let e2 = null;
+    try {
+        e2 = await attachTerminalApiClient(internalName, name, { actor: 'system', label: 'claude trust', typeOnly: true });
+        try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+        await sleepMs(300);
+        await sendTerminalInput(e2, trust.input);
+        await sleepMs(500);
+    } finally {
+        if (e2) { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
+    }
+    claudeTrustAnswers.set(internalName, { n: seen.n + 1, at: now });
+    log(`[account] ${name}: accepted ${trust.preapproval ? 'pre-approved permissions' : 'workspace trust'} for its own folder (${trust.how})`, CYAN);
+    return { ok: false, reason: "waiting: hop answered Claude Code's trust question for this folder" };
+}
 async function readRoomComposer(internalName, agent = sessionAgentKind(internalName)) {
     try {
         const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
@@ -9102,6 +9129,12 @@ async function readRoomComposer(internalName, agent = sessionAgentKind(internalN
         // suggestion in an empty box), so a first-run screen is never a box to type in.
         const claudeFirstRun = agent === 'claude' && !!r ? claudeFirstRunLib.firstRunStep(now, { theme: claudeThemePreference() }) : null;
         if (r && claudeFirstRun) return { ...r, state: { ...r.state, found: false }, working: false, agyWelcome, claudeFirstRun };
+        // Its trust question looks the same way ("❯ No, exit"): no box either.
+        // What it names, against the session's own folder, says whose it is.
+        if (agent === 'claude' && r && TRUST_PROMPT_RE.test(now)) {
+            const cwd = getEffectiveSessionConfig(internalName)?.cwd || null;
+            return { ...r, state: { ...r.state, found: false }, working: false, agyWelcome, claudeFirstRun: null, claudeTrust: trustDialogAnswer(now, cwd) };
+        }
         return r ? { ...r, working: screenSaysWorking(text), agyWelcome, claudeFirstRun } : null;
     } catch (e) { return null; }
 }
@@ -9191,6 +9224,7 @@ async function deliverIntoAgent(cb, entry, phase) {
                 // Past agy's first-run welcome first; the message goes on the next pass.
                 if (a.agyWelcome && await stepPastAgyWelcome(cb.session, entry.displayName)) return { ok: false, reason: "waiting: hop stepped past Antigravity's first-run welcome" };
                 if (a.claudeFirstRun && await stepPastClaudeFirstRun(cb.session, entry.displayName)) return { ok: false, reason: "waiting: hop stepped past Claude Code's first-run setup" };
+                if (a.claudeTrust) return await answerClaudeTrust(cb.session, entry.displayName, a.claudeTrust);
                 if (!a.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
                 // This very message, already sitting in the box typed and never
                 // sent (an earlier delivery, an agent's `hopa send` before it

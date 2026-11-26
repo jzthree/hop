@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Account } from "../utils/accounts";
+import { notifyAccountsChanged } from "../utils/accountsChanged";
 
 // Removing an account (Settings → Agent accounts, and the sign-in sheet):
 // asked in the row itself, never in a browser dialog. The host takes it out
@@ -40,6 +41,7 @@ export const RemoveAccountAsk = ({ account: a, onNotice, onRemoved, onCancel }: 
     setBusy(false);
     if (!r.ok) { onNotice(typeof r.data.error === "string" ? r.data.error : "Could not remove it"); return; }
     onNotice(`Removed ${name}${typeof r.data.movedTo === "string" ? `. Its folder is kept in ${r.data.movedTo}` : ""}`);
+    notifyAccountsChanged();
     onRemoved();
   };
 

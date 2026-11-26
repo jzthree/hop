@@ -51,6 +51,7 @@ import { watchLiveness } from "../utils/socketLiveness";
 import { sendToSession } from "../utils/quickReply";
 import { DigestCard } from "./DigestCard";
 import { hasUnseenViews, loadViewsSeen } from "./ViewsPanel";
+import { onAccountsMaybeChanged } from "../utils/accountsChanged";
 
 // Full-screen, in-app session switcher (mobile-first). Hot sessions — current,
 // attention, most recent — are preview cards; the tail is compact rows grouped
@@ -1944,7 +1945,7 @@ export const SessionSwitcher = ({
       .then((d) => { if (d && Array.isArray(d.claude) && Array.isArray(d.codex)) setAgentHomes({ ...d, antigravity: Array.isArray(d.antigravity) ? d.antigravity : [] }); })
       .catch(() => { /* no accounts info: nothing labelled */ });
   };
-  useEffect(() => { loadAgentHomes(); }, []);
+  useEffect(() => { loadAgentHomes(); return onAccountsMaybeChanged(loadAgentHomes); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const homesFor = (agent?: string | null): AgentHome[] =>
     (agent === "claude" || agent === "codex" ? agentHomes[agent] : agent === "antigravity" ? agentHomes.antigravity || [] : []);
   // The account a NEW agent session starts in; "" = the agent's default.

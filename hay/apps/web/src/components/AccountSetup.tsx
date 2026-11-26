@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { createPortal } from "react-dom";
 import { RemoveAccountAsk, RemoveAccountButton } from "./AccountRemove";
+import { notifyAccountsChanged } from "../utils/accountsChanged";
 import {
   AGENT_TITLE, accountFolder, accountLine, accountSlug, sameLogins, setupProgress, signInStatus,
   type Account, type AccountsOverview, type AgentKind, type SignInJob
@@ -89,7 +90,7 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
   const lastState = useRef<string | null>(null);
   useEffect(() => {
     const s = job ? `${job.id}:${job.state}` : null;
-    if (lastState.current && s !== lastState.current && job && job.state !== "running") void reload(true);
+    if (lastState.current && s !== lastState.current && job && job.state !== "running") { void reload(true); notifyAccountsChanged(); }
     lastState.current = s;
   }, [job]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -121,6 +122,7 @@ export const AccountSetup = ({ data, reload, onClose, onNotice, start }: Props) 
     const mail = agent === "claude" ? email.trim() : "";
     setAdding(null); setName(""); setEmail("");
     await reload();
+    notifyAccountsChanged();
     void signIn(agent, home.dir, mail);
   };
 

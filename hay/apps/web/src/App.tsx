@@ -74,6 +74,7 @@ import { isAppCtrlEnter, isFullscreenChord, isQueueChord } from "./utils/fullscr
 import { queueTypedInput, tabQueues, terminalSaysWorking } from "./utils/queueInput";
 import { isLocalLinkUrl, localLinkFailed, localWsBase, startLocalLink } from "./utils/localLink";
 import { watchLiveness } from "./utils/socketLiveness";
+import { onAccountsMaybeChanged } from "./utils/accountsChanged";
 
 const createRoomId = () => `room-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -4607,10 +4608,13 @@ const App = () => {
   // The accounts a session can switch to (its menu's Account item).
   useEffect(() => {
     if (!isEmbeddedInHop()) return;
-    fetch("/api/agent-homes", { cache: "no-store" })
+    const load = () => fetch("/api/agent-homes", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d && Array.isArray(d.claude) && Array.isArray(d.codex)) setAgentHomes(d); })
       .catch(() => { /* no accounts info: no account item */ });
+    void load();
+    // An account added or signed in since: in the menu without a reload (utils/accountsChanged).
+    return onAccountsMaybeChanged(() => { void load(); });
   }, []);
   // The Mac app's hop › Settings… (⌘,) asks for the page.
   useEffect(() => {

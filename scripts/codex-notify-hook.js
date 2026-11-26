@@ -72,6 +72,11 @@ function resolveHopSession(dir, rootId, envSession) {
 // whatever notify chain is configured (Computer Use wraps it), so walk up
 // to the first codex process and look at how it runs.
 function underSharedCodexDaemon() {
+  const args = codexProcessArgs();
+  return args !== null && /\sapp-server(\s|$)/.test(args);
+}
+/** The command line of the first codex process above this hook, or null. */
+function codexProcessArgs() {
   let pid = process.ppid;
   for (let i = 0; i < 8 && pid > 1; i++) {
     let row = "";
@@ -79,14 +84,43 @@ function underSharedCodexDaemon() {
     try {
       row = execFileSync("ps", ["-o", "ppid=,comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
       args = execFileSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
-    } catch { return false; }
+    } catch { return null; }
     const m = /^(\d+)\s+(.*)$/.exec(row);
-    if (!m) return false;
+    if (!m) return null;
     // The executable itself, not any command line that mentions it.
-    if (path.basename(m[2]) === "codex") return /\sapp-server(\s|$)/.test(args);
+    if (path.basename(m[2]) === "codex") return args;
     pid = Number(m[1]);
   }
-  return false;
+  return null;
+}
+
+// A one-shot `codex exec` started from a hop session's shell — a script's
+// model call (an evaluation harness runs thousands) — inherits HOP_SESSION
+// but is not that session's conversation. Recording it put each call's
+// prompt in Answers as the person's own question, and pointed the session's
+// record at a thread restore would bring back instead of its own. Its
+// rollout says how it was started (session_meta: originator "codex_exec",
+// source "exec"); with no rollout, the codex process above this hook does.
+function isExecRun(threadId) {
+  const meta = threadMeta(threadId);
+  if (meta) return meta.originator === "codex_exec" || meta.source === "exec";
+  const args = codexProcessArgs();
+  return args !== null && /\sexec(\s|$)/.test(args);
+}
+/** A thread's session_meta payload (its rollout's first line), or null. */
+function threadMeta(id) {
+  const file = id ? findRollout(id) : null;
+  if (!file) return null;
+  try {
+    const fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(65536);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    const text = buf.toString("utf8", 0, n);
+    const nl = text.indexOf("\n");
+    const meta = JSON.parse(nl >= 0 ? text.slice(0, nl) : text);
+    return meta && meta.payload && typeof meta.payload === "object" ? meta.payload : null;
+  } catch { return null; }
 }
 
 // A sub-agent's rollout names its parent in its first line (session_meta →
@@ -139,6 +173,7 @@ function bumpTurn(payload) {
   const rawThread = (payload && typeof payload["thread-id"] === "string") ? payload["thread-id"]
              : (payload && typeof payload.thread_id === "string") ? payload.thread_id
              : (payload && typeof payload.session_id === "string") ? payload.session_id : null;
+  if (isExecRun(rawThread)) return; // a script's one-shot call, not this session's conversation
   let rootId = rootThreadId(rawThread);
   // Under the shared daemon the environment is another session's: the
   // turn goes only to a record that already names this thread, else nowhere.

@@ -106,3 +106,19 @@ test('the answer is kept with the turn\'s own question: the last message handed 
   assert.equal(a.question, 'what was the final AUC?');
   assert.equal(a.text, '0.812');
 });
+
+test("a script's one-shot `codex exec` in a session's shell is not that session's turn", () => {
+  const home = freshHome();
+  const save = (id, payload) => fs.writeFileSync(
+    path.join(home, 'codex', 'sessions', '2026', '10', '12', `rollout-2026-10-12T00-00-00-${id}.jsonl`),
+    JSON.stringify({ type: 'session_meta', payload: { id, ...payload } }) + '\n');
+  save('thread-tui', { originator: 'codex-tui', source: 'cli' });
+  save('thread-exec', { originator: 'codex_exec', source: 'exec' });
+  run(home, 'writer', { type: 'agent-turn-complete', 'thread-id': 'thread-tui', 'input-messages': ['carry on'], 'last-assistant-message': 'Done.' });
+  run(home, 'writer', { type: 'agent-turn-complete', 'thread-id': 'thread-exec', 'input-messages': ['You are an expert reader… Answer with JSON only.'], 'last-assistant-message': '{"published": "A"}' });
+  // The session's own conversation stays on record, and its question is the person's.
+  assert.equal(turn(home, 'writer').sessionId, 'thread-tui');
+  assert.equal(turn(home, 'writer').count, 1);
+  const answer = JSON.parse(fs.readFileSync(path.join(home, 'claude-sessions', 'writer.answer'), 'utf8'));
+  assert.equal(answer.question, 'carry on');
+});

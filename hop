@@ -48,6 +48,7 @@ const agentSignin = require('./lib/agent-signin');
 const accountRemoval = require('./lib/account-removal');
 const { resolveCallerSession, sessionFromEnvLine, envFromLine, isPtyKeeper, agentInAncestry } = require('./lib/session-identity');
 const checkbacks = require('./lib/checkbacks');
+const claudeFirstRunLib = require('./lib/claude-firstrun');
 const messages = require('./lib/messages');
 const sessionFiles = require('./lib/session-files');
 const viewShares = require('./lib/view-shares');
@@ -9042,6 +9043,42 @@ async function stepPastAgyWelcome(internalName, displayName) {
     if (pressed) log(`[agy] ${displayName || internalName}: stepped past agy's first-run welcome (${pressed}× Enter)`, CYAN);
     return pressed;
 }
+// Claude Code's first run in an account folder it has not set up (hop moved
+// the session there at a limit): theme, security notes, terminal setup, the
+// Chrome prompt. hop answers those as lib/claude-firstrun.js says — the
+// person's own theme, no terminal changes, browser tools off — one screen
+// per pass, and only those screens.
+/** The theme the person chose in their default Claude folder, or null. */
+function claudeThemePreference() {
+    try {
+        const t = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'))?.theme;
+        return typeof t === 'string' && claudeFirstRunLib.THEME_LABEL[t] ? t : null;
+    } catch (e) { return null; }
+}
+async function stepPastClaudeFirstRun(internalName, displayName) {
+    const steps = [];
+    let e2 = null;
+    try {
+        for (let i = 0; i < 6; i++) {
+            const c = await readRoomComposer(internalName, 'claude');
+            const step = c && c.claudeFirstRun;
+            if (!step) break;
+            if (!e2) {
+                e2 = await attachTerminalApiClient(internalName, displayName || internalName, { actor: 'system', label: 'claude first run', typeOnly: true });
+                try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+                await sleepMs(300);
+            }
+            // A picker's arrows one at a time, as a person presses them, then the answer.
+            for (const key of step.keys.match(/\x1b\[[AB]|\x1b|\r/g) || []) { await sendTerminalInput(e2, key); await sleepMs(150); }
+            steps.push(step.kind);
+            await sleepMs(1500);
+        }
+    } finally {
+        if (e2) { try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ } }
+    }
+    if (steps.length) log(`[account] ${displayName || internalName}: stepped past Claude Code's first-run setup (${steps.join(', ')})`, CYAN);
+    return steps.length;
+}
 async function readRoomComposer(internalName, agent = sessionAgentKind(internalName)) {
     try {
         const hostRes = await callExternalHayHostApi(`/rooms/${encodeURIComponent(internalName)}/serialized`);
@@ -9060,7 +9097,12 @@ async function readRoomComposer(internalName, agent = sessionAgentKind(internalN
         // (Rows of the raw screen: stripped, each \r\n is two line breaks.)
         const now = stripAnsiForSearch(String(d.data).split('\n').slice(-Math.max(1, Number(d.rows) || 50)).join('\n'));
         const agyWelcome = agy && !!r && !r.state.found && AGY_WELCOME_RE.test(now) && /enter Confirm/.test(now);
-        return r ? { ...r, working: screenSaysWorking(text), agyWelcome } : null;
+        // Claude Code's own first run (a folder it had not set up): which screen, and its answer.
+        // Its pickers' "❯ option" line reads like the prompt (the option as a
+        // suggestion in an empty box), so a first-run screen is never a box to type in.
+        const claudeFirstRun = agent === 'claude' && !!r ? claudeFirstRunLib.firstRunStep(now, { theme: claudeThemePreference() }) : null;
+        if (r && claudeFirstRun) return { ...r, state: { ...r.state, found: false }, working: false, agyWelcome, claudeFirstRun };
+        return r ? { ...r, working: screenSaysWorking(text), agyWelcome, claudeFirstRun } : null;
     } catch (e) { return null; }
 }
 const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim();
@@ -9148,6 +9190,7 @@ async function deliverIntoAgent(cb, entry, phase) {
                 if (a.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
                 // Past agy's first-run welcome first; the message goes on the next pass.
                 if (a.agyWelcome && await stepPastAgyWelcome(cb.session, entry.displayName)) return { ok: false, reason: "waiting: hop stepped past Antigravity's first-run welcome" };
+                if (a.claudeFirstRun && await stepPastClaudeFirstRun(cb.session, entry.displayName)) return { ok: false, reason: "waiting: hop stepped past Claude Code's first-run setup" };
                 if (!a.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
                 // This very message, already sitting in the box typed and never
                 // sent (an earlier delivery, an agent's `hopa send` before it

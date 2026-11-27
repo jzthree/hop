@@ -3,7 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeCheckback } = require('../lib/checkbacks');
-const { envelope, typedText, stripEnvelope, presence, pairTraffic, mayAnswer, shellName, PAIR_MAX } = require('../lib/messages');
+const { envelope, typedText, stripEnvelope, presence, pairTraffic, mayAnswer, shellName, fromItsPerson, PAIR_MAX } = require('../lib/messages');
+const answers = require('../lib/answers');
 
 const NOW = Date.parse('2026-11-10T18:00:00.000Z');
 const M = 60_000;
@@ -39,6 +40,26 @@ test('an agent outside hop is marked as one; a bad sender id is ignored', () => 
   const bad = normalizeCheckback({ session: 's_b', message: 'x', idle: true, queued: true, fromSession: '../etc', fromName: 'evil' }, NOW);
   assert.equal(bad.fromSession, undefined);
   assert.equal(typedText(bad), 'x');
+});
+
+test('an app acting for its person (a wiki\'s notice) is not the person, and its words are not their question', () => {
+  // Sent with the person's sign-in by a page served through hop port.
+  const notice = normalizeCheckback({ session: 's_b', message: '[Lab wiki: base model accepted] The base is now version 2. No reply needed.', idle: true, queued: true, from: 'Lab wiki', fromApp: '  Lab\nwiki ' }, NOW);
+  assert.equal(notice.fromApp, 'Lab wiki', 'one plain line');
+  assert.equal(typedText(notice), notice.message, 'typed as the app wrote it: it names itself');
+  assert.equal(fromItsPerson(notice), false);
+  const own = normalizeCheckback({ session: 's_b', message: 'go on', idle: true, queued: true, from: 'you' }, NOW);
+  assert.equal(fromItsPerson(own), true);
+  assert.equal(normalizeCheckback({ session: 's_b', message: 'x', idle: true, queued: true, fromApp: '   ' }, NOW).fromApp, undefined);
+  assert.equal(fromItsPerson(normalizeCheckback({ session: 's_b', message: 'x', idle: true, queued: true, fromOutside: true }, NOW)), false);
+  assert.equal(fromItsPerson(normalizeCheckback({ session: 's_b', message: 'x', idle: true, queued: true, createdBy: 'agent' }, NOW)), false);
+  // Answers: the prompt it became files under the agents' tab, by the app.
+  const at = NOW + 30_000;
+  const typed = [{ at: NOW + 1000, slackMs: 120_000, text: typedText(notice), person: fromItsPerson(notice), source: 'message', by: notice.fromApp }];
+  const d = answers.describe(`<pasted_content id="aa">\n${notice.message}\n</pasted_content id="aa">`, { at, typed, asked: [] });
+  assert.deepEqual([d.from, d.source, d.by], ['agents', 'message', 'Lab wiki']);
+  const mine = answers.describe('go on', { at, typed: [{ at: NOW + 1000, slackMs: 120_000, text: typedText(own), person: true, source: 'queued' }], asked: [] });
+  assert.deepEqual([mine.from, mine.source], ['you', 'queued']);
 });
 
 test('a scheduled check-back from another session carries its sender too', () => {

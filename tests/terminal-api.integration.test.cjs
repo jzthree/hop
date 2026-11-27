@@ -2258,6 +2258,14 @@ test('hop send: a message from another session says who sent it, and the answer 
   // 4. The person's own message (the web, the phone) is typed as written.
   await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: B, text: 'from me', from: 'you' }, userHeaders);
   assert.equal((await got(bDir))[2], 'from me');
+  //    A page acting for the person (served with hop port, their sign-in)
+  //    says the words are its own notice: typed as it wrote them, carded
+  //    as the app's, and never filed as the person's question.
+  const notice = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/send', { internalName: B, text: '[Lab wiki: base model accepted] now version 2. No reply needed.', app: 'Lab wiki' }, userHeaders);
+  assert.equal(notice.data.status, 'sent', JSON.stringify(notice.data));
+  assert.equal((await got(bDir))[3], '[Lab wiki: base model accepted] now version 2. No reply needed.');
+  const card = (await requestJson(state.port, state.sessionSecret, 'GET', '/api/checkbacks')).data.items.find((c) => c.id === notice.data.id);
+  assert.deepEqual([card.from, card.fromApp], ['Lab wiki', 'Lab wiki']);
 
   // 5. Two agents can't trade messages without end: held while beta is busy,
   //    the pair's next one past the limit is refused, with what to do.
@@ -2357,7 +2365,9 @@ test('answers: the person\'s question and its reply are kept until read; typed, 
     n++;
     await fs.writeFile(path.join(dir, `${internal}.answer`), JSON.stringify({ sessionId: 'conv', count: n, at: new Date(at + 1000).toISOString(), text: reply, ...extra }));
   };
-  const list = async () => (await S('GET', '/api/answers')).data.answers.filter((a) => a.session === internal);
+  // The person's tab; the agents' tab holds the rest.
+  const all = async () => (await S('GET', '/api/answers')).data.answers.filter((a) => a.session === internal);
+  const list = async () => (await all()).filter((a) => a.from !== 'agents');
   const until = async (fn, what, ms = 12000) => {
     const t0 = Date.now();
     while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await delay(300); }
@@ -2387,16 +2397,17 @@ test('answers: the person\'s question and its reply are kept until read; typed, 
     // 4. Codex: the question arrives with the answer.
     await delay(3500);
     await turn(null, '0.812', { agent: 'codex', question: 'what was the final AUC?' });
-    const all = await until(async () => { const l = await list(); return l.length >= 2 ? l : null; }, 'the codex answer');
+    const mine = await until(async () => { const l = await list(); return l.length >= 2 ? l : null; }, 'the codex answer');
     await delay(3500);
     assert.deepEqual((await list()).map((a) => a.question), ['what was the final AUC?', 'why is the validation loss flat?'], 'newest first, only the person\'s');
-    assert.equal(all[0].agent, 'codex');
+    assert.equal(mine[0].agent, 'codex');
+    assert.deepEqual((await all()).filter((a) => a.from === 'agents').map((a) => [a.question, a.source]), [['summarise the last three runs', 'typed']], 'what hop typed: on the agents\' tab; the app\'s own notice: nowhere');
     assert.equal(await unread(), 2);
 
     // 5. Read: by id, then the rest of the session. Agents can't read them.
     assert.equal((await S('POST', '/api/answers/read', { ids: [first.id] })).data.read, 1);
     assert.equal(await unread(), 1);
-    assert.equal((await S('POST', '/api/answers/read', { session: internal })).data.read, 1);
+    assert.equal((await S('POST', '/api/answers/read', { session: internal })).data.read, 2, 'the rest of the session: its agents\' turn too');
     assert.equal(await unread(), 0);
     assert.equal((await S('GET', '/api/answers', null, agentHeaders)).status, 403);
     assert.equal((await S('POST', '/api/answers/read', { all: true }, agentHeaders)).status, 403);

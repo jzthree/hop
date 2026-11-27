@@ -8718,11 +8718,11 @@ function checkbackDeliveriesFor(session, now = Date.now()) {
     const out = [];
     for (const cb of loadCheckbacks().items) {
         if (cb.session !== session || !Number.isFinite(cb.deliveredAt) || now - cb.deliveredAt > 24 * 3600_000) continue;
-        const person = !!(cb.queued && !cb.fromSession && !cb.fromOutside && cb.createdBy !== 'agent');
+        const person = messages.fromItsPerson(cb);
         out.push({
             at: cb.deliveredAt, slackMs: 120_000, text: messages.typedText(cb), person,
             source: cb.queued ? (person ? 'queued' : 'message') : 'scheduled',
-            by: person ? null : (cb.fromName || cb.from || (cb.createdBy === 'agent' ? 'an agent' : 'you'))
+            by: person ? null : (cb.fromApp || cb.fromName || cb.from || (cb.createdBy === 'agent' ? 'an agent' : 'you'))
         });
     }
     return out;
@@ -9496,7 +9496,7 @@ function applyDelivery(cb, r, now, displayName) {
     if (r.quiet) return false;
     if (r.ok) {
         // The person's own queued message: hop typed it, the words are theirs.
-        if (cb.queued && !cb.fromSession && !cb.fromOutside && cb.createdBy !== 'agent') noteTypedInput(cb.session, messages.typedText(cb), true);
+        if (messages.fromItsPerson(cb)) noteTypedInput(cb.session, messages.typedText(cb), true);
         Object.assign(cb, checkbacks.afterDelivery(cb, now));
         delete cb.sendNow; delete cb.failures;
         log(`[checkback] ${cb.id} → ${displayName}: ${JSON.stringify(cb.message.slice(0, 80))}${cb.status === 'pending' ? ' (recurs)' : ''}`, DIM);
@@ -18500,8 +18500,13 @@ happens until someone clicks it.
                         session: target, message: text, idle: true, queued: true,
                         from: input.from
                             || (fromSession ? (getSessionDisplayName(fromSession) || fromSession) : null)
+                            || (typeof input.app === 'string' && input.app.trim() ? input.app : null)
                             || (actor === 'agent' ? 'an agent' : 'you'),
                         ...senderFields(fromSession, actor),
+                        // `app`: a page acting for its person (served with
+                        // hop port, signed in as them) says the words are its
+                        // own notice, not theirs — kept off their Answers.
+                        fromApp: input.app,
                         replyHere: input.replyHere === true,
                         force: input.mode === 'now',
                         createdBy: actor === 'agent' ? 'agent' : 'user'

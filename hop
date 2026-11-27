@@ -9243,6 +9243,18 @@ function noteSetAsideDraft(session, text, state) {
     try { writePrivateFile(SET_ASIDE_FILE, JSON.stringify({ items }, null, 2)); } catch (e) { /* the log line still says */ }
 }
 /** Take the draft out of the box. → { ok } or { ok: false, reason }. */
+// What someone typed after hop's message in the box (box = message + typing).
+function typingAfter(boxText, message) {
+    const need = solid(message).length;
+    let n = 0, i = 0;
+    for (; i < boxText.length && n < need; i++) if (!/\s/.test(boxText[i])) n++;
+    return boxText.slice(i).replace(/^\s+/, '');
+}
+/**
+ * Take the draft out of the box (`aside.clear` when that is more than the
+ * draft: hop's own message with someone's typing after it). → { ok } or
+ * { ok: false, reason }.
+ */
 async function setDraftAside(entry, session, agent, aside) {
     entry.lastTouchedAt = Date.now();
     if (aside.how === 'stash') {
@@ -9250,28 +9262,60 @@ async function setDraftAside(entry, session, agent, aside) {
         await sleepMs(500);
         const r = await readRoomComposer(session, agent);
         if (r && r.state.found && r.state.isEmpty) return { ok: true };
+        if (r && r.full.found && !r.state.isEmpty && solid(r.full.text) !== solid(aside.text)) {
+            // Something else came up: the box was empty after all (misread) and
+            // Ctrl+S brought back a draft the person had stashed. Stash it again.
+            sendTerminalInput(entry, '\x13');
+            await sleepMs(500);
+            log(`[checkback] ${getSessionDisplayName(session) || session}: Ctrl+S brought up a stashed draft instead; stashed it again`, YELLOW);
+            return { ok: false, reason: "waiting: the input box didn't read as expected" };
+        }
         // Ctrl+S did nothing (rebound, or a Claude without the stash): the draft is as it was.
         return { ok: false, reason: "waiting: the input box has text in it (Claude's Ctrl+S didn't set it aside)" };
     }
-    noteSetAsideDraft(session, aside.text, 'aside');
-    if (await clearOwnText(entry, session, aside.text)) return { ok: true };
+    const clear = aside.clear || aside.text;
+    if (aside.text) noteSetAsideDraft(session, aside.text, 'aside');
+    if (await clearOwnText(entry, session, clear)) return { ok: true };
     const r = await readRoomComposer(session, agent);
-    if (r && r.full.found && solid(r.full.text) === solid(aside.text)) {
-        noteSetAsideDraft(session, aside.text, 'restored');
+    if (r && r.full.found && solid(r.full.text) === solid(clear)) {
+        if (aside.text) noteSetAsideDraft(session, aside.text, 'restored');
         return { ok: false, reason: "waiting: the input box has text in it (hop couldn't take it out)" };
     }
-    // Part of it came out: put the whole draft back over what is left.
-    await clearOwnText(entry, session, aside.text);
+    // Part of it came out: clear the rest and put the draft back whole.
+    await clearOwnText(entry, session, clear);
     const back = await putDraftBack(entry, session, agent, aside);
     return { ok: false, reason: back ? "waiting: the input box has text in it (hop couldn't take it out)" : 'hop could not take the draft out of the input box whole; it is saved in set-aside-drafts.json' };
 }
 /**
- * Put the draft back once the message has gone: only into an empty box (a
- * box with anything else in it is someone's — Ctrl+S there would stash it
- * over the draft). True when the box shows the draft again.
+ * Put the draft back once the message has gone (`sent`) or failed to.
+ * Claude brings its stash back by itself whenever a prompt is submitted
+ * (queued behind a turn too; after a slash command, once its screen closes),
+ * so then hop only waits for it. Otherwise hop types it, or presses Ctrl+S,
+ * once, and only into a box read empty twice: Ctrl+S is a toggle, and on a
+ * box that only looked empty for a moment it would stash the draft again;
+ * a box with anything else in it is someone's. True when the box shows the
+ * draft again.
  */
-async function putDraftBack(entry, session, agent, aside) {
+async function putDraftBack(entry, session, agent, aside, { sent = false } = {}) {
+    if (!aside.text) return true;
     const same = (r) => !!r && r.full.found && solid(r.full.text) === solid(aside.text);
+    const read = () => readRoomComposer(session, agent);
+    const waitFor = async (ms) => {
+        const until = Date.now() + ms;
+        let r = null;
+        for (;;) {
+            r = await read();
+            if (same(r) || Date.now() >= until) return r;
+            await sleepMs(500);
+        }
+    };
+    const emptyTwice = async () => {
+        const a = await read();
+        if (!a || !a.state.found || !a.state.isEmpty) return false;
+        await sleepMs(600);
+        const b = await read();
+        return !!b && b.state.found && b.state.isEmpty;
+    };
     // The delivery's attach, unless the idle reaper closed it during the
     // message's pauses: then one of its own for this.
     let own = null;
@@ -9284,25 +9328,22 @@ async function putDraftBack(entry, session, agent, aside) {
         }
         return own;
     };
+    const claudeBringsIt = aside.how === 'stash' && sent;
     let r = null;
     try {
-        for (let attempt = 0; attempt < 3; attempt++) {
-            await sleepMs(attempt ? 900 : 400);
-            r = await readRoomComposer(session, agent);
-            if (same(r)) break;
-            if (!r || !r.state.found) continue;
-            if (!r.state.isEmpty) break;
+        r = await waitFor(claudeBringsIt ? 8000 : 400);
+        if (!same(r) && !claudeBringsIt && await emptyTwice()) {
             const w = await writer();
             if (aside.how === 'stash') sendTerminalInput(w, '\x13');
             else await sendTerminalInput(w, aside.text);
+            r = await waitFor(3000);
         }
-        r = await readRoomComposer(session, agent);
     } finally {
         if (own) { try { closeTerminalApiEntry(own.id); } catch (e) { /* closed */ } }
     }
     const ok = same(r);
     if (aside.how === 'retype') noteSetAsideDraft(session, aside.text, ok ? 'restored' : 'lost');
-    if (!ok) log(`[checkback] ${getSessionDisplayName(session) || session}: the draft set aside was not put back${aside.how === 'stash' ? " (Claude's Ctrl+S brings it back)" : ` (kept in ${SET_ASIDE_FILE})`}`, YELLOW);
+    if (!ok) log(`[checkback] ${getSessionDisplayName(session) || session}: the draft set aside is not back in the box yet${aside.how === 'stash' ? " (Claude holds it: Ctrl+S, or the next prompt, brings it back)" : ` (kept in ${SET_ASIDE_FILE})`}`, YELLOW);
     return ok;
 }
 const deliveriesInFlight = new Set();
@@ -9331,7 +9372,7 @@ async function deliverIntoAgent(cb, entry, phase) {
         // A shell gets its command as written; an agent hears who sent it.
         const typed = gated ? messages.typedText(cb) : cb.message;
         let alreadyTyped = false;
-        let aside = null; // the person's draft, set aside for this message: { text, how }
+        let aside = null; // the person's draft, set aside for this message: { text, how, clear?, seen }
         if (gated) {
             const a = await readRoomComposer(cb.session, agent);
             if (a) {
@@ -9347,19 +9388,27 @@ async function deliverIntoAgent(cb, entry, phase) {
                 // pressed Enter): send that rather than wait behind it forever.
                 if (!a.state.isEmpty && boxIsOnly(a.full, typed)) alreadyTyped = true;
                 else if (!a.state.isEmpty) {
-                    // Someone's draft: set aside once it has sat still (see draftAsidePlan).
-                    const plan = draftAsidePlan(agent, a.full);
+                    // This very message with someone's typing after it (they typed
+                    // as hop did): untangled — hop's text out, the message sent on
+                    // its own, the typing put back. Otherwise the box holds a
+                    // draft: set aside (see draftAsidePlan). Either once the box
+                    // has sat still ("send now": at once).
+                    const typing = !a.full.collapsed && boxJoinedTyping(a.full, typed) ? typingAfter(a.full.text, typed) : null;
+                    const plan = typing !== null
+                        ? (typing.length > DRAFT_RETYPE_MAX ? { reason: 'waiting: typing joined it in the input box' } : { how: 'retype' })
+                        : draftAsidePlan(agent, a.full);
                     if (!plan.how) return { ok: false, reason: plan.reason };
-                    // ("Send now" means now: no waiting for the draft to sit still.)
                     if (!draftSettled(cb.session, a.full) && !cb.sendNow) return { ok: false, reason: 'waiting: someone is typing in the input box' };
-                    aside = { text: a.full.text, how: plan.how };
+                    aside = typing !== null
+                        ? { text: typing, how: 'retype', clear: a.full.text, seen: a.full.text, untangle: true }
+                        : { text: a.full.text, how: plan.how, seen: a.full.text };
                 }
                 // The same a moment later too: nobody is mid-word.
                 await sleepMs(1200);
                 const b = await readRoomComposer(cb.session, agent);
                 if (b && b.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
                 if (b && !b.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
-                if (b && aside && solid(b.full.text) !== solid(aside.text)) return { ok: false, reason: 'waiting: someone is typing in the input box' };
+                if (b && aside && solid(b.full.text) !== solid(aside.seen)) return { ok: false, reason: 'waiting: someone is typing in the input box' };
                 if (b && !aside && (alreadyTyped ? !boxIsOnly(b.full, typed) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
             }
         }
@@ -9375,9 +9424,13 @@ async function deliverIntoAgent(cb, entry, phase) {
             if (aside) {
                 const set = await setDraftAside(e2, cb.session, agent, aside);
                 if (!set.ok) return { ok: false, reason: set.reason };
-                log(`[checkback] ${cb.id}: set the draft in ${entry.displayName || cb.session}'s input box aside (${aside.how === 'stash' ? "Claude's Ctrl+S" : 'hop types it back'}) to send this`, DIM);
+                log(aside.untangle
+                    ? `[checkback] ${cb.id}: took it back out from under the typing after it in ${entry.displayName || cb.session}'s input box, to send it on its own`
+                    : `[checkback] ${cb.id}: set the draft in ${entry.displayName || cb.session}'s input box aside (${aside.how === 'stash' ? "Claude's Ctrl+S" : 'hop types it back'}) to send this`, DIM);
             }
+            let result = null;
             try {
+                result = await (async () => {
                 if (alreadyTyped) {
                     log(`[checkback] ${cb.id}: its text was already in the input box, unsent; sending it`, YELLOW);
                 } else {
@@ -9417,9 +9470,11 @@ async function deliverIntoAgent(cb, entry, phase) {
                     ok: false, unsent: true,
                     reason: cleared ? "it didn't submit, so hop took it back out of the input box; trying again" : "it didn't submit and is still in the input box"
                 };
+                })();
+                return result;
             } finally {
                 // Whatever happened to the message, the draft goes back.
-                if (aside) await putDraftBack(e2, cb.session, agent, aside);
+                if (aside) await putDraftBack(e2, cb.session, agent, aside, { sent: !!result?.ok });
             }
         } finally {
             try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ }
@@ -9441,7 +9496,8 @@ function applyDelivery(cb, r, now, displayName) {
     }
     if (cb.lastError === r.reason && !r.mixed && !r.unsent) return false;
     cb.lastError = r.reason;
-    if (r.mixed) { cb.paused = 'mixed'; cb.pausedAt = now; }
+    // Typing that joined it is untangled on a later pass, once the box sits
+    // still (deliverIntoAgent), so a mixed message is no longer held.
     if (r.unsent) {
         cb.failures = (cb.failures || 0) + 1;
         if (cb.failures >= 3) { cb.status = 'failed'; cb.failedAt = now; }
@@ -9501,6 +9557,8 @@ async function runCheckbackSweep() {
         } catch (e) { /* host busy: timers and files still evaluate; idle waits */ }
         let dirty = false;
         for (const cb of pending) {
+            // Held earlier because typing joined it: hop now untangles those.
+            if (cb.paused === 'mixed') { delete cb.paused; delete cb.pausedAt; dirty = true; }
             if (cb.paused) {
                 // On hold: the person decides — for a day. Then it is stale.
                 if (checkbacks.heldExpired(cb, now)) {

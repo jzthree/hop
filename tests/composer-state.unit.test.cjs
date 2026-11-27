@@ -118,3 +118,59 @@ test("agy's grey box hint is no text typed in it; what was typed still is", asyn
   assert.equal(typed.state.text, 'continue');
   assert.equal(typed.full.text, 'continue');
 });
+
+test("a framed card above Claude's input line is not the input box", async (t) => {
+  // Claude Code's "Product feedback drafted" panel sits in a ╭╮╰╯ frame above
+  // its rule-framed `❯` line; read as the box, the card was typed text and
+  // every message for the session waited behind it.
+  const composer = require('../lib/composer');
+  if (!composer.loadHeadlessTerminal()) { t.skip('xterm-headless unavailable'); return; }
+  const w = 70;
+  const rule = '─'.repeat(w);
+  const card = [
+    '╭' + '─'.repeat(w - 2) + '╮',
+    '│ ✻ Product feedback drafted: a model named a result by its mechanism │',
+    '│ 1 to review · 2 to send · 0 to dismiss' + ' '.repeat(w - 42) + '│',
+    '╰' + '─'.repeat(w - 2) + '╯'
+  ];
+  const screen = (input, cursorCol) => [...card, '', rule, `❯ ${input}`, rule, '  ⏵⏵ auto mode on (shift+tab to cycle) · 1 feedback draft']
+    .join('\r\n') + `\x1b[7;${cursorCol}H`;
+  // An empty box showing Claude's dim suggestion.
+  const empty = await composer.readComposerFromSerialized(screen('\x1b[2msend me the design note\x1b[0m', 3), 80, 12);
+  assert.equal(empty.state.found, true);
+  assert.notEqual(empty.state.strategy, 'box');
+  assert.equal(empty.state.isEmpty, true, 'the card is not typed text, and the suggestion is a ghost');
+  assert.equal(empty.full.text, '');
+  // What was typed is still read, from the input line.
+  const typed = await composer.readComposerFromSerialized(screen('fix the axis labels', 22), 80, 12);
+  assert.equal(typed.state.isEmpty, false);
+  assert.equal(typed.state.text, 'fix the axis labels');
+  assert.equal(typed.full.text, 'fix the axis labels');
+  // The cursor elsewhere (a replay can leave it anywhere): the rule above the `❯` line still says so.
+  const elsewhere = await composer.readComposerFromSerialized(screen('fix the axis labels', 22) + '\x1b[1;1H', 80, 12, { cursorGhost: false });
+  assert.equal(elsewhere.state.text, 'fix the axis labels');
+});
+
+test("Claude's input box is found above its subagent list, and a prompt echoed in the transcript is not it", async (t) => {
+  // With subagents running, Claude lists them under its status line, which
+  // put a tall box out of reach of the bottom-up scan: "the agent's input
+  // box isn't on screen", and every message for the session waited.
+  const composer = require('../lib/composer');
+  if (!composer.loadHeadlessTerminal()) { t.skip('xterm-headless unavailable'); return; }
+  const rule = '─'.repeat(70);
+  const draft = Array.from({ length: 12 }, (_, i) => (i === 0 ? '❯ ' : '  ') + `line ${i} of a long draft about the base model`);
+  const agents = ['  ⏺ main', ...Array.from({ length: 6 }, (_, i) => `  ◯ general-purpose  Reading log ${i}`)];
+  const rows = ['❯ [hop message from an agent] an older prompt, echoed in the transcript', '', '⏺ Working on it.', '',
+    rule, ...draft, rule, '  ⏵⏵ auto mode on (shift+tab to cycle) · /tasks to see subagents', '', ...agents];
+  const lastText = 5 + draft.length - 1; // 1-based row of the draft's last line
+  const screen = rows.join('\r\n') + `\x1b[${lastText};${draft[draft.length - 1].length + 1}H`;
+  const r = await composer.readComposerFromSerialized(screen, 80, 40);
+  assert.equal(r.state.found, true, 'the box above the subagent list');
+  assert.match(r.state.text, /^line 0 of a long draft/);
+  assert.match(r.full.text, /line 11 of a long draft about the base model$/);
+  // No box on screen (a dialog in its place): the echoed prompt is not taken for it.
+  const noBox = ['❯ [hop message from an agent] an older prompt, echoed in the transcript', '', ...Array.from({ length: 20 }, (_, i) => `  output ${i}`),
+    '  Select a model', '  1. Default', '  2. Opus', ...agents].join('\r\n') + '\x1b[23;3H';
+  const n = await composer.readComposerFromSerialized(noBox, 80, 40);
+  assert.equal(n.state.found, false);
+});

@@ -2060,6 +2060,17 @@ test('a message for an agent never joins a draft: it goes past one that sat stil
   await typeIn('\x15');
   await until(async () => (await box()) === '', 5000, 'the box cleared');
 
+  // 2c. The message itself in the box with someone's typing after it (they
+  //     typed as hop did): untangled — sent on its own, the typing put back.
+  await typeIn('untangle me please o');
+  await until(async () => (await box()) === 'untangle me please o', 5000, 'the tangled box');
+  await send('untangle me please');
+  await until(async () => (await got()).includes('untangle me please'), 20000, 'the message sent on its own');
+  assert.equal((await got()).filter((l) => l.startsWith('untangle me please')).length, 1, 'sent once, without the typing');
+  await until(async () => (await box()) === 'o', 8000, 'the typing back in the box');
+  await typeIn('\x15');
+  await until(async () => (await box()) === '', 5000, 'the box cleared');
+
   // 3. A busy agent: queued, then typed when its turn ends.
   await fs.writeFile(path.join(dir, 'BUSY'), '1');
   await stamp('prompt', Date.now());
@@ -2067,7 +2078,7 @@ test('a message for an agent never joins a draft: it goes past one that sat stil
   const third = await send('after your turn');
   assert.equal(third.data.status, 'queued');
   await delay(5000);
-  assert.deepEqual(await got(), ['hello agent', 'second message', 'and another', 'to codex'], 'not typed mid-turn');
+  assert.deepEqual(await got(), ['hello agent', 'second message', 'and another', 'to codex', 'untangle me please'], 'not typed mid-turn');
   assert.equal(await box(), '', 'nothing waiting inside the box');
   await fs.rm(path.join(dir, 'BUSY'));
   await stamp('turn', Date.now() + 1000);

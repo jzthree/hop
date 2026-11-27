@@ -1026,8 +1026,13 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
   useEffect(() => {
     if (live) return;
     let cancelled = false;
+    // Only a tile on screen repaints: every tile on the wall fetched and
+    // redrew its whole screen every 5s whether or not anyone could see it
+    // (50 tiles: ~10 full redraws a second). One scrolled into view paints
+    // at once.
+    let onScreen = true;
     const paint = async () => {
-      if (cancelled || document.hidden) return;
+      if (cancelled || document.hidden || !onScreen) return;
       try {
         const res = await fetch("/api/sessions/screen?name=" + encodeURIComponent(room));
         if (!res.ok) return;
@@ -1086,12 +1091,21 @@ const LiveTile = ({ wsBase, room, userName, theme, live, deliberate, claudeApp, 
         })
       : null;
     if (boxRef.current) ro?.observe(boxRef.current);
+    const io = typeof IntersectionObserver !== "undefined" && boxRef.current
+      ? new IntersectionObserver(([entry]) => {
+          const was = onScreen;
+          onScreen = !!entry?.isIntersecting;
+          if (onScreen && !was) paint();
+        })
+      : null;
+    if (boxRef.current) io?.observe(boxRef.current);
     return () => {
       cancelled = true;
       settleRef.current = null;
       window.clearInterval(id);
       window.clearTimeout(resizeDebounce);
       ro?.disconnect();
+      io?.disconnect();
     };
   }, [live, room]);
 
@@ -1587,6 +1601,57 @@ export const SessionSwitcher = ({
   // terminal (the focused tile below). Announced once per open via onNotice;
   // the ⌨ chip in the header is the standing indicator.
   const interactiveTiles = effectiveZoom >= INTERACTIVE_ZOOM && !!tileWsBase;
+  // A tile becomes a terminal when it comes within half a screen of view,
+  // and stays one while the wall is up; until then it shows its preview.
+  // Opening the wall built every tile's terminal at once — 50 on Jian's
+  // wall — and each one's font measure laid out all the tiles already
+  // there: the Mac app froze for 1.5s or more on every open (measured in
+  // WebKit with 50 sessions, 2026-11-26).
+  const [termKeys, setTermKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const termObserverRef = useRef<IntersectionObserver | null>(null);
+  useEffect(() => {
+    if (!open || !interactiveTiles) {
+      setTermKeys((prev) => (prev.size ? new Set() : prev));
+      return;
+    }
+    if (typeof IntersectionObserver === "undefined") return;
+    // One new terminal per frame: each one's font measure lays the page out,
+    // and a row scrolled in at once made one long stall of several.
+    const queue: string[] = [];
+    let raf = 0;
+    const pump = () => {
+      raf = 0;
+      const k = queue.shift();
+      if (!k) return;
+      setTermKeys((prev) => {
+        if (prev.has(k)) return prev;
+        const next = new Set(prev);
+        next.add(k);
+        return next;
+      });
+      if (queue.length) raf = requestAnimationFrame(pump);
+    };
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const k = (e.target as HTMLElement).dataset.sessionKey;
+        if (e.isIntersecting && k && !queue.includes(k)) queue.push(k);
+      }
+      if (queue.length && !raf) raf = requestAnimationFrame(pump);
+    }, { rootMargin: "50% 0px 50% 0px" });
+    termObserverRef.current = io;
+    document.querySelectorAll<HTMLElement>(".switcher-card[data-session-key]").forEach((el) => io.observe(el));
+    return () => { io.disconnect(); termObserverRef.current = null; if (raf) cancelAnimationFrame(raf); };
+  }, [open, interactiveTiles]);
+  // Cards that appear later (scrolling a filter, a new session) are watched
+  // too; observing one already watched is a no-op.
+  useEffect(() => {
+    const io = termObserverRef.current;
+    if (!io) return;
+    document.querySelectorAll<HTMLElement>(".switcher-card[data-session-key]").forEach((el) => io.observe(el));
+  });
+  // No IntersectionObserver (very old engines): every tile is a terminal, as before.
+  const tileIsTerminal = (key: string) =>
+    typeof IntersectionObserver === "undefined" || termKeys.has(key);
   const noticedInteractiveRef = useRef(false);
   useEffect(() => { if (open) noticedInteractiveRef.current = false; }, [open]);
   const changeZoom = (next: number) => {
@@ -2494,42 +2559,58 @@ export const SessionSwitcher = ({
   // quarter of that rate — 30+ tiles stay cheap, and the daemon only renders
   // previews on demand anyway. Paused while the tab is hidden.
   const lastColdRefreshRef = useRef(0);
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    // Hot = the hero tiles in recency mode. A filter's result set is small,
-    // so every match is hot — its preview is the evidence the user is
-    // scanning. The other modes have no hero tier; everything refreshes at
-    // the cold rate.
-    const hotKeys = new Set(
-      model.mode === "tiers" ? model.hero.map(sessionKey)
+  // Which sessions preview, and which of them are hot. Hot = the hero tiles
+  // in recency mode. A filter's result set is small, so every match is hot
+  // — its preview is the evidence the user is scanning. The other modes have
+  // no hero tier; everything refreshes at the cold rate. EVERY session
+  // previews — dead ones serve their retained last screen from the daemon,
+  // so a tile is never a blank box.
+  const previewPlan = useMemo(() => {
+    // At interactive zoom a tile on screen is a terminal that repaints
+    // itself (LiveTile); its preview only feeds the card's chips, which the
+    // cold rate keeps fresh enough. Every session there read as hot on a
+    // busy wall, so all 50 were fetched every 5s.
+    const hot = new Set(
+      interactiveTiles ? []
+      : model.mode === "tiers" ? model.hero.map(sessionKey)
       : model.mode === "filter" ? [...model.rows.map(sessionKey), ...contentMatches.map((m) => sessionKey(m.session))]
       : []
     );
-    // EVERY session previews — dead ones serve their retained last screen
-    // from the daemon, so a tile is never a blank box.
+    const all: string[] = [];
     const seenKeys = new Set<string>();
-    const all = (
+    for (const s of (
       model.mode === "tiers" ? [...model.hero, ...model.groups.flatMap((g) => g.rows)]
       : model.mode === "project" ? model.groups.flatMap((g) => g.rows)
       : model.mode === "filter" ? [...model.rows, ...contentMatches.map((m) => m.session)]
       : model.rows
-    ).filter((s) => {
-      if (s.type === "port") return false;
+    )) {
+      if (s.type === "port") continue;
       const key = sessionKey(s);
-      if (seenKeys.has(key)) return false;
+      if (seenKeys.has(key)) continue;
       seenKeys.add(key);
-      return true;
-    });
+      all.push(key);
+    }
+    return { all, hot, signature: all.map((k) => (hot.has(k) ? `*${k}` : k)).join("\n") };
+  }, [model, contentMatches, interactiveTiles]);
+  const previewPlanRef = useRef(previewPlan);
+  previewPlanRef.current = previewPlan;
+  // The loop restarts only when WHICH sessions preview changes. Keyed on the
+  // model itself, it restarted — fetching at once — on every session-list
+  // update, and a busy fleet updates that list several times a second: the
+  // wall asked for ~12 previews a second where ~4 were meant (measured with
+  // 50 sessions, 2026-11-26).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
     const refresh = async () => {
+      const { all, hot: hotKeys } = previewPlanRef.current;
       if (cancelled || document.hidden || all.length === 0) return;
       // Time-based cold tier (not tick-based: the first mount often races the
       // sessions fetch and would consume the cold slot on an empty list).
       const coldToo = Date.now() - lastColdRefreshRef.current > 15000;
-      const targets = all.filter((s) => hotKeys.has(sessionKey(s)) || coldToo);
+      const targets = all.filter((key) => hotKeys.has(key) || coldToo);
       await Promise.all(
-        targets.map(async (s) => {
-          const key = sessionKey(s);
+        targets.map(async (key) => {
           try {
             const res = await fetch(`/api/sessions/preview?name=${encodeURIComponent(key)}`);
             if (!res.ok) return;
@@ -2566,7 +2647,7 @@ export const SessionSwitcher = ({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [open, model, contentMatches]);
+  }, [open, previewPlan.signature]);
 
   const startLongPress = (event: ReactPointerEvent, session: SwitcherSession) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
@@ -3255,7 +3336,7 @@ export const SessionSwitcher = ({
             way the name can't. Hidden at dense zooms where the card has no
             room for a second text line. */}
         {s.tagline && <div className="switcher-card-tagline" title={s.tagline}>{s.tagline}</div>}
-        {interactiveTiles && tileWsBase && s.active && s.type !== "port" ? (
+        {interactiveTiles && tileWsBase && s.active && s.type !== "port" && (tileIsTerminal(key) || focusedKey === key || current) ? (
           <div className="switcher-preview switcher-preview-live">
             <LiveTile
               wsBase={tileWsBase}

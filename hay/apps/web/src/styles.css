@@ -2208,6 +2208,15 @@ button.primary {
   gap: 10px;
   margin-bottom: 18px;
 }
+/* Cards off screen are skipped by layout and paint. A tile's terminal
+   measures its font when it is made, which lays out the page: with fifty
+   cards on the wall each of those layouts walked them all, and scrolling new
+   tiles in hitched (measured in WebKit, 2026-11-26). A skipped card keeps
+   the height it last had, or about a tile's before it is first drawn. */
+.switcher-grid > .switcher-card {
+  content-visibility: auto;
+  contain-intrinsic-height: auto calc(var(--tile-h, 130px) + 64px);
+}
 
 .switcher-card {
   position: relative;

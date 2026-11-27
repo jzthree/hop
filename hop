@@ -9255,9 +9255,14 @@ function typingAfter(boxText, message) {
  * draft: hop's own message with someone's typing after it). → { ok } or
  * { ok: false, reason }.
  */
+// Boxes Ctrl+S did not empty, by session: not pressed again until the box changes.
+const stashRefused = new Map();
 async function setDraftAside(entry, session, agent, aside) {
     entry.lastTouchedAt = Date.now();
     if (aside.how === 'stash') {
+        const key = solid(aside.seen || aside.text);
+        if (stashRefused.get(session) === key) return { ok: false, reason: "waiting: the input box has text in it (Claude's Ctrl+S didn't set it aside)" };
+        stashRefused.delete(session);
         sendTerminalInput(entry, '\x13');
         await sleepMs(500);
         const r = await readRoomComposer(session, agent);
@@ -9270,7 +9275,10 @@ async function setDraftAside(entry, session, agent, aside) {
             log(`[checkback] ${getSessionDisplayName(session) || session}: Ctrl+S brought up a stashed draft instead; stashed it again`, YELLOW);
             return { ok: false, reason: "waiting: the input box didn't read as expected" };
         }
-        // Ctrl+S did nothing (rebound, or a Claude without the stash): the draft is as it was.
+        // Ctrl+S did nothing (rebound, a Claude without the stash, or not a
+        // draft at all): the box is as it was. Not pressed again on it.
+        stashRefused.set(session, key);
+        log(`[checkback] ${getSessionDisplayName(session) || session}: Ctrl+S did not set the text in the input box aside; waiting for it to change`, YELLOW);
         return { ok: false, reason: "waiting: the input box has text in it (Claude's Ctrl+S didn't set it aside)" };
     }
     const clear = aside.clear || aside.text;

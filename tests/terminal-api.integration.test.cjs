@@ -1965,7 +1965,9 @@ process.stdin.on('data', (d) => {
         if (stash !== null && !slash) { box = stash; stash = null; }
       }
     } else if (c === '\\x13') {
-      if (box.trim()) { stash = box; box = ''; } else if (stash !== null) { box = stash; stash = null; }
+      fs.appendFileSync(path.join(dir, 'ctrl-s.log'), 'S\\n');
+      if (fs.existsSync(path.join(dir, 'NOSTASH'))) { /* a Claude whose Ctrl+S does nothing */ }
+      else if (box.trim()) { stash = box; box = ''; } else if (stash !== null) { box = stash; stash = null; }
     } else if (c === '\\x7f') box = box.slice(0, -1);
     else if (c === '\\x15') { const j = box.lastIndexOf('\\n'); box = j < 0 ? '' : box.slice(0, j + 1); }
     else if (c === '\\x05' || c === '\\t') { /* end / tab: nothing here */ }
@@ -2042,6 +2044,28 @@ test('a message for an agent never joins a draft: it goes past one that sat stil
   await until(async () => (await got()).includes('and another'), 15000, 'the next message past the same draft');
   await until(async () => (await box()) === 'my draft', 8000, 'the draft back again');
 
+  // 2a. Ctrl+S that does nothing: pressed once, not again on every pass,
+  //     until the box changes.
+  await typeIn('\x15');
+  await until(async () => (await box()) === '', 5000, 'the box cleared');
+  await fs.writeFile(path.join(dir, 'NOSTASH'), '1');
+  const presses = async () => { try { return (await fs.readFile(path.join(dir, 'ctrl-s.log'), 'utf8')).length / 2; } catch { return 0; } };
+  const before = await presses();
+  await typeIn('stuck draft');
+  await until(async () => (await box()) === 'stuck draft', 5000, 'the stuck draft');
+  await send('behind a stuck draft');
+  await until(async () => (await presses()) > before, 15000, 'one Ctrl+S');
+  await delay(9000);
+  assert.equal(await presses(), before + 1, 'pressed once, not on every pass');
+  assert.equal(await box(), 'stuck draft');
+  assert.ok(!(await got()).includes('behind a stuck draft'));
+  await fs.rm(path.join(dir, 'NOSTASH'));
+  await typeIn('!');
+  await until(async () => (await got()).includes('behind a stuck draft'), 20000, 'the message once the box changed');
+  await until(async () => (await box()) === 'stuck draft!', 8000, 'that draft back');
+  await typeIn('\x15');
+  await until(async () => (await box()) === '', 5000, 'the box cleared');
+
   // 2b. An agent with no stash (Codex): hop takes the draft out, sends, and
   //     types the draft back.
   await fs.writeFile(path.join(sessDir, `${internal}.turn`), JSON.stringify({ sessionId: 'fake-conv', agent: 'codex', at: new Date(Date.now() - 60_000).toISOString() }));
@@ -2078,7 +2102,7 @@ test('a message for an agent never joins a draft: it goes past one that sat stil
   const third = await send('after your turn');
   assert.equal(third.data.status, 'queued');
   await delay(5000);
-  assert.deepEqual(await got(), ['hello agent', 'second message', 'and another', 'to codex', 'untangle me please'], 'not typed mid-turn');
+  assert.deepEqual(await got(), ['hello agent', 'second message', 'and another', 'behind a stuck draft', 'to codex', 'untangle me please'], 'not typed mid-turn');
   assert.equal(await box(), '', 'nothing waiting inside the box');
   await fs.rm(path.join(dir, 'BUSY'));
   await stamp('turn', Date.now() + 1000);

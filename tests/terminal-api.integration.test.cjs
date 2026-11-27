@@ -164,8 +164,10 @@ async function launchDaemon(previousState = null) {
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true
   });
-  child.stdout.on('data', (chunk) => output.push(chunk.toString('utf8')));
-  child.stderr.on('data', (chunk) => output.push(chunk.toString('utf8')));
+  // HOP_TEST_DAEMON_LOG=<file> keeps the daemon's output for a failure to be read.
+  const keep = (chunk) => { output.push(chunk.toString('utf8')); if (process.env.HOP_TEST_DAEMON_LOG) require('fs').appendFileSync(process.env.HOP_TEST_DAEMON_LOG, chunk); };
+  child.stdout.on('data', keep);
+  child.stderr.on('data', keep);
   child.once('exit', (code) => { exitCode = code; });
   child.unref();
   daemonPid = child.pid;
@@ -210,6 +212,8 @@ async function startDaemon() {
     HOP_HOME: hopHome,
     HOP_NO_TUNNEL: '1',
     HOP_NO_UPDATE_CHECK: '1',
+    // A draft in an agent's box is set aside once it has sat still this long.
+    HOP_DRAFT_SETTLED_MS: '3000',
     // Never the real ~/.codex: tests plant their own rollouts here.
     CODEX_HOME: path.join(tempDir, 'codex_home'),
     // …nor the real ~/.gemini (agy's hooks and conversations), nor the real
@@ -1926,6 +1930,8 @@ const FAKE_CLAUDE = `
 const fs = require('fs'); const path = require('path');
 const dir = process.argv[2];
 let box = ''; const log = []; let lastBusy = null;
+// Claude Code's Ctrl+S: one stashed draft, back by itself on the next submit.
+let stash = null;
 const busyNow = () => fs.existsSync(path.join(dir, 'BUSY'));
 process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.setEncoding('utf8');
 const draw = () => {
@@ -1953,8 +1959,13 @@ process.stdin.on('data', (d) => {
     if (c === '\\x1b') { while (i + 1 < d.length && !/[A-Za-z~u]/.test(d[i + 1])) i++; i++; continue; }
     if (c === '\\r') {
       if (!fs.existsSync(path.join(dir, 'STUCK')) && box.trim()) {
-        fs.appendFileSync(path.join(dir, 'got.log'), box + '\\n'); log.push('* got: ' + box); box = '';
+        fs.appendFileSync(path.join(dir, 'got.log'), box + '\\n'); log.push('* got: ' + box);
+        const slash = box.trim().startsWith('/');
+        box = '';
+        if (stash !== null && !slash) { box = stash; stash = null; }
       }
+    } else if (c === '\\x13') {
+      if (box.trim()) { stash = box; box = ''; } else if (stash !== null) { box = stash; stash = null; }
     } else if (c === '\\x7f') box = box.slice(0, -1);
     else if (c === '\\x15') { const j = box.lastIndexOf('\\n'); box = j < 0 ? '' : box.slice(0, j + 1); }
     else if (c === '\\x05' || c === '\\t') { /* end / tab: nothing here */ }
@@ -1966,7 +1977,7 @@ setInterval(() => { if (busyNow() !== lastBusy) draw(); }, 250);
 draw();
 `;
 
-test('a message for an agent is typed only into an empty input box, waits out a turn, and is never left there unsent', async () => {
+test('a message for an agent never joins a draft: it goes past one that sat still and puts it back, waits out a turn, and is never left unsent', async () => {
   const dir = path.join(tempDir, 'fake-claude');
   await fs.mkdir(dir, { recursive: true });
   const script = path.join(dir, 'fake-claude.js');
@@ -2008,23 +2019,46 @@ test('a message for an agent is typed only into an empty input box, waits out a 
   assert.deepEqual(await got(), ['hello agent']);
   assert.equal(await box(), '');
 
-  // 2. Someone's draft in the box: the message waits, and never joins it.
+  // 2. Someone's draft in the box: the message never joins it. While the
+  //    draft is changing it waits; once the draft has sat still, Claude's
+  //    Ctrl+S sets it aside, the message goes exactly as written, and the
+  //    draft comes back.
   await typeIn('my draft');
   await until(async () => (await box()) === 'my draft', 5000, 'the draft');
   const second = await send('second message');
   assert.equal(second.data.status, 'queued');
-  assert.match(second.data.reason, /input box has text/);
-  await delay(4000);
+  assert.match(second.data.reason, /typing in the input box/);
   assert.equal(await box(), 'my draft', 'the draft is untouched');
   assert.deepEqual(await got(), ['hello agent'], 'nothing submitted over the draft');
   const q = await queued();
   assert.equal(q.length, 1);
   assert.equal(q[0].from, 'test');
-  // The draft goes away: the message follows within seconds.
-  await typeIn('\x15');
-  await until(async () => (await got()).includes('second message'), 20000, 'the queued message to go');
-  assert.deepEqual(await got(), ['hello agent', 'second message']);
+  await until(async () => (await got()).includes('second message'), 20000, 'the queued message to go past the draft');
+  assert.deepEqual(await got(), ['hello agent', 'second message'], 'the message alone, not the draft');
+  await until(async () => (await box()) === 'my draft', 8000, 'the draft back in the box');
   await until(async () => (await queued()).length === 0, 8000, 'the queue to empty');
+  // A second message behind it does not wait again: the draft has sat still.
+  const again = await send('and another');
+  await until(async () => (await got()).includes('and another'), 15000, 'the next message past the same draft');
+  await until(async () => (await box()) === 'my draft', 8000, 'the draft back again');
+
+  // 2b. An agent with no stash (Codex): hop takes the draft out, sends, and
+  //     types the draft back.
+  await fs.writeFile(path.join(sessDir, `${internal}.turn`), JSON.stringify({ sessionId: 'fake-conv', agent: 'codex', at: new Date(Date.now() - 60_000).toISOString() }));
+  await typeIn('\x15');
+  await until(async () => (await box()) === '', 5000, 'the box cleared');
+  await typeIn('codex draft');
+  await until(async () => (await box()) === 'codex draft', 5000, 'the codex draft');
+  await send('to codex');
+  await until(async () => (await got()).includes('to codex'), 20000, 'the message past the codex draft');
+  assert.equal((await got()).filter((l) => l.includes('codex draft')).length, 0, 'the draft was never submitted');
+  await until(async () => (await box()) === 'codex draft', 8000, 'the codex draft typed back');
+  // Kept on disk while it was out of the box; gone once it is back.
+  const setAside = async () => JSON.parse(await fs.readFile(path.join(hopHome, 'set-aside-drafts.json'), 'utf8')).items;
+  await until(async () => (await setAside()).length === 0, 8000, 'the saved copy of the draft to go once it is back');
+  await stamp('turn', Date.now() - 60_000);
+  await typeIn('\x15');
+  await until(async () => (await box()) === '', 5000, 'the box cleared');
 
   // 3. A busy agent: queued, then typed when its turn ends.
   await fs.writeFile(path.join(dir, 'BUSY'), '1');
@@ -2033,7 +2067,7 @@ test('a message for an agent is typed only into an empty input box, waits out a 
   const third = await send('after your turn');
   assert.equal(third.data.status, 'queued');
   await delay(5000);
-  assert.deepEqual(await got(), ['hello agent', 'second message'], 'not typed mid-turn');
+  assert.deepEqual(await got(), ['hello agent', 'second message', 'and another', 'to codex'], 'not typed mid-turn');
   assert.equal(await box(), '', 'nothing waiting inside the box');
   await fs.rm(path.join(dir, 'BUSY'));
   await stamp('turn', Date.now() + 1000);

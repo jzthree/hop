@@ -9197,6 +9197,114 @@ async function clearOwnText(entry, internalName, message) {
     }
     return false;
 }
+// ---- A draft in the box: set aside, message sent, draft put back ----------
+// A message used to wait for an empty box, so a draft left there (often for
+// hours) held it and every message after it. Now, once the draft has sat
+// unchanged a while (nobody is mid-sentence), hop sets it aside, sends the
+// message exactly as written, and puts the draft back:
+//  - Claude Code: its own Ctrl+S stash. It keeps the draft whole (pasted
+//    blocks, images, cursor, mode) and puts it back by itself when the next
+//    prompt is submitted; after a slash command, a second Ctrl+S on the
+//    empty box does.
+//  - Codex and agy have no stash: hop reads the draft, takes it out, and types
+//    it back, so only plain text it can read whole (no pasted-block or image
+//    placeholder, short enough to go back in as text). Until it is back, the
+//    draft is also kept in set-aside-drafts.json, so it is never lost.
+const DRAFT_SETTLED_MS = Math.max(1000, Number(process.env.HOP_DRAFT_SETTLED_MS) || 20_000);
+const DRAFT_RETYPE_MAX = 900;
+const DRAFT_RETYPE_ROWS = 6;
+const draftSightings = new Map(); // session -> { key, since }
+/** True once this same draft has sat in the box DRAFT_SETTLED_MS. */
+function draftSettled(session, full, now = Date.now()) {
+    const key = solid(full.text);
+    const seen = draftSightings.get(session);
+    if (!seen || seen.key !== key) { draftSightings.set(session, { key, since: now }); return false; }
+    return now - seen.since >= DRAFT_SETTLED_MS;
+}
+/** How a draft can be set aside in this agent's box: { how } or { reason } to wait. */
+function draftAsidePlan(agent, full) {
+    if (agent === 'claude') return { how: 'stash' };
+    if (full.collapsed) return { reason: "waiting: the input box holds a pasted block or image, which hop can't set aside and put back" };
+    // Long, or taller than the box shows whole (a tall draft scrolls inside
+    // it): what hop can read would not be all of it.
+    if (full.text.length > DRAFT_RETYPE_MAX || full.rows > DRAFT_RETYPE_ROWS) return { reason: 'waiting: the input box has a long draft in it' };
+    return { how: 'retype' };
+}
+const SET_ASIDE_FILE = path.join(HOME_DIR, 'set-aside-drafts.json');
+function noteSetAsideDraft(session, text, state) {
+    let items = [];
+    try { items = JSON.parse(fs.readFileSync(SET_ASIDE_FILE, 'utf8')).items || []; } catch (e) { /* none yet */ }
+    const at = Date.now();
+    const i = items.findIndex((x) => x.session === session && x.text === text && x.state === 'aside');
+    if (i >= 0) items[i] = { ...items[i], state, at };
+    else items.push({ session, name: getSessionDisplayName(session) || session, text, state, at });
+    // Kept: the ones not put back, for a week; the rest go.
+    items = items.filter((x) => x.state !== 'restored' && at - x.at < 7 * 86_400_000).slice(-50);
+    try { writePrivateFile(SET_ASIDE_FILE, JSON.stringify({ items }, null, 2)); } catch (e) { /* the log line still says */ }
+}
+/** Take the draft out of the box. → { ok } or { ok: false, reason }. */
+async function setDraftAside(entry, session, agent, aside) {
+    entry.lastTouchedAt = Date.now();
+    if (aside.how === 'stash') {
+        sendTerminalInput(entry, '\x13');
+        await sleepMs(500);
+        const r = await readRoomComposer(session, agent);
+        if (r && r.state.found && r.state.isEmpty) return { ok: true };
+        // Ctrl+S did nothing (rebound, or a Claude without the stash): the draft is as it was.
+        return { ok: false, reason: "waiting: the input box has text in it (Claude's Ctrl+S didn't set it aside)" };
+    }
+    noteSetAsideDraft(session, aside.text, 'aside');
+    if (await clearOwnText(entry, session, aside.text)) return { ok: true };
+    const r = await readRoomComposer(session, agent);
+    if (r && r.full.found && solid(r.full.text) === solid(aside.text)) {
+        noteSetAsideDraft(session, aside.text, 'restored');
+        return { ok: false, reason: "waiting: the input box has text in it (hop couldn't take it out)" };
+    }
+    // Part of it came out: put the whole draft back over what is left.
+    await clearOwnText(entry, session, aside.text);
+    const back = await putDraftBack(entry, session, agent, aside);
+    return { ok: false, reason: back ? "waiting: the input box has text in it (hop couldn't take it out)" : 'hop could not take the draft out of the input box whole; it is saved in set-aside-drafts.json' };
+}
+/**
+ * Put the draft back once the message has gone: only into an empty box (a
+ * box with anything else in it is someone's — Ctrl+S there would stash it
+ * over the draft). True when the box shows the draft again.
+ */
+async function putDraftBack(entry, session, agent, aside) {
+    const same = (r) => !!r && r.full.found && solid(r.full.text) === solid(aside.text);
+    // The delivery's attach, unless the idle reaper closed it during the
+    // message's pauses: then one of its own for this.
+    let own = null;
+    const writer = async () => {
+        if (terminalApiSessions.has(entry.id)) { entry.lastTouchedAt = Date.now(); return entry; }
+        if (!own) {
+            own = await attachTerminalApiClient(session, getSessionDisplayName(session) || session, { actor: 'system', label: 'draft back', typeOnly: true });
+            try { await Promise.race([own?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
+            await sleepMs(300);
+        }
+        return own;
+    };
+    let r = null;
+    try {
+        for (let attempt = 0; attempt < 3; attempt++) {
+            await sleepMs(attempt ? 900 : 400);
+            r = await readRoomComposer(session, agent);
+            if (same(r)) break;
+            if (!r || !r.state.found) continue;
+            if (!r.state.isEmpty) break;
+            const w = await writer();
+            if (aside.how === 'stash') sendTerminalInput(w, '\x13');
+            else await sendTerminalInput(w, aside.text);
+        }
+        r = await readRoomComposer(session, agent);
+    } finally {
+        if (own) { try { closeTerminalApiEntry(own.id); } catch (e) { /* closed */ } }
+    }
+    const ok = same(r);
+    if (aside.how === 'retype') noteSetAsideDraft(session, aside.text, ok ? 'restored' : 'lost');
+    if (!ok) log(`[checkback] ${getSessionDisplayName(session) || session}: the draft set aside was not put back${aside.how === 'stash' ? " (Claude's Ctrl+S brings it back)" : ` (kept in ${SET_ASIDE_FILE})`}`, YELLOW);
+    return ok;
+}
 const deliveriesInFlight = new Set();
 // Who a message is from, for the line typed before it (lib/messages.js): a
 // session, or an agent with none (outside hop). The person: nobody.
@@ -9223,6 +9331,7 @@ async function deliverIntoAgent(cb, entry, phase) {
         // A shell gets its command as written; an agent hears who sent it.
         const typed = gated ? messages.typedText(cb) : cb.message;
         let alreadyTyped = false;
+        let aside = null; // the person's draft, set aside for this message: { text, how }
         if (gated) {
             const a = await readRoomComposer(cb.session, agent);
             if (a) {
@@ -9237,13 +9346,21 @@ async function deliverIntoAgent(cb, entry, phase) {
                 // sent (an earlier delivery, an agent's `hopa send` before it
                 // pressed Enter): send that rather than wait behind it forever.
                 if (!a.state.isEmpty && boxIsOnly(a.full, typed)) alreadyTyped = true;
-                else if (!a.state.isEmpty) return { ok: false, reason: 'waiting: the input box has text in it' };
+                else if (!a.state.isEmpty) {
+                    // Someone's draft: set aside once it has sat still (see draftAsidePlan).
+                    const plan = draftAsidePlan(agent, a.full);
+                    if (!plan.how) return { ok: false, reason: plan.reason };
+                    // ("Send now" means now: no waiting for the draft to sit still.)
+                    if (!draftSettled(cb.session, a.full) && !cb.sendNow) return { ok: false, reason: 'waiting: someone is typing in the input box' };
+                    aside = { text: a.full.text, how: plan.how };
+                }
                 // The same a moment later too: nobody is mid-word.
                 await sleepMs(1200);
                 const b = await readRoomComposer(cb.session, agent);
                 if (b && b.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
                 if (b && !b.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
-                if (b && (alreadyTyped ? !boxIsOnly(b.full, typed) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
+                if (b && aside && solid(b.full.text) !== solid(aside.text)) return { ok: false, reason: 'waiting: someone is typing in the input box' };
+                if (b && !aside && (alreadyTyped ? !boxIsOnly(b.full, typed) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
             }
         }
         // Forced into a busy Codex, a check-back queues there (Tab); "send
@@ -9255,38 +9372,55 @@ async function deliverIntoAgent(cb, entry, phase) {
             // is, or the text and the Enter leave in one burst.
             try { await Promise.race([e2?.adapter?.ready || Promise.resolve(), sleepMs(4000)]); } catch (e) { /* type anyway */ }
             await sleepMs(300);
-            if (alreadyTyped) {
-                log(`[checkback] ${cb.id}: its text was already in the input box, unsent; sending it`, YELLOW);
-            } else {
-                await sendTerminalInput(e2, typed);
-                // Codex folds keys within ~half a second of the text into a
-                // paste (measured: 400ms failed, 1s submitted).
-                await sleepMs(agent === 'codex' ? 1000 : 500);
+            if (aside) {
+                const set = await setDraftAside(e2, cb.session, agent, aside);
+                if (!set.ok) return { ok: false, reason: set.reason };
+                log(`[checkback] ${cb.id}: set the draft in ${entry.displayName || cb.session}'s input box aside (${aside.how === 'stash' ? "Claude's Ctrl+S" : 'hop types it back'}) to send this`, DIM);
             }
-            if (gated && !alreadyTyped) {
-                const t = await readRoomComposer(cb.session, agent);
-                if (t && t.full.found) {
-                    if (t.state.isEmpty) return { ok: false, reason: "the message didn't reach the input box; trying again" };
-                    if (boxJoinedTyping(t.full, typed)) {
-                        return { ok: false, mixed: true, reason: 'typing joined it in the input box, so it was not sent' };
+            try {
+                if (alreadyTyped) {
+                    log(`[checkback] ${cb.id}: its text was already in the input box, unsent; sending it`, YELLOW);
+                } else {
+                    await sendTerminalInput(e2, typed);
+                    // Codex folds keys within ~half a second of the text into a
+                    // paste (measured: 400ms failed, 1s submitted).
+                    await sleepMs(agent === 'codex' ? 1000 : 500);
+                }
+                if (gated && !alreadyTyped) {
+                    const t = await readRoomComposer(cb.session, agent);
+                    if (t && t.full.found) {
+                        if (t.state.isEmpty) return { ok: false, reason: "the message didn't reach the input box; trying again" };
+                        if (boxJoinedTyping(t.full, typed)) {
+                            return { ok: false, mixed: true, reason: 'typing joined it in the input box, so it was not sent' };
+                        }
                     }
                 }
+                sendTerminalInput(e2, submitKey);
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    await sleepMs(1500);
+                    const still = gated
+                        ? await (async () => {
+                            const r = await readRoomComposer(cb.session, agent);
+                            // The draft back in the box (Claude restores its stash on
+                            // submit) means the message went. A pasted block in it
+                            // reads like hop's own collapsed text: never press Enter on it.
+                            if (aside && r && r.full.found && solid(r.full.text) === solid(aside.text)) return false;
+                            return !!r && !r.state.isEmpty && boxStillHolds(r.full, typed);
+                        })()
+                        : await composerStillHolds(cb.session, typed);
+                    if (!still) return { ok: true };
+                    if (attempt < 2) sendTerminalInput(e2, submitKey);
+                }
+                // Never leave it typed and unsent.
+                const cleared = gated ? await clearOwnText(e2, cb.session, typed) : false;
+                return {
+                    ok: false, unsent: true,
+                    reason: cleared ? "it didn't submit, so hop took it back out of the input box; trying again" : "it didn't submit and is still in the input box"
+                };
+            } finally {
+                // Whatever happened to the message, the draft goes back.
+                if (aside) await putDraftBack(e2, cb.session, agent, aside);
             }
-            sendTerminalInput(e2, submitKey);
-            for (let attempt = 0; attempt < 3; attempt++) {
-                await sleepMs(1500);
-                const still = gated
-                    ? await (async () => { const r = await readRoomComposer(cb.session, agent); return !!r && !r.state.isEmpty && boxStillHolds(r.full, typed); })()
-                    : await composerStillHolds(cb.session, typed);
-                if (!still) return { ok: true };
-                if (attempt < 2) sendTerminalInput(e2, submitKey);
-            }
-            // Never leave it typed and unsent.
-            const cleared = gated ? await clearOwnText(e2, cb.session, typed) : false;
-            return {
-                ok: false, unsent: true,
-                reason: cleared ? "it didn't submit, so hop took it back out of the input box; trying again" : "it didn't submit and is still in the input box"
-            };
         } finally {
             try { closeTerminalApiEntry(e2.id); } catch (e) { /* closed */ }
         }

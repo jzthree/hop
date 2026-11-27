@@ -2693,3 +2693,75 @@ test('an agent attach is named after the session it comes from, and one agent ke
   assert.equal(mine.fromSession, watcher);
   assert.equal(listed.filter((t) => t.displayName === 'watched1' && t.fromSession === watcher).length, 1);
 });
+
+// Moving a session to another account restarts its agent. Closing the room
+// for that told everyone watching "Session ended" and took the session out
+// of every list until a new room came up — a session hop was carrying on
+// looked dead (2026-11-26). The agent is relaunched inside its own terminal:
+// whoever watches stays attached, sees a line saying what happened, and the
+// session is listed live throughout.
+test('a deliberate restart relaunches the agent inside its own terminal: watchers stay attached, nothing ends', async () => {
+  const create = await requestJson(state.port, state.sessionSecret, 'POST', '/api/terminals', { name: 'inplace1', cwd: tempDir }, agentHeaders);
+  assert.equal(create.status, 200);
+  const internal = create.data.sessionName;
+  const threadId = '01a14846-0000-7000-8000-0000000beef1';
+  const day = path.join(daemonEnv.CODEX_HOME, 'sessions', '2026', '11', '26');
+  await fs.mkdir(day, { recursive: true });
+  const rollout = path.join(day, `rollout-2026-11-26T10-00-00-${threadId}.jsonl`);
+  await fs.writeFile(rollout, JSON.stringify({ type: 'session_meta', timestamp: '2026-11-26T10:00:00Z', payload: { id: threadId, cwd: tempDir } }) + '\n');
+  const turnFile = path.join(hopHome, 'claude-sessions', `${internal}.turn`);
+  await fs.writeFile(turnFile, JSON.stringify({ sessionId: threadId, agent: 'codex', count: 1, at: new Date().toISOString() }), { mode: 0o600 });
+
+  // Someone watching, for the whole restart.
+  const events = [];
+  const watch = http.request({ hostname: '127.0.0.1', port: state.port, path: `/api/terminals/${create.data.id}/stream`, method: 'GET', headers: { Authorization: `Bearer ${state.sessionSecret}` } }, (res) => {
+    let buf = '';
+    res.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      let i;
+      while ((i = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, i).trim();
+        buf = buf.slice(i + 2);
+        if (block.startsWith('data:')) { try { events.push(JSON.parse(block.replace(/^data:\s*/, ''))); } catch (e) { /* partial */ } }
+      }
+    });
+  });
+  watch.on('error', () => {});
+  watch.end();
+  const text = () => events.filter((e) => e.type === 'output' || e.type === 'snapshot').map((e) => String(e.data || '')).join('');
+
+  // The shell has to be at its prompt before restore calls it idle.
+  let planned = false;
+  for (const deadline = Date.now() + 15000; Date.now() < deadline && !planned; await delay(400)) {
+    const plan = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { dryRun: true, only: [internal], replaceIdleAgent: true });
+    planned = (plan.data.restored || []).some((x) => x.name === 'inplace1');
+  }
+  assert.ok(planned, 'the idle session is planned for a restart');
+
+  // Listed live the whole time.
+  let missing = 0, polling = true;
+  const poll = (async () => {
+    while (polling) {
+      const s = await requestJson(state.port, state.sessionSecret, 'GET', '/api/sessions');
+      if (!(s.data.sessions || []).some((x) => x.internalName === internal && x.live)) missing += 1;
+      await delay(150);
+    }
+  })();
+  const r = await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/restore', { only: [internal], replaceIdleAgent: true });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.ok((r.data.restored || []).some((x) => x.name === 'inplace1'), JSON.stringify(r.data));
+  for (const deadline = Date.now() + 15000; Date.now() < deadline && !text().includes('stub codex:'); ) await delay(200);
+  polling = false;
+  await poll;
+  watch.destroy();
+
+  assert.match(text(), /hop is restarting Codex here/, 'the watcher is told what is happening');
+  assert.ok(text().includes('stub codex:') && text().includes(threadId), `the agent came back in the same terminal: ${JSON.stringify(text().slice(-400))}`);
+  assert.ok(text().indexOf('stub codex:') > text().indexOf('hop is restarting Codex here'));
+  assert.ok(!events.some((e) => e.type === 'session_ended'), 'the watcher never hears that the session ended');
+  assert.equal(missing, 0, 'the session never dropped out of the list');
+
+  await requestJson(state.port, state.sessionSecret, 'POST', '/api/sessions/delete', { name: internal, internalName: internal });
+  await fs.rm(rollout, { force: true });
+  await fs.rm(turnFile, { force: true });
+});

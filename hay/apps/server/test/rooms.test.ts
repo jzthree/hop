@@ -1345,3 +1345,115 @@ describe("device-key eviction", () => {
     expect(presence.clients.map((c: { id: string }) => c.id).sort()).toEqual(["a", "c"]);
   });
 });
+
+// A terminal whose kill() ends it, like a real one: the exit event follows.
+class ExitingPty extends FakePty {
+  exitHandlers: Array<(e: { exitCode: number; signal?: number }) => void> = [];
+  options: any;
+  holdExit = false;
+  constructor(options: any) { super(); this.options = options; }
+  onExit(handler: (e: { exitCode: number; signal?: number }) => void) {
+    this.exitHandlers.push(handler);
+    return { dispose: () => {} };
+  }
+  exit(code = 0) { for (const h of this.exitHandlers) h({ exitCode: code }); }
+  override kill() {
+    super.kill();
+    if (!this.holdExit) setTimeout(() => this.exit(1), 5);
+  }
+}
+
+describe("Room.respawn", () => {
+  const setup = () => {
+    const ptys: ExitingPty[] = [];
+    const factory: PtyFactory = (options) => {
+      const p = new ExitingPty(options);
+      ptys.push(p);
+      return p as any;
+    };
+    const manager = new RoomManager(factory);
+    const room = manager.getRoom("mover", { cols: 80, rows: 24 }, { cwd: "/tmp", command: "claude --resume a" });
+    const viewer = new FakeSocket();
+    room.attachClient({ id: "v", name: "Phone", colorIndex: 0, cols: 80, rows: 24 }, viewer);
+    return { ptys, manager, room, viewer };
+  };
+
+  it("relaunches in the same room: viewers stay, see the banner, never see the session end", async () => {
+    const { ptys, manager, room, viewer } = setup();
+    // The person's own size, which the new program must start at.
+    viewer.emitMessage({ type: "resize", cols: 132, rows: 41 });
+    viewer.emitMessage({ type: "input", data: "x" });
+    ptys[0].emit("\x1b[?1049h\x1b[?2004hold claude screen");
+    const result = await manager.respawnRoom("mover", {
+      command: "claude --resume a",
+      env: { CLAUDE_CONFIG_DIR: "/tmp/other" },
+      cwd: "/tmp/w",
+      banner: "\r\n── moved to the other account ──\r\n",
+      settleMs: 10
+    });
+    expect(result).toEqual({ ok: true });
+    expect(ptys).toHaveLength(2);
+    expect(ptys[0].killed).toBe(true);
+    expect(ptys[1].options).toMatchObject({ id: "mover", cols: 132, rows: 41, cwd: "/tmp/w", command: "claude --resume a" });
+    expect(ptys[1].options.env).toMatchObject({ CLAUDE_CONFIG_DIR: "/tmp/other", HOP_SESSION: "mover" });
+    expect(room.hasEnded()).toBe(false);
+    expect(manager.hasRoom("mover")).toBe(true);
+    ptys[1].emit("new claude screen");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(findMessages(viewer, "session_ended")).toHaveLength(0);
+    const out = findMessages(viewer, "output").map((m) => String(m.data)).join("");
+    // The alternate screen the old one left on is turned off before the banner.
+    expect(out.indexOf("\x1b[?1049l")).toBeGreaterThan(out.indexOf("old claude screen"));
+    expect(out.indexOf("moved to the other account")).toBeGreaterThan(out.indexOf("\x1b[?1049l"));
+    expect(out.indexOf("new claude screen")).toBeGreaterThan(out.indexOf("moved to the other account"));
+    // Typing reaches the new program.
+    viewer.emitMessage({ type: "input", data: "hi" });
+    expect(ptys[1].writes).toContain("hi");
+  });
+
+  it("late output and the exit of the replaced terminal are ignored", async () => {
+    const { ptys, manager, room, viewer } = setup();
+    await manager.respawnRoom("mover", { command: "claude", settleMs: 0 });
+    ptys[0].emit("ghost");
+    ptys[0].exit(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(room.hasEnded()).toBe(false);
+    expect(findMessages(viewer, "output").map((m) => String(m.data)).join("")).not.toContain("ghost");
+    // The new terminal's own exit still ends the room.
+    ptys[1].exit(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(room.hasEnded()).toBe(true);
+    expect(findMessages(viewer, "session_ended")).toHaveLength(1);
+  });
+
+  it("input between the old terminal's end and the new one's start goes nowhere", async () => {
+    const { ptys, manager, viewer } = setup();
+    const pending = manager.respawnRoom("mover", { command: "claude", settleMs: 40 });
+    await new Promise((r) => setTimeout(r, 20)); // old has exited, new not started
+    viewer.emitMessage({ type: "input", data: "lost" });
+    expect(ptys[0].writes).not.toContain("lost");
+    expect(await pending).toEqual({ ok: true });
+    expect(ptys[1].writes).not.toContain("lost");
+  });
+
+  it("gives up, leaving the room alone, when the old terminal will not end", async () => {
+    const { ptys, manager, room } = setup();
+    ptys[0].holdExit = true;
+    const result = await manager.respawnRoom("mover", { command: "claude", exitTimeoutMs: 1000 });
+    expect(result.ok).toBe(false);
+    expect(ptys).toHaveLength(1);
+    expect(room.hasEnded()).toBe(false);
+    // Its exit, when it finally comes, ends the room as any exit would.
+    ptys[0].exit(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(room.hasEnded()).toBe(true);
+  });
+
+  it("refuses an ended room and a second respawn in flight", async () => {
+    const { manager } = setup();
+    const first = manager.respawnRoom("mover", { command: "claude", settleMs: 30 });
+    expect(await manager.respawnRoom("mover", { command: "claude" })).toEqual({ ok: false, error: "already relaunching" });
+    expect((await first).ok).toBe(true);
+    expect((await manager.respawnRoom("nope", {})).ok).toBe(false);
+  });
+});

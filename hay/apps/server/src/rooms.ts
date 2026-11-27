@@ -127,6 +127,28 @@ export type RoomCreateOptions = {
   adoptReplay?: string;
 };
 
+/** What Room.respawn starts in place of the terminal's current program. */
+export type RoomRespawnOptions = {
+  cwd?: string;
+  env?: Record<string, string>;
+  shell?: string;
+  command?: string;
+  /** Written where the old program stopped, before the new one starts. */
+  banner?: string;
+  /** How long after the old terminal ends before the new one starts (ms). */
+  settleMs?: number;
+  /** How long the old terminal may take to end before giving up (ms). */
+  exitTimeoutMs?: number;
+};
+
+// Modes a program turns on and leaves on when it is killed rather than
+// quitting: the alternate screen, mouse and focus reporting, bracketed
+// paste, kitty keyboard, a hidden cursor, a synchronized update left open.
+// Turned off between a respawned terminal's old program and its new one, so
+// the banner shows on the normal screen and the new program starts clean.
+const RESPAWN_MODE_RESET =
+  "\x1b[?2026l\x1b[0m\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?2031l\x1b[<u\x1b[>4m\x1b[?25h";
+
 export type RoomSummary = {
   id: string;
   cwd: string;
@@ -408,6 +430,12 @@ export class Room extends EventEmitter {
   private oscBuffer = "";
   private cleanupTimer: NodeJS.Timeout | null = null;
   private ended = false;
+  // Set while respawn() is replacing the terminal: the old one's exit starts
+  // the new one instead of ending the room.
+  private onReplacedExit: (() => void) | null = null;
+  // Between the old terminal's end and the new one's start: input has
+  // nowhere to go.
+  private respawning = false;
   private cwdPollTimer: NodeJS.Timeout | null = null;
   // False until the first client attaches: that client is the one whose
   // connect created the room, so its hello carries created=true.
@@ -456,7 +484,19 @@ export class Room extends EventEmitter {
       this.lastActivityAt = now();
     }
 
-    this.pty.onData((data: string) => {
+    this.wirePty(this.pty);
+
+    // Start PID-based cwd polling as fallback for shells without OSC 7
+    this.startCwdPolling();
+  }
+
+  /**
+   * Output and exit of ONE terminal. A terminal respawn() replaced says
+   * nothing more: its late output and its exit belong to no one.
+   */
+  private wirePty(pty: IPty) {
+    pty.onData((data: string) => {
+      if (pty !== this.pty) return;
       this.lastActivityAt = now();
       this.appendOutput(data);
       this.updateTerminalState(data);
@@ -467,17 +507,26 @@ export class Room extends EventEmitter {
     });
 
     const handleExit = (exitCode?: number | null, signal?: number | string) => {
+      if (pty !== this.pty) return;
       const normalizedExit = Number.isFinite(exitCode) ? Number(exitCode) : null;
       const normalizedSignal = signal !== undefined && signal !== null ? String(signal) : null;
       console.log(
         `[hay] PTY exit room=${this.id} code=${normalizedExit ?? "null"} signal=${normalizedSignal ?? "null"}`
       );
+      // Ended on purpose, to start another in its place (respawn): the room
+      // and everyone in it carry on.
+      if (this.onReplacedExit) {
+        const next = this.onReplacedExit;
+        this.onReplacedExit = null;
+        next();
+        return;
+      }
       // Spurious-exit guard: an exit event with the shell still alive must not
       // end the session — a wrongly `ended` room keeps serving output but its
       // cwd poll and cleanup are permanently dead (observed live: a restored
       // session whose cwd froze for hours while the shell ran fine). If the
       // pid still exists shortly after the event, ignore it.
-      const pid = (this.pty as unknown as { pid?: number }).pid;
+      const pid = (pty as unknown as { pid?: number }).pid;
       const finish = () => this.endSession({
         exitCode: normalizedExit,
         signal: normalizedSignal,
@@ -497,23 +546,96 @@ export class Room extends EventEmitter {
       }, 150);
     };
 
-    if (typeof this.pty.onExit === "function") {
-      this.pty.onExit((event) => {
+    if (typeof pty.onExit === "function") {
+      pty.onExit((event) => {
         handleExit(event.exitCode, event.signal);
       });
     } else {
       // Legacy fallback ONLY when onExit is unavailable — registering both
       // fired every real exit twice.
-      const legacyOn = (this.pty as unknown as { on?: (event: string, handler: (...args: any[]) => void) => void }).on;
+      const legacyOn = (pty as unknown as { on?: (event: string, handler: (...args: any[]) => void) => void }).on;
       if (typeof legacyOn === "function") {
-        legacyOn.call(this.pty, "exit", (exitCode: number, signal?: number) => {
+        legacyOn.call(pty, "exit", (exitCode: number, signal?: number) => {
           handleExit(exitCode, signal);
         });
       }
     }
+  }
 
-    // Start PID-based cwd polling as fallback for shells without OSC 7
-    this.startCwdPolling();
+  /**
+   * Start another program in this terminal's place without ending the room.
+   * The old terminal is ended; once it has gone (and `settleMs` more, for
+   * what ran on it to finish dying), `banner` is written below the old
+   * screen and the new one starts at the room's current size. Everyone
+   * attached stays attached, and the screen and scrollback stay.
+   *
+   * Closing the room and opening a new one to relaunch an agent (moving a
+   * session to another account) told every viewer "Session ended" and took
+   * the session out of every list until the new room came up: from the
+   * person's side, a session hop was carrying on looked dead (2026-11-26).
+   */
+  respawn(ptyFactory: PtyFactory, options: RoomRespawnOptions = {}): Promise<{ ok: boolean; error?: string }> {
+    if (this.ended) return Promise.resolve({ ok: false, error: "the session has ended" });
+    if (this.onReplacedExit || this.respawning) return Promise.resolve({ ok: false, error: "already relaunching" });
+    const old = this.pty;
+    return new Promise((resolve) => {
+      let giveUp: NodeJS.Timeout | null = null;
+      const start = () => {
+        this.respawning = false;
+        if (this.ended) { resolve({ ok: false, error: "the session has ended" }); return; }
+        this.injectOutput(RESPAWN_MODE_RESET + (options.banner || ""));
+        let next: IPty;
+        try {
+          next = ptyFactory({
+            id: this.id,
+            cols: this.activeCols,
+            rows: this.activeRows,
+            cwd: options.cwd || this.liveCwd || this.initialCwd,
+            env: { ...(options.env || {}), HOP_SESSION: this.id },
+            shell: options.shell,
+            command: options.command
+          });
+        } catch (e) {
+          this.endSession({ exitCode: null, signal: null, message: "Session ended" });
+          resolve({ ok: false, error: `could not start the new terminal: ${(e as Error)?.message || e}` });
+          return;
+        }
+        this.pty = next;
+        this.foregroundProcess = "";
+        this.osc7Seen = false;
+        this.wirePty(next);
+        console.log(`[hay] room=${this.id} relaunched in place`);
+        resolve({ ok: true });
+      };
+      this.onReplacedExit = () => {
+        if (giveUp) { clearTimeout(giveUp); giveUp = null; }
+        this.respawning = true;
+        setTimeout(start, Math.max(0, options.settleMs ?? 2000));
+      };
+      // The old terminal would not end: leave the room as it is (its exit,
+      // whenever it comes, ends the room as any exit would).
+      giveUp = setTimeout(() => {
+        giveUp = null;
+        if (!this.onReplacedExit) return;
+        this.onReplacedExit = null;
+        resolve({ ok: false, error: "the old terminal did not end" });
+      }, Math.max(1000, options.exitTimeoutMs ?? 10_000));
+      try {
+        old.kill();
+      } catch {
+        /* already gone: its exit event still comes */
+      }
+    });
+  }
+
+  /** Output that hop itself writes into the terminal (respawn's banner): as if the program had printed it. */
+  private injectOutput(data: string) {
+    if (!data) return;
+    this.lastActivityAt = now();
+    this.appendOutput(data);
+    this.updateTerminalState(data);
+    this.queueOutput(data);
+    this.emit("pty_output", { roomId: this.id, data, timestamp: now() });
   }
 
   attachClient(info: ClientInfo, socket: SocketAdapter) {
@@ -1081,6 +1203,8 @@ export class Room extends EventEmitter {
 
   sendSystemInput(data: string, source = "system") {
     if (!data) return;
+    // Mid-respawn there is no program to type into yet.
+    if (this.respawning) return;
     this.pty.write(data);
     this.emit("pty_input", {
       roomId: this.id,
@@ -1126,6 +1250,8 @@ export class Room extends EventEmitter {
         this.applySize(client, client.cols, client.rows, `typed ${inputShape(data)}`);
       }
     }
+    // Mid-respawn there is no program to type into yet.
+    if (this.respawning) return;
     this.pty.write(data);
     this.emit("pty_input", { roomId: this.id, clientId: client.id, data, timestamp: now() });
   }
@@ -1217,7 +1343,8 @@ export class Room extends EventEmitter {
 
   private applySize(client: ClientState, cols: number, rows: number, why: string) {
     if (cols !== this.activeCols || rows !== this.activeRows) this.noteResize(client, cols, rows, why);
-    this.pty.resize(cols, rows);
+    // Mid-respawn the old terminal is gone; the new one starts at activeCols×activeRows.
+    if (!this.respawning) this.pty.resize(cols, rows);
     this.activeCols = cols;
     this.activeRows = rows;
     this.grid?.resize(cols, rows);
@@ -1780,6 +1907,17 @@ export class RoomManager {
     this.rooms.set(roomId, room);
     room.resumeAfterAdopt();
     return room;
+  }
+
+  /**
+   * Relaunch a live room's program in place (Room.respawn) through this
+   * manager's terminal factory — an adopted room's own factory only hands
+   * back the terminal it adopted.
+   */
+  respawnRoom(roomId: string, options: RoomRespawnOptions): Promise<{ ok: boolean; error?: string }> {
+    const room = this.rooms.get(roomId);
+    if (!room || room.hasEnded()) return Promise.resolve({ ok: false, error: "no such session" });
+    return room.respawn(this.ptyFactory, options);
   }
 
   closeRoom(roomId: string) {

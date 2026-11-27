@@ -1,7 +1,7 @@
 // Termshare Server Library
 // Export everything needed for embedding into other apps
 
-export { Room, RoomManager, setDefaultViewerColors, getDefaultViewerColors, type SocketAdapter, type ClientInfo, type RoomSummary } from "./rooms";
+export { Room, RoomManager, setDefaultViewerColors, getDefaultViewerColors, type SocketAdapter, type ClientInfo, type RoomSummary, type RoomRespawnOptions } from "./rooms";
 export { createPty, resolveSpawn, type PtyFactory } from "./pty";
 export { KeeperClient, KeeperPty, type KeeperItem } from "./keeper";
 export { sanitizeName, sanitizeRoom } from "./utils";

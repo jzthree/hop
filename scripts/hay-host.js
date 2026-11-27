@@ -501,6 +501,36 @@ async function main() {
             res.end(JSON.stringify(result));
             return;
         }
+        // Relaunch a room's program in place (Room.respawn): the daemon moving
+        // a session to another account. Viewers stay attached and keep the
+        // screen; closing the room for this told each of them it had ended.
+        const respawnMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)\/respawn$/);
+        if (respawnMatch && req.method === 'POST') {
+            const roomId = hay.sanitizeRoom(decodeURIComponent(respawnMatch[1]));
+            const send = (code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+            if (!roomId || typeof rooms.respawnRoom !== 'function') { send(404, { error: 'Not found' }); return; }
+            let body;
+            try { body = await readJsonBody(req); } catch (e) { send(400, { error: 'Invalid request' }); return; }
+            const str = (v) => (typeof v === 'string' && v.trim() ? v : undefined);
+            const num = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : undefined);
+            const cwd = str(body.cwd);
+            try {
+                const result = await rooms.respawnRoom(roomId, {
+                    cwd: cwd ? existingCwdOr(cwd, FALLBACK_CWD) : undefined,
+                    env: normalizeEnv(body.env),
+                    shell: str(body.shell),
+                    command: str(body.command),
+                    banner: typeof body.banner === 'string' ? body.banner.slice(0, 2000) : undefined,
+                    settleMs: num(body.settleMs),
+                    exitTimeoutMs: num(body.exitTimeoutMs)
+                });
+                send(result.ok ? 200 : 409, result);
+            } catch (err) {
+                console.error(`[hay-host] Error relaunching room "${roomId}":`, err);
+                send(500, { error: 'Failed to relaunch the room' });
+            }
+            return;
+        }
         const deleteRoomMatch = reqUrl.pathname.match(/^\/rooms\/([^/]+)$/);
         if (deleteRoomMatch && req.method === 'DELETE') {
             const roomId = hay.sanitizeRoom(decodeURIComponent(deleteRoomMatch[1]));

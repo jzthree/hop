@@ -10408,6 +10408,32 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
     // an explicit delete removes them), so the standard plan then applies.
     const skipped = [];
     let onlySet = null;
+    // Close a live room so it can be opened again on its relaunch command.
+    const closeForRelaunch = async (internalName) => {
+        // Snapshot the restore records before the close. A host that
+        // predates ?preserve=1 deletes them on session_end; rewrite
+        // whatever went missing so the plan below still sees them.
+        const backups = {};
+        for (const ext of ['json', 'turn', 'meta', 'agy']) {
+            const f = path.join(CLAUDE_SESSIONS_DIR, `${internalName}.${ext}`);
+            try { backups[f] = fs.readFileSync(f); } catch (e) { /* absent */ }
+        }
+        const closed = await terminateExternalHaySession(internalName, { preserveRecords: true });
+        for (const [f, buf] of Object.entries(backups)) {
+            try { fs.accessSync(f); } catch (e) {
+                try { writePrivateFile(f, buf, 0o600); } catch (e2) { /* best effort */ }
+            }
+        }
+        return closed;
+    };
+    // A deliberate restart (an account move, Codex's helper pile-up) of a
+    // live session relaunches its agent INSIDE the room it runs in, below:
+    // everyone watching stays attached and keeps the screen. Closing the
+    // room for it told each viewer "Session ended" and dropped the session
+    // from every list until the new room came up — a session hop was
+    // carrying on looked dead (Jian, 2026-11-26). A host without in-place
+    // relaunch still gets the close.
+    const inPlace = new Set();
     if (Array.isArray(only) && only.length) {
         const { resolved, unknown } = resolveRestoreTargets(only, snapshot);
         for (const name of unknown) skipped.push({ name, reason: 'no such session' });
@@ -10426,20 +10452,12 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 continue;
             }
             if (dryRun) { live.delete(internalName); continue; }
-            // Snapshot the restore records before the close. A host that
-            // predates ?preserve=1 deletes them on session_end; rewrite
-            // whatever went missing so the plan below still sees them.
-            const backups = {};
-            for (const ext of ['json', 'turn', 'meta', 'agy']) {
-                const f = path.join(CLAUDE_SESSIONS_DIR, `${internalName}.${ext}`);
-                try { backups[f] = fs.readFileSync(f); } catch (e) { /* absent */ }
+            if (replaceIdleAgent && isExternalTerminalBackend()) {
+                inPlace.add(internalName);
+                live.delete(internalName);
+                continue;
             }
-            const closed = await terminateExternalHaySession(internalName, { preserveRecords: true });
-            for (const [f, buf] of Object.entries(backups)) {
-                try { fs.accessSync(f); } catch (e) {
-                    try { writePrivateFile(f, buf, 0o600); } catch (e2) { /* best effort */ }
-                }
-            }
+            const closed = await closeForRelaunch(internalName);
             if (!closed) {
                 skipped.push({ name: display, reason: 'could not close the old room' });
                 onlySet.delete(internalName);
@@ -10558,8 +10576,31 @@ async function restoreSavedSessionsUnlocked({ dryRun = false, includeAgents = fa
                 : SESSION_RESTORED_SEPARATOR;
             if (buf) seedOutput = sanitizeSeedBuffer(buf) + separator;
         }
+        if (inPlace.has(p.internalName)) {
+            const move = accountSwitches.get(p.internalName);
+            const agentTitle = AGENT_TITLE[p.agent] || 'the agent';
+            const banner = move
+                ? `\r\n\x1b[2m──── hop moved this session to the ${move.to} ${move.agent} account${move.why ? ` (${move.why})` : ''} — ${move.agent} restarts here with the same conversation ────\x1b[0m\r\n`
+                : `\r\n\x1b[2m──── hop is restarting ${agentTitle} here — the same conversation carries on ────\x1b[0m\r\n`;
+            const r = await relaunchExternalRoomInPlace(p.internalName, { command: p.command || undefined, cwd: p.cwd, shell: p.shell, env: p.env, banner });
+            if (r.ok) {
+                log(`  ${p.displayName}: relaunched in its own terminal`, DIM);
+            } else {
+                // Not in place (a host that predates it, or the old program
+                // would not end): close and open it again, as before.
+                if (!r.unsupported) log(`  ${p.displayName}: could not relaunch in place (${r.error}) — closing it to restart it`, YELLOW);
+                if (!(await closeForRelaunch(p.internalName))) {
+                    skipped.push({ name: p.displayName, reason: 'could not close the old room' });
+                    continue;
+                }
+                // The keeper ends the old terminal a beat after the room closes (see closedAny).
+                await new Promise((r2) => setTimeout(r2, 2000));
+            }
+        }
         let entry;
         try {
+            // In place: the room is already there, so this only attaches the
+            // verifier below (no size claim — the room keeps its viewers' size).
             entry = await attachTerminalApiClient(p.internalName, p.displayName, {
                 actor: 'user', cwd: p.cwd, cols: p.cols, rows: p.rows, shell: p.shell, env: p.env,
                 createdBy: p.createdBy, agentPermitted: p.agentPermitted, folderId: p.folderId,
@@ -13963,6 +14004,44 @@ async function waitForExternalHaySessionClosed(sessionName, hostPort = null, tim
     }
     const finalRooms = await fetchExternalHayRuntimeRoomsFromHost({ port: targetPort, scoped: true });
     return Array.isArray(finalRooms) && !finalRooms.some((room) => room && room.id === sessionName);
+}
+
+/**
+ * Relaunch a live session's program inside its own terminal (the host's
+ * Room.respawn): `command` as argv with the session's environment, in the
+ * room's current size, `banner` written where the old program stopped.
+ * Everyone watching stays attached. { ok } or { ok: false, unsupported }
+ * from a host that predates it, or { ok: false, error }.
+ */
+async function relaunchExternalRoomInPlace(sessionName, { command, cwd, shell, env, banner } = {}) {
+    if (!isExternalTerminalBackend()) return { ok: false, unsupported: true };
+    const existing = getEffectiveSessionConfig(sessionName) || {};
+    // The account the session was just moved to wins over any env read before the move.
+    const accountEnv = withDurableAccountEnv(sessionName, { env: env || existing.env }).env;
+    const config = { ...existing, cwd: cwd || existing.cwd, shell: shell || existing.shell, env: accountEnv };
+    const ptyRuntime = buildSessionPtyEnv(sessionName, config, resolveSessionWorkspaceName(existing, {}));
+    const body = {
+        cwd: config.cwd,
+        shell: config.shell,
+        env: ptyRuntime.env,
+        command: command ? withCodexIdentity(command, sessionName) : undefined,
+        banner,
+        // The old program's last processes get SIGTERM 1.5s after the hangup
+        // (pty-keeper endTerminal): the new one starts after that.
+        settleMs: 2500
+    };
+    let response;
+    try {
+        response = await callExternalHayHostApi(`/rooms/${encodeURIComponent(sessionName)}/respawn`, 'POST', body, 20_000);
+    } catch (e) {
+        return { ok: false, error: e?.message || String(e) };
+    }
+    if (response?.status === 404) return { ok: false, unsupported: true };
+    if (response?.status === 200 && response.data?.ok === true) {
+        reconcileCached = { at: 0, value: null };
+        return { ok: true };
+    }
+    return { ok: false, error: response?.data?.error || `status ${response?.status || 'unknown'}` };
 }
 
 async function terminateExternalHaySession(sessionName, { preserveRecords = false } = {}) {

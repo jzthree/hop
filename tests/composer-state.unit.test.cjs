@@ -174,3 +174,31 @@ test("Claude's input box is found above its subagent list, and a prompt echoed i
   const n = await composer.readComposerFromSerialized(noBox, 80, 40);
   assert.equal(n.state.found, false);
 });
+
+test("a list the agent asks its person to choose from is a question on screen, not a draft", async (t) => {
+  // Codex relaunched in another folder asks which one to resume in. Its
+  // selected option starts with `›` like its input line, so the options read
+  // as typed text: hop pressed its clear-line keys into the menu every few
+  // seconds for hours and every message for the session waited behind it.
+  const composer = require('../lib/composer');
+  if (!composer.loadHeadlessTerminal()) { t.skip('xterm-headless unavailable'); return; }
+  const chooser = ['', '  Working directory · resume', '  Session = latest cwd recorded in the resumed session', '  Current = your current working directory', '',
+    '› 1. Use session directory (/Users/me/Code/project)', '  2. Use current directory (/Users/me)', '  3. Always use session directory', '  4. Always use current directory', '',
+    '  enter continue · esc use session · ⌃c quit'].join('\r\n');
+  for (const cursor of ['\x1b[6;1H', '\x1b[24;1H']) {
+    const r = await composer.readComposerFromSerialized(chooser + cursor, 146, 24);
+    assert.equal(r.state.found, false, 'no input box to type into');
+    assert.equal(r.state.menu, true);
+    assert.equal(r.full.found, false);
+  }
+  // Claude's permission prompt, its second option selected.
+  const claudeAsk = ['⏺ Bash(rm -rf build)', '', ' Do you want to proceed?', '   1. Yes', ' ❯ 2. Yes, and don\'t ask again for rm commands', '   3. No, and tell Claude what to do differently (esc)', '', ' Esc to cancel · Tab to amend'].join('\r\n');
+  const c = await composer.readComposerFromSerialized(claudeAsk, 80, 12);
+  assert.equal(c.state.menu, true);
+  // A numbered list typed in Codex's own box is still a draft.
+  const draft = ['• Done.', '', '› 1. rerun the eval', '  2. then plot the loss', '', '  GPT-6.2-Astra xhigh · ~/Code/project · Main [default]', '  ← for agents · ? for shortcuts'].join('\r\n') + '\x1b[4;25H';
+  const d = await composer.readComposerFromSerialized(draft, 100, 12);
+  assert.equal(d.state.found, true);
+  assert.equal(d.state.menu, undefined);
+  assert.equal(d.full.text, '1. rerun the eval\n2. then plot the loss');
+});

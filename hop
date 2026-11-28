@@ -24,6 +24,7 @@ const { snapshotFromMetas, planRefiles, pruneList, snapshotFileName } = require(
 const recentlyClosed = require('./lib/recently-closed');
 const messageLog = require('./lib/message-log');
 const answers = require('./lib/answers');
+const rolloutFile = require('./lib/codex-rollout');
 const nebulaRelay = require('./lib/nebula-relay');
 const notebookView = require('./lib/notebook-view');
 const markdownHtml = require('./lib/markdown-html');
@@ -7949,6 +7950,19 @@ function codexRolloutCopies(threadId) {
     }
     return out;
 }
+/**
+ * The folder a Codex thread last worked in: the cwd of the last turn in its
+ * newest copy, read from the end (a rollout runs to gigabytes). `codex
+ * resume` started anywhere else stops at a "Working directory · resume"
+ * menu until someone answers it — what an in-place restart left a session
+ * at for hours (2026-11-28). Null when unknown (only a compressed copy).
+ */
+function codexThreadCwd(threadId) {
+    const newest = codexRolloutCopies(threadId).filter((f) => f.endsWith('.jsonl'))
+        .map((f) => { try { return { f, m: fs.statSync(f).mtimeMs }; } catch (e) { return null; } })
+        .filter(Boolean).sort((a, b) => b.m - a.m)[0];
+    return newest ? rolloutFile.lastTurnCwd(newest.f) : null;
+}
 /** Every copy of a Codex thread's history segments (rollout-…-<thread>_<segment>.jsonl[.zst]), in every Codex folder. */
 function codexRolloutSegments(threadId) {
     if (!threadId || !/^[A-Za-z0-9-]{8,}$/.test(threadId)) return [];
@@ -9390,6 +9404,9 @@ async function deliverIntoAgent(cb, entry, phase) {
                 if (a.agyWelcome && await stepPastAgyWelcome(cb.session, entry.displayName)) return { ok: false, reason: "waiting: hop stepped past Antigravity's first-run welcome" };
                 if (a.claudeFirstRun && await stepPastClaudeFirstRun(cb.session, entry.displayName)) return { ok: false, reason: "waiting: hop stepped past Claude Code's first-run setup" };
                 if (a.claudeTrust) return await answerClaudeTrust(cb.session, entry.displayName, a.claudeTrust);
+                // A list to choose from (Codex asking which folder to resume
+                // in, a permission prompt): its person's to answer. No key goes in.
+                if (a.state.menu) return { ok: false, reason: 'waiting: the agent is asking a question on screen (a list to choose from)' };
                 if (!a.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
                 // This very message, already sitting in the box typed and never
                 // sent (an earlier delivery, an agent's `hopa send` before it
@@ -9415,6 +9432,7 @@ async function deliverIntoAgent(cb, entry, phase) {
                 await sleepMs(1200);
                 const b = await readRoomComposer(cb.session, agent);
                 if (b && b.working && !cb.force) return { ok: false, quiet: !cb.lastError, reason: null };
+                if (b && b.state.menu) return { ok: false, reason: 'waiting: the agent is asking a question on screen (a list to choose from)' };
                 if (b && !b.state.found) return { ok: false, reason: "waiting: the agent's input box isn't on screen" };
                 if (b && aside && solid(b.full.text) !== solid(aside.seen)) return { ok: false, reason: 'waiting: someone is typing in the input box' };
                 if (b && !aside && (alreadyTyped ? !boxIsOnly(b.full, typed) : !b.state.isEmpty)) return { ok: false, reason: 'waiting: the input box has text in it' };
@@ -10101,9 +10119,12 @@ function restorePlanForSession(entry) {
         const turn = readTurnInfo(entry.internalName);
         if (turn && turn.agent === 'codex') {
             const metaCwd = readClaudeSessionMeta(entry.internalName)?.cwd;
-            const cwd = metaCwd || entry.cwd;
             // The hook may have named a sub-agent's thread; resume the root.
             const rootId = codexRootThreadId(turn.sessionId);
+            // Where the conversation last worked, when that folder is still
+            // there: Codex resumes there without asking which folder to use.
+            const threadCwd = codexThreadCwd(rootId);
+            const cwd = (threadCwd && (() => { try { return fs.statSync(threadCwd).isDirectory(); } catch (e) { return false; } })() ? threadCwd : null) || metaCwd || entry.cwd;
             // Codex compresses a conversation it has not used for a while
             // (rollout-….jsonl.zst) and resumes it all the same: one that is
             // only compressed is still there. Looking for .jsonl alone left

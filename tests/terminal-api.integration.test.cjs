@@ -1934,8 +1934,17 @@ let box = ''; const log = []; let lastBusy = null;
 let stash = null;
 const busyNow = () => fs.existsSync(path.join(dir, 'BUSY'));
 process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.setEncoding('utf8');
+const menuNow = () => fs.existsSync(path.join(dir, 'MENU'));
+let lastMenu = null;
 const draw = () => {
   const cols = process.stdout.columns || 80;
+  lastMenu = menuNow();
+  // Codex asking which folder to resume in: a list, not the box.
+  if (lastMenu) {
+    process.stdout.write('\\x1b[2J\\x1b[H\\r\\n  Working directory \\u00b7 resume\\r\\n\\r\\n\\u203a 1. Use session directory (/tmp/a)\\r\\n  2. Use current directory (/tmp/b)\\r\\n\\r\\n  enter continue \\u00b7 esc use session \\u00b7 \\u2303c quit');
+    fs.writeFileSync(path.join(dir, 'box.txt'), box);
+    return;
+  }
   const rule = '\\u2500'.repeat(Math.max(10, cols - 2));
   const busy = busyNow(); lastBusy = busy;
   const lines = box.split('\\n');
@@ -1952,6 +1961,7 @@ const draw = () => {
 // Key by key, as a terminal app reads them; a chunk of text with no keys
 // in it is a paste (Enter inside a paste is part of it, not a submit).
 process.stdin.on('data', (d) => {
+  if (menuNow()) { fs.appendFileSync(path.join(dir, 'menu-keys.log'), JSON.stringify(d) + '\\n'); return; }
   const paste = d.length > 1 && !/[\\x00-\\x1f\\x7f]/.test(d.replace(/\\r$/, ''));
   if (paste) { box += d.replace(/\\r/g, ''); draw(); return; }
   for (let i = 0; i < d.length; i++) {
@@ -1975,7 +1985,7 @@ process.stdin.on('data', (d) => {
   }
   draw();
 });
-setInterval(() => { if (busyNow() !== lastBusy) draw(); }, 250);
+setInterval(() => { if (busyNow() !== lastBusy || menuNow() !== lastMenu) draw(); }, 250);
 draw();
 `;
 
@@ -2095,6 +2105,20 @@ test('a message for an agent never joins a draft: it goes past one that sat stil
   await typeIn('\x15');
   await until(async () => (await box()) === '', 5000, 'the box cleared');
 
+  // 2d. The agent asks its person to choose (Codex's resume-folder list):
+  //     no draft to set aside — hop waits, and no key goes into the list.
+  await fs.writeFile(path.join(dir, 'MENU'), '1');
+  await delay(800);
+  const asked = await send('after the question');
+  assert.equal(asked.data.status, 'queued');
+  assert.match(asked.data.reason, /asking a question on screen/);
+  await delay(8000);
+  const menuKeys = async () => { try { return (await fs.readFile(path.join(dir, 'menu-keys.log'), 'utf8')).split('\n').filter(Boolean); } catch { return []; } };
+  assert.deepEqual(await menuKeys(), [], 'not a key into the list');
+  await fs.rm(path.join(dir, 'MENU'));
+  await until(async () => (await got()).includes('after the question'), 20000, 'the message once the question was answered');
+  await until(async () => (await queued()).length === 0, 8000, 'the queue to empty');
+
   // 3. A busy agent: queued, then typed when its turn ends.
   await fs.writeFile(path.join(dir, 'BUSY'), '1');
   await stamp('prompt', Date.now());
@@ -2102,7 +2126,7 @@ test('a message for an agent never joins a draft: it goes past one that sat stil
   const third = await send('after your turn');
   assert.equal(third.data.status, 'queued');
   await delay(5000);
-  assert.deepEqual(await got(), ['hello agent', 'second message', 'and another', 'behind a stuck draft', 'to codex', 'untangle me please'], 'not typed mid-turn');
+  assert.deepEqual(await got(), ['hello agent', 'second message', 'and another', 'behind a stuck draft', 'to codex', 'untangle me please', 'after the question'], 'not typed mid-turn');
   assert.equal(await box(), '', 'nothing waiting inside the box');
   await fs.rm(path.join(dir, 'BUSY'));
   await stamp('turn', Date.now() + 1000);
